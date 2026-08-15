@@ -15,8 +15,18 @@ non-deferrable because retrofitting it would distort the engine.
 
 - `WorkspaceEngine` is the single owner of the published revision.
 - State lives in immutable `WorkspaceSnapshot` values (identity, revision,
-  status, provider state, symbol graph). Once published, a snapshot never
-  changes.
+  status, freshness, provider state, symbol graph). Once published, a
+  snapshot never changes.
+- Freshness is a snapshot axis of its own, independent from the lifecycle
+  status (SPEC §6): `Ready` does not imply `Fresh`, and a `Degraded`
+  workspace may still hold a reconciled syntax snapshot. Only the publisher
+  claims freshness — the query layer never derives it. An update inherits
+  the base snapshot's freshness while the graph is untouched; touching the
+  graph (`graph_mut` / `replace_graph`) revokes it, so the reconciling
+  publisher must re-claim `Fresh` explicitly after its edits, once
+  reconciliation against the worktree is confirmed. Queries enforce each
+  request's `FreshnessRequirement` against the pinned snapshot and reject
+  unmet ones with a typed error.
 - Publication is an atomic pointer swap: the engine holds
   `ArcSwap<WorkspaceSnapshot>`; a query pins one `Arc<WorkspaceSnapshot>`
   up front and observes exactly one revision.
@@ -57,6 +67,11 @@ non-deferrable because retrofitting it would distort the engine.
 
 - `crates/chakra-engine/tests/atomic_revisions.rs` proves: a held snapshot
   stays immutable after publish; concurrent publishers produce exactly one
-  winner; concurrent readers never observe a hybrid or a backwards
-  revision.
+  winner; readers observe the old snapshot while a private update is
+  prepared and the new one after publish (deterministic barrier handshake);
+  concurrent readers never observe a hybrid or a backwards revision.
+- `crates/chakra-engine/tests/freshness.rs` proves the freshness contract:
+  `RequireFresh` is rejected with a typed error until reconciliation claims
+  `Fresh`, `AllowStale` is served with a stale envelope, and status/freshness
+  combinations stay independent.
 - Revisit clone-per-update only with benchmark data (roadmap §18).

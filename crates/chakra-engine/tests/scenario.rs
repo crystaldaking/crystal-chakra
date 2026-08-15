@@ -307,6 +307,9 @@ fn entity_ids_are_scoped_to_their_revision() -> Result<(), Box<dyn Error>> {
     }
     let mut update = engine.begin_update();
     update.replace_graph(reversed);
+    // Replacing the graph revoked freshness; this update stands in for a
+    // completed reconciliation, so it re-claims `Fresh` explicitly.
+    update.set_freshness(Freshness::Fresh);
     engine.publish(update)?;
     let snapshot = engine.snapshot();
     let current_revision = snapshot.revision();

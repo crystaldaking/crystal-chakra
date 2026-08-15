@@ -83,12 +83,23 @@ impl UpdateBuilder {
     }
 
     /// Mutable access for incremental edits relative to the base snapshot.
+    ///
+    /// Mutating the graph changes the published relationship to the
+    /// filesystem, so this revokes any inherited or previously claimed
+    /// freshness: the publisher must re-confirm reconciliation and call
+    /// [`UpdateBuilder::set_freshness`] *after* its graph edits.
     pub fn graph_mut(&mut self) -> &mut SymbolGraph {
+        self.freshness = Freshness::Stale;
         &mut self.graph
     }
 
     /// Replaces the whole graph (used by the initial full index).
+    ///
+    /// Like [`UpdateBuilder::graph_mut`], this revokes freshness: a replaced
+    /// graph is only `Fresh` once the publisher explicitly says the
+    /// worktree was reconciled.
     pub fn replace_graph(&mut self, graph: SymbolGraph) {
+        self.freshness = Freshness::Stale;
         self.graph = graph;
     }
 
@@ -98,10 +109,12 @@ impl UpdateBuilder {
 
     /// Claims (or revokes) filesystem freshness for the published snapshot.
     ///
-    /// Freshness is inherited from the base snapshot unless set here: an
-    /// update that changes nothing about the filesystem relationship keeps
-    /// it, while a publisher that just reconciled the worktree claims
-    /// `Fresh` explicitly — `Ready` alone never implies it.
+    /// Freshness is inherited from the base snapshot only while the graph is
+    /// untouched: [`UpdateBuilder::graph_mut`] and
+    /// [`UpdateBuilder::replace_graph`] revoke it, so a publisher that
+    /// changed the graph must call this *after* its edits, once
+    /// reconciliation against the worktree is confirmed. `Ready` alone never
+    /// implies `Fresh`.
     pub fn set_freshness(&mut self, freshness: Freshness) {
         self.freshness = freshness;
     }
@@ -146,8 +159,10 @@ impl WorkspaceEngine {
     /// Starts a private update based on the current revision.
     ///
     /// Status, freshness, and provider state are inherited from the base
-    /// snapshot; override them on the builder when the update changes the
-    /// workspace's relationship to the filesystem or a provider.
+    /// snapshot. Freshness inheritance ends the moment the graph is touched:
+    /// [`UpdateBuilder::graph_mut`] and [`UpdateBuilder::replace_graph`]
+    /// revoke it, and the publisher must claim `Fresh` explicitly once
+    /// reconciliation is confirmed.
     pub fn begin_update(&self) -> UpdateBuilder {
         let base = self.snapshot();
         UpdateBuilder {
@@ -246,6 +261,45 @@ mod tests {
         let published = engine.publish(update)?;
         assert_eq!(published.status(), WorkspaceStatus::Ready);
         assert_eq!(published.freshness(), Freshness::Stale);
+        Ok(())
+    }
+
+    #[test]
+    fn graph_mutation_revokes_inherited_freshness() -> Result<(), Box<dyn std::error::Error>> {
+        let engine = engine()?;
+        let mut update = engine.begin_update();
+        update.set_status(WorkspaceStatus::Ready);
+        update.set_freshness(Freshness::Fresh);
+        engine.publish(update)?;
+
+        // Replacing the graph silently keeping `Fresh` would publish an
+        // unverified freshness claim — mutation revokes it instead.
+        let mut update = engine.begin_update();
+        update.replace_graph(SymbolGraph::new());
+        let published = engine.publish(update)?;
+        assert_eq!(published.freshness(), Freshness::Stale);
+
+        // Same for incremental mutation, even if `Fresh` was claimed before
+        // the edit: the mutation has the last word.
+        let mut update = engine.begin_update();
+        update.set_freshness(Freshness::Fresh);
+        assert_eq!(update.graph_mut().symbol_count(), 0);
+        let published = engine.publish(update)?;
+        assert_eq!(published.freshness(), Freshness::Stale);
+
+        // The reconciling publisher claims freshness after its graph edits.
+        let mut update = engine.begin_update();
+        update.replace_graph(SymbolGraph::new());
+        update.set_freshness(Freshness::Fresh);
+        let published = engine.publish(update)?;
+        assert_eq!(published.freshness(), Freshness::Fresh);
+
+        // Metadata-only updates leave the freshness axis alone.
+        let mut update = engine.begin_update();
+        update.set_status(WorkspaceStatus::Degraded);
+        let published = engine.publish(update)?;
+        assert_eq!(published.status(), WorkspaceStatus::Degraded);
+        assert_eq!(published.freshness(), Freshness::Fresh);
         Ok(())
     }
 

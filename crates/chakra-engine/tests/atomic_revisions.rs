@@ -81,6 +81,10 @@ fn readers_observe_old_snapshot_until_publish_then_new() -> Result<(), Box<dyn E
     // while a private update is fully prepared, and the new one after
     // publish — regardless of scheduling. This is the regression test for
     // "queries cannot observe a partially published revision" (SPEC §5).
+    //
+    // Every participant records its first failure and still reaches every
+    // remaining rendezvous, so a failed check can never strand the other
+    // threads on a `Barrier`.
     let engine = engine_with_scenario()?;
     let base_revision = engine.snapshot().revision();
     let scenario_symbols = engine.snapshot().graph().symbol_count();
@@ -101,46 +105,63 @@ fn readers_observe_old_snapshot_until_publish_then_new() -> Result<(), Box<dyn E
             // While the update sits ready, readers must still see the old
             // snapshot; they signal once every reader checked.
             observed_old.wait();
-            let snapshot = engine.publish(update).map_err(|error| error.to_string())?;
+            let outcome = engine
+                .publish(update)
+                .map(|snapshot| snapshot.revision())
+                .map_err(|error| error.to_string());
+            // Reached even when publish failed, so readers never wait forever.
             published.wait();
-            Ok(snapshot.revision())
+            outcome
         });
 
         let mut readers = Vec::new();
         for _ in 0..READERS {
             readers.push(scope.spawn(|| -> Result<(), String> {
+                let mut failure: Option<String> = None;
+                let mut record = |check: Result<(), String>| {
+                    if failure.is_none() {
+                        failure = check.err();
+                    }
+                };
+
                 update_ready.wait();
                 let before = engine.snapshot();
                 if before.revision() != base_revision {
-                    return Err("private update leaked into the published slot".to_owned());
+                    record(Err(
+                        "private update leaked into the published slot".to_owned()
+                    ));
+                } else if before.graph().symbol_count() != scenario_symbols {
+                    record(Err("reader observed a partially replaced graph".to_owned()));
+                } else {
+                    record(
+                        before.graph().validate_consistency().map_err(|error| {
+                            format!("inconsistent snapshot before publish: {error}")
+                        }),
+                    );
                 }
-                if before.graph().symbol_count() != scenario_symbols {
-                    return Err("reader observed a partially replaced graph".to_owned());
-                }
-                before
-                    .graph()
-                    .validate_consistency()
-                    .map_err(|error| format!("inconsistent snapshot before publish: {error}"))?;
                 observed_old.wait();
 
                 published.wait();
                 let after = engine.snapshot();
                 if after.revision() != base_revision.next() {
-                    return Err("publish not atomically visible to a reader".to_owned());
+                    record(Err("publish not atomically visible to a reader".to_owned()));
+                } else if after.graph().symbol_count() != tiny_symbols {
+                    record(Err(
+                        "reader observed a hybrid of old and new graphs".to_owned()
+                    ));
+                } else {
+                    record(
+                        after.graph().validate_consistency().map_err(|error| {
+                            format!("inconsistent snapshot after publish: {error}")
+                        }),
+                    );
                 }
-                if after.graph().symbol_count() != tiny_symbols {
-                    return Err("reader observed a hybrid of old and new graphs".to_owned());
-                }
-                after
-                    .graph()
-                    .validate_consistency()
-                    .map_err(|error| format!("inconsistent snapshot after publish: {error}"))?;
                 // The snapshot pinned before publish still observes the
                 // complete old state.
                 if before.graph().symbol_count() != scenario_symbols {
-                    return Err("a held snapshot changed under the reader".to_owned());
+                    record(Err("a held snapshot changed under the reader".to_owned()));
                 }
-                Ok(())
+                failure.map_or(Ok(()), Err)
             }));
         }
 
