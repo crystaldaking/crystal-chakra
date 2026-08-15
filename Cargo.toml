@@ -1,0 +1,18 @@
+[workspace]
+resolver = "3"
+members = ["crates/chakra-cli"]
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.97.1"
+
+[workspace.dependencies]
+clap = { version = "4", features = ["derive"] }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+panic = "deny"
+unwrap_used = "deny"
+expect_used = "deny"

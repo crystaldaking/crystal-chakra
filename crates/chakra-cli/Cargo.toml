@@ -1,0 +1,17 @@
+[package]
+name = "chakra-cli"
+description = "User-facing chakra CLI and binary entry point"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[[bin]]
+name = "chakra"
+path = "src/main.rs"
+
+[dependencies]
+clap.workspace = true
+
+[lints]
+workspace = true

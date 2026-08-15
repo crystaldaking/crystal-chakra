@@ -1,0 +1,28 @@
+# Dependency policy for the Chakra workspace (cargo-deny).
+# Docs: https://embarkstudios.github.io/cargo-deny/
+
+[advisories]
+ignore = []
+
+[licenses]
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Unicode-3.0",
+]
+confidence-threshold = 0.8
+
+[licenses.private]
+# Workspace crates are publish = false and carry no license yet
+# (license choice is pending with the repository owner).
+ignore = true
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+highlight = "all"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
