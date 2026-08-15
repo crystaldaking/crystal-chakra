@@ -51,7 +51,7 @@ impl ChakraMcpServer {
 
 #[tool_handler(
     name = "chakra",
-    instructions = "Local code intelligence for the registered repository: structured symbols, callers, and diff context with provenance and precision metadata.",
+    instructions = "Chakra code intelligence (v0.1 skeleton): only the `status` tool is exposed so far; symbol search, callers, and diff context tools arrive as indexing lands.",
     router = self.tool_router
 )]
 impl ServerHandler for ChakraMcpServer {}

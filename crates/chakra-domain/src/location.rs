@@ -4,6 +4,10 @@
 //! scalar values from the start of the line. Language-adapter output
 //! (Tree-sitter rows, LSP UTF-16 positions) is converted at the adapter
 //! boundary; core code never sees 0-based or UTF-16 positions.
+//!
+//! Invariants are enforced by construction: fields are private and
+//! deserialization validates, so a zero position or a reversed range cannot
+//! exist in core code regardless of origin.
 
 use std::fmt;
 
@@ -51,10 +55,7 @@ impl RepoRelativePath {
         if raw.ends_with('/') {
             return Err(RepoPathError::TrailingSlash(raw));
         }
-        if raw
-            .split('/')
-            .any(|component| component == "." || component == "..")
-        {
+        if raw.split('/').any(|c| c == "." || c == "..") {
             return Err(RepoPathError::DotComponent(raw));
         }
         Ok(Self(raw))
@@ -85,7 +86,8 @@ impl fmt::Display for RepoRelativePath {
     }
 }
 
-/// A 1-based position in a text file.
+/// A 1-based position in a text file. Fields are private; construct via
+/// [`TextPosition::new`] or validated deserialization.
 #[derive(
     Debug,
     Clone,
@@ -99,7 +101,24 @@ impl fmt::Display for RepoRelativePath {
     Deserialize,
     schemars::JsonSchema,
 )]
+#[serde(try_from = "TextPositionWire")]
+#[schemars(with = "TextPositionWire")]
 pub struct TextPosition {
+    line: u32,
+    column: u32,
+}
+
+/// Deserialization shape for [`TextPosition`]; validated on conversion.
+#[derive(Debug, Clone, Copy, Deserialize, schemars::JsonSchema)]
+struct TextPositionWire {
+    line: u32,
+    column: u32,
+}
+
+/// Why a position is invalid.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+#[error("positions are 1-based, got line {line}, column {column}")]
+pub struct PositionError {
     pub line: u32,
     pub column: u32,
 }
@@ -111,22 +130,42 @@ impl TextPosition {
         }
         Ok(Self { line, column })
     }
+
+    pub fn line(&self) -> u32 {
+        self.line
+    }
+
+    pub fn column(&self) -> u32 {
+        self.column
+    }
 }
 
-/// Why a position is invalid.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
-#[error("positions are 1-based, got line {line}, column {column}")]
-pub struct PositionError {
-    pub line: u32,
-    pub column: u32,
+impl TryFrom<TextPositionWire> for TextPosition {
+    type Error = PositionError;
+
+    fn try_from(wire: TextPositionWire) -> Result<Self, Self::Error> {
+        Self::new(wire.line, wire.column)
+    }
 }
 
 /// A half-open range within one file: `start` inclusive, `end` exclusive.
+/// Construct via [`SourceRange::new`] or validated deserialization.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(try_from = "SourceRangeWire")]
+#[schemars(with = "SourceRangeWire")]
 pub struct SourceRange {
-    pub file: RepoRelativePath,
-    pub start: TextPosition,
-    pub end: TextPosition,
+    file: RepoRelativePath,
+    start: TextPosition,
+    end: TextPosition,
+}
+
+/// Deserialization shape for [`SourceRange`]; validated on conversion
+/// (nested positions validate themselves first).
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+struct SourceRangeWire {
+    file: RepoRelativePath,
+    start: TextPosition,
+    end: TextPosition,
 }
 
 /// Why a range is invalid.
@@ -151,6 +190,26 @@ impl SourceRange {
             return Err(RangeError::EndBeforeStart { start, end });
         }
         Ok(Self { file, start, end })
+    }
+
+    pub fn file(&self) -> &RepoRelativePath {
+        &self.file
+    }
+
+    pub fn start(&self) -> TextPosition {
+        self.start
+    }
+
+    pub fn end(&self) -> TextPosition {
+        self.end
+    }
+}
+
+impl TryFrom<SourceRangeWire> for SourceRange {
+    type Error = RangeError;
+
+    fn try_from(wire: SourceRangeWire) -> Result<Self, Self::Error> {
+        Self::new(wire.file, wire.start, wire.end)
     }
 }
 
@@ -185,6 +244,12 @@ mod tests {
     }
 
     #[test]
+    fn path_serde_rejects_invalid_values() {
+        let result = serde_json::from_str::<RepoRelativePath>("\"../nope.rs\"");
+        assert!(result.is_err());
+    }
+
+    #[test]
     fn positions_are_one_based() {
         assert!(TextPosition::new(0, 1).is_err());
         assert!(TextPosition::new(1, 0).is_err());
@@ -192,19 +257,58 @@ mod tests {
     }
 
     #[test]
-    fn range_must_not_end_before_it_starts() -> Result<(), RepoPathError> {
+    fn zero_position_is_rejected_by_deserialization() {
+        let result = serde_json::from_str::<TextPosition>(r#"{"line":0,"column":4}"#);
+        assert!(result.is_err());
+        let ok = serde_json::from_str::<TextPosition>(r#"{"line":2,"column":4}"#);
+        assert!(ok.is_ok());
+    }
+
+    #[test]
+    fn range_must_not_end_before_it_starts() -> Result<(), Box<dyn std::error::Error>> {
         let file = RepoRelativePath::new("src/lib.rs")?;
-        let start = TextPosition { line: 5, column: 3 };
-        let end = TextPosition { line: 5, column: 2 };
-        assert!(SourceRange::new(file.clone(), start, end).is_err());
-        let same_line_ok = TextPosition { line: 5, column: 3 };
-        assert!(SourceRange::new(file, start, same_line_ok).is_ok());
+        let start = TextPosition::new(5, 3)?;
+        let end = TextPosition::new(5, 2)?;
+        assert!(matches!(
+            SourceRange::new(file.clone(), start, end),
+            Err(RangeError::EndBeforeStart { .. })
+        ));
+        assert!(SourceRange::new(file, start, TextPosition::new(5, 3)?).is_ok());
         Ok(())
     }
 
     #[test]
-    fn path_serde_rejects_invalid_values() {
-        let result = serde_json::from_str::<RepoRelativePath>("\"../nope.rs\"");
+    fn reversed_range_is_rejected_by_deserialization() -> Result<(), Box<dyn std::error::Error>> {
+        let raw =
+            r#"{"file":"src/lib.rs","start":{"line":9,"column":1},"end":{"line":2,"column":1}}"#;
+        let result = serde_json::from_str::<SourceRange>(raw);
         assert!(result.is_err());
+
+        let ok = serde_json::from_str::<SourceRange>(
+            r#"{"file":"src/lib.rs","start":{"line":2,"column":1},"end":{"line":9,"column":1}}"#,
+        )?;
+        assert_eq!(ok.start().line(), 2);
+        assert_eq!(ok.end().line(), 9);
+        assert_eq!(ok.file().as_str(), "src/lib.rs");
+        Ok(())
+    }
+
+    #[test]
+    fn range_serialization_shape_is_unchanged() -> Result<(), Box<dyn std::error::Error>> {
+        let range = SourceRange::new(
+            RepoRelativePath::new("src/lib.rs")?,
+            TextPosition::new(2, 1)?,
+            TextPosition::new(9, 5)?,
+        )?;
+        let json = serde_json::to_value(&range)?;
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "file": "src/lib.rs",
+                "start": { "line": 2, "column": 1 },
+                "end": { "line": 9, "column": 5 }
+            })
+        );
+        Ok(())
     }
 }

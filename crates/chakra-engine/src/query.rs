@@ -1,9 +1,10 @@
 //! [`QueryService`] implementation over the published snapshot.
 //!
 //! Each method pins one `Arc<WorkspaceSnapshot>` up front, so a query always
-//! observes exactly one revision (SPEC §5). Results are always reported
-//! `Freshness::Fresh`: the snapshot is the latest published state and no
-//! asynchronous source exists yet; the watcher phases make freshness real.
+//! observes exactly one revision (SPEC §5). Reported freshness derives from
+//! the workspace status: only a snapshot that completed reconciliation
+//! (`Ready`) is `Fresh`; everything else reports `Stale`. This is
+//! deliberately conservative until the watcher/reconciliation phases land.
 
 use chakra_domain::envelope::QueryEnvelope;
 use chakra_domain::query::{
@@ -12,7 +13,8 @@ use chakra_domain::query::{
     QueryService, RelatedSymbol, RepoMapData, RepoMapRequest, SearchData, SearchRequest,
     StatusData, StatusRequest, SymbolRef, SymbolSearchData, SymbolSearchRequest, SymbolView,
 };
-use chakra_domain::state::Freshness;
+use chakra_domain::revision::Revision;
+use chakra_domain::state::{Freshness, WorkspaceStatus};
 use chakra_domain::symbol::{Edge, EdgeKind, Symbol};
 
 use crate::engine::{WorkspaceEngine, WorkspaceSnapshot};
@@ -30,12 +32,28 @@ fn bounded<T>(mut items: Vec<T>, limit: usize) -> (Vec<T>, bool) {
     (items, truncated)
 }
 
-/// SPEC §24 resolution: ids are exact; names resolve only when unambiguous.
-fn resolve<'a>(graph: &'a SymbolGraph, reference: &SymbolRef) -> Result<&'a Symbol, QueryError> {
+/// SPEC §24 resolution: ids are exact and revision-scoped; names resolve
+/// only when unambiguous.
+fn resolve<'a>(
+    graph: &'a SymbolGraph,
+    reference: &SymbolRef,
+    current_revision: Revision,
+) -> Result<&'a Symbol, QueryError> {
     match reference {
-        SymbolRef::ById(id) => graph
-            .symbol(*id)
-            .ok_or_else(|| QueryError::SymbolNotFound(format!("{id:?}"))),
+        SymbolRef::ById { id, revision } => {
+            // An EntityId is an arena index: it is only meaningful within
+            // the revision it was taken from. Refuse to silently resolve a
+            // stale reference against a newer graph.
+            if *revision != current_revision {
+                return Err(QueryError::StaleSymbolRef {
+                    reference_revision: *revision,
+                    current_revision,
+                });
+            }
+            graph
+                .symbol(*id)
+                .ok_or_else(|| QueryError::SymbolNotFound(format!("{id:?}")))
+        }
         SymbolRef::ByName(name) => {
             let matches = graph.resolve_name(name);
             match matches.len() {
@@ -76,11 +94,20 @@ fn sort_related(items: &mut [RelatedSymbol]) {
     });
 }
 
+/// Conservative freshness until watcher/reconciliation phases exist: only a
+/// workspace that completed indexing may claim fresh data.
+fn freshness_of(status: WorkspaceStatus) -> Freshness {
+    match status {
+        WorkspaceStatus::Ready => Freshness::Fresh,
+        _ => Freshness::Stale,
+    }
+}
+
 fn envelope<T>(snapshot: &WorkspaceSnapshot, truncated: bool, data: T) -> QueryEnvelope<T> {
     QueryEnvelope::new(
         snapshot.identity().workspace.clone(),
         snapshot.revision(),
-        Freshness::Fresh,
+        freshness_of(snapshot.status()),
         snapshot.status(),
         snapshot.provider_state(),
         truncated,
@@ -164,7 +191,7 @@ impl QueryService for WorkspaceEngine {
             .ok_or(QueryError::MissingSymbolRef)?;
         let snapshot = self.snapshot();
         let graph = snapshot.graph();
-        let symbol = resolve(graph, reference)?;
+        let symbol = resolve(graph, reference, snapshot.revision())?;
         let limit = clamp_limit(request.limit);
 
         let mut callers: Vec<RelatedSymbol> = graph
@@ -208,7 +235,7 @@ impl QueryService for WorkspaceEngine {
             .chain(callees.iter())
             .chain(implementations.iter())
             .chain(tests.iter())
-            .map(|item| item.symbol.location.file.clone())
+            .map(|item| item.symbol.location.file().clone())
             .collect();
         related_files.sort();
         related_files.dedup();
@@ -237,7 +264,7 @@ impl QueryService for WorkspaceEngine {
             .ok_or(QueryError::MissingSymbolRef)?;
         let snapshot = self.snapshot();
         let graph = snapshot.graph();
-        let target = resolve(graph, reference)?;
+        let target = resolve(graph, reference, snapshot.revision())?;
         let mut callers: Vec<RelatedSymbol> = graph
             .incoming_edges(target.id)
             .iter()

@@ -10,4 +10,4 @@ mod graph;
 mod query;
 
 pub use engine::{PublishError, UpdateBuilder, WorkspaceEngine, WorkspaceSnapshot};
-pub use graph::{GraphError, SymbolGraph};
+pub use graph::{ConsistencyError, GraphError, SymbolGraph};

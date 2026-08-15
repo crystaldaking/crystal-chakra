@@ -12,21 +12,8 @@ use chakra_domain::query::{
 use chakra_domain::revision::Revision;
 use chakra_domain::state::{Freshness, ProviderState, WorkspaceStatus};
 use chakra_domain::symbol::SymbolKind;
-use chakra_engine::WorkspaceEngine;
 
-use common::{ScenarioIds, scenario_graph};
-
-fn scenario_engine() -> Result<(WorkspaceEngine, ScenarioIds), Box<dyn Error>> {
-    let identity = chakra_domain::identity::WorkspaceIdentity::for_primary_worktree(
-        std::path::Path::new("."),
-    )?;
-    let engine = WorkspaceEngine::new(identity);
-    let (graph, ids) = scenario_graph()?;
-    let mut update = engine.begin_update();
-    update.replace_graph(graph);
-    engine.publish(update)?;
-    Ok((engine, ids))
-}
+use common::scenario_engine;
 
 #[test]
 fn status_reports_scenario_counts() -> Result<(), Box<dyn Error>> {
@@ -129,8 +116,12 @@ fn qualified_name_resolves_unambiguously() -> Result<(), Box<dyn Error>> {
 #[test]
 fn callers_of_provider_trait_method_is_the_service() -> Result<(), Box<dyn Error>> {
     let (engine, ids) = scenario_engine()?;
+    let revision = engine.snapshot().revision();
     let envelope = engine.callers(CallersRequest {
-        symbol: Some(SymbolRef::ById(ids.provider_refund)),
+        symbol: Some(SymbolRef::ById {
+            id: ids.provider_refund,
+            revision,
+        }),
         ..CallersRequest::default()
     })?;
     assert_eq!(envelope.data.callers.len(), 1);
@@ -146,8 +137,12 @@ fn callers_of_provider_trait_method_is_the_service() -> Result<(), Box<dyn Error
 #[test]
 fn context_combines_bounded_relations() -> Result<(), Box<dyn Error>> {
     let (engine, ids) = scenario_engine()?;
+    let revision = engine.snapshot().revision();
     let envelope = engine.context(ContextRequest {
-        symbol: Some(SymbolRef::ById(ids.service_refund)),
+        symbol: Some(SymbolRef::ById {
+            id: ids.service_refund,
+            revision,
+        }),
         ..ContextRequest::default()
     })?;
     let data = &envelope.data;
@@ -179,8 +174,12 @@ fn context_combines_bounded_relations() -> Result<(), Box<dyn Error>> {
 #[test]
 fn trait_method_context_shows_implementations() -> Result<(), Box<dyn Error>> {
     let (engine, ids) = scenario_engine()?;
+    let revision = engine.snapshot().revision();
     let envelope = engine.context(ContextRequest {
-        symbol: Some(SymbolRef::ById(ids.provider_refund)),
+        symbol: Some(SymbolRef::ById {
+            id: ids.provider_refund,
+            revision,
+        }),
         ..ContextRequest::default()
     })?;
     assert_eq!(envelope.data.implementations.len(), 1);
@@ -234,11 +233,15 @@ fn unimplemented_queries_fail_with_typed_errors() -> Result<(), Box<dyn Error>> 
 #[test]
 fn missing_and_unknown_symbol_refs_are_typed_errors() -> Result<(), Box<dyn Error>> {
     let (engine, _) = scenario_engine()?;
+    let revision = engine.snapshot().revision();
     let missing = engine.context(ContextRequest::default());
     assert!(matches!(missing, Err(QueryError::MissingSymbolRef)));
 
     let unknown = engine.callers(CallersRequest {
-        symbol: Some(SymbolRef::ById(chakra_domain::symbol::EntityId(9999))),
+        symbol: Some(SymbolRef::ById {
+            id: chakra_domain::symbol::EntityId(9999),
+            revision,
+        }),
         ..CallersRequest::default()
     });
     assert!(matches!(unknown, Err(QueryError::SymbolNotFound(_))));
@@ -248,5 +251,51 @@ fn missing_and_unknown_symbol_refs_are_typed_errors() -> Result<(), Box<dyn Erro
         ..CallersRequest::default()
     });
     assert!(matches!(absent, Err(QueryError::SymbolNotFound(_))));
+    Ok(())
+}
+
+#[test]
+fn entity_ids_are_scoped_to_their_revision() -> Result<(), Box<dyn Error>> {
+    let (engine, ids) = scenario_engine()?;
+    let stale_revision = engine.snapshot().revision();
+
+    // Any newer publication makes old ids unresolvable by value.
+    engine.publish(engine.begin_update())?;
+
+    let result = engine.callers(CallersRequest {
+        symbol: Some(SymbolRef::ById {
+            id: ids.provider_refund,
+            revision: stale_revision,
+        }),
+        ..CallersRequest::default()
+    });
+    let expected = QueryError::StaleSymbolRef {
+        reference_revision: stale_revision,
+        current_revision: Revision(2),
+    };
+    assert_eq!(result.err(), Some(expected));
+
+    // Re-resolving against the current revision works again.
+    let resolved = engine.callers(CallersRequest {
+        symbol: Some(SymbolRef::ById {
+            id: ids.provider_refund,
+            revision: engine.snapshot().revision(),
+        }),
+        ..CallersRequest::default()
+    })?;
+    assert_eq!(resolved.data.callers.len(), 1);
+    Ok(())
+}
+
+#[test]
+fn unindexed_engine_reports_initializing_and_not_fresh() -> Result<(), Box<dyn Error>> {
+    let identity = chakra_domain::identity::WorkspaceIdentity::for_primary_worktree(
+        std::path::Path::new("."),
+    )?;
+    let engine = chakra_engine::WorkspaceEngine::new(identity);
+    let envelope = engine.status(StatusRequest)?;
+    assert_eq!(envelope.status, WorkspaceStatus::Initializing);
+    assert_eq!(envelope.freshness, Freshness::Stale);
+    assert_eq!(envelope.data.counts.symbols, 0);
     Ok(())
 }

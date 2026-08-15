@@ -32,8 +32,6 @@ pub enum GraphError {
 #[derive(Debug, Clone, Default)]
 pub struct SymbolGraph {
     symbols: Vec<Symbol>,
-    /// Lowercase simple name → entities, for exact-name resolution.
-    by_name: HashMap<String, Vec<EntityId>>,
     /// File → entities declared in it.
     by_file: HashMap<RepoRelativePath, Vec<EntityId>>,
     outgoing: HashMap<EntityId, Vec<Edge>>,
@@ -55,10 +53,10 @@ impl SymbolGraph {
         provenance: Provenance,
         precision: Precision,
     ) -> Result<EntityId, GraphError> {
-        if key.path != location.file {
+        if &key.path != location.file() {
             return Err(GraphError::KeyLocationMismatch {
                 key_path: key.path.as_str().to_owned(),
-                location_path: location.file.as_str().to_owned(),
+                location_path: location.file().as_str().to_owned(),
             });
         }
         let id = EntityId(self.symbols.len() as u64);
@@ -70,12 +68,8 @@ impl SymbolGraph {
             provenance,
             precision,
         };
-        self.by_name
-            .entry(symbol.name().to_lowercase())
-            .or_default()
-            .push(id);
         self.by_file
-            .entry(symbol.location.file.clone())
+            .entry(symbol.location.file().clone())
             .or_default()
             .push(id);
         self.symbols.push(symbol);
@@ -172,29 +166,96 @@ impl SymbolGraph {
         self.incoming.get(&id).map_or(&[], Vec::as_slice)
     }
 
-    /// Recomputes counts and checks edge endpoints against the arena.
-    ///
-    /// Publication makes hybrids impossible by construction; this exists so
-    /// the atomic-revision regression test can assert that property on every
-    /// observed snapshot.
-    pub fn validate_consistency(&self) -> Result<(), GraphError> {
-        for edges in self.outgoing.values().chain(self.incoming.values()) {
+    /// Independent consistency audit used by the atomic-revision regression
+    /// tests: every derived structure is recomputed from the arena and
+    /// compared, so a hybrid snapshot would be caught here.
+    pub fn validate_consistency(&self) -> Result<(), ConsistencyError> {
+        // Arena ids match arena positions.
+        for (index, symbol) in self.symbols.iter().enumerate() {
+            if symbol.id.0 as usize != index {
+                return Err(ConsistencyError::IdPositionMismatch {
+                    id: symbol.id,
+                    index,
+                });
+            }
+        }
+
+        // The file index covers exactly the arena symbols.
+        let mut expected_by_file: HashMap<&RepoRelativePath, Vec<EntityId>> = HashMap::new();
+        for symbol in &self.symbols {
+            expected_by_file
+                .entry(symbol.location.file())
+                .or_default()
+                .push(symbol.id);
+        }
+        for ids in expected_by_file.values_mut() {
+            ids.sort_unstable();
+        }
+        let mut actual_by_file: HashMap<&RepoRelativePath, Vec<EntityId>> = self
+            .by_file
+            .iter()
+            .map(|(path, ids)| (path, ids.clone()))
+            .collect();
+        for ids in actual_by_file.values_mut() {
+            ids.sort_unstable();
+        }
+        if actual_by_file != expected_by_file {
+            return Err(ConsistencyError::FileIndexMismatch);
+        }
+
+        // Edges: stored under the correct key, endpoints exist, mirrored in
+        // the incoming index, and the recorded count matches reality.
+        let mut actual_edge_count = 0_u64;
+        for (key, edges) in &self.outgoing {
             for edge in edges {
-                for id in [edge.from, edge.to] {
-                    if self.symbol(id).is_none() {
-                        return Err(GraphError::UnknownEntity(id));
-                    }
+                actual_edge_count += 1;
+                if edge.from != *key {
+                    return Err(ConsistencyError::EdgeWrongOutgoingKey {
+                        key: *key,
+                        from: edge.from,
+                    });
+                }
+                self.symbol(edge.from)
+                    .ok_or(ConsistencyError::UnknownEntity(edge.from))?;
+                self.symbol(edge.to)
+                    .ok_or(ConsistencyError::UnknownEntity(edge.to))?;
+                let mirrored = self
+                    .incoming
+                    .get(&edge.to)
+                    .is_some_and(|incoming| incoming.contains(edge));
+                if !mirrored {
+                    return Err(ConsistencyError::EdgeMirrorMissing {
+                        from: edge.from,
+                        to: edge.to,
+                    });
                 }
             }
         }
-        if self.symbols.len() as u64 != self.symbol_count() {
-            return Err(GraphError::KeyLocationMismatch {
-                key_path: "internal".to_owned(),
-                location_path: "count mismatch".to_owned(),
+        if actual_edge_count != self.edge_count {
+            return Err(ConsistencyError::EdgeCountMismatch {
+                recorded: self.edge_count,
+                actual: actual_edge_count,
             });
         }
         Ok(())
     }
+}
+
+/// A broken internal graph invariant found by [`SymbolGraph::validate_consistency`].
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum ConsistencyError {
+    #[error("edge endpoint {0:?} does not exist in the arena")]
+    UnknownEntity(EntityId),
+    #[error("symbol id {id:?} sits at arena index {index}")]
+    IdPositionMismatch { id: EntityId, index: usize },
+    #[error("edge stored under outgoing key {key:?} but its from is {from:?}")]
+    EdgeWrongOutgoingKey { key: EntityId, from: EntityId },
+    #[error("edge from {from:?} to {to:?} is missing from the incoming index")]
+    EdgeMirrorMissing { from: EntityId, to: EntityId },
+    #[error("recorded edge count {recorded} does not match actual {actual}")]
+    EdgeCountMismatch { recorded: u64, actual: u64 },
+    #[error("file index does not cover exactly the arena symbols")]
+    FileIndexMismatch,
 }
 
 #[cfg(test)]
@@ -207,13 +268,9 @@ mod tests {
         Ok(RepoRelativePath::new(path)?)
     }
 
-    fn range(path: RepoRelativePath) -> SourceRange {
-        let position = TextPosition { line: 1, column: 1 };
-        SourceRange {
-            file: path,
-            start: position,
-            end: position,
-        }
+    fn range(path: RepoRelativePath) -> Result<SourceRange, Box<dyn std::error::Error>> {
+        let position = TextPosition::new(1, 1)?;
+        Ok(SourceRange::new(path, position, position)?)
     }
 
     fn key(name: &str, path: RepoRelativePath) -> SymbolKey {
@@ -232,9 +289,10 @@ mod tests {
         path: &str,
     ) -> Result<EntityId, Box<dyn std::error::Error>> {
         let file = file(path)?;
+        let location = range(file.clone())?;
         Ok(graph.add_symbol(
-            key(name, file.clone()),
-            range(file),
+            key(name, file),
+            location,
             None,
             Provenance::TreeSitter,
             Precision::Syntax,
@@ -246,9 +304,10 @@ mod tests {
         let mut graph = SymbolGraph::new();
         let key_path = file("src/a.rs")?;
         let other = file("src/b.rs")?;
+        let location = range(other)?;
         let result = graph.add_symbol(
             key("f", key_path),
-            range(other),
+            location,
             None,
             Provenance::TreeSitter,
             Precision::Syntax,

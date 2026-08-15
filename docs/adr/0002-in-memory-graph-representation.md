@@ -17,11 +17,15 @@ representation must support the atomic publication model of ADR-001.
 
 - `Vec<Symbol>` arena; `EntityId` is the arena index (strictly
   revision-scoped identity per SPEC §10);
-- `HashMap<String, Vec<EntityId>>` for exact name resolution;
 - `HashMap<RepoRelativePath, Vec<EntityId>>` for file membership
   (`repo_map`);
 - `HashMap<EntityId, Vec<Edge>>` in both directions for `callers` /
   `context` adjacency.
+
+Name resolution is a deliberate linear scan over the arena (exact for
+`resolve_name`, case-insensitive substring for `symbol_search`): a name
+index would be cloned on every update while v0.1 repositories are small.
+Add one only when measurements justify it.
 
 Mutation happens only while building privately (`add_symbol` / `add_edge`
 with validation: key path must equal location file, endpoints must exist);

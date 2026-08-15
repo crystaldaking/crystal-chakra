@@ -9,12 +9,14 @@
 #![allow(dead_code)]
 
 use std::error::Error;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
+use chakra_domain::identity::WorkspaceIdentity;
 use chakra_domain::location::{RepoRelativePath, SourceRange, TextPosition};
 use chakra_domain::provenance::{Precision, Provenance};
+use chakra_domain::state::WorkspaceStatus;
 use chakra_domain::symbol::{EdgeKind, EntityId, Language, SymbolKey, SymbolKind};
-use chakra_engine::SymbolGraph;
+use chakra_engine::{SymbolGraph, WorkspaceEngine};
 
 /// Root of the Controller → Service → Provider fixture crate.
 pub fn fixture_root() -> PathBuf {
@@ -44,17 +46,10 @@ const CONTROLLER_RS: &str = "src/api/controller.rs";
 const SERVICE_RS: &str = "src/service/payment_service.rs";
 const PROVIDER_RS: &str = "src/provider/mod.rs";
 
-fn range(file: &RepoRelativePath, line: u32) -> SourceRange {
-    let start = TextPosition { line, column: 1 };
-    let end = TextPosition {
-        line: line + 1,
-        column: 1,
-    };
-    SourceRange {
-        file: file.clone(),
-        start,
-        end,
-    }
+fn range(file: &RepoRelativePath, line: u32) -> Result<SourceRange, Box<dyn Error>> {
+    let start = TextPosition::new(line, 1)?;
+    let end = TextPosition::new(line + 1, 1)?;
+    Ok(SourceRange::new(file.clone(), start, end)?)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -76,7 +71,7 @@ fn add(
             kind,
             path: file.clone(),
         },
-        range(&file, line),
+        range(&file, line)?,
         signature.map(str::to_owned),
         Provenance::TreeSitter,
         Precision::Syntax,
@@ -185,11 +180,11 @@ pub fn scenario_graph() -> Result<(SymbolGraph, ScenarioIds), Box<dyn Error>> {
 
     fn call_site(file: &str, line: u32) -> Result<Option<SourceRange>, Box<dyn Error>> {
         let file = RepoRelativePath::new(file)?;
-        Ok(Some(SourceRange {
-            start: TextPosition { line, column: 13 },
-            end: TextPosition { line, column: 30 },
+        Ok(Some(SourceRange::new(
             file,
-        }))
+            TextPosition::new(line, 13)?,
+            TextPosition::new(line, 30)?,
+        )?))
     }
 
     graph.add_edge(
@@ -254,4 +249,19 @@ pub fn scenario_graph() -> Result<(SymbolGraph, ScenarioIds), Box<dyn Error>> {
         test_rejects_zero,
     };
     Ok((graph, ids))
+}
+
+/// Engine with the scenario graph published as revision 1.
+///
+/// The update sets `Ready` explicitly: it stands in for a completed initial
+/// index, which is the only honest way to reach `Ready`/`Fresh`.
+pub fn scenario_engine() -> Result<(WorkspaceEngine, ScenarioIds), Box<dyn Error>> {
+    let identity = WorkspaceIdentity::for_primary_worktree(Path::new("."))?;
+    let engine = WorkspaceEngine::new(identity);
+    let (graph, ids) = scenario_graph()?;
+    let mut update = engine.begin_update();
+    update.replace_graph(graph);
+    update.set_status(WorkspaceStatus::Ready);
+    engine.publish(update)?;
+    Ok((engine, ids))
 }

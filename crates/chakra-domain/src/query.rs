@@ -13,6 +13,7 @@ use crate::envelope::QueryEnvelope;
 use crate::identity::WorkspaceIdentity;
 use crate::location::{RepoRelativePath, SourceRange};
 use crate::provenance::{Precision, Provenance};
+use crate::revision::Revision;
 use crate::state::{FreshnessRequirement, ProviderState};
 use crate::symbol::{EdgeKind, EntityId, SymbolKind};
 
@@ -24,12 +25,17 @@ pub const MAX_QUERY_LIMIT: u32 = 500;
 /// Reference to a symbol for entity-based queries (SPEC §24).
 ///
 /// Preferred flow: `symbol_search` → pick a candidate → address it by id.
-/// `ByName` resolves only when it is unambiguous; ambiguity is returned as
-/// [`QueryError::AmbiguousSymbol`], never guessed away.
+/// `ById` carries the revision the id was taken from (the envelope revision
+/// of the response that returned it); an [`EntityId`] is an arena index and
+/// is meaningless once a newer revision is published, so resolution fails
+/// with [`QueryError::StaleSymbolRef`] on a mismatch instead of silently
+/// returning the wrong symbol. `ByName` resolves only when it is
+/// unambiguous; ambiguity is returned as [`QueryError::AmbiguousSymbol`],
+/// never guessed away.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum SymbolRef {
-    ById(EntityId),
+    ById { id: EntityId, revision: Revision },
     ByName(String),
 }
 
@@ -250,6 +256,13 @@ pub enum QueryError {
     Unsupported(&'static str),
     #[error("symbol reference is required")]
     MissingSymbolRef,
+    #[error(
+        "symbol reference was taken from revision {reference_revision}, but the published revision is {current_revision}; re-resolve via symbol_search"
+    )]
+    StaleSymbolRef {
+        reference_revision: Revision,
+        current_revision: Revision,
+    },
     #[error("symbol not found: {0}")]
     SymbolNotFound(String),
     #[error(
@@ -297,8 +310,14 @@ mod tests {
     fn symbol_ref_serializes_as_snake_case_tagged() -> Result<(), Box<dyn std::error::Error>> {
         let by_name = serde_json::to_value(SymbolRef::ByName("refund".to_owned()))?;
         assert_eq!(by_name, serde_json::json!({ "by_name": "refund" }));
-        let by_id = serde_json::to_value(SymbolRef::ById(EntityId(7)))?;
-        assert_eq!(by_id, serde_json::json!({ "by_id": 7 }));
+        let by_id = serde_json::to_value(SymbolRef::ById {
+            id: EntityId(7),
+            revision: Revision(42),
+        })?;
+        assert_eq!(
+            by_id,
+            serde_json::json!({ "by_id": { "id": 7, "revision": 42 } })
+        );
         Ok(())
     }
 

@@ -5,47 +5,37 @@ mod common;
 
 use std::error::Error;
 use std::sync::Barrier;
-use std::sync::atomic::{AtomicBool, Ordering};
 
+use chakra_domain::location::{RepoRelativePath, SourceRange, TextPosition};
+use chakra_domain::provenance::{Precision, Provenance};
+use chakra_domain::revision::Revision;
+use chakra_domain::symbol::{Language, SymbolKey, SymbolKind};
 use chakra_engine::{PublishError, SymbolGraph, WorkspaceEngine};
 
-use common::scenario_graph;
+use common::{scenario_engine, scenario_graph};
 
-fn engine_with_scenario() -> Result<WorkspaceEngine, Box<dyn Error>> {
-    let identity = chakra_domain::identity::WorkspaceIdentity::for_primary_worktree(
-        std::path::Path::new("."),
-    )?;
-    let engine = WorkspaceEngine::new(identity);
-    let (graph, _) = scenario_graph()?;
-    let mut update = engine.begin_update();
-    update.replace_graph(graph);
-    engine.publish(update)?;
-    Ok(engine)
-}
-
-/// A single-provider graph that differs from the scenario in every count.
 fn tiny_graph() -> Result<SymbolGraph, Box<dyn Error>> {
     let mut graph = SymbolGraph::new();
-    let file = chakra_domain::location::RepoRelativePath::new("src/lib.rs")?;
-    let position = chakra_domain::location::TextPosition { line: 1, column: 1 };
+    let file = RepoRelativePath::new("src/lib.rs")?;
+    let position = TextPosition::new(1, 1)?;
     graph.add_symbol(
-        chakra_domain::symbol::SymbolKey {
-            language: chakra_domain::symbol::Language::Rust,
+        SymbolKey {
+            language: Language::Rust,
             qualified_name: "only".to_owned(),
             container: None,
-            kind: chakra_domain::symbol::SymbolKind::Function,
+            kind: SymbolKind::Function,
             path: file.clone(),
         },
-        chakra_domain::location::SourceRange {
-            file,
-            start: position,
-            end: position,
-        },
+        SourceRange::new(file, position, position)?,
         None,
-        chakra_domain::provenance::Provenance::TreeSitter,
-        chakra_domain::provenance::Precision::Syntax,
+        Provenance::TreeSitter,
+        Precision::Syntax,
     )?;
     Ok(graph)
+}
+
+fn engine_with_scenario() -> Result<WorkspaceEngine, Box<dyn Error>> {
+    Ok(scenario_engine()?.0)
 }
 
 #[test]
@@ -94,7 +84,9 @@ fn readers_never_observe_partial_revisions() -> Result<(), Box<dyn Error>> {
     let tiny_symbols = tiny.symbol_count();
 
     const PUBLISHES: usize = 100;
-    let readers_done = AtomicBool::new(false);
+    // Every reader performs exactly this many snapshot checks, so the test
+    // cannot pass vacuously regardless of how threads are scheduled.
+    const OBSERVATIONS_PER_READER: usize = 500;
     let start = Barrier::new(4); // 3 readers + publisher
 
     std::thread::scope(|scope| {
@@ -109,19 +101,22 @@ fn readers_never_observe_partial_revisions() -> Result<(), Box<dyn Error>> {
                 }
                 engine.publish(update).map_err(|error| error.to_string())?;
             }
-            readers_done.store(true, Ordering::Release);
             Ok(())
         });
 
         let mut readers = Vec::new();
         for _ in 0..3 {
-            readers.push(scope.spawn(|| -> Result<(), String> {
+            readers.push(scope.spawn(|| -> Result<usize, String> {
                 start.wait();
-                let mut last_revision = chakra_domain::revision::Revision::INITIAL;
-                while !readers_done.load(Ordering::Acquire) {
+                let mut last_revision = Revision::INITIAL;
+                let mut observations = 0;
+                for _ in 0..OBSERVATIONS_PER_READER {
                     let snapshot = engine.snapshot();
                     if snapshot.revision() < last_revision {
                         return Err("revision went backwards for a reader".to_owned());
+                    }
+                    if snapshot.revision() < Revision(1) {
+                        return Err("reader observed the unindexed initial revision".to_owned());
                     }
                     last_revision = snapshot.revision();
                     let graph = snapshot.graph();
@@ -132,8 +127,9 @@ fn readers_never_observe_partial_revisions() -> Result<(), Box<dyn Error>> {
                     if count != scenario_symbols && count != tiny_symbols {
                         return Err(format!("partial graph observed: {count} symbols"));
                     }
+                    observations += 1;
                 }
-                Ok(())
+                Ok(observations)
             }));
         }
 
@@ -142,10 +138,11 @@ fn readers_never_observe_partial_revisions() -> Result<(), Box<dyn Error>> {
             .map_err(|_| std::io::Error::other("publisher panicked"))?
             .map_err(std::io::Error::other)?;
         for reader in readers {
-            reader
+            let observations = reader
                 .join()
                 .map_err(|_| std::io::Error::other("reader panicked"))?
                 .map_err(std::io::Error::other)?;
+            assert_eq!(observations, OBSERVATIONS_PER_READER);
         }
         Ok(())
     })

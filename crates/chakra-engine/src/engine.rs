@@ -101,11 +101,15 @@ pub struct WorkspaceEngine {
 
 impl WorkspaceEngine {
     /// A fresh engine: revision 0, empty graph, no language provider.
+    ///
+    /// Status starts at `Initializing`: the engine has not yet observed or
+    /// indexed the filesystem, so nothing may report ready/fresh data. The
+    /// first real reconciliation/index publish sets `Ready` explicitly.
     pub fn new(identity: WorkspaceIdentity) -> Self {
         let snapshot = WorkspaceSnapshot {
             identity,
             revision: Revision::INITIAL,
-            status: WorkspaceStatus::Ready,
+            status: WorkspaceStatus::Initializing,
             provider_state: ProviderState::NotConfigured,
             graph: SymbolGraph::new(),
         };
@@ -174,12 +178,13 @@ mod tests {
     }
 
     #[test]
-    fn new_engine_starts_at_revision_zero() -> Result<(), Box<dyn std::error::Error>> {
+    fn new_engine_starts_unindexed() -> Result<(), Box<dyn std::error::Error>> {
         let engine = engine()?;
         let snapshot = engine.snapshot();
         assert_eq!(snapshot.revision(), Revision::INITIAL);
         assert_eq!(snapshot.graph().symbol_count(), 0);
-        assert_eq!(snapshot.status(), WorkspaceStatus::Ready);
+        // Not Ready: nothing has observed the filesystem yet.
+        assert_eq!(snapshot.status(), WorkspaceStatus::Initializing);
         assert_eq!(snapshot.provider_state(), ProviderState::NotConfigured);
         Ok(())
     }
