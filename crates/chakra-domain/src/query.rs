@@ -46,6 +46,21 @@ pub struct SymbolView {
     pub precision: Precision,
 }
 
+impl From<&crate::symbol::Symbol> for SymbolView {
+    fn from(symbol: &crate::symbol::Symbol) -> Self {
+        Self {
+            id: symbol.id,
+            name: symbol.name().to_owned(),
+            qualified_name: symbol.key.qualified_name.clone(),
+            kind: symbol.key.kind,
+            location: symbol.location.clone(),
+            signature: symbol.signature.clone(),
+            provenance: symbol.provenance,
+            precision: symbol.precision,
+        }
+    }
+}
+
 /// A typed relation to another symbol, as seen in query responses.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct RelatedSymbol {

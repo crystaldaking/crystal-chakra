@@ -29,10 +29,14 @@ cargo deny check           # requires cargo-deny
 
 ## Repository layout
 
-- `crates/chakra-cli` — user-facing `chakra` binary (only crate so far; further
-  v0.1 crates such as `chakra-domain`, `chakra-engine`, `chakra-language-rust`,
-  and `chakra-mcp` are added when they carry real code, per
-  `docs/roadmap/v0.1.md` §14).
+- `crates/chakra-cli` — user-facing `chakra` binary.
+- `crates/chakra-domain` — core types and MCP-independent query contracts.
+- `crates/chakra-engine` — in-memory symbol graph, atomic revision
+  publication, `QueryService` implementation.
+- `fixtures/rust/controller-service-provider` — Controller → Service →
+  Provider fixture crate (test oracle; excluded from the workspace).
+- Further v0.1 crates (`chakra-language-rust`, `chakra-mcp`) are added when
+  they carry real code, per `docs/roadmap/v0.1.md` §14.
 - `docs/SPEC.md` — architectural source of truth.
 - `docs/roadmap/v0.1.md` — v0.1 scope authority.
 - `docs/adr/` — architectural decision records.
