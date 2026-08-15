@@ -24,8 +24,15 @@ mentions both.
   inside `chakra-mcp`; tool inputs/outputs are the domain contract types
   (serde + JSON Schema), so no MCP protocol types enter `chakra-domain` or
   `chakra-engine`.
+- The first real syntax tools are `repo_map`, `search`, and `symbol_search`
+  alongside `status`. They only delegate to `QueryService`; indexing and
+  Tree-sitter types remain outside the transport crate.
 - The adapter holds `Arc<dyn QueryService>`; it is tested against a stub
   service, proving the boundary does not depend on the engine.
+- Potentially repository-wide synchronous queries run on Tokio's blocking
+  pool behind a two-permit semaphore. MCP runtime workers stay responsive,
+  and concurrent CPU work is bounded without leaking async types into the
+  query contract.
 - Stdout is owned by the protocol stream; logging goes to stderr only.
 
 ## Alternatives considered
@@ -40,8 +47,10 @@ mentions both.
 
 ## Consequences
 
-- `tokio` enters the workspace (rmcp runs on it); CPU-heavy parsing must
-  keep off the runtime's core paths per AGENTS.md when indexing lands.
+- `tokio` enters the workspace (rmcp runs on it). The CLI performs blocking
+  Git discovery and CPU-heavy initial parsing through an owned
+  `spawn_blocking` task before serving requests, keeping it off runtime
+  worker paths.
 - Protocol upgrades (e.g. MCP 2026-07-28 discovery lifecycle) arrive by
   upgrading `rmcp`, not by rewriting protocol code.
 - Adding the HTTP transport later is additive in `chakra-mcp`; the query
@@ -49,11 +58,12 @@ mentions both.
 
 ## Validation / follow-up
 
-- `crates/chakra-mcp/tests/contract.rs`: in-process client over a duplex
-  transport verifies server identity, tool listing, and a structured
-  `status` call against the domain contract.
+- `crates/chakra-mcp/tests/contract.rs`: in-process clients over a duplex
+  transport verify server identity, tool listing, a structured `status`
+  call against a domain-only stub, and `repo_map` / `search` /
+  `symbol_search` against a real indexed Rust fixture.
 - Manual smoke: piped `initialize`/`tools/list` frames into
   `chakra serve --repo .` and received correct responses (2026-08-15).
-- Re-verify Codex connectivity end to end once the indexer serves real
-  data (roadmap §13 was verified for transport support; the product-level
-  connection test is part of the v0.1 evaluation).
+- External Codex CLI/Desktop connectivity with the real indexed tools remains
+  a product-level v0.1 evaluation step; the in-process real-index client
+  covers the protocol contract in CI.

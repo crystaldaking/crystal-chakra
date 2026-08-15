@@ -118,6 +118,8 @@ pub struct RepoMapRequest {
 pub struct FileSummary {
     pub path: RepoRelativePath,
     pub symbol_count: u64,
+    pub provenance: Provenance,
+    pub precision: Precision,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -130,6 +132,14 @@ pub struct RepoMapData {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct SearchRequest {
     pub query: String,
+    /// Interpret `query` as a Rust `regex` expression instead of a literal
+    /// substring.
+    #[serde(default)]
+    pub regex: bool,
+    /// Match case exactly. Literal and regex modes are case-insensitive by
+    /// default for agent-oriented discovery.
+    #[serde(default)]
+    pub case_sensitive: bool,
     #[serde(default)]
     pub limit: Option<u32>,
     #[serde(default)]
@@ -141,6 +151,8 @@ pub struct TextMatch {
     pub file: RepoRelativePath,
     pub range: SourceRange,
     pub line: String,
+    /// The matching source line exceeded the response snippet budget.
+    pub line_truncated: bool,
     pub provenance: Provenance,
     pub precision: Precision,
 }
@@ -178,13 +190,23 @@ pub struct ContextRequest {
     pub freshness: FreshnessRequirement,
 }
 
+/// A declaration snippet captured from the same immutable revision as the
+/// symbol graph. Both line and character budgets are enforced by the query
+/// layer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct SourceSnippet {
+    pub range: SourceRange,
+    pub text: String,
+    pub truncated: bool,
+    pub provenance: Provenance,
+    pub precision: Precision,
+}
+
 /// Bounded, provenance-tagged context around one symbol (SPEC §25).
-///
-/// Source snippets are intentionally absent until the indexer owns file
-/// contents; the fields here are what the syntax graph can honestly answer.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ContextData {
     pub symbol: SymbolView,
+    pub source: Option<SourceSnippet>,
     pub callers: Vec<RelatedSymbol>,
     pub callees: Vec<RelatedSymbol>,
     pub implementations: Vec<RelatedSymbol>,

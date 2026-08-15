@@ -5,9 +5,11 @@ compact, current, structured, provenance-aware facts about a Git worktree over
 MCP — repository structure, symbols, references, callers, source context, and
 Git diff state — so agents can navigate a codebase with fewer blind searches.
 
-Status: **v0.1 in progress**. Domain contracts, the in-memory engine with
-atomic revision publication, and an MCP stdio skeleton (`status` tool)
-exist; syntax indexing and the remaining tools land in later phases.
+Status: **v0.1 in progress**. The current slice provides Git-aware Rust
+discovery, a Tree-sitter syntax index, atomic in-memory revisions, and MCP
+tools for `status`, `repo_map`, literal/regex `search`, and `symbol_search`.
+Live filesystem updates, precise rust-analyzer enrichment, and Git diff
+context land in later slices.
 
 ## Build and run
 
@@ -17,7 +19,7 @@ Requires [rustup](https://rustup.rs/). The pinned toolchain (`1.97.1`, Edition
 ```sh
 cargo build
 cargo run -- --help        # or: ./target/debug/chakra --help
-cargo run -- serve         # serve MCP over stdio for the current directory
+cargo run -- serve         # index and serve the current Git worktree
 ```
 
 ### Connect an agent (Codex example)
@@ -47,12 +49,12 @@ cargo deny check           # requires cargo-deny
 - `crates/chakra-domain` — core types and MCP-independent query contracts.
 - `crates/chakra-engine` — in-memory symbol graph, atomic revision
   publication, `QueryService` implementation.
-- `crates/chakra-mcp` — MCP stdio adapter (`rmcp`), currently the `status`
-  tool over the domain contracts.
+- `crates/chakra-language-rust` — Git-aware Tree-sitter Rust discovery,
+  parsing, syntax extraction, and graph construction adapter.
+- `crates/chakra-mcp` — MCP stdio adapter (`rmcp`) exposing the current
+  typed query tools over domain contracts.
 - `fixtures/rust/controller-service-provider` — Controller → Service →
   Provider fixture crate (test oracle; excluded from the workspace).
-- Further v0.1 crates (`chakra-language-rust`) are added when they carry
-  real code, per `docs/roadmap/v0.1.md` §14.
 - `docs/SPEC.md` — architectural source of truth.
 - `docs/roadmap/v0.1.md` — v0.1 scope authority.
 - `docs/adr/` — architectural decision records.

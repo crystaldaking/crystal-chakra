@@ -17,8 +17,11 @@ representation must support the atomic publication model of ADR-001.
 
 - `Vec<Symbol>` arena; `EntityId` is the arena index (strictly
   revision-scoped identity per SPEC §10);
-- `HashMap<RepoRelativePath, Vec<EntityId>>` for file membership
-  (`repo_map`);
+- `HashMap<RepoRelativePath, IndexedFile>` for file membership
+  (`repo_map`) and the immutable source text captured for that same graph
+  revision (`search` and bounded context snippets); source strings use
+  `Arc<str>` so private snapshot construction does not repeatedly copy file
+  bodies, and file summaries retain Git provenance/precision;
 - `HashMap<EntityId, Vec<Edge>>` in both directions for `callers` /
   `context` adjacency.
 
@@ -27,9 +30,12 @@ Name resolution is a deliberate linear scan over the arena (exact for
 index would be cloned on every update while v0.1 repositories are small.
 Add one only when measurements justify it.
 
-Mutation happens only while building privately (`add_symbol` / `add_edge`
-with validation: key path must equal location file, endpoints must exist);
-after publication the graph is immutable behind an `Arc`.
+Mutation happens only while building privately (`add_file` / `add_symbol` /
+`add_edge` with validation: files are unique, key path must equal location
+file, endpoints must exist); after publication the graph is immutable behind
+an `Arc`. Capturing text and syntax facts together is required so a query
+cannot search filesystem bytes from a different revision than its symbol
+results.
 
 ## Alternatives considered
 
@@ -49,7 +55,7 @@ after publication the graph is immutable behind an `Arc`.
   documented budgets; naive ranking is deliberate until benchmarks say
   otherwise (SPEC §33, roadmap §18).
 - The representation is clone-friendly, which keeps ADR-001's private
-  update construction trivial.
+  update construction trivial. Source bodies are shared across the clone.
 - If future phases need deep traversal (`impact`), the adjacency maps
   extend without changing the public engine API.
 

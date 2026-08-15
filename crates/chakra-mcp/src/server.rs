@@ -1,31 +1,39 @@
-//! MCP server skeleton: typed tools over stdio (ADR-0003).
-//!
-//! Only `status` is exposed in this phase — enough to prove typed tool
-//! exposure end to end. The remaining v0.1 tools are added with the indexer
-//! so their results carry real data instead of stub payloads.
+//! MCP server: typed tools over stdio (ADR-0003).
 
 use std::sync::Arc;
 
 use chakra_domain::envelope::QueryEnvelope;
-use chakra_domain::query::{QueryError, QueryService, StatusData, StatusRequest};
+use chakra_domain::query::{
+    QueryError, QueryService, RepoMapData, RepoMapRequest, SearchData, SearchRequest, StatusData,
+    StatusRequest, SymbolSearchData, SymbolSearchRequest,
+};
 use rmcp::handler::server::router::tool::ToolRouter;
-use rmcp::handler::server::wrapper::Json;
+use rmcp::handler::server::wrapper::{Json, Parameters};
 use rmcp::transport::stdio;
 use rmcp::{ErrorData, ServerHandler, ServiceExt, tool, tool_handler, tool_router};
 use thiserror::Error;
+use tokio::sync::Semaphore;
+
+const MAX_CONCURRENT_QUERIES: usize = 2;
 
 /// MCP server handle. Cloneable so transports can share one query service.
 #[derive(Clone)]
 pub struct ChakraMcpServer {
     service: Arc<dyn QueryService>,
+    query_slots: Arc<Semaphore>,
     tool_router: ToolRouter<Self>,
 }
 
-/// Maps domain errors onto MCP protocol errors. Deliberately minimal in
-/// this phase; richer mapping (tool-level vs protocol errors) arrives with
-/// the real tools.
 fn to_error_data(error: QueryError) -> ErrorData {
-    ErrorData::internal_error(error.to_string(), None)
+    match error {
+        QueryError::Invalid(_)
+        | QueryError::MissingSymbolRef
+        | QueryError::StaleSymbolRef { .. }
+        | QueryError::SymbolNotFound(_)
+        | QueryError::AmbiguousSymbol { .. }
+        | QueryError::FreshnessNotMet { .. } => ErrorData::invalid_params(error.to_string(), None),
+        QueryError::Unsupported(_) => ErrorData::internal_error(error.to_string(), None),
+    }
 }
 
 #[tool_router]
@@ -33,8 +41,31 @@ impl ChakraMcpServer {
     pub fn new(service: Arc<dyn QueryService>) -> Self {
         Self {
             service,
+            query_slots: Arc::new(Semaphore::new(MAX_CONCURRENT_QUERIES)),
             tool_router: Self::tool_router(),
         }
+    }
+
+    async fn execute_query<T, F>(&self, query: F) -> Result<Json<QueryEnvelope<T>>, ErrorData>
+    where
+        T: Send + 'static,
+        F: FnOnce(&dyn QueryService) -> Result<QueryEnvelope<T>, QueryError> + Send + 'static,
+    {
+        let permit = self
+            .query_slots
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| ErrorData::internal_error("query executor is shutting down", None))?;
+        let service = self.service.clone();
+        tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            query(service.as_ref())
+        })
+        .await
+        .map_err(|error| ErrorData::internal_error(format!("query worker failed: {error}"), None))?
+        .map(Json)
+        .map_err(to_error_data)
     }
 
     #[tool(
@@ -47,11 +78,47 @@ impl ChakraMcpServer {
             .map(Json)
             .map_err(to_error_data)
     }
+
+    #[tool(
+        name = "repo_map",
+        description = "List indexed Rust files with bounded syntax-symbol counts"
+    )]
+    async fn repo_map(
+        &self,
+        Parameters(request): Parameters<RepoMapRequest>,
+    ) -> Result<Json<QueryEnvelope<RepoMapData>>, ErrorData> {
+        self.execute_query(move |service| service.repo_map(request))
+            .await
+    }
+
+    #[tool(
+        name = "search",
+        description = "Search the atomically indexed source snapshot using literal or regex text matching"
+    )]
+    async fn search(
+        &self,
+        Parameters(request): Parameters<SearchRequest>,
+    ) -> Result<Json<QueryEnvelope<SearchData>>, ErrorData> {
+        self.execute_query(move |service| service.search(request))
+            .await
+    }
+
+    #[tool(
+        name = "symbol_search",
+        description = "Find bounded Rust syntax symbol candidates by simple or qualified name"
+    )]
+    async fn symbol_search(
+        &self,
+        Parameters(request): Parameters<SymbolSearchRequest>,
+    ) -> Result<Json<QueryEnvelope<SymbolSearchData>>, ErrorData> {
+        self.execute_query(move |service| service.symbol_search(request))
+            .await
+    }
 }
 
 #[tool_handler(
     name = "chakra",
-    instructions = "Chakra code intelligence (v0.1 skeleton): only the `status` tool is exposed so far; symbol search, callers, and diff context tools arrive as indexing lands.",
+    instructions = "Chakra Rust syntax intelligence: inspect status and repo_map, search indexed source text, and resolve ambiguous names through symbol_search. Results are bounded and carry revision, freshness, provenance, and precision.",
     router = self.tool_router
 )]
 impl ServerHandler for ChakraMcpServer {}

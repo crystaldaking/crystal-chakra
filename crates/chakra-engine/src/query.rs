@@ -8,11 +8,14 @@
 //! [`QueryError::FreshnessNotMet`] instead of silently serving stale data.
 
 use chakra_domain::envelope::QueryEnvelope;
+use chakra_domain::location::{SourceRange, TextPosition};
+use chakra_domain::provenance::{Precision, Provenance};
 use chakra_domain::query::{
     CallersData, CallersRequest, ContextData, ContextRequest, DEFAULT_QUERY_LIMIT, DiffContextData,
     DiffContextRequest, FileSummary, IndexCounts, MAX_QUERY_LIMIT, ProviderInfo, QueryError,
     QueryService, RelatedSymbol, RepoMapData, RepoMapRequest, SearchData, SearchRequest,
-    StatusData, StatusRequest, SymbolRef, SymbolSearchData, SymbolSearchRequest, SymbolView,
+    SourceSnippet, StatusData, StatusRequest, SymbolRef, SymbolSearchData, SymbolSearchRequest,
+    SymbolView, TextMatch,
 };
 use chakra_domain::revision::Revision;
 use chakra_domain::state::FreshnessRequirement;
@@ -20,6 +23,11 @@ use chakra_domain::symbol::{Edge, EdgeKind, Symbol};
 
 use crate::engine::{WorkspaceEngine, WorkspaceSnapshot};
 use crate::graph::SymbolGraph;
+
+const MAX_SEARCH_PATTERN_CHARS: usize = 1_024;
+const MAX_MATCH_LINE_CHARS: usize = 512;
+const MAX_SNIPPET_LINES: usize = 20;
+const MAX_SNIPPET_CHARS: usize = 4_096;
 
 /// Applies the SPEC §29 budget: default when absent, hard cap always.
 fn clamp_limit(limit: Option<u32>) -> usize {
@@ -124,6 +132,95 @@ fn envelope<T>(snapshot: &WorkspaceSnapshot, truncated: bool, data: T) -> QueryE
     )
 }
 
+fn bounded_match_line(line: &str, match_start: usize, match_end: usize) -> (String, bool) {
+    if line.chars().count() <= MAX_MATCH_LINE_CHARS {
+        return (line.to_owned(), false);
+    }
+
+    let match_start_char = line[..match_start].chars().count();
+    let match_end_char = line[..match_end].chars().count();
+    let match_chars = match_end_char.saturating_sub(match_start_char);
+    let surrounding = MAX_MATCH_LINE_CHARS.saturating_sub(match_chars);
+    let start_char = match_start_char.saturating_sub(surrounding / 2);
+    let end_char = (start_char + MAX_MATCH_LINE_CHARS).max(match_end_char);
+    let total_chars = line.chars().count();
+    let end_char = end_char.min(total_chars);
+    let start_char = end_char.saturating_sub(MAX_MATCH_LINE_CHARS);
+    let snippet: String = line
+        .chars()
+        .skip(start_char)
+        .take(end_char - start_char)
+        .collect();
+    (snippet, true)
+}
+
+fn position_byte_offset(source: &str, position: TextPosition) -> Option<usize> {
+    let line_index = usize::try_from(position.line().checked_sub(1)?).ok()?;
+    let column_index = usize::try_from(position.column().checked_sub(1)?).ok()?;
+    let line_start = if line_index == 0 {
+        0
+    } else {
+        source
+            .match_indices('\n')
+            .nth(line_index - 1)
+            .map(|(offset, _)| offset + 1)?
+    };
+    let line = source.get(line_start..)?.split('\n').next()?;
+    let column_byte = if column_index == line.chars().count() {
+        line.len()
+    } else {
+        line.char_indices()
+            .nth(column_index)
+            .map(|(offset, _)| offset)?
+    };
+    Some(line_start + column_byte)
+}
+
+fn advance_position(start: TextPosition, text: &str) -> Option<TextPosition> {
+    let mut line = start.line();
+    let mut column = start.column();
+    for character in text.chars() {
+        if character == '\n' {
+            line = line.checked_add(1)?;
+            column = 1;
+        } else {
+            column = column.checked_add(1)?;
+        }
+    }
+    TextPosition::new(line, column).ok()
+}
+
+fn source_snippet(graph: &SymbolGraph, symbol: &Symbol) -> Option<SourceSnippet> {
+    let range = &symbol.location;
+    let source = graph.file_source(range.file())?;
+    let start_byte = position_byte_offset(source, range.start())?;
+    let end_byte = position_byte_offset(source, range.end())?;
+    let full = source.get(start_byte..end_byte)?;
+
+    let mut end = full.len();
+    let mut lines = 1_usize;
+    for (chars, (offset, character)) in full.char_indices().enumerate() {
+        if chars >= MAX_SNIPPET_CHARS || (character == '\n' && lines >= MAX_SNIPPET_LINES) {
+            end = offset;
+            break;
+        }
+        if character == '\n' {
+            lines += 1;
+        }
+    }
+    let text = full.get(..end)?.to_owned();
+    let truncated = end < full.len();
+    let snippet_end = advance_position(range.start(), &text)?;
+    let snippet_range = SourceRange::new(range.file().clone(), range.start(), snippet_end).ok()?;
+    Some(SourceSnippet {
+        range: snippet_range,
+        text,
+        truncated,
+        provenance: symbol.provenance,
+        precision: symbol.precision,
+    })
+}
+
 impl QueryService for WorkspaceEngine {
     fn status(&self, _request: StatusRequest) -> Result<QueryEnvelope<StatusData>, QueryError> {
         let snapshot = self.snapshot();
@@ -151,18 +248,77 @@ impl QueryService for WorkspaceEngine {
             .graph()
             .file_summaries()
             .into_iter()
-            .map(|(path, count)| FileSummary {
+            .map(|(path, count, provenance, precision)| FileSummary {
                 path,
                 symbol_count: count,
+                provenance,
+                precision,
             })
             .collect();
         let (files, truncated) = bounded(summaries, clamp_limit(request.limit));
         Ok(envelope(&snapshot, truncated, RepoMapData { files }))
     }
 
-    fn search(&self, _request: SearchRequest) -> Result<QueryEnvelope<SearchData>, QueryError> {
-        // Text search needs file contents, which arrive with the indexer.
-        Err(QueryError::Unsupported("search"))
+    fn search(&self, request: SearchRequest) -> Result<QueryEnvelope<SearchData>, QueryError> {
+        if request.query.is_empty() {
+            return Err(QueryError::Invalid("query must be non-empty".to_owned()));
+        }
+        if request.query.chars().count() > MAX_SEARCH_PATTERN_CHARS {
+            return Err(QueryError::Invalid(format!(
+                "query exceeds the {MAX_SEARCH_PATTERN_CHARS}-character pattern budget"
+            )));
+        }
+        let snapshot = self.snapshot();
+        enforce_freshness(request.freshness, &snapshot)?;
+        let pattern = if request.regex {
+            request.query.clone()
+        } else {
+            regex::escape(&request.query)
+        };
+        let matcher = regex::RegexBuilder::new(&pattern)
+            .case_insensitive(!request.case_sensitive)
+            .build()
+            .map_err(|error| QueryError::Invalid(format!("invalid regex: {error}")))?;
+        let limit = clamp_limit(request.limit);
+        let mut matches = Vec::new();
+        let mut truncated = false;
+
+        'files: for (path, source) in snapshot.graph().source_files() {
+            for (line_index, line) in source.lines().enumerate() {
+                for found in matcher.find_iter(line) {
+                    if matches.len() >= limit {
+                        truncated = true;
+                        break 'files;
+                    }
+                    let line_number = u32::try_from(line_index + 1)
+                        .map_err(|_| QueryError::Invalid("source has too many lines".to_owned()))?;
+                    let start_column = u32::try_from(line[..found.start()].chars().count() + 1)
+                        .map_err(|_| QueryError::Invalid("source line is too long".to_owned()))?;
+                    let end_column = u32::try_from(line[..found.end()].chars().count() + 1)
+                        .map_err(|_| QueryError::Invalid("source line is too long".to_owned()))?;
+                    let range = SourceRange::new(
+                        path.clone(),
+                        TextPosition::new(line_number, start_column)
+                            .map_err(|error| QueryError::Invalid(error.to_string()))?,
+                        TextPosition::new(line_number, end_column)
+                            .map_err(|error| QueryError::Invalid(error.to_string()))?,
+                    )
+                    .map_err(|error| QueryError::Invalid(error.to_string()))?;
+                    let (line, line_truncated) =
+                        bounded_match_line(line, found.start(), found.end());
+                    truncated |= line_truncated;
+                    matches.push(TextMatch {
+                        file: path.clone(),
+                        range,
+                        line,
+                        line_truncated,
+                        provenance: Provenance::TextSearch,
+                        precision: Precision::Textual,
+                    });
+                }
+            }
+        }
+        Ok(envelope(&snapshot, truncated, SearchData { matches }))
     }
 
     fn symbol_search(
@@ -260,6 +416,7 @@ impl QueryService for WorkspaceEngine {
             || files_truncated;
         let data = ContextData {
             symbol: SymbolView::from(symbol),
+            source: source_snippet(graph, symbol),
             callers,
             callees,
             implementations,

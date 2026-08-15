@@ -1,13 +1,14 @@
 //! `chakra` — user-facing entry point of the Chakra code intelligence service.
 //!
-//! `chakra serve` runs the MCP server over stdio (ADR-0003); indexing is
-//! added in the next phase.
+//! `chakra serve` indexes the materialized Git worktree, atomically publishes
+//! the first fresh syntax revision, then runs MCP over stdio (ADR-0003).
 
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
 
 use chakra_domain::identity::WorkspaceIdentity;
+use chakra_domain::state::{Freshness, WorkspaceStatus};
 use chakra_engine::WorkspaceEngine;
 use clap::{Args, CommandFactory, Parser, Subcommand};
 
@@ -60,7 +61,24 @@ async fn serve(args: ServeArgs) -> ExitCode {
         )
         .try_init();
 
-    let identity = match WorkspaceIdentity::for_primary_worktree(&args.repo) {
+    // Parsing is CPU-heavy and filesystem/Git discovery is blocking. Keep it
+    // on Tokio's owned blocking pool instead of a runtime worker.
+    let report = match tokio::task::spawn_blocking(move || {
+        chakra_language_rust::index_repository(&args.repo)
+    })
+    .await
+    {
+        Ok(Ok(report)) => report,
+        Ok(Err(error)) => {
+            eprintln!("chakra: {error}");
+            return ExitCode::FAILURE;
+        }
+        Err(error) => {
+            eprintln!("chakra: syntax index task failed: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let identity = match WorkspaceIdentity::for_primary_worktree(&report.repository_root) {
         Ok(identity) => identity,
         Err(error) => {
             eprintln!("chakra: {error}");
@@ -68,6 +86,26 @@ async fn serve(args: ServeArgs) -> ExitCode {
         }
     };
     let engine = WorkspaceEngine::new(identity);
+    let mut update = engine.begin_update();
+    update.replace_graph(report.graph);
+    update.set_status(WorkspaceStatus::Ready);
+    // Discovery and parsing used one complete scan of the actual worktree;
+    // graph mutation revoked freshness, so the indexing owner reclaims it
+    // only after the graph is complete and internally validated.
+    update.set_freshness(Freshness::Fresh);
+    if let Err(error) = engine.publish(update) {
+        eprintln!("chakra: failed to publish initial syntax index: {error}");
+        return ExitCode::FAILURE;
+    }
+    tracing::info!(
+        files = report.metrics.parsed_files,
+        syntax_error_files = report.metrics.syntax_error_files,
+        truncated_call_sites = report.metrics.truncated_call_sites,
+        symbols = report.metrics.symbols,
+        edges = report.metrics.edges,
+        elapsed_micros = report.metrics.elapsed.as_micros(),
+        "initial Rust syntax revision published"
+    );
     match chakra_mcp::serve_stdio(Arc::new(engine)).await {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {

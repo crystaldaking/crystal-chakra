@@ -7,6 +7,7 @@
 //! see `docs/adr/0002-in-memory-graph-representation.md`.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use chakra_domain::location::{RepoRelativePath, SourceRange};
 use chakra_domain::provenance::{Precision, Provenance};
@@ -23,6 +24,18 @@ pub enum GraphError {
     },
     #[error("unknown symbol id: {0:?}")]
     UnknownEntity(EntityId),
+    #[error("source file is already indexed: {0}")]
+    DuplicateFile(RepoRelativePath),
+}
+
+#[derive(Debug, Clone)]
+struct IndexedFile {
+    symbols: Vec<EntityId>,
+    /// Immutable source captured in the same published revision as the
+    /// syntax facts. `Arc<str>` keeps private snapshot clones cheap.
+    source: Option<Arc<str>>,
+    provenance: Provenance,
+    precision: Precision,
 }
 
 /// Symbols and typed relations of one workspace revision.
@@ -32,8 +45,8 @@ pub enum GraphError {
 #[derive(Debug, Clone, Default)]
 pub struct SymbolGraph {
     symbols: Vec<Symbol>,
-    /// File → entities declared in it.
-    by_file: HashMap<RepoRelativePath, Vec<EntityId>>,
+    /// File → captured source plus entities declared in it.
+    files: HashMap<RepoRelativePath, IndexedFile>,
     outgoing: HashMap<EntityId, Vec<Edge>>,
     incoming: HashMap<EntityId, Vec<Edge>>,
     edge_count: u64,
@@ -42,6 +55,36 @@ pub struct SymbolGraph {
 impl SymbolGraph {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Adds one discovered source file and the exact text parsed for this
+    /// graph revision. Files with no extractable declarations still appear
+    /// in `repo_map` and text search.
+    pub fn add_file(
+        &mut self,
+        path: RepoRelativePath,
+        source: impl Into<Arc<str>>,
+    ) -> Result<(), GraphError> {
+        match self.files.entry(path.clone()) {
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                entry.insert(IndexedFile {
+                    symbols: Vec::new(),
+                    source: Some(source.into()),
+                    provenance: Provenance::Git,
+                    precision: Precision::Precise,
+                });
+            }
+            std::collections::hash_map::Entry::Occupied(mut entry) => {
+                if entry.get().source.is_some() {
+                    return Err(GraphError::DuplicateFile(path));
+                }
+                let file = entry.get_mut();
+                file.source = Some(source.into());
+                file.provenance = Provenance::Git;
+                file.precision = Precision::Precise;
+            }
+        }
+        Ok(())
     }
 
     /// Adds a symbol; the key path must match the location file.
@@ -68,9 +111,15 @@ impl SymbolGraph {
             provenance,
             precision,
         };
-        self.by_file
+        self.files
             .entry(symbol.location.file().clone())
-            .or_default()
+            .or_insert_with(|| IndexedFile {
+                symbols: Vec::new(),
+                source: None,
+                provenance: symbol.provenance,
+                precision: symbol.precision,
+            })
+            .symbols
             .push(id);
         self.symbols.push(symbol);
         Ok(id)
@@ -122,18 +171,41 @@ impl SymbolGraph {
     }
 
     pub fn file_count(&self) -> u64 {
-        self.by_file.len() as u64
+        self.files.len() as u64
     }
 
     /// Files with the number of symbols declared in each, sorted by path.
-    pub fn file_summaries(&self) -> Vec<(RepoRelativePath, u64)> {
-        let mut summaries: Vec<(RepoRelativePath, u64)> = self
-            .by_file
+    pub fn file_summaries(&self) -> Vec<(RepoRelativePath, u64, Provenance, Precision)> {
+        let mut summaries: Vec<_> = self
+            .files
             .iter()
-            .map(|(path, ids)| (path.clone(), ids.len() as u64))
+            .map(|(path, file)| {
+                (
+                    path.clone(),
+                    file.symbols.len() as u64,
+                    file.provenance,
+                    file.precision,
+                )
+            })
             .collect();
         summaries.sort_by(|a, b| a.0.cmp(&b.0));
         summaries
+    }
+
+    /// Captured source for one file in this graph revision.
+    pub fn file_source(&self, path: &RepoRelativePath) -> Option<&str> {
+        self.files.get(path)?.source.as_deref()
+    }
+
+    /// Captured source files sorted by repository-relative path.
+    pub fn source_files(&self) -> Vec<(&RepoRelativePath, &str)> {
+        let mut files: Vec<_> = self
+            .files
+            .iter()
+            .filter_map(|(path, file)| file.source.as_deref().map(|source| (path, source)))
+            .collect();
+        files.sort_by(|a, b| a.0.cmp(b.0));
+        files
     }
 
     /// Case-insensitive substring search over simple and qualified names.
@@ -181,7 +253,8 @@ impl SymbolGraph {
         }
 
         // The file index covers exactly the arena symbols.
-        let mut expected_by_file: HashMap<&RepoRelativePath, Vec<EntityId>> = HashMap::new();
+        let mut expected_by_file: HashMap<&RepoRelativePath, Vec<EntityId>> =
+            self.files.keys().map(|path| (path, Vec::new())).collect();
         for symbol in &self.symbols {
             expected_by_file
                 .entry(symbol.location.file())
@@ -192,9 +265,9 @@ impl SymbolGraph {
             ids.sort_unstable();
         }
         let mut actual_by_file: HashMap<&RepoRelativePath, Vec<EntityId>> = self
-            .by_file
+            .files
             .iter()
-            .map(|(path, ids)| (path, ids.clone()))
+            .map(|(path, file)| (path, file.symbols.clone()))
             .collect();
         for ids in actual_by_file.values_mut() {
             ids.sort_unstable();
@@ -424,6 +497,26 @@ mod tests {
         assert_eq!(graph.symbol_count(), 2);
         assert_eq!(graph.edge_count(), 1);
         assert_eq!(graph.file_count(), 2);
+        Ok(())
+    }
+
+    #[test]
+    fn source_files_without_symbols_are_indexed_and_duplicates_are_rejected()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut graph = SymbolGraph::new();
+        let path = file("src/comments.rs")?;
+        graph.add_file(path.clone(), "//! Documentation only.\n")?;
+        assert_eq!(graph.file_count(), 1);
+        assert_eq!(
+            graph.file_summaries(),
+            vec![(path.clone(), 0, Provenance::Git, Precision::Precise)]
+        );
+        assert_eq!(graph.file_source(&path), Some("//! Documentation only.\n"));
+        assert!(matches!(
+            graph.add_file(path.clone(), "changed"),
+            Err(GraphError::DuplicateFile(duplicate)) if duplicate == path
+        ));
+        graph.validate_consistency()?;
         Ok(())
     }
 
