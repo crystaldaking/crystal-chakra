@@ -1,0 +1,18 @@
+[package]
+name = "chakra-domain"
+description = "Core domain types and query contracts for Chakra (no MCP/LSP dependencies)"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+serde.workspace = true
+schemars.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+
+[lints]
+workspace = true

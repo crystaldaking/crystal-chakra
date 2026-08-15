@@ -1,6 +1,8 @@
 [workspace]
 resolver = "3"
-members = ["crates/chakra-cli"]
+members = ["crates/*"]
+# Fixture crates are standalone packages, not workspace members.
+exclude = ["fixtures"]
 
 [workspace.package]
 edition = "2024"
@@ -8,6 +10,10 @@ rust-version = "1.97.1"
 
 [workspace.dependencies]
 clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+schemars = "1"
+thiserror = "2"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
