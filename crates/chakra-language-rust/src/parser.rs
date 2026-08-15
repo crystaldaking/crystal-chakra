@@ -64,8 +64,15 @@ pub(crate) struct CallDraft {
 #[derive(Debug)]
 pub(crate) struct ImplDraft {
     pub symbol: usize,
-    pub target_type: String,
-    pub trait_name: Option<String>,
+    /// Exact syntactic container prefix at the impl site, including inline
+    /// modules nested inside the physical file module.
+    pub module_path: Vec<String>,
+    /// Same-module lookup candidate only when the target syntax is an
+    /// unqualified type identifier (optionally with generic arguments).
+    pub target_lookup: Option<String>,
+    /// Same-module lookup candidate only when the trait syntax is an
+    /// unqualified type identifier (optionally with generic arguments).
+    pub trait_lookup: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -187,9 +194,38 @@ impl Extraction<'_> {
             }
         }
         if truncated {
+            // The ellipsis is part of the response budget rather than an
+            // extra character after it.
+            if let Some((last, _)) = signature.char_indices().next_back() {
+                signature.truncate(last);
+            }
             signature.push('…');
         }
         Some(signature)
+    }
+
+    fn type_name(&self, node: Node<'_>) -> Option<&str> {
+        match node.kind() {
+            "identifier" | "type_identifier" => self.text(node),
+            "generic_type" => node
+                .child_by_field_name("type")
+                .and_then(|base| self.type_name(base)),
+            "scoped_type_identifier" => node
+                .child_by_field_name("name")
+                .and_then(|name| self.text(name)),
+            _ => self.text(node).and_then(base_type_identifier),
+        }
+    }
+
+    fn simple_type_lookup(&self, node: Node<'_>) -> Option<&str> {
+        let base = if node.kind() == "generic_type" {
+            node.child_by_field_name("type")?
+        } else {
+            node
+        };
+        matches!(base.kind(), "identifier" | "type_identifier")
+            .then(|| self.text(base))
+            .flatten()
     }
 
     fn add_symbol(
@@ -338,16 +374,16 @@ impl Extraction<'_> {
         let Some(target_node) = node.child_by_field_name("type") else {
             return Ok(());
         };
-        let Some(target_text) = self.text(target_node) else {
+        let Some(target_type) = self.type_name(target_node).map(str::to_owned) else {
             return Ok(());
         };
-        let target_type = base_type_identifier(target_text)
-            .unwrap_or("unknown")
-            .to_owned();
-        let trait_name = node
-            .child_by_field_name("trait")
-            .and_then(|item| self.text(item))
-            .and_then(last_identifier)
+        let target_lookup = self.simple_type_lookup(target_node).map(str::to_owned);
+        let trait_node = node.child_by_field_name("trait");
+        let trait_name = trait_node
+            .and_then(|item| self.type_name(item))
+            .map(str::to_owned);
+        let trait_lookup = trait_node
+            .and_then(|item| self.simple_type_lookup(item))
             .map(str::to_owned);
         let label = trait_name.as_ref().map_or_else(
             || format!("<impl {target_type}>"),
@@ -362,8 +398,9 @@ impl Extraction<'_> {
         )?;
         self.implementations.push(ImplDraft {
             symbol: parent,
-            target_type: target_type.clone(),
-            trait_name,
+            module_path: context.prefix.clone(),
+            target_lookup,
+            trait_lookup,
         });
         if let Some(body) = node.child_by_field_name("body") {
             let mut child_context = context.clone();
@@ -405,27 +442,14 @@ impl Extraction<'_> {
     }
 
     fn visit_import(&mut self, node: Node<'_>, context: &Context) -> Result<(), ParseError> {
-        let Some(raw) = self.text(node) else {
+        let Some(signature) = self.signature(node) else {
             return Ok(());
         };
-        let import = raw
-            .trim()
-            .strip_prefix("use")
-            .unwrap_or(raw)
-            .trim()
-            .trim_end_matches(';')
-            .trim();
-        if import.is_empty() {
+        let name = signature.trim_end_matches(';').trim().to_owned();
+        if name.is_empty() {
             return Ok(());
         }
-        let name = format!("use {import}");
-        self.add_symbol(
-            context,
-            &name,
-            SymbolKind::Import,
-            node,
-            Some(raw.trim().to_owned()),
-        )?;
+        self.add_symbol(context, &name, SymbolKind::Import, node, Some(signature))?;
         Ok(())
     }
 
@@ -696,6 +720,63 @@ mod tests {
         assert_eq!(
             call.location.start().column() as usize,
             source[..byte].chars().count() + 1
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn bounds_every_signature_including_imports_and_the_ellipsis()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let long_identifier = "a".repeat(MAX_SIGNATURE_CHARS + 100);
+        let source = format!("pub use crate::{long_identifier};\nfn short() {{}}\n");
+        let mut parser = RustParser::new()?;
+        let parsed = parser.parse(RepoRelativePath::new("src/lib.rs")?, source)?;
+        let import = parsed
+            .symbols
+            .iter()
+            .find(|symbol| symbol.key.kind == SymbolKind::Import)
+            .ok_or("import symbol missing")?;
+        let signature = import.signature.as_deref().ok_or("signature missing")?;
+
+        assert_eq!(signature.chars().count(), MAX_SIGNATURE_CHARS);
+        assert!(signature.ends_with('…'));
+        assert!(import.key.qualified_name.chars().count() <= MAX_SIGNATURE_CHARS);
+        Ok(())
+    }
+
+    #[test]
+    fn impl_lookups_keep_simple_generic_names_but_reject_qualified_paths()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let source = r#"
+            trait Local<T> {}
+            trait Marker {}
+            struct S<T>(T);
+            impl<T> Local<T> for S<T> {}
+            impl std::fmt::Display for S<u8> {}
+            impl Marker for std::vec::Vec<u8> {}
+        "#;
+        let mut parser = RustParser::new()?;
+        let parsed = parser.parse(RepoRelativePath::new("src/lib.rs")?, source.to_owned())?;
+
+        assert_eq!(parsed.implementations.len(), 3);
+        assert!(parsed.implementations[0].module_path.is_empty());
+        assert_eq!(
+            parsed.implementations[0].target_lookup.as_deref(),
+            Some("S")
+        );
+        assert_eq!(
+            parsed.implementations[0].trait_lookup.as_deref(),
+            Some("Local")
+        );
+        assert_eq!(
+            parsed.implementations[1].target_lookup.as_deref(),
+            Some("S")
+        );
+        assert_eq!(parsed.implementations[1].trait_lookup, None);
+        assert_eq!(parsed.implementations[2].target_lookup, None);
+        assert_eq!(
+            parsed.implementations[2].trait_lookup.as_deref(),
+            Some("Marker")
         );
         Ok(())
     }

@@ -81,6 +81,12 @@ fn symbol_search_matches_names_and_respects_budgets() -> Result<(), Box<dyn Erro
         ..SymbolSearchRequest::default()
     });
     assert!(matches!(empty, Err(QueryError::Invalid(_))));
+
+    let oversized = engine.symbol_search(SymbolSearchRequest {
+        query: "x".repeat(1_025),
+        ..SymbolSearchRequest::default()
+    });
+    assert!(matches!(oversized, Err(QueryError::Invalid(_))));
     Ok(())
 }
 

@@ -189,38 +189,35 @@ fn add_implementation_edges(
     for (file_index, file) in parsed.iter().enumerate() {
         for implementation in &file.implementations {
             let impl_id = ids[file_index][implementation.symbol];
-            let module = file.module_path.join("::");
-            let target = [SymbolKind::Struct, SymbolKind::Enum]
-                .into_iter()
-                .find_map(|kind| {
-                    unique(lookup.get(&(qualified(&module, &implementation.target_type), kind)))
-                });
+            let module = implementation.module_path.join("::");
+            // Only resolve an unqualified type name to a declaration in the
+            // same logical module. Collapsing `other::S`, `&S`, or another
+            // compound type to `S` would invent a relationship that the
+            // syntax tree does not prove.
+            let target = implementation.target_lookup.as_ref().and_then(|target| {
+                [SymbolKind::Struct, SymbolKind::Enum]
+                    .into_iter()
+                    .find_map(|kind| unique(lookup.get(&(qualified(&module, target), kind))))
+            });
             if let Some(target) = target {
                 graph.add_edge(
                     EdgeKind::Contains,
                     target,
                     impl_id,
                     Provenance::TreeSitter,
-                    Precision::Syntax,
+                    Precision::Heuristic,
                     None,
                 )?;
             }
 
-            let Some(trait_name) = implementation.trait_name.as_ref() else {
+            let Some(trait_lookup) = implementation.trait_lookup.as_ref() else {
                 continue;
             };
-            let local_trait =
-                unique(lookup.get(&(qualified(&module, trait_name), SymbolKind::Trait)));
-            let unique_global_trait = graph
-                .symbols()
-                .iter()
-                .filter(|symbol| {
-                    symbol.key.kind == SymbolKind::Trait && symbol.name() == trait_name
-                })
-                .map(|symbol| symbol.id)
-                .collect::<Vec<_>>();
-            let Some(trait_id) = local_trait
-                .or_else(|| (unique_global_trait.len() == 1).then(|| unique_global_trait[0]))
+            // A qualified trait can refer to another module, crate, or an
+            // external dependency. Do not guess it from a same-named local
+            // declaration; only a simple same-module lookup is admitted.
+            let Some(trait_id) =
+                unique(lookup.get(&(qualified(&module, trait_lookup), SymbolKind::Trait)))
             else {
                 continue;
             };
@@ -230,7 +227,7 @@ fn add_implementation_edges(
                     target,
                     trait_id,
                     Provenance::TreeSitter,
-                    Precision::Syntax,
+                    Precision::Heuristic,
                     None,
                 )?;
             }
@@ -259,7 +256,7 @@ fn add_implementation_edges(
                         ids[file_index][method_index],
                         trait_method,
                         Provenance::TreeSitter,
-                        Precision::Syntax,
+                        Precision::Heuristic,
                         None,
                     )?;
                 }

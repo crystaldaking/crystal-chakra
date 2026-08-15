@@ -24,7 +24,7 @@ use chakra_domain::symbol::{Edge, EdgeKind, Symbol};
 use crate::engine::{WorkspaceEngine, WorkspaceSnapshot};
 use crate::graph::SymbolGraph;
 
-const MAX_SEARCH_PATTERN_CHARS: usize = 1_024;
+const MAX_QUERY_PATTERN_CHARS: usize = 1_024;
 const MAX_MATCH_LINE_CHARS: usize = 512;
 const MAX_SNIPPET_LINES: usize = 20;
 const MAX_SNIPPET_CHARS: usize = 4_096;
@@ -263,9 +263,9 @@ impl QueryService for WorkspaceEngine {
         if request.query.is_empty() {
             return Err(QueryError::Invalid("query must be non-empty".to_owned()));
         }
-        if request.query.chars().count() > MAX_SEARCH_PATTERN_CHARS {
+        if request.query.chars().count() > MAX_QUERY_PATTERN_CHARS {
             return Err(QueryError::Invalid(format!(
-                "query exceeds the {MAX_SEARCH_PATTERN_CHARS}-character pattern budget"
+                "query exceeds the {MAX_QUERY_PATTERN_CHARS}-character pattern budget"
             )));
         }
         let snapshot = self.snapshot();
@@ -329,11 +329,16 @@ impl QueryService for WorkspaceEngine {
         if query.is_empty() {
             return Err(QueryError::Invalid("query must be non-empty".to_owned()));
         }
+        if query.chars().count() > MAX_QUERY_PATTERN_CHARS {
+            return Err(QueryError::Invalid(format!(
+                "query exceeds the {MAX_QUERY_PATTERN_CHARS}-character pattern budget"
+            )));
+        }
         let snapshot = self.snapshot();
         enforce_freshness(request.freshness, &snapshot)?;
-        let mut candidates: Vec<SymbolView> = snapshot
-            .graph()
-            .search_names(query)
+        let limit = clamp_limit(request.limit);
+        let (matches, truncated) = snapshot.graph().search_names(query, limit);
+        let mut candidates: Vec<SymbolView> = matches
             .into_iter()
             .filter_map(|id| snapshot.graph().symbol(id))
             .map(SymbolView::from)
@@ -343,7 +348,6 @@ impl QueryService for WorkspaceEngine {
                 .cmp(&b.qualified_name)
                 .then(a.id.cmp(&b.id))
         });
-        let (candidates, truncated) = bounded(candidates, clamp_limit(request.limit));
         let data = SymbolSearchData {
             query: query.to_owned(),
             candidates,

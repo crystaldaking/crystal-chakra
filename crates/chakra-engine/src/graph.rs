@@ -208,17 +208,23 @@ impl SymbolGraph {
         files
     }
 
-    /// Case-insensitive substring search over simple and qualified names.
-    pub fn search_names(&self, needle: &str) -> Vec<EntityId> {
+    /// Case-insensitive substring search over qualified names. Result
+    /// construction stops at the caller's budget plus the first omitted
+    /// match, so a broad query cannot allocate one view per graph symbol.
+    pub fn search_names(&self, needle: &str, limit: usize) -> (Vec<EntityId>, bool) {
         let needle = needle.to_lowercase();
-        self.symbols
-            .iter()
-            .filter(|symbol| {
-                symbol.name().to_lowercase().contains(&needle)
-                    || symbol.key.qualified_name.to_lowercase().contains(&needle)
-            })
-            .map(|symbol| symbol.id)
-            .collect()
+        let mut matches = Vec::with_capacity(limit.min(self.symbols.len()));
+        for symbol in &self.symbols {
+            // The simple name is a suffix of the qualified name, so one
+            // comparison covers both without a second lowercase allocation.
+            if symbol.key.qualified_name.to_lowercase().contains(&needle) {
+                if matches.len() == limit {
+                    return (matches, true);
+                }
+                matches.push(symbol.id);
+            }
+        }
+        (matches, false)
     }
 
     /// Exact resolution by simple or qualified name (SPEC §24).
@@ -459,11 +465,15 @@ mod tests {
             "service::PaymentService::refund",
             "src/service.rs",
         )?;
+        add_fn(&mut graph, "refund_helper", "src/helper.rs")?;
         add_fn(&mut graph, "unrelated", "src/lib.rs")?;
-        assert_eq!(graph.search_names("refund").len(), 1);
-        assert_eq!(graph.search_names("REFUND").len(), 1);
-        assert_eq!(graph.search_names("paymentservice::ref").len(), 1);
-        assert_eq!(graph.search_names("missing").len(), 0);
+        assert_eq!(graph.search_names("refund", 10).0.len(), 2);
+        assert_eq!(graph.search_names("REFUND", 10).0.len(), 2);
+        assert_eq!(graph.search_names("paymentservice::ref", 10).0.len(), 1);
+        assert_eq!(graph.search_names("missing", 10), (vec![], false));
+        let (limited, truncated) = graph.search_names("refund", 1);
+        assert_eq!(limited.len(), 1);
+        assert!(truncated);
         Ok(())
     }
 

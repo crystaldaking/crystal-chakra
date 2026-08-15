@@ -31,20 +31,25 @@ The upstream Tree-sitter project currently publishes the maintained
   `git rev-parse --show-toplevel` and NUL-delimited
   `git ls-files --cached --others --exclude-standard` with fixed arguments,
   then admits regular `.rs` files only. It explicitly excludes `target`
-  and `.git` path components and refuses symlinks, so repository content
-  cannot redirect source reads outside the worktree. No administrative Git
-  path is constructed by Chakra.
+  and `.git` path components and skips paths whose final filesystem entry is
+  a symlink. Repository-relative paths reject lexical traversal, and no
+  administrative Git path is constructed by Chakra. Reconciliation against
+  concurrent filesystem replacement belongs to the live-update slice.
 - Parse files in sorted repository-relative order and build the graph in
   deterministic passes: files/source, declarations, containment and impl
-  relations, then call candidates. Declarations and syntactically explicit
-  relations use Tree-sitter/syntax quality. A call expression is proven by
-  Tree-sitter, but linking its spelling to same-named declarations is only
-  heuristic precision; it is never labeled precise.
+  relations, then call candidates. Declarations and direct AST containment
+  use Tree-sitter/syntax quality. Cross-declaration name links, including
+  impl targets, trait methods, and call candidates, use Tree-sitter
+  provenance with heuristic precision. Impl linking only considers unique,
+  unqualified names in the same logical module; qualified/external and
+  compound paths are not collapsed to a same-named local declaration.
 - Capture source text in the same immutable graph revision as syntax facts.
   Snapshot text search uses the mature Rust `regex` crate in literal or
   regex mode, returns textual precision, and bounds result count, pattern
-  length, and returned source lines. Context snippets have line and
-  character caps.
+  length, and returned source lines. Symbol-name search caps its input and
+  stops result construction at the requested budget. Context snippets have
+  line and character caps. Extracted signatures, including imports, share
+  one hard character cap whose truncation marker stays inside the budget.
 - Tree-sitter error trees are accepted. Valid declarations elsewhere in a
   temporarily invalid file remain indexable, and the index reports how many
   files contain syntax errors.
@@ -63,6 +68,9 @@ The upstream Tree-sitter project currently publishes the maintained
   reverse the language-adapter dependency boundary.
 - Treat name-matched call targets as syntax-precise or provider-precise:
   rejected. Tree-sitter does not type-resolve Rust calls.
+- Resolve qualified impl paths by their final identifier: rejected because
+  `std::fmt::Display` must not be linked to an unrelated local `Display`.
+  v0.1 skips unresolved qualified links rather than building a Rust resolver.
 - Read files directly during each text query: rejected because a query could
   mix published syntax revision N with filesystem contents from N+1.
 
@@ -86,10 +94,11 @@ The upstream Tree-sitter project currently publishes the maintained
 - Discovery tests cover tracked, untracked, ignored, `target`, tracked files
   matching ignore rules, and a real linked worktree whose `.git` is a file.
 - Parser tests cover declarations, fields, impl containers, calls, test
-  attributes, Unicode-aware source positions, and partial extraction from an
-  error tree.
+  attributes, Unicode-aware source positions, bounded import signatures, and
+  partial extraction from an error tree.
 - Fixture integration tests cover ambiguous `refund` symbols, imports,
-  containment, impls, call-candidate quality, exact/regex text search,
-  bounded source output, context snippets, and indexing/query measurements.
+  containment, impls, rejection of false qualified impl links,
+  call-candidate quality, exact/regex text search, bounded source output,
+  context snippets, and indexing/query measurements.
 - The MCP contract test queries the real fixture through an in-process MCP
   client.

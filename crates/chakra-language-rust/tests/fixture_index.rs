@@ -159,14 +159,95 @@ fn fixture_extracts_required_rust_syntax_facts() -> Result<(), Box<dyn Error>> {
     assert!(graph.outgoing_edges(stripe).iter().any(|edge| {
         edge.kind == EdgeKind::Implements
             && edge.to == provider_trait
-            && edge.precision == Precision::Syntax
+            && edge.provenance == Provenance::TreeSitter
+            && edge.precision == Precision::Heuristic
     }));
     let stripe_refund = only("provider::StripeProvider::refund")?;
     let trait_refund = only("provider::PaymentProvider::refund")?;
     assert!(graph.outgoing_edges(stripe_refund).iter().any(|edge| {
         edge.kind == EdgeKind::Implements
             && edge.to == trait_refund
-            && edge.precision == Precision::Syntax
+            && edge.provenance == Provenance::TreeSitter
+            && edge.precision == Precision::Heuristic
+    }));
+    Ok(())
+}
+
+#[test]
+fn qualified_impl_paths_are_not_linked_to_same_named_local_declarations()
+-> Result<(), Box<dyn Error>> {
+    let repository = fixture_repository()?;
+    fs::write(
+        repository.path().join("src/impl_resolution.rs"),
+        r#"
+            pub trait Display {}
+            pub trait Marker {}
+            pub struct S;
+            pub struct Vec;
+
+            impl std::fmt::Display for S {}
+            impl Marker for std::vec::Vec<u8> {}
+
+            pub mod nested {
+                pub trait Local {}
+                pub struct Nested;
+                impl Local for Nested {}
+            }
+        "#,
+    )?;
+    let report = index_repository(repository.path())?;
+    let graph = &report.graph;
+    let only = |name: &str| -> Result<chakra_domain::symbol::EntityId, Box<dyn Error>> {
+        let matches = graph.resolve_name(name);
+        if matches.len() != 1 {
+            return Err(format!("expected one symbol for {name}, got {}", matches.len()).into());
+        }
+        Ok(matches[0])
+    };
+
+    let display = only("impl_resolution::Display")?;
+    let marker = only("impl_resolution::Marker")?;
+    let local_s = only("impl_resolution::S")?;
+    let local_vec = only("impl_resolution::Vec")?;
+    let nested_trait = only("impl_resolution::nested::Local")?;
+    let nested_type = only("impl_resolution::nested::Nested")?;
+
+    assert!(
+        !graph
+            .outgoing_edges(local_s)
+            .iter()
+            .any(|edge| { edge.kind == EdgeKind::Implements && edge.to == display })
+    );
+    assert!(
+        !graph
+            .outgoing_edges(local_vec)
+            .iter()
+            .any(|edge| { edge.kind == EdgeKind::Implements && edge.to == marker })
+    );
+    assert!(!graph.outgoing_edges(local_vec).iter().any(|edge| {
+        edge.kind == EdgeKind::Contains
+            && graph
+                .symbol(edge.to)
+                .is_some_and(|symbol| symbol.key.kind == SymbolKind::ImplBlock)
+    }));
+
+    let s_impl = graph
+        .outgoing_edges(local_s)
+        .iter()
+        .find(|edge| {
+            edge.kind == EdgeKind::Contains
+                && graph
+                    .symbol(edge.to)
+                    .is_some_and(|symbol| symbol.key.kind == SymbolKind::ImplBlock)
+        })
+        .ok_or("local S impl containment missing")?;
+    assert_eq!(s_impl.provenance, Provenance::TreeSitter);
+    assert_eq!(s_impl.precision, Precision::Heuristic);
+    assert!(graph.outgoing_edges(nested_type).iter().any(|edge| {
+        edge.kind == EdgeKind::Implements
+            && edge.to == nested_trait
+            && edge.provenance == Provenance::TreeSitter
+            && edge.precision == Precision::Heuristic
     }));
     Ok(())
 }
