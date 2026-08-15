@@ -7,6 +7,8 @@
 //! snapshot does not satisfy it, the call fails with
 //! [`QueryError::FreshnessNotMet`] instead of silently serving stale data.
 
+use std::sync::Arc;
+
 use chakra_domain::envelope::QueryEnvelope;
 use chakra_domain::location::{SourceRange, TextPosition};
 use chakra_domain::provenance::{Precision, Provenance};
@@ -28,6 +30,7 @@ const MAX_QUERY_PATTERN_CHARS: usize = 1_024;
 const MAX_MATCH_LINE_CHARS: usize = 512;
 const MAX_SNIPPET_LINES: usize = 20;
 const MAX_SNIPPET_CHARS: usize = 4_096;
+const MAX_FRESH_SNAPSHOT_ATTEMPTS: usize = 3;
 
 /// Applies the SPEC §29 budget: default when absent, hard cap always.
 fn clamp_limit(limit: Option<u32>) -> usize {
@@ -118,6 +121,27 @@ fn enforce_freshness(
             actual: snapshot.freshness(),
         })
     }
+}
+
+fn query_snapshot(
+    engine: &WorkspaceEngine,
+    requirement: FreshnessRequirement,
+) -> Result<Arc<WorkspaceSnapshot>, QueryError> {
+    if requirement == FreshnessRequirement::AllowStale {
+        return Ok(engine.snapshot());
+    }
+    for _ in 0..MAX_FRESH_SNAPSHOT_ATTEMPTS {
+        engine
+            .require_fresh()
+            .map_err(|error| QueryError::FreshnessUnavailable(error.to_string()))?;
+        let snapshot = engine.snapshot();
+        if requirement.is_satisfied_by(snapshot.freshness()) {
+            return Ok(snapshot);
+        }
+    }
+    let snapshot = engine.snapshot();
+    enforce_freshness(requirement, &snapshot)?;
+    Ok(snapshot)
 }
 
 fn envelope<T>(snapshot: &WorkspaceSnapshot, truncated: bool, data: T) -> QueryEnvelope<T> {
@@ -242,8 +266,7 @@ impl QueryService for WorkspaceEngine {
     }
 
     fn repo_map(&self, request: RepoMapRequest) -> Result<QueryEnvelope<RepoMapData>, QueryError> {
-        let snapshot = self.snapshot();
-        enforce_freshness(request.freshness, &snapshot)?;
+        let snapshot = query_snapshot(self, request.freshness)?;
         let summaries = snapshot
             .graph()
             .file_summaries()
@@ -268,8 +291,7 @@ impl QueryService for WorkspaceEngine {
                 "query exceeds the {MAX_QUERY_PATTERN_CHARS}-character pattern budget"
             )));
         }
-        let snapshot = self.snapshot();
-        enforce_freshness(request.freshness, &snapshot)?;
+        let snapshot = query_snapshot(self, request.freshness)?;
         let pattern = if request.regex {
             request.query.clone()
         } else {
@@ -334,8 +356,7 @@ impl QueryService for WorkspaceEngine {
                 "query exceeds the {MAX_QUERY_PATTERN_CHARS}-character pattern budget"
             )));
         }
-        let snapshot = self.snapshot();
-        enforce_freshness(request.freshness, &snapshot)?;
+        let snapshot = query_snapshot(self, request.freshness)?;
         let limit = clamp_limit(request.limit);
         let (matches, truncated) = snapshot.graph().search_names(query, limit);
         let mut candidates: Vec<SymbolView> = matches
@@ -360,8 +381,7 @@ impl QueryService for WorkspaceEngine {
             .symbol
             .as_ref()
             .ok_or(QueryError::MissingSymbolRef)?;
-        let snapshot = self.snapshot();
-        enforce_freshness(request.freshness, &snapshot)?;
+        let snapshot = query_snapshot(self, request.freshness)?;
         let graph = snapshot.graph();
         let symbol = resolve(graph, reference, snapshot.revision())?;
         let limit = clamp_limit(request.limit);
@@ -435,8 +455,7 @@ impl QueryService for WorkspaceEngine {
             .symbol
             .as_ref()
             .ok_or(QueryError::MissingSymbolRef)?;
-        let snapshot = self.snapshot();
-        enforce_freshness(request.freshness, &snapshot)?;
+        let snapshot = query_snapshot(self, request.freshness)?;
         let graph = snapshot.graph();
         let target = resolve(graph, reference, snapshot.revision())?;
         let mut callers: Vec<RelatedSymbol> = graph

@@ -7,7 +7,9 @@
 
 mod discovery;
 mod indexer;
+mod live;
 mod parser;
 
 pub use discovery::{DiscoveryError, discover_rust_files, resolve_repository_root};
-pub use indexer::{IndexMetrics, IndexReport, RustIndexError, index_repository};
+pub use indexer::{IndexMetrics, IndexReport, RustIndexError, RustSyntaxIndex, index_repository};
+pub use live::{LiveIndexError, LiveIndexMetrics, LiveRustIndex, start_live_rust_index};

@@ -16,6 +16,7 @@ schemars = "1"
 thiserror = "2"
 arc-swap = "1"
 regex = "1"
+notify = "8.2"
 tree-sitter = "0.26"
 tree-sitter-rust = "0.24"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync"] }

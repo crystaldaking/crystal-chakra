@@ -6,7 +6,7 @@
 //! matches is rejected with [`PublishError::Conflict`], so a slow update can
 //! never overwrite a newer revision.
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use arc_swap::ArcSwap;
 use chakra_domain::identity::WorkspaceIdentity;
@@ -61,6 +61,36 @@ pub enum PublishError {
     #[error("update is based on revision {base}, but the published revision is {current}")]
     Conflict { base: Revision, current: Revision },
 }
+
+/// Failure to prove that the published syntax state reflects the current
+/// materialized worktree.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[error("freshness reconciliation failed: {message}")]
+pub struct FreshnessBarrierError {
+    message: String,
+}
+
+impl FreshnessBarrierError {
+    pub fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+        }
+    }
+}
+
+/// Language-neutral synchronization point used by `RequireFresh` queries.
+///
+/// Implementations reconcile their canonical sources and atomically publish
+/// the completed result before returning. The engine deliberately knows
+/// nothing about filesystem watcher or language-provider types.
+pub trait FreshnessBarrier: std::fmt::Debug + Send + Sync {
+    fn require_fresh(&self) -> Result<(), FreshnessBarrierError>;
+}
+
+/// A workspace has exactly one owner for freshness reconciliation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+#[error("a freshness barrier is already installed")]
+pub struct BarrierAlreadyInstalled;
 
 /// A private, in-progress update to the workspace state.
 ///
@@ -128,6 +158,7 @@ impl UpdateBuilder {
 #[derive(Debug)]
 pub struct WorkspaceEngine {
     current: ArcSwap<WorkspaceSnapshot>,
+    freshness_barrier: OnceLock<Arc<dyn FreshnessBarrier>>,
 }
 
 impl WorkspaceEngine {
@@ -148,7 +179,27 @@ impl WorkspaceEngine {
         };
         Self {
             current: ArcSwap::from_pointee(snapshot),
+            freshness_barrier: OnceLock::new(),
         }
+    }
+
+    /// Installs the single reconciliation owner for this workspace.
+    pub fn install_freshness_barrier(
+        &self,
+        barrier: Arc<dyn FreshnessBarrier>,
+    ) -> Result<(), BarrierAlreadyInstalled> {
+        self.freshness_barrier
+            .set(barrier)
+            .map_err(|_| BarrierAlreadyInstalled)
+    }
+
+    /// Waits until the installed owner has reconciled and published the
+    /// latest syntax state. Static engines without a live owner retain their
+    /// already-published freshness semantics.
+    pub fn require_fresh(&self) -> Result<(), FreshnessBarrierError> {
+        self.freshness_barrier
+            .get()
+            .map_or(Ok(()), |barrier| barrier.require_fresh())
     }
 
     /// The currently published revision, as a consistent immutable view.

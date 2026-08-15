@@ -32,7 +32,9 @@ fn to_error_data(error: QueryError) -> ErrorData {
         | QueryError::SymbolNotFound(_)
         | QueryError::AmbiguousSymbol { .. }
         | QueryError::FreshnessNotMet { .. } => ErrorData::invalid_params(error.to_string(), None),
-        QueryError::Unsupported(_) => ErrorData::internal_error(error.to_string(), None),
+        QueryError::Unsupported(_) | QueryError::FreshnessUnavailable(_) => {
+            ErrorData::internal_error(error.to_string(), None)
+        }
     }
 }
 

@@ -1,0 +1,201 @@
+//! Deterministic live-update regressions over a real temporary Git worktree.
+
+use std::error::Error;
+use std::fs;
+use std::path::Path;
+use std::process::Command;
+use std::sync::Arc;
+
+use chakra_domain::identity::WorkspaceIdentity;
+use chakra_domain::query::{QueryService, RepoMapRequest, SymbolSearchRequest};
+use chakra_domain::state::{Freshness, FreshnessRequirement, WorkspaceStatus};
+use chakra_engine::WorkspaceEngine;
+use chakra_language_rust::{LiveRustIndex, index_repository, start_live_rust_index};
+use tempfile::TempDir;
+
+fn write(root: &Path, path: &str, source: &str) -> Result<(), Box<dyn Error>> {
+    let path = root.join(path);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(path, source)?;
+    Ok(())
+}
+
+fn repository() -> Result<TempDir, Box<dyn Error>> {
+    let repository = TempDir::new()?;
+    let status = Command::new("git")
+        .current_dir(repository.path())
+        .args(["init", "--quiet"])
+        .status()?;
+    if !status.success() {
+        return Err("git init failed".into());
+    }
+    write(
+        repository.path(),
+        "src/lib.rs",
+        "pub mod one;\npub mod two;\n",
+    )?;
+    write(repository.path(), "src/one.rs", "pub fn alpha() {}\n")?;
+    write(repository.path(), "src/two.rs", "pub fn beta() {}\n")?;
+    Ok(repository)
+}
+
+fn start(repository: &TempDir) -> Result<(Arc<WorkspaceEngine>, LiveRustIndex), Box<dyn Error>> {
+    let report = index_repository(repository.path())?;
+    let identity = WorkspaceIdentity::for_primary_worktree(&report.repository_root)?;
+    let engine = Arc::new(WorkspaceEngine::new(identity));
+    let mut update = engine.begin_update();
+    update.replace_graph(report.graph);
+    update.set_status(WorkspaceStatus::Indexing);
+    update.set_freshness(Freshness::Stale);
+    engine.publish(update)?;
+    let live = start_live_rust_index(report.repository_root, report.syntax_index, engine.clone())?;
+    Ok((engine, live))
+}
+
+fn symbols(
+    engine: &WorkspaceEngine,
+    query: &str,
+) -> Result<Vec<String>, chakra_domain::query::QueryError> {
+    let result = engine.symbol_search(SymbolSearchRequest {
+        query: query.to_owned(),
+        limit: None,
+        freshness: FreshnessRequirement::RequireFresh,
+    })?;
+    assert_eq!(result.freshness, Freshness::Fresh);
+    Ok(result
+        .data
+        .candidates
+        .into_iter()
+        .map(|symbol| symbol.qualified_name)
+        .collect())
+}
+
+#[test]
+fn immediate_fresh_read_is_atomic_and_reindexes_only_one_file() -> Result<(), Box<dyn Error>> {
+    let repository = repository()?;
+    let (engine, live) = start(&repository)?;
+    let before_unchanged_query = live.metrics();
+    assert_eq!(symbols(&engine, "one::alpha")?, ["one::alpha"]);
+    let after_unchanged_query = live.metrics();
+    assert_eq!(
+        after_unchanged_query.files_reparsed, before_unchanged_query.files_reparsed,
+        "a fresh proof must not reparse unchanged content"
+    );
+    let old_snapshot = engine.snapshot();
+    let baseline = after_unchanged_query;
+
+    write(
+        repository.path(),
+        "src/one.rs",
+        "pub fn alpha_after_edit() {}\n",
+    )?;
+    let found = symbols(&engine, "alpha_after_edit")?;
+    let current = engine.snapshot();
+    let metrics = live.metrics();
+
+    assert_eq!(found, ["one::alpha_after_edit"]);
+    assert!(current.revision() > old_snapshot.revision());
+    current.graph().validate_consistency()?;
+    assert_eq!(old_snapshot.graph().resolve_name("one::alpha").len(), 1);
+    assert!(
+        old_snapshot
+            .graph()
+            .resolve_name("one::alpha_after_edit")
+            .is_empty()
+    );
+    assert!(current.graph().resolve_name("one::alpha").is_empty());
+    assert_eq!(
+        metrics.files_reparsed - baseline.files_reparsed,
+        1,
+        "ordinary edit must parse only its changed file"
+    );
+    assert_eq!(
+        metrics.relationship_files_recomputed - baseline.relationship_files_recomputed,
+        1,
+        "unrelated relationship owners must not be recomputed"
+    );
+    assert_eq!(metrics.full_repository_reindexes, 0);
+    live.shutdown()?;
+    Ok(())
+}
+
+#[test]
+fn create_rename_and_delete_are_visible_without_sleeps() -> Result<(), Box<dyn Error>> {
+    let repository = repository()?;
+    let (engine, live) = start(&repository)?;
+
+    write(
+        repository.path(),
+        "src/created.rs",
+        "pub fn appeared() {}\n",
+    )?;
+    assert_eq!(
+        symbols(&engine, "created::appeared")?,
+        ["created::appeared"]
+    );
+
+    fs::rename(
+        repository.path().join("src/created.rs"),
+        repository.path().join("src/renamed.rs"),
+    )?;
+    assert_eq!(
+        symbols(&engine, "renamed::appeared")?,
+        ["renamed::appeared"]
+    );
+    assert!(symbols(&engine, "created::appeared")?.is_empty());
+
+    fs::remove_file(repository.path().join("src/renamed.rs"))?;
+    assert!(symbols(&engine, "appeared")?.is_empty());
+    let map = engine.repo_map(RepoMapRequest {
+        limit: None,
+        freshness: FreshnessRequirement::RequireFresh,
+    })?;
+    assert!(
+        map.data
+            .files
+            .iter()
+            .all(|file| file.path.as_str() != "src/renamed.rs")
+    );
+    live.shutdown()?;
+    Ok(())
+}
+
+#[test]
+fn atomic_save_and_temporary_syntax_error_publish_complete_revisions() -> Result<(), Box<dyn Error>>
+{
+    let repository = repository()?;
+    let (engine, live) = start(&repository)?;
+
+    write(
+        repository.path(),
+        "src/.one.rs.chakra-swap",
+        "pub fn atomically_saved() {}\n",
+    )?;
+    fs::rename(
+        repository.path().join("src/.one.rs.chakra-swap"),
+        repository.path().join("src/one.rs"),
+    )?;
+    assert_eq!(
+        symbols(&engine, "atomically_saved")?,
+        ["one::atomically_saved"]
+    );
+
+    write(
+        repository.path(),
+        "src/one.rs",
+        "pub fn retained() {}\npub fn temporarily_broken( {\n",
+    )?;
+    assert_eq!(symbols(&engine, "retained")?, ["one::retained"]);
+    let broken_revision = engine.snapshot();
+    broken_revision.graph().validate_consistency()?;
+    assert_eq!(live.metrics().syntax_error_files, 1);
+
+    write(repository.path(), "src/one.rs", "pub fn recovered() {}\n")?;
+    assert_eq!(symbols(&engine, "recovered")?, ["one::recovered"]);
+    assert_eq!(live.metrics().syntax_error_files, 0);
+    assert!(engine.snapshot().revision() > broken_revision.revision());
+    live.shutdown()?;
+    Ok(())
+}

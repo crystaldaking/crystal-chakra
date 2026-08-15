@@ -300,6 +300,8 @@ pub enum QueryError {
         required: FreshnessRequirement,
         actual: Freshness,
     },
+    #[error("fresh syntax state is unavailable: {0}")]
+    FreshnessUnavailable(String),
 }
 
 /// The MCP-independent application interface (SPEC §23).
@@ -307,10 +309,10 @@ pub enum QueryError {
 /// Implementations must guarantee that a call observes exactly one
 /// published revision (SPEC §5), that large results respect budgets
 /// (SPEC §29), and that a request's [`FreshnessRequirement`] is either met
-/// or rejected with [`QueryError::FreshnessNotMet`] — a `RequireFresh`
-/// request must never be silently served from a stale snapshot. Methods are
-/// synchronous: v0.1 queries run against an in-memory snapshot and are
-/// cheap; async concerns live in the adapters.
+/// or rejected with a typed freshness error — a `RequireFresh` request must
+/// never be silently served from a stale snapshot. Methods are synchronous:
+/// v0.1 queries run against an in-memory snapshot and adapters may use a
+/// blocking worker when reconciliation is required.
 pub trait QueryService: Send + Sync {
     fn status(&self, request: StatusRequest) -> Result<QueryEnvelope<StatusData>, QueryError>;
     fn repo_map(&self, request: RepoMapRequest) -> Result<QueryEnvelope<RepoMapData>, QueryError>;

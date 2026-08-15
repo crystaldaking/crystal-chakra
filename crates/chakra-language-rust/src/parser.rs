@@ -1,6 +1,7 @@
 //! Tree-sitter Rust extraction into language-neutral Chakra drafts.
 
 use std::num::TryFromIntError;
+use std::sync::Arc;
 
 use chakra_domain::location::{RepoRelativePath, SourceRange, TextPosition};
 use chakra_domain::symbol::{Language, SymbolKey, SymbolKind};
@@ -34,10 +35,9 @@ pub(crate) enum ParseError {
     },
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct ParsedFile {
-    pub path: RepoRelativePath,
-    pub source: String,
+    pub source: Arc<str>,
     pub module_path: Vec<String>,
     pub symbols: Vec<SymbolDraft>,
     pub calls: Vec<CallDraft>,
@@ -45,7 +45,7 @@ pub(crate) struct ParsedFile {
     pub has_errors: bool,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct SymbolDraft {
     pub key: SymbolKey,
     pub location: SourceRange,
@@ -53,7 +53,7 @@ pub(crate) struct SymbolDraft {
     pub parent: Option<usize>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct CallDraft {
     pub caller: usize,
     pub name: String,
@@ -61,7 +61,7 @@ pub(crate) struct CallDraft {
     pub location: SourceRange,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct ImplDraft {
     pub symbol: usize,
     /// Exact syntactic container prefix at the impl site, including inline
@@ -576,11 +576,12 @@ impl RustParser {
     pub(crate) fn parse(
         &mut self,
         path: RepoRelativePath,
-        source: String,
+        source: impl Into<Arc<str>>,
     ) -> Result<ParsedFile, ParseError> {
+        let source = source.into();
         let tree = self
             .parser
-            .parse(&source, None)
+            .parse(source.as_ref(), None)
             .ok_or_else(|| ParseError::NoTree(path.clone()))?;
         let root = tree.root_node();
         let module_path = module_path(&path);
@@ -598,7 +599,7 @@ impl RustParser {
         };
         let mut extraction = Extraction {
             path: path.clone(),
-            source: &source,
+            source: source.as_ref(),
             line_starts,
             symbols: Vec::new(),
             calls: Vec::new(),
@@ -612,7 +613,6 @@ impl RustParser {
             ..
         } = extraction;
         Ok(ParsedFile {
-            path,
             source,
             module_path,
             symbols,

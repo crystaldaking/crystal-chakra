@@ -1,7 +1,7 @@
 //! `chakra` — user-facing entry point of the Chakra code intelligence service.
 //!
-//! `chakra serve` indexes the materialized Git worktree, atomically publishes
-//! the first fresh syntax revision, then runs MCP over stdio (ADR-0003).
+//! `chakra serve` indexes the materialized Git worktree, starts the live
+//! reconciliation owner, then runs MCP over stdio (ADR-0003).
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -85,28 +85,59 @@ async fn serve(args: ServeArgs) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let engine = WorkspaceEngine::new(identity);
+    let engine = Arc::new(WorkspaceEngine::new(identity));
     let mut update = engine.begin_update();
     update.replace_graph(report.graph);
-    update.set_status(WorkspaceStatus::Ready);
-    // Discovery and parsing used one complete scan of the actual worktree;
-    // graph mutation revoked freshness, so the indexing owner reclaims it
-    // only after the graph is complete and internally validated.
-    update.set_freshness(Freshness::Fresh);
+    update.set_status(WorkspaceStatus::Indexing);
+    // The watcher is not active yet, so the initial scan cannot close the
+    // startup race. The live owner reclaims freshness after it starts
+    // watching and performs its mandatory reconciliation.
+    update.set_freshness(Freshness::Stale);
     if let Err(error) = engine.publish(update) {
         eprintln!("chakra: failed to publish initial syntax index: {error}");
         return ExitCode::FAILURE;
     }
+    let initial_metrics = report.metrics;
     tracing::info!(
-        files = report.metrics.parsed_files,
-        syntax_error_files = report.metrics.syntax_error_files,
-        truncated_call_sites = report.metrics.truncated_call_sites,
-        symbols = report.metrics.symbols,
-        edges = report.metrics.edges,
-        elapsed_micros = report.metrics.elapsed.as_micros(),
-        "initial Rust syntax revision published"
+        files = initial_metrics.parsed_files,
+        syntax_error_files = initial_metrics.syntax_error_files,
+        truncated_call_sites = initial_metrics.truncated_call_sites,
+        symbols = initial_metrics.symbols,
+        edges = initial_metrics.edges,
+        elapsed_micros = initial_metrics.elapsed.as_micros(),
+        "initial Rust syntax revision published as stale pending live reconciliation"
     );
-    match chakra_mcp::serve_stdio(Arc::new(engine)).await {
+    let repository_root = report.repository_root;
+    let syntax_index = report.syntax_index;
+    let live_engine = engine.clone();
+    let live = match tokio::task::spawn_blocking(move || {
+        chakra_language_rust::start_live_rust_index(repository_root, syntax_index, live_engine)
+    })
+    .await
+    {
+        Ok(Ok(live)) => live,
+        Ok(Err(error)) => {
+            eprintln!("chakra: failed to start live Rust index: {error}");
+            return ExitCode::FAILURE;
+        }
+        Err(error) => {
+            eprintln!("chakra: live Rust index startup task failed: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let serve_result = chakra_mcp::serve_stdio(engine).await;
+    match tokio::task::spawn_blocking(move || live.shutdown()).await {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => {
+            eprintln!("chakra: failed to stop live Rust index: {error}");
+            return ExitCode::FAILURE;
+        }
+        Err(error) => {
+            eprintln!("chakra: live Rust index shutdown task failed: {error}");
+            return ExitCode::FAILURE;
+        }
+    }
+    match serve_result {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("chakra: {error}");

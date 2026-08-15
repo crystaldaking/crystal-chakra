@@ -9,5 +9,8 @@ mod engine;
 mod graph;
 mod query;
 
-pub use engine::{PublishError, UpdateBuilder, WorkspaceEngine, WorkspaceSnapshot};
+pub use engine::{
+    BarrierAlreadyInstalled, FreshnessBarrier, FreshnessBarrierError, PublishError, UpdateBuilder,
+    WorkspaceEngine, WorkspaceSnapshot,
+};
 pub use graph::{ConsistencyError, GraphError, SymbolGraph};

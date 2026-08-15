@@ -1,12 +1,13 @@
-//! Repository-wide deterministic syntax index construction.
+//! Deterministic Rust syntax indexing with reusable per-file facts.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use chakra_domain::location::RepoRelativePath;
+use chakra_domain::location::{RepoRelativePath, SourceRange};
 use chakra_domain::provenance::{Precision, Provenance};
 use chakra_domain::symbol::{EdgeKind, EntityId, SymbolKind};
 use chakra_engine::{ConsistencyError, GraphError, SymbolGraph};
@@ -14,7 +15,7 @@ use thiserror::Error;
 use tracing::{info, info_span};
 
 use crate::discovery::{DiscoveryError, discover_rust_files, resolve_repository_root};
-use crate::parser::{ParsedFile, RustParser};
+use crate::parser::{ParsedFile, RustParser, SymbolDraft};
 
 const MAX_CANDIDATES_PER_CALL_SITE: usize = 64;
 
@@ -31,13 +32,38 @@ pub struct IndexMetrics {
     pub elapsed: Duration,
 }
 
-/// Complete private index result, ready for atomic publication by the
-/// workspace engine owner.
+/// Work performed by one content reconciliation.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct ReconcileMetrics {
+    pub scanned_files: u64,
+    pub unchanged_files: u64,
+    pub reparsed_files: u64,
+    pub created_files: u64,
+    pub modified_files: u64,
+    pub deleted_files: u64,
+    pub relationship_files_recomputed: u64,
+    pub syntax_error_files: u64,
+    pub truncated_call_sites: u64,
+}
+
+/// Result of reconciling exact worktree contents with the reusable index.
+#[derive(Debug)]
+pub(crate) struct ReconcileReport {
+    /// Present only when source content changed and a new graph is ready.
+    pub graph: Option<SymbolGraph>,
+    pub metrics: ReconcileMetrics,
+    pub next_index: Option<RustSyntaxIndex>,
+}
+
+/// Complete private initial index, ready for atomic publication by the
+/// workspace engine owner. `syntax_index` remains private to the live owner
+/// after the first graph is published.
 #[derive(Debug)]
 pub struct IndexReport {
     pub repository_root: PathBuf,
     pub graph: SymbolGraph,
     pub metrics: IndexMetrics,
+    pub syntax_index: RustSyntaxIndex,
 }
 
 /// Failure to discover, read, parse, or validate the Rust syntax index.
@@ -53,30 +79,346 @@ pub enum RustIndexError {
     },
     #[error("failed to parse Rust source: {0}")]
     Parse(String),
+    #[error("Rust syntax index update failed: {0}")]
+    Update(String),
     #[error(transparent)]
     Graph(#[from] GraphError),
     #[error("constructed syntax graph is inconsistent: {0}")]
     Consistency(#[from] ConsistencyError),
 }
 
-fn symbol_lookup(graph: &SymbolGraph) -> HashMap<(String, SymbolKind), Vec<EntityId>> {
-    let mut lookup: HashMap<(String, SymbolKind), Vec<EntityId>> = HashMap::new();
-    for symbol in graph.symbols() {
-        lookup
-            .entry((symbol.key.qualified_name.clone(), symbol.key.kind))
-            .or_default()
-            .push(symbol.id);
-    }
-    lookup
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+struct SymbolAddress {
+    path: RepoRelativePath,
+    index: usize,
 }
 
-fn unique(matches: Option<&Vec<EntityId>>) -> Option<EntityId> {
-    let matches = matches?;
-    if matches.len() == 1 {
-        matches.first().copied()
-    } else {
-        None
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum DependencyKey {
+    Exact(String, SymbolKind),
+    CallableName(String),
+}
+
+#[derive(Debug, Clone)]
+struct RelationshipEdge {
+    kind: EdgeKind,
+    from: SymbolAddress,
+    to: SymbolAddress,
+    provenance: Provenance,
+    precision: Precision,
+    location: Option<SourceRange>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct RelationshipContribution {
+    dependencies: HashSet<DependencyKey>,
+    edges: Vec<RelationshipEdge>,
+    truncated_call_sites: u64,
+}
+
+#[derive(Debug)]
+struct SymbolCatalog<'a> {
+    files: &'a BTreeMap<RepoRelativePath, Arc<ParsedFile>>,
+    exact: HashMap<(String, SymbolKind), Vec<SymbolAddress>>,
+    callable: HashMap<String, Vec<SymbolAddress>>,
+}
+
+impl<'a> SymbolCatalog<'a> {
+    fn new(files: &'a BTreeMap<RepoRelativePath, Arc<ParsedFile>>) -> Self {
+        let mut exact: HashMap<(String, SymbolKind), Vec<SymbolAddress>> = HashMap::new();
+        let mut callable: HashMap<String, Vec<SymbolAddress>> = HashMap::new();
+        for (path, file) in files {
+            for (index, symbol) in file.symbols.iter().enumerate() {
+                let address = SymbolAddress {
+                    path: path.clone(),
+                    index,
+                };
+                exact
+                    .entry((symbol.key.qualified_name.clone(), symbol.key.kind))
+                    .or_default()
+                    .push(address.clone());
+                if is_callable(symbol.key.kind) {
+                    callable
+                        .entry(symbol_name(symbol).to_owned())
+                        .or_default()
+                        .push(address);
+                }
+            }
+        }
+        for addresses in exact.values_mut() {
+            addresses.sort();
+        }
+        for addresses in callable.values_mut() {
+            addresses.sort();
+        }
+        Self {
+            files,
+            exact,
+            callable,
+        }
     }
+
+    fn symbol(&self, address: &SymbolAddress) -> Option<&SymbolDraft> {
+        self.files.get(&address.path)?.symbols.get(address.index)
+    }
+
+    fn unique_exact(&self, qualified_name: &str, kind: SymbolKind) -> Option<SymbolAddress> {
+        unique(self.exact.get(&(qualified_name.to_owned(), kind)))
+    }
+
+    fn call_candidates(&self, name: &str, qualifier: Option<&str>) -> (Vec<SymbolAddress>, bool) {
+        let mut candidates = self.callable.get(name).cloned().unwrap_or_default();
+        if let Some(qualifier) = qualifier {
+            let qualified: Vec<_> = candidates
+                .iter()
+                .filter(|address| {
+                    self.symbol(address).is_some_and(|symbol| {
+                        symbol.key.container.as_deref() == Some(qualifier)
+                            || symbol.key.qualified_name.rsplit_once("::").is_some_and(
+                                |(container, _)| {
+                                    container == qualifier
+                                        || container.rsplit("::").next() == Some(qualifier)
+                                },
+                            )
+                    })
+                })
+                .cloned()
+                .collect();
+            if !qualified.is_empty() {
+                candidates = qualified;
+            }
+        }
+        candidates.sort();
+        let truncated = candidates.len() > MAX_CANDIDATES_PER_CALL_SITE;
+        candidates.truncate(MAX_CANDIDATES_PER_CALL_SITE);
+        (candidates, truncated)
+    }
+}
+
+/// Reusable per-file syntax facts and per-owner relationship contributions.
+///
+/// Entity ids are intentionally absent here: they are revision-scoped and
+/// assigned only while a complete immutable graph is materialized.
+#[derive(Debug, Clone, Default)]
+pub struct RustSyntaxIndex {
+    files: BTreeMap<RepoRelativePath, Arc<ParsedFile>>,
+    relationships: BTreeMap<RepoRelativePath, Arc<RelationshipContribution>>,
+}
+
+impl RustSyntaxIndex {
+    fn from_sources(
+        sources: BTreeMap<RepoRelativePath, Arc<str>>,
+    ) -> Result<(Self, SymbolGraph), RustIndexError> {
+        let mut parser = RustParser::new().map_err(parse_error)?;
+        let mut files = BTreeMap::new();
+        for (path, source) in sources {
+            let parsed = parser.parse(path.clone(), source).map_err(parse_error)?;
+            files.insert(path, Arc::new(parsed));
+        }
+        let catalog = SymbolCatalog::new(&files);
+        let relationships = files
+            .iter()
+            .map(|(path, file)| {
+                (
+                    path.clone(),
+                    Arc::new(relationships_for_file(path, file, &catalog)),
+                )
+            })
+            .collect();
+        let index = Self {
+            files,
+            relationships,
+        };
+        let graph = index.materialize_graph()?;
+        Ok((index, graph))
+    }
+
+    pub(crate) fn paths(&self) -> Vec<RepoRelativePath> {
+        self.files.keys().cloned().collect()
+    }
+
+    /// Reconciles exact discovered source contents. Unchanged text is not
+    /// reparsed. Changed files and relationship owners are prepared in a
+    /// private copy and become the reusable state only after graph validation.
+    pub(crate) fn reconcile_sources(
+        &self,
+        sources: BTreeMap<RepoRelativePath, Arc<str>>,
+    ) -> Result<ReconcileReport, RustIndexError> {
+        let mut metrics = ReconcileMetrics {
+            scanned_files: sources.len() as u64,
+            ..ReconcileMetrics::default()
+        };
+        let mut changed_paths = BTreeSet::new();
+        for (path, source) in &sources {
+            match self.files.get(path) {
+                Some(current) if current.source.as_ref() == source.as_ref() => {
+                    metrics.unchanged_files += 1;
+                }
+                Some(_) => {
+                    metrics.modified_files += 1;
+                    changed_paths.insert(path.clone());
+                }
+                None => {
+                    metrics.created_files += 1;
+                    changed_paths.insert(path.clone());
+                }
+            }
+        }
+        for path in self.files.keys() {
+            if !sources.contains_key(path) {
+                metrics.deleted_files += 1;
+                changed_paths.insert(path.clone());
+            }
+        }
+        if changed_paths.is_empty() {
+            metrics.syntax_error_files = self.syntax_error_files();
+            metrics.truncated_call_sites = self.truncated_call_sites();
+            return Ok(ReconcileReport {
+                graph: None,
+                metrics,
+                next_index: None,
+            });
+        }
+
+        let mut next_files = self.files.clone();
+        let mut changed_dependencies = HashSet::new();
+        for path in &changed_paths {
+            if let Some(previous) = self.files.get(path) {
+                changed_dependencies.extend(exported_dependencies(previous));
+            }
+        }
+        let mut parser = RustParser::new().map_err(parse_error)?;
+        for path in &changed_paths {
+            match sources.get(path) {
+                Some(source) => {
+                    let parsed = parser
+                        .parse(path.clone(), source.clone())
+                        .map_err(parse_error)?;
+                    changed_dependencies.extend(exported_dependencies(&parsed));
+                    next_files.insert(path.clone(), Arc::new(parsed));
+                    metrics.reparsed_files += 1;
+                }
+                None => {
+                    next_files.remove(path);
+                }
+            }
+        }
+
+        let mut affected_owners = changed_paths.clone();
+        affected_owners.extend(
+            self.relationships
+                .iter()
+                .filter(|(_, contribution)| {
+                    contribution
+                        .dependencies
+                        .iter()
+                        .any(|key| changed_dependencies.contains(key))
+                })
+                .map(|(path, _)| path.clone()),
+        );
+
+        let catalog = SymbolCatalog::new(&next_files);
+        let mut next_relationships = self.relationships.clone();
+        for path in &affected_owners {
+            match next_files.get(path) {
+                Some(file) => {
+                    next_relationships.insert(
+                        path.clone(),
+                        Arc::new(relationships_for_file(path, file, &catalog)),
+                    );
+                    metrics.relationship_files_recomputed += 1;
+                }
+                None => {
+                    next_relationships.remove(path);
+                }
+            }
+        }
+
+        let next = Self {
+            files: next_files,
+            relationships: next_relationships,
+        };
+        let graph = next.materialize_graph()?;
+        metrics.syntax_error_files = next.syntax_error_files();
+        metrics.truncated_call_sites = next.truncated_call_sites();
+        Ok(ReconcileReport {
+            graph: Some(graph),
+            metrics,
+            next_index: Some(next),
+        })
+    }
+
+    fn syntax_error_files(&self) -> u64 {
+        self.files.values().filter(|file| file.has_errors).count() as u64
+    }
+
+    fn truncated_call_sites(&self) -> u64 {
+        self.relationships
+            .values()
+            .map(|contribution| contribution.truncated_call_sites)
+            .sum()
+    }
+
+    fn materialize_graph(&self) -> Result<SymbolGraph, RustIndexError> {
+        let mut graph = SymbolGraph::new();
+        let mut ids = BTreeMap::new();
+        for (path, file) in &self.files {
+            graph.add_file(path.clone(), file.source.clone())?;
+            for (index, symbol) in file.symbols.iter().enumerate() {
+                let id = graph.add_symbol(
+                    symbol.key.clone(),
+                    symbol.location.clone(),
+                    symbol.signature.clone(),
+                    Provenance::TreeSitter,
+                    Precision::Syntax,
+                )?;
+                ids.insert(
+                    SymbolAddress {
+                        path: path.clone(),
+                        index,
+                    },
+                    id,
+                );
+            }
+        }
+        for contribution in self.relationships.values() {
+            for edge in &contribution.edges {
+                let from = address_id(&ids, &edge.from)?;
+                let to = address_id(&ids, &edge.to)?;
+                graph.add_edge(
+                    edge.kind,
+                    from,
+                    to,
+                    edge.provenance,
+                    edge.precision,
+                    edge.location.clone(),
+                )?;
+            }
+        }
+        graph.validate_consistency()?;
+        Ok(graph)
+    }
+}
+
+fn address_id(
+    ids: &BTreeMap<SymbolAddress, EntityId>,
+    address: &SymbolAddress,
+) -> Result<EntityId, RustIndexError> {
+    ids.get(address).copied().ok_or_else(|| {
+        RustIndexError::Update(format!(
+            "relationship references missing symbol {}#{}",
+            address.path, address.index
+        ))
+    })
+}
+
+fn parse_error(error: impl std::fmt::Display) -> RustIndexError {
+    RustIndexError::Parse(error.to_string())
+}
+
+fn unique(matches: Option<&Vec<SymbolAddress>>) -> Option<SymbolAddress> {
+    let matches = matches?;
+    (matches.len() == 1).then(|| matches[0].clone())
 }
 
 fn qualified(prefix: &str, name: &str) -> String {
@@ -87,227 +429,208 @@ fn qualified(prefix: &str, name: &str) -> String {
     }
 }
 
-fn callable_lookup(graph: &SymbolGraph) -> HashMap<String, Vec<EntityId>> {
-    let mut lookup: HashMap<String, Vec<EntityId>> = HashMap::new();
-    for symbol in graph.symbols().iter().filter(|symbol| {
-        matches!(
+fn symbol_name(symbol: &SymbolDraft) -> &str {
+    symbol
+        .key
+        .qualified_name
+        .rsplit("::")
+        .next()
+        .unwrap_or(&symbol.key.qualified_name)
+}
+
+fn is_callable(kind: SymbolKind) -> bool {
+    matches!(
+        kind,
+        SymbolKind::Function | SymbolKind::Method | SymbolKind::Test
+    )
+}
+
+fn exported_dependencies(file: &ParsedFile) -> HashSet<DependencyKey> {
+    let mut keys = HashSet::new();
+    for symbol in &file.symbols {
+        keys.insert(DependencyKey::Exact(
+            symbol.key.qualified_name.clone(),
             symbol.key.kind,
-            SymbolKind::Function | SymbolKind::Method | SymbolKind::Test
-        )
-    }) {
-        lookup
-            .entry(symbol.name().to_owned())
-            .or_default()
-            .push(symbol.id);
-    }
-    lookup
-}
-
-fn candidates_by_name(
-    graph: &SymbolGraph,
-    lookup: &HashMap<String, Vec<EntityId>>,
-    name: &str,
-    qualifier: Option<&str>,
-) -> (Vec<EntityId>, bool) {
-    let mut candidates = lookup.get(name).cloned().unwrap_or_default();
-    if let Some(qualifier) = qualifier {
-        let qualified: Vec<EntityId> = candidates
-            .iter()
-            .copied()
-            .filter(|id| {
-                graph.symbol(*id).is_some_and(|symbol| {
-                    symbol.key.container.as_deref() == Some(qualifier)
-                        || symbol.key.qualified_name.rsplit_once("::").is_some_and(
-                            |(container, _)| {
-                                container == qualifier
-                                    || container.rsplit("::").next() == Some(qualifier)
-                            },
-                        )
-                })
-            })
-            .collect();
-        if !qualified.is_empty() {
-            candidates = qualified;
+        ));
+        if is_callable(symbol.key.kind) {
+            keys.insert(DependencyKey::CallableName(symbol_name(symbol).to_owned()));
         }
     }
-    candidates.sort_unstable();
-    let truncated = candidates.len() > MAX_CANDIDATES_PER_CALL_SITE;
-    candidates.truncate(MAX_CANDIDATES_PER_CALL_SITE);
-    (candidates, truncated)
+    keys
 }
 
-fn add_containment_edges(
-    graph: &mut SymbolGraph,
-    parsed: &[ParsedFile],
-    ids: &[Vec<EntityId>],
-) -> Result<(), GraphError> {
-    let lookup = symbol_lookup(graph);
-    for (file_index, file) in parsed.iter().enumerate() {
-        let physical_module = if file.module_path.is_empty() {
-            None
-        } else {
-            unique(lookup.get(&(file.module_path.join("::"), SymbolKind::Module)))
+fn relationships_for_file(
+    path: &RepoRelativePath,
+    file: &ParsedFile,
+    catalog: &SymbolCatalog<'_>,
+) -> RelationshipContribution {
+    let mut contribution = RelationshipContribution::default();
+    let address = |index| SymbolAddress {
+        path: path.clone(),
+        index,
+    };
+
+    let physical_module = if file.module_path.is_empty() {
+        None
+    } else {
+        let name = file.module_path.join("::");
+        contribution
+            .dependencies
+            .insert(DependencyKey::Exact(name.clone(), SymbolKind::Module));
+        catalog.unique_exact(&name, SymbolKind::Module)
+    };
+    for (index, symbol) in file.symbols.iter().enumerate() {
+        let parent = symbol
+            .parent
+            .map(&address)
+            .or_else(|| physical_module.clone());
+        let Some(parent) = parent else {
+            continue;
         };
-        for (symbol_index, draft) in file.symbols.iter().enumerate() {
-            let (parent, provenance, precision) = if let Some(parent) = draft.parent {
-                (
-                    ids[file_index].get(parent).copied(),
-                    Provenance::TreeSitter,
-                    Precision::Syntax,
-                )
-            } else {
-                // Mapping a physical module file to the `mod` declaration in
-                // its parent file is deterministic layout inference, not a
-                // type-system fact.
-                (physical_module, Provenance::Heuristic, Precision::Heuristic)
-            };
-            let Some(parent) = parent else {
-                continue;
-            };
-            let child = ids[file_index][symbol_index];
-            if parent != child {
-                graph.add_edge(
-                    EdgeKind::Contains,
-                    parent,
-                    child,
-                    provenance,
-                    precision,
-                    None,
-                )?;
-            }
-        }
-    }
-    Ok(())
-}
-
-fn add_implementation_edges(
-    graph: &mut SymbolGraph,
-    parsed: &[ParsedFile],
-    ids: &[Vec<EntityId>],
-) -> Result<(), GraphError> {
-    let lookup = symbol_lookup(graph);
-    for (file_index, file) in parsed.iter().enumerate() {
-        for implementation in &file.implementations {
-            let impl_id = ids[file_index][implementation.symbol];
-            let module = implementation.module_path.join("::");
-            // Only resolve an unqualified type name to a declaration in the
-            // same logical module. Collapsing `other::S`, `&S`, or another
-            // compound type to `S` would invent a relationship that the
-            // syntax tree does not prove.
-            let target = implementation.target_lookup.as_ref().and_then(|target| {
-                [SymbolKind::Struct, SymbolKind::Enum]
-                    .into_iter()
-                    .find_map(|kind| unique(lookup.get(&(qualified(&module, target), kind))))
+        let child = address(index);
+        if parent != child {
+            let physical = symbol.parent.is_none();
+            contribution.edges.push(RelationshipEdge {
+                kind: EdgeKind::Contains,
+                from: parent,
+                to: child,
+                provenance: if physical {
+                    Provenance::Heuristic
+                } else {
+                    Provenance::TreeSitter
+                },
+                precision: if physical {
+                    Precision::Heuristic
+                } else {
+                    Precision::Syntax
+                },
+                location: None,
             });
-            if let Some(target) = target {
-                graph.add_edge(
-                    EdgeKind::Contains,
-                    target,
-                    impl_id,
-                    Provenance::TreeSitter,
-                    Precision::Heuristic,
-                    None,
-                )?;
-            }
+        }
+    }
 
-            let Some(trait_lookup) = implementation.trait_lookup.as_ref() else {
-                continue;
-            };
-            // A qualified trait can refer to another module, crate, or an
-            // external dependency. Do not guess it from a same-named local
-            // declaration; only a simple same-module lookup is admitted.
-            let Some(trait_id) =
-                unique(lookup.get(&(qualified(&module, trait_lookup), SymbolKind::Trait)))
-            else {
-                continue;
-            };
-            if let Some(target) = target {
-                graph.add_edge(
-                    EdgeKind::Implements,
-                    target,
-                    trait_id,
-                    Provenance::TreeSitter,
-                    Precision::Heuristic,
-                    None,
-                )?;
+    for implementation in &file.implementations {
+        let module = implementation.module_path.join("::");
+        let mut target = None;
+        if let Some(target_lookup) = implementation.target_lookup.as_ref() {
+            for kind in [SymbolKind::Struct, SymbolKind::Enum] {
+                let name = qualified(&module, target_lookup);
+                contribution
+                    .dependencies
+                    .insert(DependencyKey::Exact(name.clone(), kind));
+                target = target.or_else(|| catalog.unique_exact(&name, kind));
             }
+        }
+        if let Some(target) = target.clone() {
+            contribution.edges.push(RelationshipEdge {
+                kind: EdgeKind::Contains,
+                from: target,
+                to: address(implementation.symbol),
+                provenance: Provenance::TreeSitter,
+                precision: Precision::Heuristic,
+                location: None,
+            });
+        }
 
-            for (method_index, method) in file.symbols.iter().enumerate() {
-                if method.parent != Some(implementation.symbol)
-                    || method.key.kind != SymbolKind::Method
-                {
-                    continue;
-                }
-                let method_name = method
-                    .key
-                    .qualified_name
-                    .rsplit("::")
-                    .next()
-                    .unwrap_or(&method.key.qualified_name);
-                let trait_method = graph.symbol(trait_id).and_then(|trait_symbol| {
-                    unique(lookup.get(&(
-                        qualified(&trait_symbol.key.qualified_name, method_name),
-                        SymbolKind::Method,
-                    )))
+        let Some(trait_lookup) = implementation.trait_lookup.as_ref() else {
+            continue;
+        };
+        let trait_name = qualified(&module, trait_lookup);
+        contribution
+            .dependencies
+            .insert(DependencyKey::Exact(trait_name.clone(), SymbolKind::Trait));
+        let Some(trait_address) = catalog.unique_exact(&trait_name, SymbolKind::Trait) else {
+            continue;
+        };
+        if let Some(target) = target {
+            contribution.edges.push(RelationshipEdge {
+                kind: EdgeKind::Implements,
+                from: target,
+                to: trait_address.clone(),
+                provenance: Provenance::TreeSitter,
+                precision: Precision::Heuristic,
+                location: None,
+            });
+        }
+        let Some(trait_symbol) = catalog.symbol(&trait_address) else {
+            continue;
+        };
+        for (method_index, method) in file.symbols.iter().enumerate() {
+            if method.parent != Some(implementation.symbol) || method.key.kind != SymbolKind::Method
+            {
+                continue;
+            }
+            let trait_method_name =
+                qualified(&trait_symbol.key.qualified_name, symbol_name(method));
+            contribution.dependencies.insert(DependencyKey::Exact(
+                trait_method_name.clone(),
+                SymbolKind::Method,
+            ));
+            if let Some(trait_method) = catalog.unique_exact(&trait_method_name, SymbolKind::Method)
+            {
+                contribution.edges.push(RelationshipEdge {
+                    kind: EdgeKind::Implements,
+                    from: address(method_index),
+                    to: trait_method,
+                    provenance: Provenance::TreeSitter,
+                    precision: Precision::Heuristic,
+                    location: None,
                 });
-                if let Some(trait_method) = trait_method {
-                    graph.add_edge(
-                        EdgeKind::Implements,
-                        ids[file_index][method_index],
-                        trait_method,
-                        Provenance::TreeSitter,
-                        Precision::Heuristic,
-                        None,
-                    )?;
-                }
             }
         }
     }
-    Ok(())
+
+    for call in &file.calls {
+        contribution
+            .dependencies
+            .insert(DependencyKey::CallableName(call.name.clone()));
+        let (candidates, truncated) =
+            catalog.call_candidates(&call.name, call.qualifier.as_deref());
+        contribution.truncated_call_sites += u64::from(truncated);
+        let caller = address(call.caller);
+        let is_test = file
+            .symbols
+            .get(call.caller)
+            .is_some_and(|symbol| symbol.key.kind == SymbolKind::Test);
+        for target in candidates {
+            contribution.edges.push(RelationshipEdge {
+                kind: EdgeKind::Calls,
+                from: caller.clone(),
+                to: target.clone(),
+                provenance: Provenance::TreeSitter,
+                precision: Precision::Heuristic,
+                location: Some(call.location.clone()),
+            });
+            if is_test {
+                contribution.edges.push(RelationshipEdge {
+                    kind: EdgeKind::Tests,
+                    from: caller.clone(),
+                    to: target,
+                    provenance: Provenance::Heuristic,
+                    precision: Precision::Heuristic,
+                    location: Some(call.location.clone()),
+                });
+            }
+        }
+    }
+    contribution
 }
 
-fn add_call_candidate_edges(
-    graph: &mut SymbolGraph,
-    parsed: &[ParsedFile],
-    ids: &[Vec<EntityId>],
-) -> Result<u64, GraphError> {
-    let mut truncated_call_sites = 0_u64;
-    let lookup = callable_lookup(graph);
-    for (file_index, file) in parsed.iter().enumerate() {
-        for call in &file.calls {
-            let caller = ids[file_index][call.caller];
-            let is_test = graph
-                .symbol(caller)
-                .is_some_and(|symbol| symbol.key.kind == SymbolKind::Test);
-            let (candidates, truncated) =
-                candidates_by_name(graph, &lookup, &call.name, call.qualifier.as_deref());
-            truncated_call_sites += u64::from(truncated);
-            for target in candidates {
-                // Tree-sitter proves the call expression and spelling. The
-                // link to a same-named declaration remains heuristic until a
-                // precise provider confirms it.
-                graph.add_edge(
-                    EdgeKind::Calls,
-                    caller,
-                    target,
-                    Provenance::TreeSitter,
-                    Precision::Heuristic,
-                    Some(call.location.clone()),
-                )?;
-                if is_test {
-                    graph.add_edge(
-                        EdgeKind::Tests,
-                        caller,
-                        target,
-                        Provenance::Heuristic,
-                        Precision::Heuristic,
-                        Some(call.location.clone()),
-                    )?;
-                }
+fn read_sources(
+    repository_root: &Path,
+) -> Result<BTreeMap<RepoRelativePath, Arc<str>>, RustIndexError> {
+    let files = discover_rust_files(repository_root)?;
+    let mut sources = BTreeMap::new();
+    for path in files {
+        let source = fs::read_to_string(repository_root.join(path.as_str())).map_err(|source| {
+            RustIndexError::Read {
+                path: path.clone(),
+                source,
             }
-        }
+        })?;
+        sources.insert(path, Arc::<str>::from(source));
     }
-    Ok(truncated_call_sites)
+    Ok(sources)
 }
 
 /// Builds a complete Rust syntax index from the actual materialized Git
@@ -315,58 +638,16 @@ fn add_call_candidate_edges(
 pub fn index_repository(root: &Path) -> Result<IndexReport, RustIndexError> {
     let started = Instant::now();
     let repository_root = resolve_repository_root(root)?;
-    let span = info_span!(
-        "rust_repository_index",
-        root = %repository_root.display()
-    );
+    let span = info_span!("rust_repository_index", root = %repository_root.display());
     let _entered = span.enter();
-    let files = discover_rust_files(&repository_root)?;
-    let mut parser = RustParser::new().map_err(|error| RustIndexError::Parse(error.to_string()))?;
-    let mut parsed = Vec::with_capacity(files.len());
-
-    for path in files {
-        let file_span = info_span!("rust_file_parse", path = %path);
-        let _file_entered = file_span.enter();
-        let source = fs::read_to_string(repository_root.join(path.as_str())).map_err(|source| {
-            RustIndexError::Read {
-                path: path.clone(),
-                source,
-            }
-        })?;
-        parsed.push(
-            parser
-                .parse(path, source)
-                .map_err(|error| RustIndexError::Parse(error.to_string()))?,
-        );
-    }
-
-    let mut graph = SymbolGraph::new();
-    let mut ids = Vec::with_capacity(parsed.len());
-    for file in &parsed {
-        graph.add_file(file.path.clone(), file.source.clone())?;
-        let mut file_ids = Vec::with_capacity(file.symbols.len());
-        for symbol in &file.symbols {
-            file_ids.push(graph.add_symbol(
-                symbol.key.clone(),
-                symbol.location.clone(),
-                symbol.signature.clone(),
-                Provenance::TreeSitter,
-                Precision::Syntax,
-            )?);
-        }
-        ids.push(file_ids);
-    }
-
-    add_containment_edges(&mut graph, &parsed, &ids)?;
-    add_implementation_edges(&mut graph, &parsed, &ids)?;
-    let truncated_call_sites = add_call_candidate_edges(&mut graph, &parsed, &ids)?;
-    graph.validate_consistency()?;
-
+    let sources = read_sources(&repository_root)?;
+    let discovered_files = sources.len() as u64;
+    let (syntax_index, graph) = RustSyntaxIndex::from_sources(sources)?;
     let metrics = IndexMetrics {
-        discovered_files: parsed.len() as u64,
-        parsed_files: parsed.len() as u64,
-        syntax_error_files: parsed.iter().filter(|file| file.has_errors).count() as u64,
-        truncated_call_sites,
+        discovered_files,
+        parsed_files: discovered_files,
+        syntax_error_files: syntax_index.syntax_error_files(),
+        truncated_call_sites: syntax_index.truncated_call_sites(),
         symbols: graph.symbol_count(),
         edges: graph.edge_count(),
         elapsed: started.elapsed(),
@@ -384,5 +665,13 @@ pub fn index_repository(root: &Path) -> Result<IndexReport, RustIndexError> {
         repository_root,
         graph,
         metrics,
+        syntax_index,
     })
+}
+
+/// Reads the latest Git-aware Rust file inventory and exact contents.
+pub(crate) fn scan_repository_sources(
+    repository_root: &Path,
+) -> Result<BTreeMap<RepoRelativePath, Arc<str>>, RustIndexError> {
+    read_sources(repository_root)
 }

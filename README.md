@@ -6,10 +6,10 @@ MCP — repository structure, symbols, references, callers, source context, and
 Git diff state — so agents can navigate a codebase with fewer blind searches.
 
 Status: **v0.1 in progress**. The current slice provides Git-aware Rust
-discovery, a Tree-sitter syntax index, atomic in-memory revisions, and MCP
-tools for `status`, `repo_map`, literal/regex `search`, and `symbol_search`.
-Live filesystem updates, precise rust-analyzer enrichment, and Git diff
-context land in later slices.
+discovery, a Tree-sitter syntax index, bounded live filesystem reconciliation,
+deterministic fresh-query barriers, atomic in-memory revisions, and MCP tools
+for `status`, `repo_map`, literal/regex `search`, and `symbol_search`. Precise
+rust-analyzer enrichment and Git diff context land in later slices.
 
 ## Build and run
 
@@ -50,7 +50,8 @@ cargo deny check           # requires cargo-deny
 - `crates/chakra-engine` — in-memory symbol graph, atomic revision
   publication, `QueryService` implementation.
 - `crates/chakra-language-rust` — Git-aware Tree-sitter Rust discovery,
-  parsing, syntax extraction, and graph construction adapter.
+  parsing, incremental syntax extraction, live watching, and reconciliation
+  adapter.
 - `crates/chakra-mcp` — MCP stdio adapter (`rmcp`) exposing the current
   typed query tools over domain contracts.
 - `fixtures/rust/controller-service-provider` — Controller → Service →

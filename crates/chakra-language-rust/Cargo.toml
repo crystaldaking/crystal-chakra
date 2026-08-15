@@ -9,6 +9,7 @@ publish = false
 [dependencies]
 chakra-domain = { path = "../chakra-domain", version = "0.1.0" }
 chakra-engine = { path = "../chakra-engine", version = "0.1.0" }
+notify.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 tree-sitter.workspace = true
