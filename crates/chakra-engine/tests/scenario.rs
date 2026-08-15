@@ -3,7 +3,9 @@
 mod common;
 
 use std::error::Error;
+use std::sync::Arc;
 
+use chakra_domain::location::RepoRelativePath;
 use chakra_domain::provenance::{Precision, Provenance};
 use chakra_domain::query::{
     CallersRequest, ContextRequest, DiffContextRequest, QueryError, QueryService, RepoMapRequest,
@@ -12,9 +14,30 @@ use chakra_domain::query::{
 use chakra_domain::revision::Revision;
 use chakra_domain::state::{Freshness, ProviderState, WorkspaceStatus};
 use chakra_domain::symbol::SymbolKind;
-use chakra_engine::SymbolGraph;
+use chakra_engine::{
+    PreciseProvider, PreciseQueryRequest, PreciseQueryResult, PreciseRelation, SymbolGraph,
+};
 
 use common::{scenario_engine, scenario_graph};
+
+#[derive(Debug)]
+struct FixedProvider {
+    result: PreciseQueryResult,
+}
+
+impl PreciseProvider for FixedProvider {
+    fn state_for(&self, revision: Revision) -> ProviderState {
+        if self.result.state == ProviderState::Ready && self.result.revision != revision {
+            ProviderState::CatchingUp
+        } else {
+            self.result.state
+        }
+    }
+
+    fn enrich(&self, _request: PreciseQueryRequest) -> PreciseQueryResult {
+        self.result.clone()
+    }
+}
 
 #[test]
 fn status_reports_scenario_counts() -> Result<(), Box<dyn Error>> {
@@ -138,6 +161,117 @@ fn callers_of_provider_trait_method_is_the_service() -> Result<(), Box<dyn Error
     assert_eq!(caller.precision, Precision::Syntax);
     assert_eq!(caller.provenance, Provenance::TreeSitter);
     assert!(caller.location.is_some());
+    Ok(())
+}
+
+#[test]
+fn current_precise_callers_replace_matching_syntax_candidates() -> Result<(), Box<dyn Error>> {
+    let (engine, ids) = scenario_engine()?;
+    let revision = engine.snapshot().revision();
+    let caller = engine
+        .snapshot()
+        .graph()
+        .symbol(ids.controller_refund)
+        .ok_or("controller symbol missing")?
+        .clone();
+    engine.install_precise_provider(Arc::new(FixedProvider {
+        result: PreciseQueryResult {
+            revision,
+            state: ProviderState::Ready,
+            incoming: vec![PreciseRelation {
+                name: caller.name().to_owned(),
+                declaration: caller.location,
+                call_site: None,
+                provenance: Provenance::RustAnalyzer,
+            }],
+            outgoing: Vec::new(),
+            truncated: false,
+        },
+    }))?;
+
+    let envelope = engine.callers(CallersRequest {
+        symbol: Some(SymbolRef::ById {
+            id: ids.service_refund,
+            revision,
+        }),
+        ..CallersRequest::default()
+    })?;
+    assert_eq!(envelope.provider_state, ProviderState::Ready);
+    assert_eq!(envelope.data.callers.len(), 1);
+    assert_eq!(envelope.data.callers[0].symbol.id, ids.controller_refund);
+    assert_eq!(envelope.data.callers[0].precision, Precision::Precise);
+    assert_eq!(
+        envelope.data.callers[0].provenance,
+        Provenance::RustAnalyzer
+    );
+    Ok(())
+}
+
+#[test]
+fn older_precise_result_is_never_labeled_current_after_revision_change()
+-> Result<(), Box<dyn Error>> {
+    let (engine, ids) = scenario_engine()?;
+    let old_revision = engine.snapshot().revision();
+    let caller = engine
+        .snapshot()
+        .graph()
+        .symbol(ids.controller_refund)
+        .ok_or("controller symbol missing")?
+        .clone();
+    engine.install_precise_provider(Arc::new(FixedProvider {
+        result: PreciseQueryResult {
+            revision: old_revision,
+            state: ProviderState::Ready,
+            incoming: vec![PreciseRelation {
+                name: caller.name().to_owned(),
+                declaration: caller.location,
+                call_site: None,
+                provenance: Provenance::RustAnalyzer,
+            }],
+            outgoing: Vec::new(),
+            truncated: false,
+        },
+    }))?;
+    let mut update = engine.begin_update();
+    update.graph_mut().add_file(
+        RepoRelativePath::new("src/api/controller.rs")?,
+        "// edited source captured in the new syntax revision\n",
+    )?;
+    update.set_freshness(Freshness::Fresh);
+    let next = engine.publish(update)?;
+
+    let envelope = engine.callers(CallersRequest {
+        symbol: Some(SymbolRef::ByName(
+            "service::payment_service::PaymentService::refund".to_owned(),
+        )),
+        ..CallersRequest::default()
+    })?;
+    assert_eq!(envelope.revision, next.revision());
+    assert_eq!(envelope.provider_state, ProviderState::CatchingUp);
+    assert_eq!(envelope.data.callers.len(), 1);
+    assert_eq!(envelope.data.callers[0].precision, Precision::Syntax);
+    assert_eq!(envelope.data.callers[0].provenance, Provenance::TreeSitter);
+    Ok(())
+}
+
+#[test]
+fn degraded_provider_preserves_useful_syntax_callers() -> Result<(), Box<dyn Error>> {
+    let (engine, ids) = scenario_engine()?;
+    let revision = engine.snapshot().revision();
+    engine.install_precise_provider(Arc::new(FixedProvider {
+        result: PreciseQueryResult::unavailable(revision, ProviderState::Degraded),
+    }))?;
+    let envelope = engine.callers(CallersRequest {
+        symbol: Some(SymbolRef::ById {
+            id: ids.provider_refund,
+            revision,
+        }),
+        ..CallersRequest::default()
+    })?;
+    assert_eq!(envelope.provider_state, ProviderState::Degraded);
+    assert_eq!(envelope.data.callers.len(), 1);
+    assert_eq!(envelope.data.callers[0].symbol.id, ids.service_refund);
+    assert_eq!(envelope.data.callers[0].precision, Precision::Syntax);
     Ok(())
 }
 

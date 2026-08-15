@@ -1,0 +1,25 @@
+[package]
+name = "chakra-provider-rust-analyzer"
+description = "Optional rust-analyzer precise-provider adapter for Chakra"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+chakra-domain = { path = "../chakra-domain", version = "0.1.0" }
+chakra-engine = { path = "../chakra-engine", version = "0.1.0" }
+crossbeam-channel.workspace = true
+lsp-server.workspace = true
+lsp-types.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+url.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

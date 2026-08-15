@@ -208,6 +208,22 @@ impl SymbolGraph {
         files
     }
 
+    /// Cheap owned views of captured source, for optional language-provider
+    /// synchronization. Cloning the `Arc<str>` never copies file contents.
+    pub(crate) fn provider_documents(&self) -> Vec<(RepoRelativePath, Arc<str>)> {
+        let mut files: Vec<_> = self
+            .files
+            .iter()
+            .filter_map(|(path, file)| {
+                file.source
+                    .as_ref()
+                    .map(|source| (path.clone(), source.clone()))
+            })
+            .collect();
+        files.sort_by(|a, b| a.0.cmp(&b.0));
+        files
+    }
+
     /// Case-insensitive substring search over qualified names. Result
     /// construction stops at the caller's budget plus the first omitted
     /// match, so a broad query cannot allocate one view per graph symbol.

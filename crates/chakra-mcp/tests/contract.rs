@@ -123,7 +123,14 @@ async fn status_tool_is_listed_and_callable() -> Result<(), Box<dyn Error + Send
     tool_names.sort_unstable();
     assert_eq!(
         tool_names,
-        ["repo_map", "search", "status", "symbol_search"]
+        [
+            "callers",
+            "context",
+            "repo_map",
+            "search",
+            "status",
+            "symbol_search"
+        ]
     );
     let status_tool = tools
         .iter()
@@ -261,6 +268,54 @@ async fn indexed_fixture_is_queryable_through_structured_mcp_tools()
     assert!(candidates.iter().all(|candidate| {
         candidate["precision"] == "syntax" && candidate["provenance"] == "tree_sitter"
     }));
+    let service_refund = candidates
+        .iter()
+        .find(|candidate| {
+            candidate["qualified_name"] == "service::payment_service::PaymentService::refund"
+        })
+        .ok_or("service refund candidate missing")?;
+    let callers_args = serde_json::from_value(serde_json::json!({
+        "symbol": {
+            "by_id": {
+                "id": service_refund["id"],
+                "revision": symbols["revision"]
+            }
+        },
+        "limit": 20
+    }))?;
+    let callers = client
+        .call_tool(CallToolRequestParams::new("callers").with_arguments(callers_args))
+        .await?;
+    assert_eq!(callers.is_error, Some(false));
+    let callers = callers
+        .structured_content
+        .ok_or("callers must return structured content")?;
+    assert_eq!(callers["provider_state"], "not_configured");
+    assert_ne!(callers["data"]["callers"][0]["precision"], "precise");
+    assert_ne!(callers["data"]["callers"][0]["provenance"], "rust_analyzer");
+
+    let context_args = serde_json::from_value(serde_json::json!({
+        "symbol": {
+            "by_id": {
+                "id": service_refund["id"],
+                "revision": symbols["revision"]
+            }
+        },
+        "limit": 20
+    }))?;
+    let context = client
+        .call_tool(CallToolRequestParams::new("context").with_arguments(context_args))
+        .await?;
+    assert_eq!(context.is_error, Some(false));
+    let context = context
+        .structured_content
+        .ok_or("context must return structured content")?;
+    assert_eq!(context["data"]["symbol"]["id"], service_refund["id"]);
+    assert!(
+        context["data"]["callees"]
+            .as_array()
+            .is_some_and(|items| !items.is_empty())
+    );
 
     client.cancel().await?;
     let running = server_task

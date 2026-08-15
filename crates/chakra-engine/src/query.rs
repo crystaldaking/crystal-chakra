@@ -20,11 +20,15 @@ use chakra_domain::query::{
     SymbolView, TextMatch,
 };
 use chakra_domain::revision::Revision;
-use chakra_domain::state::FreshnessRequirement;
+use chakra_domain::state::{Freshness, FreshnessRequirement, ProviderState};
 use chakra_domain::symbol::{Edge, EdgeKind, Symbol};
 
 use crate::engine::{WorkspaceEngine, WorkspaceSnapshot};
 use crate::graph::SymbolGraph;
+use crate::precise::{
+    CallHierarchyDirections, PreciseQueryRequest, PreciseRelation, ProviderSymbol,
+    ProviderWorkspace,
+};
 
 const MAX_QUERY_PATTERN_CHARS: usize = 1_024;
 const MAX_MATCH_LINE_CHARS: usize = 512;
@@ -106,6 +110,68 @@ fn sort_related(items: &mut [RelatedSymbol]) {
     });
 }
 
+fn provider_state_for(engine: &WorkspaceEngine, snapshot: &WorkspaceSnapshot) -> ProviderState {
+    engine
+        .precise_provider()
+        .map_or(snapshot.provider_state(), |provider| {
+            provider.state_for(snapshot.revision())
+        })
+}
+
+fn precise_related(graph: &SymbolGraph, relation: PreciseRelation) -> Option<RelatedSymbol> {
+    let position = relation.declaration.start();
+    let symbol = graph
+        .symbols()
+        .iter()
+        .filter(|symbol| {
+            symbol.name() == relation.name
+                && symbol.location.file() == relation.declaration.file()
+                && symbol.location.start() <= position
+                && position < symbol.location.end()
+        })
+        .min_by_key(|symbol| {
+            (
+                symbol.location.end().line() - symbol.location.start().line(),
+                symbol
+                    .location
+                    .end()
+                    .column()
+                    .abs_diff(symbol.location.start().column()),
+            )
+        })?;
+    Some(RelatedSymbol {
+        symbol: SymbolView::from(symbol),
+        edge_kind: EdgeKind::Calls,
+        provenance: relation.provenance,
+        precision: Precision::Precise,
+        location: relation.call_site,
+    })
+}
+
+/// Precise relations win for the same revision-scoped entity; unmatched
+/// syntax candidates remain visible with their original lower precision.
+fn merge_precise(
+    graph: &SymbolGraph,
+    syntax: Vec<RelatedSymbol>,
+    precise: Vec<PreciseRelation>,
+) -> Vec<RelatedSymbol> {
+    let mut merged: Vec<_> = precise
+        .into_iter()
+        .filter_map(|relation| precise_related(graph, relation))
+        .collect();
+    sort_related(&mut merged);
+    merged.dedup_by_key(|item| item.symbol.id);
+    let precise_ids: std::collections::HashSet<_> =
+        merged.iter().map(|item| item.symbol.id).collect();
+    merged.extend(
+        syntax
+            .into_iter()
+            .filter(|item| !precise_ids.contains(&item.symbol.id)),
+    );
+    sort_related(&mut merged);
+    merged
+}
+
 /// Gate for every query with a freshness requirement: the pinned snapshot
 /// either satisfies it or the call fails with a typed error. Cheaper request
 /// validation (empty queries, missing refs) runs before this gate.
@@ -144,13 +210,18 @@ fn query_snapshot(
     Ok(snapshot)
 }
 
-fn envelope<T>(snapshot: &WorkspaceSnapshot, truncated: bool, data: T) -> QueryEnvelope<T> {
+fn envelope<T>(
+    snapshot: &WorkspaceSnapshot,
+    provider_state: ProviderState,
+    truncated: bool,
+    data: T,
+) -> QueryEnvelope<T> {
     QueryEnvelope::new(
         snapshot.identity().workspace.clone(),
         snapshot.revision(),
         snapshot.freshness(),
         snapshot.status(),
-        snapshot.provider_state(),
+        provider_state,
         truncated,
         data,
     )
@@ -248,6 +319,7 @@ fn source_snippet(graph: &SymbolGraph, symbol: &Symbol) -> Option<SourceSnippet>
 impl QueryService for WorkspaceEngine {
     fn status(&self, _request: StatusRequest) -> Result<QueryEnvelope<StatusData>, QueryError> {
         let snapshot = self.snapshot();
+        let provider_state = provider_state_for(self, &snapshot);
         let counts = IndexCounts {
             files: snapshot.graph().file_count(),
             symbols: snapshot.graph().symbol_count(),
@@ -255,14 +327,14 @@ impl QueryService for WorkspaceEngine {
         };
         let providers = vec![ProviderInfo {
             name: "rust-analyzer".to_owned(),
-            state: snapshot.provider_state(),
+            state: provider_state,
         }];
         let data = StatusData {
             workspace: snapshot.identity().clone(),
             counts,
             providers,
         };
-        Ok(envelope(&snapshot, false, data))
+        Ok(envelope(&snapshot, provider_state, false, data))
     }
 
     fn repo_map(&self, request: RepoMapRequest) -> Result<QueryEnvelope<RepoMapData>, QueryError> {
@@ -279,7 +351,12 @@ impl QueryService for WorkspaceEngine {
             })
             .collect();
         let (files, truncated) = bounded(summaries, clamp_limit(request.limit));
-        Ok(envelope(&snapshot, truncated, RepoMapData { files }))
+        Ok(envelope(
+            &snapshot,
+            provider_state_for(self, &snapshot),
+            truncated,
+            RepoMapData { files },
+        ))
     }
 
     fn search(&self, request: SearchRequest) -> Result<QueryEnvelope<SearchData>, QueryError> {
@@ -340,7 +417,12 @@ impl QueryService for WorkspaceEngine {
                 }
             }
         }
-        Ok(envelope(&snapshot, truncated, SearchData { matches }))
+        Ok(envelope(
+            &snapshot,
+            provider_state_for(self, &snapshot),
+            truncated,
+            SearchData { matches },
+        ))
     }
 
     fn symbol_search(
@@ -373,7 +455,12 @@ impl QueryService for WorkspaceEngine {
             query: query.to_owned(),
             candidates,
         };
-        Ok(envelope(&snapshot, truncated, data))
+        Ok(envelope(
+            &snapshot,
+            provider_state_for(self, &snapshot),
+            truncated,
+            data,
+        ))
     }
 
     fn context(&self, request: ContextRequest) -> Result<QueryEnvelope<ContextData>, QueryError> {
@@ -392,8 +479,6 @@ impl QueryService for WorkspaceEngine {
             .filter(|edge| edge.kind == EdgeKind::Calls)
             .filter_map(|edge| related(graph, edge, edge.from))
             .collect();
-        sort_related(&mut callers);
-        let (callers, callers_truncated) = bounded(callers, limit);
 
         let mut callees: Vec<RelatedSymbol> = graph
             .outgoing_edges(symbol.id)
@@ -401,7 +486,37 @@ impl QueryService for WorkspaceEngine {
             .filter(|edge| edge.kind == EdgeKind::Calls)
             .filter_map(|edge| related(graph, edge, edge.to))
             .collect();
+        let mut provider_state = provider_state_for(self, &snapshot);
+        let mut provider_truncated = false;
+        if snapshot.freshness() == Freshness::Fresh
+            && let Some(provider) = self.precise_provider()
+        {
+            let result = provider.enrich(PreciseQueryRequest {
+                workspace: ProviderWorkspace::from_snapshot(&snapshot),
+                symbol: ProviderSymbol {
+                    name: symbol.name().to_owned(),
+                    declaration: symbol.location.clone(),
+                },
+                directions: CallHierarchyDirections {
+                    incoming: true,
+                    outgoing: true,
+                },
+                limit,
+            });
+            provider_state = if result.revision == snapshot.revision() {
+                result.state
+            } else {
+                ProviderState::CatchingUp
+            };
+            if provider_state == ProviderState::Ready {
+                callers = merge_precise(graph, callers, result.incoming);
+                callees = merge_precise(graph, callees, result.outgoing);
+                provider_truncated = result.truncated;
+            }
+        }
+        sort_related(&mut callers);
         sort_related(&mut callees);
+        let (callers, callers_truncated) = bounded(callers, limit);
         let (callees, callees_truncated) = bounded(callees, limit);
 
         let mut implementations: Vec<RelatedSymbol> = graph
@@ -437,7 +552,8 @@ impl QueryService for WorkspaceEngine {
             || callees_truncated
             || implementations_truncated
             || tests_truncated
-            || files_truncated;
+            || files_truncated
+            || provider_truncated;
         let data = ContextData {
             symbol: SymbolView::from(symbol),
             source: source_snippet(graph, symbol),
@@ -447,7 +563,7 @@ impl QueryService for WorkspaceEngine {
             tests,
             related_files,
         };
-        Ok(envelope(&snapshot, truncated, data))
+        Ok(envelope(&snapshot, provider_state, truncated, data))
     }
 
     fn callers(&self, request: CallersRequest) -> Result<QueryEnvelope<CallersData>, QueryError> {
@@ -464,13 +580,46 @@ impl QueryService for WorkspaceEngine {
             .filter(|edge| edge.kind == EdgeKind::Calls)
             .filter_map(|edge| related(graph, edge, edge.from))
             .collect();
+        let limit = clamp_limit(request.limit);
+        let mut provider_state = provider_state_for(self, &snapshot);
+        let mut provider_truncated = false;
+        if snapshot.freshness() == Freshness::Fresh
+            && let Some(provider) = self.precise_provider()
+        {
+            let result = provider.enrich(PreciseQueryRequest {
+                workspace: ProviderWorkspace::from_snapshot(&snapshot),
+                symbol: ProviderSymbol {
+                    name: target.name().to_owned(),
+                    declaration: target.location.clone(),
+                },
+                directions: CallHierarchyDirections {
+                    incoming: true,
+                    outgoing: false,
+                },
+                limit,
+            });
+            provider_state = if result.revision == snapshot.revision() {
+                result.state
+            } else {
+                ProviderState::CatchingUp
+            };
+            if provider_state == ProviderState::Ready {
+                callers = merge_precise(graph, callers, result.incoming);
+                provider_truncated = result.truncated;
+            }
+        }
         sort_related(&mut callers);
-        let (callers, truncated) = bounded(callers, clamp_limit(request.limit));
+        let (callers, truncated) = bounded(callers, limit);
         let data = CallersData {
             target: SymbolView::from(target),
             callers,
         };
-        Ok(envelope(&snapshot, truncated, data))
+        Ok(envelope(
+            &snapshot,
+            provider_state,
+            truncated || provider_truncated,
+            data,
+        ))
     }
 
     fn diff_context(

@@ -7,10 +7,15 @@
 
 mod engine;
 mod graph;
+mod precise;
 mod query;
 
 pub use engine::{
-    BarrierAlreadyInstalled, FreshnessBarrier, FreshnessBarrierError, PublishError, UpdateBuilder,
-    WorkspaceEngine, WorkspaceSnapshot,
+    BarrierAlreadyInstalled, FreshnessBarrier, FreshnessBarrierError, ProviderAlreadyInstalled,
+    PublishError, UpdateBuilder, WorkspaceEngine, WorkspaceSnapshot,
 };
 pub use graph::{ConsistencyError, GraphError, SymbolGraph};
+pub use precise::{
+    CallHierarchyDirections, PreciseProvider, PreciseQueryRequest, PreciseQueryResult,
+    PreciseRelation, ProviderDocument, ProviderSymbol, ProviderWorkspace,
+};

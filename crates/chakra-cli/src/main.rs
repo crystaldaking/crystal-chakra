@@ -125,7 +125,37 @@ async fn serve(args: ServeArgs) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    let precise_provider = match chakra_provider_rust_analyzer::RustAnalyzerProvider::start(
+        engine.provider_workspace(),
+        chakra_provider_rust_analyzer::RustAnalyzerConfig::default(),
+    ) {
+        Ok(provider) => {
+            let adapter: Arc<dyn chakra_engine::PreciseProvider> = provider.clone();
+            if let Err(error) = engine.install_precise_provider(adapter) {
+                tracing::warn!(%error, "precise provider was not installed");
+                let _ = provider.shutdown();
+                None
+            } else {
+                Some(provider)
+            }
+        }
+        Err(error) => {
+            tracing::warn!(%error, "precise provider could not start; syntax intelligence remains available");
+            None
+        }
+    };
     let serve_result = chakra_mcp::serve_stdio(engine).await;
+    if let Some(provider) = precise_provider {
+        match tokio::task::spawn_blocking(move || provider.shutdown()).await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                tracing::warn!(%error, "precise provider did not shut down cleanly");
+            }
+            Err(error) => {
+                tracing::warn!(%error, "precise provider shutdown task failed");
+            }
+        }
+    }
     match tokio::task::spawn_blocking(move || live.shutdown()).await {
         Ok(Ok(())) => {}
         Ok(Err(error)) => {

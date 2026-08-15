@@ -15,6 +15,7 @@ use chakra_domain::state::{Freshness, ProviderState, WorkspaceStatus};
 use thiserror::Error;
 
 use crate::graph::SymbolGraph;
+use crate::precise::{PreciseProvider, ProviderWorkspace};
 
 /// One immutable, atomically published workspace state.
 #[derive(Debug)]
@@ -92,6 +93,11 @@ pub trait FreshnessBarrier: std::fmt::Debug + Send + Sync {
 #[error("a freshness barrier is already installed")]
 pub struct BarrierAlreadyInstalled;
 
+/// A workspace has at most one optional precise-provider adapter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+#[error("a precise provider is already installed")]
+pub struct ProviderAlreadyInstalled;
+
 /// A private, in-progress update to the workspace state.
 ///
 /// Obtained from [`WorkspaceEngine::begin_update`]; published via
@@ -159,6 +165,7 @@ impl UpdateBuilder {
 pub struct WorkspaceEngine {
     current: ArcSwap<WorkspaceSnapshot>,
     freshness_barrier: OnceLock<Arc<dyn FreshnessBarrier>>,
+    precise_provider: OnceLock<Arc<dyn PreciseProvider>>,
 }
 
 impl WorkspaceEngine {
@@ -180,6 +187,7 @@ impl WorkspaceEngine {
         Self {
             current: ArcSwap::from_pointee(snapshot),
             freshness_barrier: OnceLock::new(),
+            precise_provider: OnceLock::new(),
         }
     }
 
@@ -191,6 +199,25 @@ impl WorkspaceEngine {
         self.freshness_barrier
             .set(barrier)
             .map_err(|_| BarrierAlreadyInstalled)
+    }
+
+    /// Installs the optional, language-neutral precise-provider adapter.
+    pub fn install_precise_provider(
+        &self,
+        provider: Arc<dyn PreciseProvider>,
+    ) -> Result<(), ProviderAlreadyInstalled> {
+        self.precise_provider
+            .set(provider)
+            .map_err(|_| ProviderAlreadyInstalled)
+    }
+
+    /// Captures the current immutable syntax input for provider startup.
+    pub fn provider_workspace(&self) -> ProviderWorkspace {
+        ProviderWorkspace::from_snapshot(&self.snapshot())
+    }
+
+    pub(crate) fn precise_provider(&self) -> Option<&Arc<dyn PreciseProvider>> {
+        self.precise_provider.get()
     }
 
     /// Waits until the installed owner has reconciled and published the

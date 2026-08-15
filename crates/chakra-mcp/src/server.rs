@@ -4,8 +4,9 @@ use std::sync::Arc;
 
 use chakra_domain::envelope::QueryEnvelope;
 use chakra_domain::query::{
-    QueryError, QueryService, RepoMapData, RepoMapRequest, SearchData, SearchRequest, StatusData,
-    StatusRequest, SymbolSearchData, SymbolSearchRequest,
+    CallersData, CallersRequest, ContextData, ContextRequest, QueryError, QueryService,
+    RepoMapData, RepoMapRequest, SearchData, SearchRequest, StatusData, StatusRequest,
+    SymbolSearchData, SymbolSearchRequest,
 };
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::{Json, Parameters};
@@ -116,11 +117,35 @@ impl ChakraMcpServer {
         self.execute_query(move |service| service.symbol_search(request))
             .await
     }
+
+    #[tool(
+        name = "context",
+        description = "Get bounded syntax context for one resolved symbol, with optional current rust-analyzer callers and callees"
+    )]
+    async fn context(
+        &self,
+        Parameters(request): Parameters<ContextRequest>,
+    ) -> Result<Json<QueryEnvelope<ContextData>>, ErrorData> {
+        self.execute_query(move |service| service.context(request))
+            .await
+    }
+
+    #[tool(
+        name = "callers",
+        description = "Get bounded callers for one resolved symbol, preferring current rust-analyzer precision and retaining honest syntax fallback"
+    )]
+    async fn callers(
+        &self,
+        Parameters(request): Parameters<CallersRequest>,
+    ) -> Result<Json<QueryEnvelope<CallersData>>, ErrorData> {
+        self.execute_query(move |service| service.callers(request))
+            .await
+    }
 }
 
 #[tool_handler(
     name = "chakra",
-    instructions = "Chakra Rust syntax intelligence: inspect status and repo_map, search indexed source text, and resolve ambiguous names through symbol_search. Results are bounded and carry revision, freshness, provenance, and precision.",
+    instructions = "Chakra Rust code intelligence: inspect status and repo_map, search indexed source, resolve ambiguous names through symbol_search, then request context or callers. Results are bounded and carry revision, freshness, provider state, provenance, and precision.",
     router = self.tool_router
 )]
 impl ServerHandler for ChakraMcpServer {}
