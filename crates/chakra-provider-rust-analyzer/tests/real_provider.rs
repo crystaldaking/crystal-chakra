@@ -4,7 +4,7 @@
 use std::error::Error;
 use std::fs;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use chakra_domain::location::{RepoRelativePath, SourceRange, TextPosition};
 use chakra_domain::revision::Revision;
@@ -43,6 +43,7 @@ fn current_rust_analyzer_returns_precise_incoming_call() -> Result<(), Box<dyn E
             ..RustAnalyzerConfig::default()
         },
     )?;
+    let initial_started = Instant::now();
     let result = provider.enrich(PreciseQueryRequest {
         workspace,
         symbol: ProviderSymbol {
@@ -59,6 +60,7 @@ fn current_rust_analyzer_returns_precise_incoming_call() -> Result<(), Box<dyn E
         },
         limit: 20,
     });
+    let initial_elapsed = initial_started.elapsed();
     assert_eq!(
         result.state,
         ProviderState::Ready,
@@ -81,6 +83,7 @@ fn current_rust_analyzer_returns_precise_incoming_call() -> Result<(), Box<dyn E
         repository.path().join("src/lib.rs"),
         changed_source.as_ref(),
     )?;
+    let changed_started = Instant::now();
     let changed = provider.enrich(PreciseQueryRequest {
         workspace: ProviderWorkspace {
             repository_root: fs::canonicalize(repository.path())?,
@@ -104,6 +107,7 @@ fn current_rust_analyzer_returns_precise_incoming_call() -> Result<(), Box<dyn E
         },
         limit: 20,
     });
+    let changed_elapsed = changed_started.elapsed();
     assert_eq!(
         changed.state,
         ProviderState::Ready,
@@ -118,6 +122,11 @@ fn current_rust_analyzer_returns_precise_incoming_call() -> Result<(), Box<dyn E
             .any(|relation| relation.name == "caller_two"),
         "incoming after edit: {:?}",
         changed.incoming
+    );
+    eprintln!(
+        "rust_analyzer_enrichment: initial={initial_elapsed:?}, after_edit={changed_elapsed:?}, initial_incoming={}, changed_incoming={}",
+        result.incoming.len(),
+        changed.incoming.len(),
     );
     provider.shutdown()?;
     Ok(())

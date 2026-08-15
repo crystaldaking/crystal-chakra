@@ -5,6 +5,7 @@ use std::fs;
 use std::path::Path;
 use std::process::Command;
 use std::sync::Arc;
+use std::time::Instant;
 
 use chakra_domain::identity::WorkspaceIdentity;
 use chakra_domain::query::{QueryService, RepoMapRequest, SymbolSearchRequest};
@@ -91,7 +92,9 @@ fn immediate_fresh_read_is_atomic_and_reindexes_only_one_file() -> Result<(), Bo
         "src/one.rs",
         "pub fn alpha_after_edit() {}\n",
     )?;
+    let reindex_started = Instant::now();
     let found = symbols(&engine, "alpha_after_edit")?;
+    let reindex_elapsed = reindex_started.elapsed();
     let current = engine.snapshot();
     let metrics = live.metrics();
 
@@ -117,6 +120,54 @@ fn immediate_fresh_read_is_atomic_and_reindexes_only_one_file() -> Result<(), Bo
         "unrelated relationship owners must not be recomputed"
     );
     assert_eq!(metrics.full_repository_reindexes, 0);
+    eprintln!(
+        "live_single_file_reindex: elapsed={reindex_elapsed:?}, reparsed={}, relationship_files_recomputed={}, full_repository_reindexes={}",
+        metrics.files_reparsed - baseline.files_reparsed,
+        metrics.relationship_files_recomputed - baseline.relationship_files_recomputed,
+        metrics.full_repository_reindexes,
+    );
+    live.shutdown()?;
+    Ok(())
+}
+
+#[test]
+fn rapid_editor_replacements_converge_to_the_latest_source() -> Result<(), Box<dyn Error>> {
+    const EDITS: u64 = 32;
+
+    let repository = repository()?;
+    let (engine, live) = start(&repository)?;
+    let baseline = live.metrics();
+    let target = repository.path().join("src/one.rs");
+    let swap = repository.path().join("src/.one.rs.chakra-swap");
+    let backup = repository.path().join("src/.one.rs.chakra-backup");
+
+    for edit in 0..EDITS {
+        fs::write(&swap, format!("pub fn rapid_edit_{edit}() {{}}\n"))?;
+        fs::rename(&target, &backup)?;
+        fs::rename(&swap, &target)?;
+        fs::remove_file(&backup)?;
+    }
+
+    let fresh_started = Instant::now();
+    assert_eq!(symbols(&engine, "rapid_edit_31")?, ["one::rapid_edit_31"]);
+    let fresh_elapsed = fresh_started.elapsed();
+    assert!(symbols(&engine, "rapid_edit_0")?.is_empty());
+    assert_eq!(symbols(&engine, "two::beta")?, ["two::beta"]);
+
+    let metrics = live.metrics();
+    let reparsed = metrics.files_reparsed - baseline.files_reparsed;
+    assert!(reparsed >= 1, "the changed file must be reparsed");
+    assert!(
+        reparsed <= EDITS,
+        "coalescing must not invent more parses than materialized edits"
+    );
+    assert_eq!(metrics.full_repository_reindexes, 0);
+    engine.snapshot().graph().validate_consistency()?;
+    eprintln!(
+        "live_rapid_replacement: edits={EDITS}, fresh_barrier={fresh_elapsed:?}, reparsed={reparsed}, reconciliations={}, dropped_events={}, full_repository_reindexes={}",
+        metrics.reconciliations, metrics.dropped_watcher_events, metrics.full_repository_reindexes,
+    );
+
     live.shutdown()?;
     Ok(())
 }

@@ -2,6 +2,7 @@
 
 Status: accepted
 Date: 2026-08-15
+Last reviewed: 2026-08-16
 
 ## Context
 
@@ -35,6 +36,10 @@ The upstream Tree-sitter project currently publishes the maintained
   a symlink. Repository-relative paths reject lexical traversal, and no
   administrative Git path is constructed by Chakra. Reconciliation against
   concurrent filesystem replacement belongs to the live-update slice.
+- Git stdout is drained while only a fixed 64 MiB prefix can be retained;
+  stderr capture is separately bounded. Discovery fails explicitly when the
+  inventory exceeds that budget instead of allocating the complete output
+  before checking its size.
 - Parse files in sorted repository-relative order and build the graph in
   deterministic passes: files/source, declarations, containment and impl
   relations, then call candidates. Declarations and direct AST containment
@@ -102,3 +107,5 @@ The upstream Tree-sitter project currently publishes the maintained
   context snippets, and indexing/query measurements.
 - The MCP contract test queries the real fixture through an in-process MCP
   client.
+- Current local fixture measurements and their exact test entry points are
+  recorded in `docs/evaluation/v0.1-readiness.md`.

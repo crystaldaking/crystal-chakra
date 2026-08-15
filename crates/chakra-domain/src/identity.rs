@@ -74,9 +74,9 @@ impl WorkspaceIdentity {
                 path: root.to_path_buf(),
                 source,
             })?;
-        // Known limitation (SPEC §11): identity currently is the canonical
-        // path. A Git-object-based identity replaces this when the Git
-        // subsystem lands; only this constructor changes.
+        // Known v0.1 limitation (SPEC §11): identity currently is the
+        // canonical path. A stronger Git-object-aware identity can replace
+        // this in a later roadmap without changing the surrounding types.
         let repository = RepositoryId(format!("path:{}", canonical.display()));
         let workspace = WorkspaceId(format!("{}:primary", repository.as_str()));
         Ok(Self {

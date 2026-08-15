@@ -8,8 +8,10 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ffi::OsStr;
 use std::fs;
+use std::io::{self, Read};
 use std::path::{Component, Path};
-use std::process::{Command, Output};
+use std::process::{Command, ExitStatus, Stdio};
+use std::thread;
 
 use chakra_domain::location::RepoRelativePath;
 use chakra_domain::provenance::{Precision, Provenance};
@@ -21,10 +23,25 @@ use chakra_engine::{
 const MAX_GIT_OUTPUT_BYTES: usize = 8 * 1024 * 1024;
 const MAX_WORKSPACE_CHANGES: usize = 10_000;
 const MAX_ERROR_CHARS: usize = 1_024;
+const MAX_GIT_STDERR_BYTES: usize = 16 * 1024;
 
 /// Fixed-argument Git implementation for the active materialized worktree.
 #[derive(Debug, Default)]
 pub struct GitWorkspaceDiff;
+
+#[derive(Debug)]
+struct BoundedRead {
+    bytes: Vec<u8>,
+    exceeded: bool,
+}
+
+#[derive(Debug)]
+struct GitOutput {
+    status: ExitStatus,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+    stdout_exceeded: bool,
+}
 
 fn bounded_text(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes)
@@ -34,19 +51,108 @@ fn bounded_text(bytes: &[u8]) -> String {
         .collect()
 }
 
+fn read_bounded(mut reader: impl Read, limit: usize) -> io::Result<BoundedRead> {
+    let mut bytes = Vec::with_capacity(limit.min(8 * 1024));
+    let mut exceeded = false;
+    let mut buffer = [0_u8; 8 * 1024];
+    loop {
+        let read = reader.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        let remaining = limit.saturating_sub(bytes.len());
+        let retained = remaining.min(read);
+        bytes.extend_from_slice(&buffer[..retained]);
+        exceeded |= retained < read;
+    }
+    Ok(BoundedRead { bytes, exceeded })
+}
+
+fn terminate_child(child: &mut std::process::Child) {
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+fn capture_git(
+    root: &Path,
+    display: &'static str,
+    args: &[&OsStr],
+) -> Result<GitOutput, WorkspaceDiffError> {
+    let mut child = Command::new("git")
+        .current_dir(root)
+        .env("GIT_LITERAL_PATHSPECS", "1")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .args(args)
+        .spawn()
+        .map_err(|error| {
+            WorkspaceDiffError::new(format!("failed to execute `{display}`: {error}"))
+        })?;
+    let Some(stdout) = child.stdout.take() else {
+        terminate_child(&mut child);
+        return Err(WorkspaceDiffError::new(format!(
+            "failed to execute `{display}`: Git stdout pipe is unavailable"
+        )));
+    };
+    let Some(stderr) = child.stderr.take() else {
+        terminate_child(&mut child);
+        return Err(WorkspaceDiffError::new(format!(
+            "failed to execute `{display}`: Git stderr pipe is unavailable"
+        )));
+    };
+    let stdout_reader = match thread::Builder::new()
+        .name("chakra-git-diff-stdout".to_owned())
+        .spawn(move || read_bounded(stdout, MAX_GIT_OUTPUT_BYTES))
+    {
+        Ok(reader) => reader,
+        Err(error) => {
+            terminate_child(&mut child);
+            return Err(WorkspaceDiffError::new(format!(
+                "failed to execute `{display}`: {error}"
+            )));
+        }
+    };
+    let stderr = match read_bounded(stderr, MAX_GIT_STDERR_BYTES) {
+        Ok(stderr) => stderr,
+        Err(error) => {
+            terminate_child(&mut child);
+            let _ = stdout_reader.join();
+            return Err(WorkspaceDiffError::new(format!(
+                "failed to read `{display}` stderr: {error}"
+            )));
+        }
+    };
+    let status = match child.wait() {
+        Ok(status) => status,
+        Err(error) => {
+            terminate_child(&mut child);
+            let _ = stdout_reader.join();
+            return Err(WorkspaceDiffError::new(format!(
+                "failed to wait for `{display}`: {error}"
+            )));
+        }
+    };
+    let stdout = stdout_reader
+        .join()
+        .map_err(|_| WorkspaceDiffError::new(format!("`{display}` stdout reader panicked")))?
+        .map_err(|error| {
+            WorkspaceDiffError::new(format!("failed to read `{display}` stdout: {error}"))
+        })?;
+    Ok(GitOutput {
+        status,
+        stdout: stdout.bytes,
+        stderr: stderr.bytes,
+        stdout_exceeded: stdout.exceeded,
+    })
+}
+
 fn git_output(
     root: &Path,
     display: &'static str,
     args: &[&OsStr],
-) -> Result<Output, WorkspaceDiffError> {
-    let output = Command::new("git")
-        .current_dir(root)
-        .env("GIT_LITERAL_PATHSPECS", "1")
-        .args(args)
-        .output()
-        .map_err(|error| {
-            WorkspaceDiffError::new(format!("failed to execute `{display}`: {error}"))
-        })?;
+) -> Result<GitOutput, WorkspaceDiffError> {
+    let output = capture_git(root, display, args)?;
     if !output.status.success() {
         return Err(WorkspaceDiffError::new(format!(
             "`{display}` exited with status {}: {}",
@@ -54,7 +160,7 @@ fn git_output(
             bounded_text(&output.stderr)
         )));
     }
-    if output.stdout.len() > MAX_GIT_OUTPUT_BYTES {
+    if output.stdout_exceeded {
         return Err(WorkspaceDiffError::new(format!(
             "`{display}` output exceeded the {MAX_GIT_OUTPUT_BYTES}-byte safety budget"
         )));
@@ -74,14 +180,21 @@ fn has_head(root: &Path) -> Result<bool, WorkspaceDiffError> {
         ));
     }
 
-    let output = Command::new("git")
-        .current_dir(root)
-        .env("GIT_LITERAL_PATHSPECS", "1")
-        .args(["rev-parse", "--verify", "--quiet", "HEAD"])
-        .output()
-        .map_err(|error| {
-            WorkspaceDiffError::new(format!("failed to execute `git rev-parse HEAD`: {error}"))
-        })?;
+    let output = capture_git(
+        root,
+        "git rev-parse HEAD",
+        &[
+            OsStr::new("rev-parse"),
+            OsStr::new("--verify"),
+            OsStr::new("--quiet"),
+            OsStr::new("HEAD"),
+        ],
+    )?;
+    if output.stdout_exceeded {
+        return Err(WorkspaceDiffError::new(format!(
+            "`git rev-parse HEAD` output exceeded the {MAX_GIT_OUTPUT_BYTES}-byte safety budget"
+        )));
+    }
     if output.status.success() {
         Ok(true)
     } else if output.stdout.is_empty() && output.stderr.is_empty() {
@@ -639,6 +752,16 @@ mod tests {
             Err(error) => error,
         };
         assert!(error.to_string().contains("changed after syntax revision"));
+        Ok(())
+    }
+
+    #[test]
+    fn bounded_reader_drains_but_retains_only_the_budget() -> Result<(), Box<dyn Error>> {
+        let mut input = std::io::Cursor::new(b"0123456789");
+        let captured = read_bounded(&mut input, 4)?;
+        assert_eq!(captured.bytes, b"0123");
+        assert!(captured.exceeded);
+        assert_eq!(input.position(), 10);
         Ok(())
     }
 }

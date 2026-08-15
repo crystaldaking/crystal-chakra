@@ -1,0 +1,190 @@
+//! Hermetic rust-analyzer lifecycle regressions using a tiny stdio LSP peer.
+
+use std::error::Error;
+use std::ffi::OsString;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::sync::Arc;
+use std::time::Duration;
+
+use chakra_domain::location::{RepoRelativePath, SourceRange, TextPosition};
+use chakra_domain::revision::Revision;
+use chakra_domain::state::ProviderState;
+use chakra_engine::{
+    CallHierarchyDirections, PreciseProvider, PreciseQueryRequest, ProviderDocument,
+    ProviderSymbol, ProviderWorkspace,
+};
+use chakra_provider_rust_analyzer::{RustAnalyzerConfig, RustAnalyzerProvider};
+
+const FAKE_SERVER: &str = r#"
+use std::fs;
+use std::io::{self, BufRead, Read, Write};
+use std::path::PathBuf;
+
+fn request_id(body: &str) -> Option<&str> {
+    let rest = body.split_once("\"id\":")?.1;
+    let end = rest.find(|character: char| !character.is_ascii_digit())?;
+    rest.get(..end)
+}
+
+fn send(id: &str, result: &str) -> io::Result<()> {
+    let body = format!("{{\"jsonrpc\":\"2.0\",\"id\":{id},\"result\":{result}}}");
+    let mut stdout = io::stdout().lock();
+    write!(stdout, "Content-Length: {}\r\n\r\n{body}", body.len())?;
+    stdout.flush()
+}
+
+fn main() -> io::Result<()> {
+    let executable = std::env::current_exe()?;
+    let count_path = executable.with_extension("count");
+    let count = fs::read_to_string(&count_path)
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(0)
+        .saturating_add(1);
+    fs::write(&count_path, count.to_string())?;
+    let hang = executable
+        .file_stem()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.contains("hang"));
+    let cancelled_path: PathBuf = executable.with_extension("cancelled");
+    let stdin = io::stdin();
+    let mut stdin = stdin.lock();
+
+    loop {
+        let mut content_length = None;
+        loop {
+            let mut header = String::new();
+            if stdin.read_line(&mut header)? == 0 {
+                return Ok(());
+            }
+            let header = header.trim_end_matches(['\r', '\n']);
+            if header.is_empty() {
+                break;
+            }
+            if let Some(value) = header.strip_prefix("Content-Length: ") {
+                content_length = value.parse::<usize>().ok();
+            }
+        }
+        let Some(content_length) = content_length else {
+            return Ok(());
+        };
+        let mut body = vec![0; content_length];
+        stdin.read_exact(&mut body)?;
+        let body = String::from_utf8_lossy(&body);
+        if body.contains("\"method\":\"initialize\"") {
+            send("1", "{\"capabilities\":{\"callHierarchyProvider\":true}}")?;
+        } else if body.contains("\"method\":\"textDocument/prepareCallHierarchy\"") {
+            if !hang {
+                std::process::exit(17);
+            }
+        } else if body.contains("\"method\":\"$/cancelRequest\"") {
+            fs::write(&cancelled_path, body.as_bytes())?;
+        } else if body.contains("\"method\":\"shutdown\"") {
+            if let Some(id) = request_id(&body) {
+                send(id, "null")?;
+            }
+        } else if body.contains("\"method\":\"exit\"") {
+            return Ok(());
+        }
+    }
+}
+"#;
+
+fn compile_fake_server(root: &Path, name: &str) -> Result<PathBuf, Box<dyn Error>> {
+    let source = root.join(format!("{name}.rs"));
+    let executable = root.join(if cfg!(windows) {
+        format!("{name}.exe")
+    } else {
+        name.to_owned()
+    });
+    fs::write(&source, FAKE_SERVER)?;
+    let rustc = std::env::var_os("RUSTC").unwrap_or_else(|| OsString::from("rustc"));
+    let status = Command::new(rustc)
+        .args(["--edition=2024", "-o"])
+        .arg(&executable)
+        .arg(&source)
+        .status()?;
+    if !status.success() {
+        return Err("failed to compile the fake rust-analyzer peer".into());
+    }
+    Ok(executable)
+}
+
+fn request(root: &Path, revision: Revision) -> Result<PreciseQueryRequest, Box<dyn Error>> {
+    let path = RepoRelativePath::new("src/lib.rs")?;
+    let source: Arc<str> = Arc::from("pub fn target() {}\n");
+    fs::create_dir_all(root.join("src"))?;
+    fs::write(root.join(path.as_str()), source.as_ref())?;
+    Ok(PreciseQueryRequest {
+        workspace: ProviderWorkspace {
+            repository_root: fs::canonicalize(root)?,
+            revision,
+            documents: vec![ProviderDocument {
+                path: path.clone(),
+                source,
+            }],
+        },
+        symbol: ProviderSymbol {
+            name: "target".to_owned(),
+            declaration: SourceRange::new(
+                path,
+                TextPosition::new(1, 1)?,
+                TextPosition::new(1, 19)?,
+            )?,
+        },
+        directions: CallHierarchyDirections {
+            incoming: true,
+            outgoing: false,
+        },
+        limit: 20,
+    })
+}
+
+fn config(executable: &Path) -> RustAnalyzerConfig {
+    RustAnalyzerConfig {
+        executable: executable.as_os_str().to_owned(),
+        request_timeout: Duration::from_secs(1),
+        barrier_timeout: Duration::from_millis(250),
+        ..RustAnalyzerConfig::default()
+    }
+}
+
+#[test]
+fn transport_crash_restarts_once_then_degrades() -> Result<(), Box<dyn Error>> {
+    let repository = tempfile::tempdir()?;
+    let executable = compile_fake_server(repository.path(), "fake-ra-crash")?;
+    let request = request(repository.path(), Revision(1))?;
+    let provider = RustAnalyzerProvider::start(request.workspace.clone(), config(&executable))?;
+
+    let result = provider.enrich(request);
+    let process_count = fs::read_to_string(executable.with_extension("count"))?;
+    assert_eq!(
+        result.state,
+        ProviderState::Degraded,
+        "last_error={:?}, process_count={process_count}",
+        provider.last_error()
+    );
+    assert_eq!(process_count, "2");
+    assert_eq!(provider.state_for(Revision(1)), ProviderState::Degraded);
+    assert!(provider.last_error().is_some());
+    provider.shutdown()?;
+    Ok(())
+}
+
+#[test]
+fn timed_out_request_is_cancelled_before_shutdown() -> Result<(), Box<dyn Error>> {
+    let repository = tempfile::tempdir()?;
+    let executable = compile_fake_server(repository.path(), "fake-ra-hang")?;
+    let request = request(repository.path(), Revision(1))?;
+    let provider = RustAnalyzerProvider::start(request.workspace.clone(), config(&executable))?;
+
+    let result = provider.enrich(request);
+    assert_eq!(result.state, ProviderState::CatchingUp);
+    provider.shutdown()?;
+    let cancellation = fs::read_to_string(executable.with_extension("cancelled"))?;
+    assert!(cancellation.contains("$/cancelRequest"));
+    assert!(cancellation.contains("\"id\":2"));
+    Ok(())
+}

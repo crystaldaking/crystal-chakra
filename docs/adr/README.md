@@ -21,12 +21,14 @@ Date: YYYY-MM-DD
 ## Validation / follow-up
 ```
 
-Likely early ADRs, only when the decision is actually made:
+Accepted v0.1 decisions:
 
-- Cargo workspace boundaries
-- workspace revision publication model
-- Rust syntax graph representation
-- rust-analyzer synchronization/freshness barrier
-- MCP transport for v0.1
+- ADR-001: workspace revision publication model
+- ADR-002: in-memory graph representation
+- ADR-003: MCP transport and SDK
+- ADR-004: Git-aware Rust syntax index
+- ADR-005: live syntax reconciliation and freshness barriers
+- ADR-006: optional rust-analyzer precise enrichment
+- ADR-007: agent queries and Git diff scope
 
 Do not pre-create empty ADRs merely to satisfy a list.

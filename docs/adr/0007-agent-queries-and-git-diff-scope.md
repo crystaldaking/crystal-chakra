@@ -2,6 +2,7 @@
 
 Status: accepted
 Date: 2026-08-15
+Last reviewed: 2026-08-16
 
 ## Context
 
@@ -24,6 +25,10 @@ would also violate atomic revision semantics.
 - Add `chakra-git` as an outward adapter over a small Chakra-native
   `WorkspaceDiffProvider` contract. The engine and domain crates contain no Git
   command/output types, and the MCP adapter only delegates typed queries.
+- Git commands use fixed structured arguments and stream their pipes. The
+  adapter drains stdout while retaining at most 8 MiB and captures only a
+  bounded stderr prefix, so an oversized diff becomes a typed unavailable
+  result without unbounded output allocation.
 - Define the v0.1 default diff scope as `HEAD` to the final materialized
   worktree for indexed regular Rust files:
   - tracked staged and unstaged edits are combined; final worktree content wins;
@@ -91,4 +96,5 @@ would also violate atomic revision semantics.
 - The Rust fixture exercises structured `context`, ambiguity, callers,
   `diff_context`, budgets, and provenance through an in-process MCP client.
 - Fixture measurements record initial indexing, `symbol_search`, `context`, and
-  `diff_context` latency.
+  `diff_context` latency; `docs/evaluation/v0.1-readiness.md` records the
+  current local values and reproduction commands.

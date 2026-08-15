@@ -1,12 +1,30 @@
 //! Git-aware repository file discovery (SPEC §20; roadmap §11).
 
 use std::ffi::OsStr;
-use std::io;
+use std::io::{self, Read};
 use std::path::{Component, Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::{Command, ExitStatus, Stdio};
+use std::thread;
 
 use chakra_domain::location::{RepoPathError, RepoRelativePath};
 use thiserror::Error;
+
+const MAX_GIT_STDOUT_BYTES: usize = 64 * 1024 * 1024;
+const MAX_GIT_STDERR_BYTES: usize = 16 * 1024;
+
+#[derive(Debug)]
+struct BoundedRead {
+    bytes: Vec<u8>,
+    exceeded: bool,
+}
+
+#[derive(Debug)]
+struct GitOutput {
+    status: ExitStatus,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+    stdout_exceeded: bool,
+}
 
 /// Failure to establish the Git worktree or enumerate its source files.
 #[derive(Debug, Error)]
@@ -35,21 +53,127 @@ pub enum DiscoveryError {
     },
     #[error("Git returned an invalid repository-relative path: {0}")]
     InvalidPath(#[from] RepoPathError),
+    #[error("Git command `{command}` output exceeded the {limit}-byte safety budget")]
+    OutputTooLarge { command: &'static str, limit: usize },
+}
+
+fn read_bounded(mut reader: impl Read, limit: usize) -> io::Result<BoundedRead> {
+    let mut bytes = Vec::with_capacity(limit.min(8 * 1024));
+    let mut exceeded = false;
+    let mut buffer = [0_u8; 8 * 1024];
+    loop {
+        let read = reader.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        let remaining = limit.saturating_sub(bytes.len());
+        let retained = remaining.min(read);
+        bytes.extend_from_slice(&buffer[..retained]);
+        exceeded |= retained < read;
+    }
+    Ok(BoundedRead { bytes, exceeded })
+}
+
+fn terminate_child(child: &mut std::process::Child) {
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+fn capture_git(
+    current_dir: &Path,
+    command_name: &'static str,
+    args: &[&OsStr],
+) -> Result<GitOutput, DiscoveryError> {
+    let mut child = Command::new("git")
+        .current_dir(current_dir)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .args(args)
+        .spawn()
+        .map_err(|source| DiscoveryError::Spawn {
+            command: command_name,
+            source,
+        })?;
+    let Some(stdout) = child.stdout.take() else {
+        terminate_child(&mut child);
+        return Err(DiscoveryError::Spawn {
+            command: command_name,
+            source: io::Error::other("Git stdout pipe is unavailable"),
+        });
+    };
+    let Some(stderr) = child.stderr.take() else {
+        terminate_child(&mut child);
+        return Err(DiscoveryError::Spawn {
+            command: command_name,
+            source: io::Error::other("Git stderr pipe is unavailable"),
+        });
+    };
+    let stdout_reader = match thread::Builder::new()
+        .name("chakra-git-discovery-stdout".to_owned())
+        .spawn(move || read_bounded(stdout, MAX_GIT_STDOUT_BYTES))
+    {
+        Ok(reader) => reader,
+        Err(source) => {
+            terminate_child(&mut child);
+            return Err(DiscoveryError::Spawn {
+                command: command_name,
+                source,
+            });
+        }
+    };
+    let stderr = match read_bounded(stderr, MAX_GIT_STDERR_BYTES) {
+        Ok(stderr) => stderr,
+        Err(source) => {
+            terminate_child(&mut child);
+            let _ = stdout_reader.join();
+            return Err(DiscoveryError::Spawn {
+                command: command_name,
+                source,
+            });
+        }
+    };
+    let status = match child.wait() {
+        Ok(status) => status,
+        Err(source) => {
+            terminate_child(&mut child);
+            let _ = stdout_reader.join();
+            return Err(DiscoveryError::Spawn {
+                command: command_name,
+                source,
+            });
+        }
+    };
+    let stdout = stdout_reader
+        .join()
+        .map_err(|_| DiscoveryError::Spawn {
+            command: command_name,
+            source: io::Error::other("Git stdout reader panicked"),
+        })?
+        .map_err(|source| DiscoveryError::Spawn {
+            command: command_name,
+            source,
+        })?;
+    Ok(GitOutput {
+        status,
+        stdout: stdout.bytes,
+        stderr: stderr.bytes,
+        stdout_exceeded: stdout.exceeded,
+    })
 }
 
 fn git_output(
     current_dir: &Path,
     command_name: &'static str,
     args: &[&OsStr],
-) -> Result<Output, DiscoveryError> {
-    let output = Command::new("git")
-        .current_dir(current_dir)
-        .args(args)
-        .output()
-        .map_err(|source| DiscoveryError::Spawn {
+) -> Result<GitOutput, DiscoveryError> {
+    let output = capture_git(current_dir, command_name, args)?;
+    if output.stdout_exceeded {
+        return Err(DiscoveryError::OutputTooLarge {
             command: command_name,
-            source,
-        })?;
+            limit: MAX_GIT_STDOUT_BYTES,
+        });
+    }
     if !output.status.success() {
         return Err(DiscoveryError::Git {
             command: command_name,
@@ -238,6 +362,16 @@ mod tests {
         let files = discover_rust_files(&worktree)?;
         assert_eq!(files.len(), 1);
         assert_eq!(files[0].as_str(), "src/lib.rs");
+        Ok(())
+    }
+
+    #[test]
+    fn bounded_reader_drains_but_retains_only_the_budget() -> Result<(), Box<dyn Error>> {
+        let mut input = std::io::Cursor::new(b"0123456789");
+        let captured = read_bounded(&mut input, 4)?;
+        assert_eq!(captured.bytes, b"0123");
+        assert!(captured.exceeded);
+        assert_eq!(input.position(), 10);
         Ok(())
     }
 }

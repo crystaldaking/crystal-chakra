@@ -187,3 +187,43 @@ pub async fn serve_stdio(service: Arc<dyn QueryService>) -> Result<(), ServeErro
         .map_err(|error| ServeError::Runtime(error.to_string()))?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use chakra_domain::identity::WorkspaceIdentity;
+    use chakra_domain::query::StatusData;
+    use chakra_engine::WorkspaceEngine;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn cancelling_a_queued_query_prevents_dispatch()
+    -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let identity = WorkspaceIdentity::for_primary_worktree(std::path::Path::new("."))?;
+        let server = ChakraMcpServer::new(Arc::new(WorkspaceEngine::new(identity)));
+        let first = server.query_slots.clone().acquire_owned().await?;
+        let second = server.query_slots.clone().acquire_owned().await?;
+        let called = Arc::new(AtomicBool::new(false));
+        let task_called = called.clone();
+        let task_server = server.clone();
+        let task = tokio::spawn(async move {
+            task_server
+                .execute_query::<StatusData, _>(move |_| {
+                    task_called.store(true, Ordering::Release);
+                    Err(QueryError::Unsupported("cancelled test query"))
+                })
+                .await
+        });
+
+        tokio::task::yield_now().await;
+        task.abort();
+        let cancellation = task.await;
+        assert!(cancellation.is_err_and(|error| error.is_cancelled()));
+        drop((first, second));
+        tokio::task::yield_now().await;
+        assert!(!called.load(Ordering::Acquire));
+        Ok(())
+    }
+}

@@ -2,6 +2,7 @@
 
 Status: accepted
 Date: 2026-08-15
+Last reviewed: 2026-08-16
 
 ## Context
 
@@ -108,11 +109,14 @@ over native filesystem mechanisms:
 
 - Deterministic real-Git integration tests cover immediate fresh reads,
   immutable old versus new revisions, one-file reparse/no full reindex,
-  create/rename/delete, atomic replacement, temporary syntax errors, and
-  recovery. Queries synchronize through the barrier; no arbitrary test sleep
-  is used.
+  create/rename/delete, atomic replacement, temporary syntax errors, rapid
+  editor-style replacement bursts, and recovery. Queries synchronize through
+  the barrier; no arbitrary test sleep is used.
 - A pure unit test checks both quiet and absolute debounce deadlines using
   synthetic instants.
+- The hardening measurement records the fresh barrier and reparse counters for
+  both one ordinary edit and a 32-replacement burst; neither path increments
+  the full-repository reindex counter.
 - Periodic background reconciliation is deferred. v0.1 recovers missed events
   on every fresh-query barrier, which is the correctness boundary required by
   the current query contract.

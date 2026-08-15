@@ -2,6 +2,7 @@
 
 Status: accepted
 Date: 2026-08-15
+Last reviewed: 2026-08-16
 
 ## Context
 
@@ -106,8 +107,13 @@ background work is quiescent:
   `CatchingUp`, and provider degradation preserves useful syntax callers.
 - Adapter unit tests cover UTF-16 conversion, repository-scoped file URIs, and
   deterministic missing-executable degradation without a global provider.
+- A hermetic stdio peer proves that a transport crash triggers exactly one
+  automatic process restart before honest degradation, and that a timed-out
+  request sends `$/cancelRequest` before cooperative shutdown. These tests do
+  not require a global rust-analyzer installation.
 - An ignored real-provider smoke test exercises initialization, quiescence,
-  incoming Call Hierarchy, conversion, and cooperative shutdown when
-  rust-analyzer is installed. The default workspace suite does not run it.
+  incoming Call Hierarchy before and after an edit, conversion, measured
+  enrichment latency, and cooperative shutdown when rust-analyzer is
+  installed. The default workspace suite does not run it.
 - MCP contract tests invoke both `context` and `callers` through a real
   structured transport.

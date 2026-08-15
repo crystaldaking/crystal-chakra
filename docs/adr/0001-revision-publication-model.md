@@ -2,6 +2,7 @@
 
 Status: accepted
 Date: 2026-08-15
+Last reviewed: 2026-08-16
 
 ## Context
 
@@ -59,9 +60,9 @@ non-deferrable because retrofitting it would distort the engine.
 - Every update currently clones the graph. At v0.1 fixture scale this is
   noise; if measurements show it matters, the snapshot internals can switch
   to structural sharing without changing the publication model.
-- A lost update race surfaces as a typed `Conflict` the updater retries
-  from a fresh base; watchers/indexers must handle that path when they
-  arrive.
+- A lost update race surfaces as a typed `Conflict`. The live reconciliation
+  publisher retries from a fresh base with a fixed attempt bound rather than
+  overwriting a newer revision.
 
 ## Validation / follow-up
 
