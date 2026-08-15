@@ -15,6 +15,10 @@ serde_json = "1"
 schemars = "1"
 thiserror = "2"
 arc-swap = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter", "std"] }
+rmcp = { version = "3", default-features = false, features = ["server", "macros", "schemars", "transport-io"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
