@@ -4,9 +4,9 @@ use std::sync::Arc;
 
 use chakra_domain::envelope::QueryEnvelope;
 use chakra_domain::query::{
-    CallersData, CallersRequest, ContextData, ContextRequest, QueryError, QueryService,
-    RepoMapData, RepoMapRequest, SearchData, SearchRequest, StatusData, StatusRequest,
-    SymbolSearchData, SymbolSearchRequest,
+    CallersData, CallersRequest, ContextData, ContextRequest, DiffContextData, DiffContextRequest,
+    QueryError, QueryService, RepoMapData, RepoMapRequest, SearchData, SearchRequest, StatusData,
+    StatusRequest, SymbolSearchData, SymbolSearchRequest,
 };
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::{Json, Parameters};
@@ -33,9 +33,9 @@ fn to_error_data(error: QueryError) -> ErrorData {
         | QueryError::SymbolNotFound(_)
         | QueryError::AmbiguousSymbol { .. }
         | QueryError::FreshnessNotMet { .. } => ErrorData::invalid_params(error.to_string(), None),
-        QueryError::Unsupported(_) | QueryError::FreshnessUnavailable(_) => {
-            ErrorData::internal_error(error.to_string(), None)
-        }
+        QueryError::Unsupported(_)
+        | QueryError::FreshnessUnavailable(_)
+        | QueryError::DiffUnavailable(_) => ErrorData::internal_error(error.to_string(), None),
     }
 }
 
@@ -141,11 +141,23 @@ impl ChakraMcpServer {
         self.execute_query(move |service| service.callers(request))
             .await
     }
+
+    #[tool(
+        name = "diff_context",
+        description = "Summarize bounded Rust changes from HEAD to the materialized worktree, with changed symbols and related callers/tests"
+    )]
+    async fn diff_context(
+        &self,
+        Parameters(request): Parameters<DiffContextRequest>,
+    ) -> Result<Json<QueryEnvelope<DiffContextData>>, ErrorData> {
+        self.execute_query(move |service| service.diff_context(request))
+            .await
+    }
 }
 
 #[tool_handler(
     name = "chakra",
-    instructions = "Chakra Rust code intelligence: inspect status and repo_map, search indexed source, resolve ambiguous names through symbol_search, then request context or callers. Results are bounded and carry revision, freshness, provider state, provenance, and precision.",
+    instructions = "Chakra Rust code intelligence: inspect status and repo_map, search indexed source, resolve ambiguous names through symbol_search, request context or callers for one entity, and use diff_context for current worktree changes. Results are bounded and carry revision, freshness, provider state, provenance, and precision.",
     router = self.tool_router
 )]
 impl ServerHandler for ChakraMcpServer {}

@@ -359,7 +359,7 @@ fn struct_and_trait_kinds_are_exposed() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
-fn text_search_is_empty_without_captured_source_and_diff_is_still_unsupported()
+fn text_search_is_empty_without_captured_source_and_diff_requires_an_adapter()
 -> Result<(), Box<dyn Error>> {
     let (engine, _) = scenario_engine()?;
     let search = engine.search(SearchRequest {
@@ -369,7 +369,7 @@ fn text_search_is_empty_without_captured_source_and_diff_is_still_unsupported()
     assert!(search.data.matches.is_empty());
     assert!(!search.truncated);
     let diff = engine.diff_context(DiffContextRequest::default());
-    assert!(matches!(diff, Err(QueryError::Unsupported("diff_context"))));
+    assert!(matches!(diff, Err(QueryError::DiffUnavailable(_))));
     Ok(())
 }
 

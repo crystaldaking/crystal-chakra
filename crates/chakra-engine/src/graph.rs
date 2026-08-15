@@ -208,9 +208,9 @@ impl SymbolGraph {
         files
     }
 
-    /// Cheap owned views of captured source, for optional language-provider
-    /// synchronization. Cloning the `Arc<str>` never copies file contents.
-    pub(crate) fn provider_documents(&self) -> Vec<(RepoRelativePath, Arc<str>)> {
+    /// Cheap owned views of captured source for outward adapters. Cloning the
+    /// `Arc<str>` never copies file contents.
+    pub(crate) fn snapshot_documents(&self) -> Vec<(RepoRelativePath, Arc<str>)> {
         let mut files: Vec<_> = self
             .files
             .iter()
@@ -222,6 +222,18 @@ impl SymbolGraph {
             .collect();
         files.sort_by(|a, b| a.0.cmp(&b.0));
         files
+    }
+
+    /// Symbols declared in one file, in deterministic arena order.
+    pub fn symbols_in_file<'a>(
+        &'a self,
+        path: &RepoRelativePath,
+    ) -> impl Iterator<Item = &'a Symbol> {
+        self.files
+            .get(path)
+            .into_iter()
+            .flat_map(|file| file.symbols.iter())
+            .filter_map(|id| self.symbol(*id))
     }
 
     /// Case-insensitive substring search over qualified names. Result

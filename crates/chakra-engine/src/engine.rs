@@ -14,6 +14,7 @@ use chakra_domain::revision::Revision;
 use chakra_domain::state::{Freshness, ProviderState, WorkspaceStatus};
 use thiserror::Error;
 
+use crate::diff::WorkspaceDiffProvider;
 use crate::graph::SymbolGraph;
 use crate::precise::{PreciseProvider, ProviderWorkspace};
 
@@ -98,6 +99,11 @@ pub struct BarrierAlreadyInstalled;
 #[error("a precise provider is already installed")]
 pub struct ProviderAlreadyInstalled;
 
+/// A workspace has at most one Git/workspace diff adapter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+#[error("a workspace diff provider is already installed")]
+pub struct DiffProviderAlreadyInstalled;
+
 /// A private, in-progress update to the workspace state.
 ///
 /// Obtained from [`WorkspaceEngine::begin_update`]; published via
@@ -166,6 +172,7 @@ pub struct WorkspaceEngine {
     current: ArcSwap<WorkspaceSnapshot>,
     freshness_barrier: OnceLock<Arc<dyn FreshnessBarrier>>,
     precise_provider: OnceLock<Arc<dyn PreciseProvider>>,
+    diff_provider: OnceLock<Arc<dyn WorkspaceDiffProvider>>,
 }
 
 impl WorkspaceEngine {
@@ -188,6 +195,7 @@ impl WorkspaceEngine {
             current: ArcSwap::from_pointee(snapshot),
             freshness_barrier: OnceLock::new(),
             precise_provider: OnceLock::new(),
+            diff_provider: OnceLock::new(),
         }
     }
 
@@ -211,6 +219,16 @@ impl WorkspaceEngine {
             .map_err(|_| ProviderAlreadyInstalled)
     }
 
+    /// Installs the Git/workspace adapter used by `diff_context`.
+    pub fn install_diff_provider(
+        &self,
+        provider: Arc<dyn WorkspaceDiffProvider>,
+    ) -> Result<(), DiffProviderAlreadyInstalled> {
+        self.diff_provider
+            .set(provider)
+            .map_err(|_| DiffProviderAlreadyInstalled)
+    }
+
     /// Captures the current immutable syntax input for provider startup.
     pub fn provider_workspace(&self) -> ProviderWorkspace {
         ProviderWorkspace::from_snapshot(&self.snapshot())
@@ -218,6 +236,10 @@ impl WorkspaceEngine {
 
     pub(crate) fn precise_provider(&self) -> Option<&Arc<dyn PreciseProvider>> {
         self.precise_provider.get()
+    }
+
+    pub(crate) fn diff_provider(&self) -> Option<&Arc<dyn WorkspaceDiffProvider>> {
+        self.diff_provider.get()
     }
 
     /// Waits until the installed owner has reconciled and published the

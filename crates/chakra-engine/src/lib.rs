@@ -5,14 +5,19 @@
 //! Implements the [`chakra_domain::query::QueryService`] contract against
 //! the in-memory symbol graph.
 
+mod diff;
 mod engine;
 mod graph;
 mod precise;
 mod query;
 
+pub use diff::{
+    DiffDocument, DiffWorkspace, WorkspaceDiff, WorkspaceDiffError, WorkspaceDiffProvider,
+    WorkspaceFileChange,
+};
 pub use engine::{
-    BarrierAlreadyInstalled, FreshnessBarrier, FreshnessBarrierError, ProviderAlreadyInstalled,
-    PublishError, UpdateBuilder, WorkspaceEngine, WorkspaceSnapshot,
+    BarrierAlreadyInstalled, DiffProviderAlreadyInstalled, FreshnessBarrier, FreshnessBarrierError,
+    ProviderAlreadyInstalled, PublishError, UpdateBuilder, WorkspaceEngine, WorkspaceSnapshot,
 };
 pub use graph::{ConsistencyError, GraphError, SymbolGraph};
 pub use precise::{

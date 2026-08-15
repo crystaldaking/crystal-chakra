@@ -35,7 +35,7 @@ impl ProviderWorkspace {
     pub(crate) fn from_snapshot(snapshot: &WorkspaceSnapshot) -> Self {
         let documents = snapshot
             .graph()
-            .provider_documents()
+            .snapshot_documents()
             .into_iter()
             .map(|(path, source)| ProviderDocument { path, source })
             .collect();

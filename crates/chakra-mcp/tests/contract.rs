@@ -126,6 +126,7 @@ async fn status_tool_is_listed_and_callable() -> Result<(), Box<dyn Error + Send
         [
             "callers",
             "context",
+            "diff_context",
             "repo_map",
             "search",
             "status",
@@ -192,16 +193,35 @@ fn copy_rust_tree(source: &Path, target: &Path) -> Result<(), Box<dyn Error + Se
     Ok(())
 }
 
+fn git(root: &Path, args: &[&str]) -> Result<(), Box<dyn Error + Send + Sync>> {
+    let status = Command::new("git").current_dir(root).args(args).status()?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("git {} failed", args.join(" ")).into())
+    }
+}
+
 fn indexed_fixture_engine() -> Result<(TempDir, WorkspaceEngine), Box<dyn Error + Send + Sync>> {
     let repository = TempDir::new()?;
-    let status = Command::new("git")
-        .current_dir(repository.path())
-        .args(["init", "--quiet"])
-        .status()?;
-    if !status.success() {
-        return Err("git init failed".into());
-    }
+    git(repository.path(), &["init", "--quiet"])?;
+    git(
+        repository.path(),
+        &["config", "user.email", "tests@example.invalid"],
+    )?;
+    git(repository.path(), &["config", "user.name", "Chakra Tests"])?;
     copy_rust_tree(&source_fixture_root(), repository.path())?;
+    git(repository.path(), &["add", "src", "tests"])?;
+    git(repository.path(), &["commit", "--quiet", "-m", "base"])?;
+    let service_path = repository.path().join("src/service/payment_service.rs");
+    let service_source = fs::read_to_string(&service_path)?;
+    if !service_source.contains("amount_cents == 0") {
+        return Err("fixture refund guard missing".into());
+    }
+    fs::write(
+        &service_path,
+        service_source.replacen("amount_cents == 0", "amount_cents <= 0", 1),
+    )?;
     let report = index_repository(repository.path())?;
     let identity = WorkspaceIdentity::for_primary_worktree(&report.repository_root)?;
     let engine = WorkspaceEngine::new(identity);
@@ -210,6 +230,7 @@ fn indexed_fixture_engine() -> Result<(TempDir, WorkspaceEngine), Box<dyn Error 
     update.set_status(WorkspaceStatus::Ready);
     update.set_freshness(Freshness::Fresh);
     engine.publish(update)?;
+    engine.install_diff_provider(Arc::new(chakra_git::GitWorkspaceDiff))?;
     Ok((repository, engine))
 }
 
@@ -316,6 +337,90 @@ async fn indexed_fixture_is_queryable_through_structured_mcp_tools()
             .as_array()
             .is_some_and(|items| !items.is_empty())
     );
+
+    let ambiguous_args = serde_json::from_value(serde_json::json!({
+        "symbol": { "by_name": "refund" },
+        "limit": 20
+    }))?;
+    let ambiguous = client
+        .call_tool(CallToolRequestParams::new("context").with_arguments(ambiguous_args))
+        .await;
+    let ambiguity = match ambiguous {
+        Ok(_) => return Err("ambiguous context unexpectedly succeeded".into()),
+        Err(error) => error,
+    };
+    assert!(ambiguity.to_string().contains("ambiguous symbol reference"));
+
+    let diff_args = serde_json::from_value(serde_json::json!({ "limit": 20 }))?;
+    let diff = client
+        .call_tool(CallToolRequestParams::new("diff_context").with_arguments(diff_args))
+        .await?;
+    assert_eq!(diff.is_error, Some(false));
+    let diff = diff
+        .structured_content
+        .ok_or("diff_context must return structured content")?;
+    assert_eq!(diff["freshness"], "fresh");
+    assert_eq!(
+        diff["data"]["changed_files"].as_array().map(Vec::len),
+        Some(1)
+    );
+    assert_eq!(
+        diff["data"]["changed_files"][0]["path"],
+        "src/service/payment_service.rs"
+    );
+    assert_eq!(diff["data"]["changed_files"][0]["change"], "modified");
+    assert_eq!(diff["data"]["changed_files"][0]["provenance"], "git");
+    assert_eq!(diff["data"]["changed_files"][0]["precision"], "precise");
+    let changed_symbols = diff["data"]["changed_symbols"]
+        .as_array()
+        .ok_or("changed symbols missing")?;
+    let changed_refund = changed_symbols
+        .iter()
+        .find(|symbol| {
+            symbol["symbol"]["qualified_name"] == "service::payment_service::PaymentService::refund"
+                && symbol["basis"] == "declared_in_changed_file"
+                && symbol["precision"] == "heuristic"
+        })
+        .ok_or("changed refund symbol missing")?;
+    let changed_refund_id = &changed_refund["symbol"]["id"];
+    assert!(
+        diff["data"]["related_callers"]
+            .as_array()
+            .is_some_and(|items| items.iter().any(|item| {
+                item["changed_symbol_id"] == *changed_refund_id
+                    && item["relation"]["symbol"]["qualified_name"]
+                        == "api::controller::PaymentController::refund"
+                    && item["relation"]["precision"] == "heuristic"
+            }))
+    );
+    assert!(
+        diff["data"]["related_tests"]
+            .as_array()
+            .is_some_and(|items| items.iter().any(|item| {
+                item["changed_symbol_id"] == *changed_refund_id
+                    && item["relation"]["edge_kind"] == "TESTS"
+            }))
+    );
+
+    let bounded_args = serde_json::from_value(serde_json::json!({ "limit": 1 }))?;
+    let bounded = client
+        .call_tool(CallToolRequestParams::new("diff_context").with_arguments(bounded_args))
+        .await?
+        .structured_content
+        .ok_or("bounded diff_context must return structured content")?;
+    assert_eq!(bounded["truncated"], true);
+    for section in [
+        "changed_files",
+        "changed_symbols",
+        "related_callers",
+        "related_tests",
+    ] {
+        assert!(
+            bounded["data"][section]
+                .as_array()
+                .is_some_and(|items| items.len() <= 1)
+        );
+    }
 
     client.cancel().await?;
     let running = server_task

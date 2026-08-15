@@ -9,8 +9,8 @@ use std::time::Instant;
 use chakra_domain::identity::WorkspaceIdentity;
 use chakra_domain::provenance::{Precision, Provenance};
 use chakra_domain::query::{
-    CallersRequest, ContextRequest, QueryError, QueryService, RepoMapRequest, SearchRequest,
-    StatusRequest, SymbolRef, SymbolSearchRequest,
+    CallersRequest, ContextRequest, DiffContextRequest, QueryError, QueryService, RepoMapRequest,
+    SearchRequest, StatusRequest, SymbolRef, SymbolSearchRequest,
 };
 use chakra_domain::state::{Freshness, WorkspaceStatus};
 use chakra_domain::symbol::{EdgeKind, SymbolKind};
@@ -73,6 +73,7 @@ fn indexed_engine() -> Result<(TempDir, WorkspaceEngine, IndexMetrics), Box<dyn 
     update.set_status(WorkspaceStatus::Ready);
     update.set_freshness(Freshness::Fresh);
     engine.publish(update)?;
+    engine.install_diff_provider(std::sync::Arc::new(chakra_git::GitWorkspaceDiff))?;
     Ok((repository, engine, metrics))
 }
 
@@ -339,12 +340,20 @@ fn real_index_serves_bounded_repo_text_symbol_and_context_queries() -> Result<()
         )),
         ..ContextRequest::default()
     })?;
-    let snippet = context.data.source.ok_or("source snippet missing")?;
+    let snippet = context
+        .data
+        .source
+        .as_ref()
+        .ok_or("source snippet missing")?;
     assert!(snippet.text.contains("amount_cents == 0"));
     assert!(!snippet.truncated);
     assert_eq!(snippet.provenance, Provenance::TreeSitter);
     assert_eq!(snippet.precision, Precision::Syntax);
     assert!(snippet.text.chars().count() <= 4_096);
+    assert!(!context.data.callers.is_empty());
+    assert!(!context.data.callees.is_empty());
+    assert!(!context.data.tests.is_empty());
+    assert!(!context.data.related_files.is_empty());
     Ok(())
 }
 
@@ -380,6 +389,37 @@ fn search_line_snippets_remain_bounded_and_keep_original_range() -> Result<(), B
 }
 
 #[test]
+fn context_source_budget_sets_both_local_and_envelope_truncation() -> Result<(), Box<dyn Error>> {
+    let repository = fixture_repository()?;
+    let body = (0..40)
+        .map(|line| format!("    let value_{line} = {line};\n"))
+        .collect::<String>();
+    fs::write(
+        repository.path().join("src/long_context.rs"),
+        format!("pub fn long_context() {{\n{body}}}\n"),
+    )?;
+    let report = index_repository(repository.path())?;
+    let identity = WorkspaceIdentity::for_primary_worktree(&report.repository_root)?;
+    let engine = WorkspaceEngine::new(identity);
+    let mut update = engine.begin_update();
+    update.replace_graph(report.graph);
+    update.set_status(WorkspaceStatus::Ready);
+    update.set_freshness(Freshness::Fresh);
+    engine.publish(update)?;
+
+    let result = engine.context(ContextRequest {
+        symbol: Some(SymbolRef::ByName("long_context".to_owned())),
+        ..ContextRequest::default()
+    })?;
+    let snippet = result.data.source.ok_or("source snippet missing")?;
+    assert!(snippet.truncated);
+    assert!(result.truncated);
+    assert!(snippet.text.lines().count() <= 20);
+    assert!(snippet.text.chars().count() <= 4_096);
+    Ok(())
+}
+
+#[test]
 fn indexing_and_query_latencies_are_directly_measurable() -> Result<(), Box<dyn Error>> {
     let (_repository, engine, metrics) = indexed_engine()?;
     let symbol_started = Instant::now();
@@ -388,14 +428,31 @@ fn indexing_and_query_latencies_are_directly_measurable() -> Result<(), Box<dyn 
         ..SymbolSearchRequest::default()
     })?;
     let symbol_search_elapsed = symbol_started.elapsed();
+    let context_started = Instant::now();
+    let context = engine.context(ContextRequest {
+        symbol: Some(SymbolRef::ByName(
+            "service::payment_service::PaymentService::refund".to_owned(),
+        )),
+        ..ContextRequest::default()
+    })?;
+    let context_elapsed = context_started.elapsed();
+    let diff_started = Instant::now();
+    let diff = engine.diff_context(DiffContextRequest::default())?;
+    let diff_context_elapsed = diff_started.elapsed();
 
     assert!(metrics.elapsed.as_nanos() > 0);
     assert!(symbol_search_elapsed.as_nanos() > 0);
+    assert!(context_elapsed.as_nanos() > 0);
+    assert!(diff_context_elapsed.as_nanos() > 0);
     assert!(!result.data.candidates.is_empty());
+    assert!(!context.data.callees.is_empty());
+    assert!(!diff.data.changed_files.is_empty());
     eprintln!(
-        "syntax_index_fixture: initial={:?}, symbol_search={:?}, files={}, symbols={}, edges={}",
+        "syntax_index_fixture: initial={:?}, symbol_search={:?}, context={:?}, diff_context={:?}, files={}, symbols={}, edges={}",
         metrics.elapsed,
         symbol_search_elapsed,
+        context_elapsed,
+        diff_context_elapsed,
         metrics.parsed_files,
         metrics.symbols,
         metrics.edges

@@ -3,8 +3,8 @@
 //! These types are the MCP-independent application interface: adapters map
 //! transports onto [`QueryService`], and every response is wrapped in a
 //! [`QueryEnvelope`]. v0.1 exposes exactly the seven queries listed in
-//! `docs/roadmap/v0.1.md` §3; unimplemented ones fail with a typed
-//! [`QueryError::Unsupported`] rather than a stub result.
+//! `docs/roadmap/v0.1.md` §3. Optional adapters fail with typed errors rather
+//! than returning placeholder data.
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -252,10 +252,39 @@ pub enum ChangeKind {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ChangedFile {
+    /// Current path, or the former path when the file was deleted.
     pub path: RepoRelativePath,
+    /// Former path for a Git-detected rename.
+    pub previous_path: Option<RepoRelativePath>,
     pub change: ChangeKind,
     pub provenance: Provenance,
     pub precision: Precision,
+}
+
+/// Why a current symbol appears in `diff_context`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ChangedSymbolBasis {
+    /// The declaration belongs to a current file changed relative to HEAD.
+    /// v0.1 does not claim that the declaration or body overlaps a diff hunk.
+    DeclaredInChangedFile,
+}
+
+/// A current syntax symbol selected by the documented diff heuristic.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct ChangedSymbol {
+    pub symbol: SymbolView,
+    pub basis: ChangedSymbolBasis,
+    pub provenance: Provenance,
+    pub precision: Precision,
+}
+
+/// One caller/test relation anchored to a symbol returned in the same
+/// `diff_context` response.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct DiffRelatedSymbol {
+    pub changed_symbol_id: EntityId,
+    pub relation: RelatedSymbol,
 }
 
 /// Bounded structured result of a diff walk (SPEC §26). Facts must be
@@ -263,9 +292,9 @@ pub struct ChangedFile {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct DiffContextData {
     pub changed_files: Vec<ChangedFile>,
-    pub changed_symbols: Vec<SymbolView>,
-    pub related_callers: Vec<RelatedSymbol>,
-    pub related_tests: Vec<RelatedSymbol>,
+    pub changed_symbols: Vec<ChangedSymbol>,
+    pub related_callers: Vec<DiffRelatedSymbol>,
+    pub related_tests: Vec<DiffRelatedSymbol>,
 }
 
 // --- errors and the service contract ---
@@ -302,6 +331,8 @@ pub enum QueryError {
     },
     #[error("fresh syntax state is unavailable: {0}")]
     FreshnessUnavailable(String),
+    #[error("Git diff state is unavailable: {0}")]
+    DiffUnavailable(String),
 }
 
 /// The MCP-independent application interface (SPEC §23).

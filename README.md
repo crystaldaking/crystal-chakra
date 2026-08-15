@@ -8,8 +8,10 @@ Git diff state — so agents can navigate a codebase with fewer blind searches.
 Status: **v0.1 in progress**. The current slice provides Git-aware Rust
 discovery, a Tree-sitter syntax index, bounded live filesystem reconciliation,
 deterministic fresh-query barriers, atomic in-memory revisions, and MCP tools
-for `status`, `repo_map`, literal/regex `search`, and `symbol_search`. Precise
-rust-analyzer enrichment and Git diff context land in later slices.
+for `status`, `repo_map`, literal/regex `search`, `symbol_search`, `context`,
+`callers`, and `diff_context`. Optional rust-analyzer enrichment improves
+selected live caller/context requests while syntax results remain available
+when the provider is absent or degraded.
 
 ## Build and run
 
@@ -34,6 +36,13 @@ args = ["serve", "--repo", "/absolute/path/to/repository"]
 Logging goes to stderr (`RUST_LOG=debug` for more); stdout carries only the
 MCP protocol stream.
 
+`diff_context` compares `HEAD` with the final materialized worktree for indexed
+Rust files. It combines staged and unstaged tracked edits, includes untracked
+non-ignored files, and reports deletes. Git-detected staged renames include the
+former path; an unstaged move is represented as delete plus add when Git cannot
+prove a rename. Results and source snippets are bounded and advertise
+truncation, revision, freshness, provenance, and precision.
+
 ## Validation gates
 
 ```sh
@@ -49,11 +58,15 @@ cargo deny check           # requires cargo-deny
 - `crates/chakra-domain` — core types and MCP-independent query contracts.
 - `crates/chakra-engine` — in-memory symbol graph, atomic revision
   publication, `QueryService` implementation.
+- `crates/chakra-git` — typed current-worktree diff adapter over fixed Git
+  commands.
 - `crates/chakra-language-rust` — Git-aware Tree-sitter Rust discovery,
   parsing, incremental syntax extraction, live watching, and reconciliation
   adapter.
 - `crates/chakra-mcp` — MCP stdio adapter (`rmcp`) exposing the current
   typed query tools over domain contracts.
+- `crates/chakra-provider-rust-analyzer` — optional live precise-enrichment
+  adapter with revision-aware degradation.
 - `fixtures/rust/controller-service-provider` — Controller → Service →
   Provider fixture crate (test oracle; excluded from the workspace).
 - `docs/SPEC.md` — architectural source of truth.

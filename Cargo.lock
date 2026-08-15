@@ -131,6 +131,7 @@ version = "0.1.0"
 dependencies = [
  "chakra-domain",
  "chakra-engine",
+ "chakra-git",
  "chakra-language-rust",
  "chakra-mcp",
  "chakra-provider-rust-analyzer",
@@ -161,11 +162,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "chakra-git"
+version = "0.1.0"
+dependencies = [
+ "chakra-domain",
+ "chakra-engine",
+ "tempfile",
+]
+
+[[package]]
 name = "chakra-language-rust"
 version = "0.1.0"
 dependencies = [
  "chakra-domain",
  "chakra-engine",
+ "chakra-git",
  "notify",
  "tempfile",
  "thiserror",
@@ -180,6 +191,7 @@ version = "0.1.0"
 dependencies = [
  "chakra-domain",
  "chakra-engine",
+ "chakra-git",
  "chakra-language-rust",
  "rmcp",
  "serde_json",

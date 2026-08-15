@@ -7,17 +7,19 @@
 //! snapshot does not satisfy it, the call fails with
 //! [`QueryError::FreshnessNotMet`] instead of silently serving stale data.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use chakra_domain::envelope::QueryEnvelope;
 use chakra_domain::location::{SourceRange, TextPosition};
 use chakra_domain::provenance::{Precision, Provenance};
 use chakra_domain::query::{
-    CallersData, CallersRequest, ContextData, ContextRequest, DEFAULT_QUERY_LIMIT, DiffContextData,
-    DiffContextRequest, FileSummary, IndexCounts, MAX_QUERY_LIMIT, ProviderInfo, QueryError,
-    QueryService, RelatedSymbol, RepoMapData, RepoMapRequest, SearchData, SearchRequest,
-    SourceSnippet, StatusData, StatusRequest, SymbolRef, SymbolSearchData, SymbolSearchRequest,
-    SymbolView, TextMatch,
+    CallersData, CallersRequest, ChangedFile, ChangedSymbol, ChangedSymbolBasis, ContextData,
+    ContextRequest, DEFAULT_QUERY_LIMIT, DiffContextData, DiffContextRequest, DiffRelatedSymbol,
+    FileSummary, IndexCounts, MAX_QUERY_LIMIT, ProviderInfo, QueryError, QueryService,
+    RelatedSymbol, RepoMapData, RepoMapRequest, SearchData, SearchRequest, SourceSnippet,
+    StatusData, StatusRequest, SymbolRef, SymbolSearchData, SymbolSearchRequest, SymbolView,
+    TextMatch,
 };
 use chakra_domain::revision::Revision;
 use chakra_domain::state::{Freshness, FreshnessRequirement, ProviderState};
@@ -29,6 +31,7 @@ use crate::precise::{
     CallHierarchyDirections, PreciseQueryRequest, PreciseRelation, ProviderSymbol,
     ProviderWorkspace,
 };
+use crate::{DiffWorkspace, WorkspaceDiff};
 
 const MAX_QUERY_PATTERN_CHARS: usize = 1_024;
 const MAX_MATCH_LINE_CHARS: usize = 512;
@@ -107,6 +110,17 @@ fn sort_related(items: &mut [RelatedSymbol]) {
             .qualified_name
             .cmp(&b.symbol.qualified_name)
             .then(a.symbol.id.cmp(&b.symbol.id))
+    });
+}
+
+fn sort_diff_related(items: &mut [DiffRelatedSymbol]) {
+    items.sort_by(|a, b| {
+        a.relation
+            .symbol
+            .qualified_name
+            .cmp(&b.relation.symbol.qualified_name)
+            .then(a.changed_symbol_id.cmp(&b.changed_symbol_id))
+            .then(a.relation.symbol.id.cmp(&b.relation.symbol.id))
     });
 }
 
@@ -208,6 +222,65 @@ fn query_snapshot(
     let snapshot = engine.snapshot();
     enforce_freshness(requirement, &snapshot)?;
     Ok(snapshot)
+}
+
+/// Pins syntax, asks the outward adapter for Git state, then checks the
+/// freshness barrier once more. If an edit landed during the Git read, the
+/// revision changes and the whole join is retried rather than returning a
+/// mixed snapshot/worktree result.
+fn query_workspace_diff(
+    engine: &WorkspaceEngine,
+    requirement: FreshnessRequirement,
+) -> Result<(Arc<WorkspaceSnapshot>, WorkspaceDiff), QueryError> {
+    let provider = engine
+        .diff_provider()
+        .ok_or_else(|| QueryError::DiffUnavailable("provider is not configured".to_owned()))?;
+    let attempts = if requirement == FreshnessRequirement::AllowStale {
+        1
+    } else {
+        MAX_FRESH_SNAPSHOT_ATTEMPTS
+    };
+    let mut last_error = None;
+
+    for _ in 0..attempts {
+        let snapshot = query_snapshot(engine, requirement)?;
+        let diff = match provider.diff(DiffWorkspace::from_snapshot(&snapshot)) {
+            Ok(diff) => diff,
+            Err(error) => {
+                last_error = Some(QueryError::DiffUnavailable(error.to_string()));
+                continue;
+            }
+        };
+        if diff.revision != snapshot.revision() {
+            last_error = Some(QueryError::DiffUnavailable(format!(
+                "provider returned revision {}, expected {}",
+                diff.revision,
+                snapshot.revision()
+            )));
+            continue;
+        }
+        if requirement != FreshnessRequirement::AllowStale {
+            engine
+                .require_fresh()
+                .map_err(|error| QueryError::FreshnessUnavailable(error.to_string()))?;
+            let confirmed = engine.snapshot();
+            if confirmed.revision() != snapshot.revision()
+                || !requirement.is_satisfied_by(confirmed.freshness())
+            {
+                last_error = Some(QueryError::FreshnessUnavailable(
+                    "workspace changed while Git diff state was being read".to_owned(),
+                ));
+                continue;
+            }
+        }
+        return Ok((snapshot, diff));
+    }
+
+    Err(last_error.unwrap_or_else(|| {
+        QueryError::FreshnessUnavailable(
+            "could not pin one syntax revision across the Git diff read".to_owned(),
+        )
+    }))
 }
 
 fn envelope<T>(
@@ -548,15 +621,18 @@ impl QueryService for WorkspaceEngine {
         related_files.dedup();
         let (related_files, files_truncated) = bounded(related_files, limit);
 
+        let source = source_snippet(graph, symbol);
+        let source_truncated = source.as_ref().is_some_and(|snippet| snippet.truncated);
         let truncated = callers_truncated
             || callees_truncated
             || implementations_truncated
             || tests_truncated
             || files_truncated
-            || provider_truncated;
+            || provider_truncated
+            || source_truncated;
         let data = ContextData {
             symbol: SymbolView::from(symbol),
-            source: source_snippet(graph, symbol),
+            source,
             callers,
             callees,
             implementations,
@@ -624,9 +700,105 @@ impl QueryService for WorkspaceEngine {
 
     fn diff_context(
         &self,
-        _request: DiffContextRequest,
+        request: DiffContextRequest,
     ) -> Result<QueryEnvelope<DiffContextData>, QueryError> {
-        // Needs the Git subsystem; arrives with diff awareness.
-        Err(QueryError::Unsupported("diff_context"))
+        let (snapshot, mut diff) = query_workspace_diff(self, request.freshness)?;
+        let graph = snapshot.graph();
+        let limit = clamp_limit(request.limit);
+        diff.files.sort_by(|a, b| a.path.cmp(&b.path));
+        let (file_changes, files_truncated) = bounded(diff.files, limit);
+
+        let mut symbol_ids: Vec<_> = file_changes
+            .iter()
+            .filter(|change| change.change != chakra_domain::query::ChangeKind::Deleted)
+            .flat_map(|change| graph.symbols_in_file(&change.path).map(|symbol| symbol.id))
+            .collect();
+        symbol_ids.sort_by(|a, b| {
+            let a = graph.symbol(*a);
+            let b = graph.symbol(*b);
+            a.map(|symbol| (&symbol.key.qualified_name, symbol.id))
+                .cmp(&b.map(|symbol| (&symbol.key.qualified_name, symbol.id)))
+        });
+        symbol_ids.dedup();
+        let (symbol_ids, symbols_truncated) = bounded(symbol_ids, limit);
+
+        let mut callers = BTreeMap::new();
+        let mut tests = BTreeMap::new();
+        for id in &symbol_ids {
+            for edge in graph.incoming_edges(*id) {
+                let Some(item) = related(graph, edge, edge.from) else {
+                    continue;
+                };
+                let diff_relation = DiffRelatedSymbol {
+                    changed_symbol_id: *id,
+                    relation: item,
+                };
+                if edge.kind == EdgeKind::Calls {
+                    callers
+                        .entry((diff_relation.relation.symbol.id, *id))
+                        .and_modify(|existing: &mut DiffRelatedSymbol| {
+                            if diff_relation.relation.precision > existing.relation.precision {
+                                *existing = diff_relation.clone();
+                            }
+                        })
+                        .or_insert_with(|| diff_relation.clone());
+                }
+                if edge.kind == EdgeKind::Tests {
+                    tests
+                        .entry((diff_relation.relation.symbol.id, *id))
+                        .and_modify(|existing: &mut DiffRelatedSymbol| {
+                            if diff_relation.relation.precision > existing.relation.precision {
+                                *existing = diff_relation.clone();
+                            }
+                        })
+                        .or_insert(diff_relation);
+                }
+            }
+        }
+
+        let mut related_callers: Vec<_> = callers.into_values().collect();
+        let mut related_tests: Vec<_> = tests.into_values().collect();
+        sort_diff_related(&mut related_callers);
+        sort_diff_related(&mut related_tests);
+        let (related_callers, callers_truncated) = bounded(related_callers, limit);
+        let (related_tests, tests_truncated) = bounded(related_tests, limit);
+
+        let changed_files = file_changes
+            .into_iter()
+            .map(|change| ChangedFile {
+                path: change.path,
+                previous_path: change.previous_path,
+                change: change.change,
+                provenance: change.provenance,
+                precision: change.precision,
+            })
+            .collect();
+        let changed_symbols = symbol_ids
+            .into_iter()
+            .filter_map(|id| graph.symbol(id))
+            .map(|symbol| ChangedSymbol {
+                symbol: SymbolView::from(symbol),
+                basis: ChangedSymbolBasis::DeclaredInChangedFile,
+                provenance: Provenance::Heuristic,
+                precision: Precision::Heuristic,
+            })
+            .collect();
+        let truncated = diff.truncated
+            || files_truncated
+            || symbols_truncated
+            || callers_truncated
+            || tests_truncated;
+        let data = DiffContextData {
+            changed_files,
+            changed_symbols,
+            related_callers,
+            related_tests,
+        };
+        Ok(envelope(
+            &snapshot,
+            provider_state_for(self, &snapshot),
+            truncated,
+            data,
+        ))
     }
 }

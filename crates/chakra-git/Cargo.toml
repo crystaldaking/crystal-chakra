@@ -1,6 +1,6 @@
 [package]
-name = "chakra-language-rust"
-description = "Git-aware Tree-sitter Rust syntax index adapter for Chakra"
+name = "chakra-git"
+description = "Git worktree change adapter for Chakra"
 version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
@@ -9,14 +9,8 @@ publish = false
 [dependencies]
 chakra-domain = { path = "../chakra-domain", version = "0.1.0" }
 chakra-engine = { path = "../chakra-engine", version = "0.1.0" }
-notify.workspace = true
-thiserror.workspace = true
-tracing.workspace = true
-tree-sitter.workspace = true
-tree-sitter-rust.workspace = true
 
 [dev-dependencies]
-chakra-git = { path = "../chakra-git", version = "0.1.0" }
 tempfile.workspace = true
 
 [lints]

@@ -86,6 +86,12 @@ async fn serve(args: ServeArgs) -> ExitCode {
         }
     };
     let engine = Arc::new(WorkspaceEngine::new(identity));
+    let diff_adapter: Arc<dyn chakra_engine::WorkspaceDiffProvider> =
+        Arc::new(chakra_git::GitWorkspaceDiff);
+    if let Err(error) = engine.install_diff_provider(diff_adapter) {
+        eprintln!("chakra: failed to install Git diff provider: {error}");
+        return ExitCode::FAILURE;
+    }
     let mut update = engine.begin_update();
     update.replace_graph(report.graph);
     update.set_status(WorkspaceStatus::Indexing);
