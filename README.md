@@ -57,7 +57,6 @@ cargo deny check           # requires cargo-deny
 - `docs/roadmap/v0.1.md` — v0.1 scope authority.
 - `docs/adr/` — architectural decision records.
 - `.agents/skills/` — mandatory agent-driven review/validation/commit workflows.
-- `prompts/` — implementation phase prompts.
 
 `AGENTS.md` defines the mandatory operating rules, including the pre-commit
 skill workflow.

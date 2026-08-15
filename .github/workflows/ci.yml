@@ -13,8 +13,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      # Toolchain and components come from rust-toolchain.toml.
-      - uses: dtolnay/rust-toolchain@master
+      # Keep the toolchain version in sync with rust-toolchain.toml.
+      - uses: dtolnay/rust-toolchain@1.97.1
         with:
           components: rustfmt, clippy
       - run: cargo fmt --all -- --check
