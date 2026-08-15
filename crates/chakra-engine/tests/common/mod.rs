@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use chakra_domain::identity::WorkspaceIdentity;
 use chakra_domain::location::{RepoRelativePath, SourceRange, TextPosition};
 use chakra_domain::provenance::{Precision, Provenance};
-use chakra_domain::state::WorkspaceStatus;
+use chakra_domain::state::{Freshness, WorkspaceStatus};
 use chakra_domain::symbol::{EdgeKind, EntityId, Language, SymbolKey, SymbolKind};
 use chakra_engine::{SymbolGraph, WorkspaceEngine};
 
@@ -253,8 +253,9 @@ pub fn scenario_graph() -> Result<(SymbolGraph, ScenarioIds), Box<dyn Error>> {
 
 /// Engine with the scenario graph published as revision 1.
 ///
-/// The update sets `Ready` explicitly: it stands in for a completed initial
-/// index, which is the only honest way to reach `Ready`/`Fresh`.
+/// The update sets `Ready` and `Fresh` explicitly: it stands in for a
+/// completed initial index/reconciliation, which is the only honest way to
+/// reach either state.
 pub fn scenario_engine() -> Result<(WorkspaceEngine, ScenarioIds), Box<dyn Error>> {
     let identity = WorkspaceIdentity::for_primary_worktree(Path::new("."))?;
     let engine = WorkspaceEngine::new(identity);
@@ -262,6 +263,7 @@ pub fn scenario_engine() -> Result<(WorkspaceEngine, ScenarioIds), Box<dyn Error
     let mut update = engine.begin_update();
     update.replace_graph(graph);
     update.set_status(WorkspaceStatus::Ready);
+    update.set_freshness(Freshness::Fresh);
     engine.publish(update)?;
     Ok((engine, ids))
 }

@@ -25,6 +25,20 @@ pub enum FreshnessRequirement {
     AllowStale,
 }
 
+impl FreshnessRequirement {
+    /// Whether a snapshot with `freshness` may serve this requirement.
+    ///
+    /// Freshness is an independent axis from [`WorkspaceStatus`]: a `Ready`
+    /// workspace may still be reconciling (stale), and a `Degraded` one may
+    /// hold a reconciled syntax snapshot (fresh).
+    pub fn is_satisfied_by(self, freshness: Freshness) -> bool {
+        match self {
+            Self::RequireFresh => freshness == Freshness::Fresh,
+            Self::AllowStale => true,
+        }
+    }
+}
+
 /// Synchronization state of the precise language provider (SPEC §6).
 ///
 /// `CatchingUp` means the provider has not yet processed the current
@@ -54,4 +68,21 @@ pub enum WorkspaceStatus {
     Degraded,
     Stale,
     Failed,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn require_fresh_is_satisfied_only_by_fresh() {
+        assert!(FreshnessRequirement::RequireFresh.is_satisfied_by(Freshness::Fresh));
+        assert!(!FreshnessRequirement::RequireFresh.is_satisfied_by(Freshness::Stale));
+    }
+
+    #[test]
+    fn allow_stale_is_satisfied_by_anything() {
+        assert!(FreshnessRequirement::AllowStale.is_satisfied_by(Freshness::Fresh));
+        assert!(FreshnessRequirement::AllowStale.is_satisfied_by(Freshness::Stale));
+    }
 }

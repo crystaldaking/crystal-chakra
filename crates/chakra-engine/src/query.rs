@@ -1,10 +1,11 @@
 //! [`QueryService`] implementation over the published snapshot.
 //!
 //! Each method pins one `Arc<WorkspaceSnapshot>` up front, so a query always
-//! observes exactly one revision (SPEC §5). Reported freshness derives from
-//! the workspace status: only a snapshot that completed reconciliation
-//! (`Ready`) is `Fresh`; everything else reports `Stale`. This is
-//! deliberately conservative until the watcher/reconciliation phases land.
+//! observes exactly one revision (SPEC §5). Freshness is the snapshot's own
+//! axis, claimed by the publisher — never inferred from the lifecycle
+//! status. A request's [`FreshnessRequirement`] is enforced: when the pinned
+//! snapshot does not satisfy it, the call fails with
+//! [`QueryError::FreshnessNotMet`] instead of silently serving stale data.
 
 use chakra_domain::envelope::QueryEnvelope;
 use chakra_domain::query::{
@@ -14,7 +15,7 @@ use chakra_domain::query::{
     StatusData, StatusRequest, SymbolRef, SymbolSearchData, SymbolSearchRequest, SymbolView,
 };
 use chakra_domain::revision::Revision;
-use chakra_domain::state::{Freshness, WorkspaceStatus};
+use chakra_domain::state::FreshnessRequirement;
 use chakra_domain::symbol::{Edge, EdgeKind, Symbol};
 
 use crate::engine::{WorkspaceEngine, WorkspaceSnapshot};
@@ -94,12 +95,20 @@ fn sort_related(items: &mut [RelatedSymbol]) {
     });
 }
 
-/// Conservative freshness until watcher/reconciliation phases exist: only a
-/// workspace that completed indexing may claim fresh data.
-fn freshness_of(status: WorkspaceStatus) -> Freshness {
-    match status {
-        WorkspaceStatus::Ready => Freshness::Fresh,
-        _ => Freshness::Stale,
+/// Gate for every query with a freshness requirement: the pinned snapshot
+/// either satisfies it or the call fails with a typed error. Cheaper request
+/// validation (empty queries, missing refs) runs before this gate.
+fn enforce_freshness(
+    requirement: FreshnessRequirement,
+    snapshot: &WorkspaceSnapshot,
+) -> Result<(), QueryError> {
+    if requirement.is_satisfied_by(snapshot.freshness()) {
+        Ok(())
+    } else {
+        Err(QueryError::FreshnessNotMet {
+            required: requirement,
+            actual: snapshot.freshness(),
+        })
     }
 }
 
@@ -107,7 +116,7 @@ fn envelope<T>(snapshot: &WorkspaceSnapshot, truncated: bool, data: T) -> QueryE
     QueryEnvelope::new(
         snapshot.identity().workspace.clone(),
         snapshot.revision(),
-        freshness_of(snapshot.status()),
+        snapshot.freshness(),
         snapshot.status(),
         snapshot.provider_state(),
         truncated,
@@ -137,6 +146,7 @@ impl QueryService for WorkspaceEngine {
 
     fn repo_map(&self, request: RepoMapRequest) -> Result<QueryEnvelope<RepoMapData>, QueryError> {
         let snapshot = self.snapshot();
+        enforce_freshness(request.freshness, &snapshot)?;
         let summaries = snapshot
             .graph()
             .file_summaries()
@@ -164,6 +174,7 @@ impl QueryService for WorkspaceEngine {
             return Err(QueryError::Invalid("query must be non-empty".to_owned()));
         }
         let snapshot = self.snapshot();
+        enforce_freshness(request.freshness, &snapshot)?;
         let mut candidates: Vec<SymbolView> = snapshot
             .graph()
             .search_names(query)
@@ -190,6 +201,7 @@ impl QueryService for WorkspaceEngine {
             .as_ref()
             .ok_or(QueryError::MissingSymbolRef)?;
         let snapshot = self.snapshot();
+        enforce_freshness(request.freshness, &snapshot)?;
         let graph = snapshot.graph();
         let symbol = resolve(graph, reference, snapshot.revision())?;
         let limit = clamp_limit(request.limit);
@@ -263,6 +275,7 @@ impl QueryService for WorkspaceEngine {
             .as_ref()
             .ok_or(QueryError::MissingSymbolRef)?;
         let snapshot = self.snapshot();
+        enforce_freshness(request.freshness, &snapshot)?;
         let graph = snapshot.graph();
         let target = resolve(graph, reference, snapshot.revision())?;
         let mut callers: Vec<RelatedSymbol> = graph

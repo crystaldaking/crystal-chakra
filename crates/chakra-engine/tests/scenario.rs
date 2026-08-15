@@ -12,8 +12,9 @@ use chakra_domain::query::{
 use chakra_domain::revision::Revision;
 use chakra_domain::state::{Freshness, ProviderState, WorkspaceStatus};
 use chakra_domain::symbol::SymbolKind;
+use chakra_engine::SymbolGraph;
 
-use common::scenario_engine;
+use common::{scenario_engine, scenario_graph};
 
 #[test]
 fn status_reports_scenario_counts() -> Result<(), Box<dyn Error>> {
@@ -275,14 +276,70 @@ fn entity_ids_are_scoped_to_their_revision() -> Result<(), Box<dyn Error>> {
     };
     assert_eq!(result.err(), Some(expected));
 
-    // Re-resolving against the current revision works again.
+    // Publish a graph whose arena order differs, so the old numeric index now
+    // denotes a DIFFERENT symbol — the exact hazard revision scoping exists
+    // for. The scenario graph is republished in reverse declaration order.
+    let (scenario, _) = scenario_graph()?;
+    let count = scenario.symbol_count();
+    let mut reversed = SymbolGraph::new();
+    for symbol in scenario.symbols().iter().rev() {
+        reversed.add_symbol(
+            symbol.key.clone(),
+            symbol.location.clone(),
+            symbol.signature.clone(),
+            symbol.provenance,
+            symbol.precision,
+        )?;
+    }
+    let remap =
+        |id: chakra_domain::symbol::EntityId| chakra_domain::symbol::EntityId(count - 1 - id.0);
+    for symbol in scenario.symbols() {
+        for edge in scenario.outgoing_edges(symbol.id) {
+            reversed.add_edge(
+                edge.kind,
+                remap(edge.from),
+                remap(edge.to),
+                edge.provenance,
+                edge.precision,
+                edge.location.clone(),
+            )?;
+        }
+    }
+    let mut update = engine.begin_update();
+    update.replace_graph(reversed);
+    engine.publish(update)?;
+    let snapshot = engine.snapshot();
+    let current_revision = snapshot.revision();
+    let graph = snapshot.graph();
+
+    // The stale index now resolves to another symbol entirely…
+    let hijacked = graph
+        .symbol(ids.provider_refund)
+        .ok_or("remapped graph lost the old index")?;
+    assert_ne!(
+        hijacked.key.qualified_name,
+        "provider::PaymentProvider::refund"
+    );
+
+    // …so the client re-resolves by name against the current revision and
+    // gets a fresh, correct id.
+    let matches = graph.resolve_name("provider::PaymentProvider::refund");
+    let fresh_id = *matches
+        .first()
+        .ok_or("provider::PaymentProvider::refund missing after remap")?;
+    assert_ne!(fresh_id, ids.provider_refund);
+
     let resolved = engine.callers(CallersRequest {
         symbol: Some(SymbolRef::ById {
-            id: ids.provider_refund,
-            revision: engine.snapshot().revision(),
+            id: fresh_id,
+            revision: current_revision,
         }),
         ..CallersRequest::default()
     })?;
+    assert_eq!(
+        resolved.data.target.qualified_name,
+        "provider::PaymentProvider::refund"
+    );
     assert_eq!(resolved.data.callers.len(), 1);
     Ok(())
 }

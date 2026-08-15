@@ -11,7 +11,7 @@ use std::sync::Arc;
 use arc_swap::ArcSwap;
 use chakra_domain::identity::WorkspaceIdentity;
 use chakra_domain::revision::Revision;
-use chakra_domain::state::{ProviderState, WorkspaceStatus};
+use chakra_domain::state::{Freshness, ProviderState, WorkspaceStatus};
 use thiserror::Error;
 
 use crate::graph::SymbolGraph;
@@ -22,6 +22,9 @@ pub struct WorkspaceSnapshot {
     identity: WorkspaceIdentity,
     revision: Revision,
     status: WorkspaceStatus,
+    /// Independent from `status`: only a publisher that completed
+    /// reconciliation against the filesystem may claim `Fresh` (SPEC §6).
+    freshness: Freshness,
     provider_state: ProviderState,
     graph: SymbolGraph,
 }
@@ -37,6 +40,10 @@ impl WorkspaceSnapshot {
 
     pub fn status(&self) -> WorkspaceStatus {
         self.status
+    }
+
+    pub fn freshness(&self) -> Freshness {
+        self.freshness
     }
 
     pub fn provider_state(&self) -> ProviderState {
@@ -64,6 +71,7 @@ pub struct UpdateBuilder {
     base_revision: Revision,
     identity: WorkspaceIdentity,
     status: WorkspaceStatus,
+    freshness: Freshness,
     provider_state: ProviderState,
     graph: SymbolGraph,
 }
@@ -88,6 +96,16 @@ impl UpdateBuilder {
         self.status = status;
     }
 
+    /// Claims (or revokes) filesystem freshness for the published snapshot.
+    ///
+    /// Freshness is inherited from the base snapshot unless set here: an
+    /// update that changes nothing about the filesystem relationship keeps
+    /// it, while a publisher that just reconciled the worktree claims
+    /// `Fresh` explicitly — `Ready` alone never implies it.
+    pub fn set_freshness(&mut self, freshness: Freshness) {
+        self.freshness = freshness;
+    }
+
     pub fn set_provider_state(&mut self, provider_state: ProviderState) {
         self.provider_state = provider_state;
     }
@@ -102,14 +120,16 @@ pub struct WorkspaceEngine {
 impl WorkspaceEngine {
     /// A fresh engine: revision 0, empty graph, no language provider.
     ///
-    /// Status starts at `Initializing`: the engine has not yet observed or
-    /// indexed the filesystem, so nothing may report ready/fresh data. The
-    /// first real reconciliation/index publish sets `Ready` explicitly.
+    /// Status starts at `Initializing` and freshness at `Stale`: the engine
+    /// has not yet observed or indexed the filesystem, so nothing may report
+    /// ready/fresh data. The first real reconciliation/index publish sets
+    /// both explicitly.
     pub fn new(identity: WorkspaceIdentity) -> Self {
         let snapshot = WorkspaceSnapshot {
             identity,
             revision: Revision::INITIAL,
             status: WorkspaceStatus::Initializing,
+            freshness: Freshness::Stale,
             provider_state: ProviderState::NotConfigured,
             graph: SymbolGraph::new(),
         };
@@ -124,12 +144,17 @@ impl WorkspaceEngine {
     }
 
     /// Starts a private update based on the current revision.
+    ///
+    /// Status, freshness, and provider state are inherited from the base
+    /// snapshot; override them on the builder when the update changes the
+    /// workspace's relationship to the filesystem or a provider.
     pub fn begin_update(&self) -> UpdateBuilder {
         let base = self.snapshot();
         UpdateBuilder {
             base_revision: base.revision,
             identity: base.identity.clone(),
             status: base.status,
+            freshness: base.freshness,
             provider_state: base.provider_state,
             graph: base.graph.clone(),
         }
@@ -151,6 +176,7 @@ impl WorkspaceEngine {
             identity: update.identity,
             revision: update.base_revision.next(),
             status: update.status,
+            freshness: update.freshness,
             provider_state: update.provider_state,
             graph: update.graph,
         });
@@ -183,8 +209,9 @@ mod tests {
         let snapshot = engine.snapshot();
         assert_eq!(snapshot.revision(), Revision::INITIAL);
         assert_eq!(snapshot.graph().symbol_count(), 0);
-        // Not Ready: nothing has observed the filesystem yet.
+        // Not Ready and not fresh: nothing has observed the filesystem yet.
         assert_eq!(snapshot.status(), WorkspaceStatus::Initializing);
+        assert_eq!(snapshot.freshness(), Freshness::Stale);
         assert_eq!(snapshot.provider_state(), ProviderState::NotConfigured);
         Ok(())
     }
@@ -195,6 +222,30 @@ mod tests {
         let published = engine.publish(engine.begin_update())?;
         assert_eq!(published.revision(), Revision(1));
         assert_eq!(engine.snapshot().revision(), Revision(1));
+        Ok(())
+    }
+
+    #[test]
+    fn freshness_is_an_explicit_publication_claim() -> Result<(), Box<dyn std::error::Error>> {
+        let engine = engine()?;
+        // Inherited unchanged when the update says nothing.
+        let published = engine.publish(engine.begin_update())?;
+        assert_eq!(published.freshness(), Freshness::Stale);
+
+        // A reconciling publisher claims Fresh explicitly.
+        let mut update = engine.begin_update();
+        update.set_status(WorkspaceStatus::Ready);
+        update.set_freshness(Freshness::Fresh);
+        let published = engine.publish(update)?;
+        assert_eq!(published.status(), WorkspaceStatus::Ready);
+        assert_eq!(published.freshness(), Freshness::Fresh);
+
+        // A filesystem change can revoke freshness without touching status.
+        let mut update = engine.begin_update();
+        update.set_freshness(Freshness::Stale);
+        let published = engine.publish(update)?;
+        assert_eq!(published.status(), WorkspaceStatus::Ready);
+        assert_eq!(published.freshness(), Freshness::Stale);
         Ok(())
     }
 

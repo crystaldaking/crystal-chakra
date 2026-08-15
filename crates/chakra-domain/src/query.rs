@@ -14,7 +14,7 @@ use crate::identity::WorkspaceIdentity;
 use crate::location::{RepoRelativePath, SourceRange};
 use crate::provenance::{Precision, Provenance};
 use crate::revision::Revision;
-use crate::state::{FreshnessRequirement, ProviderState};
+use crate::state::{Freshness, FreshnessRequirement, ProviderState};
 use crate::symbol::{EdgeKind, EntityId, SymbolKind};
 
 /// Default result budget when a request does not specify one (SPEC §29).
@@ -271,14 +271,24 @@ pub enum QueryError {
     AmbiguousSymbol { query: String, candidates: usize },
     #[error("invalid request: {0}")]
     Invalid(String),
+    #[error(
+        "freshness requirement {required:?} is not met: the published snapshot is {actual:?}; retry after reconciliation or allow stale results"
+    )]
+    FreshnessNotMet {
+        required: FreshnessRequirement,
+        actual: Freshness,
+    },
 }
 
 /// The MCP-independent application interface (SPEC §23).
 ///
 /// Implementations must guarantee that a call observes exactly one
-/// published revision (SPEC §5) and that large results respect budgets
-/// (SPEC §29). Methods are synchronous: v0.1 queries run against an
-/// in-memory snapshot and are cheap; async concerns live in the adapters.
+/// published revision (SPEC §5), that large results respect budgets
+/// (SPEC §29), and that a request's [`FreshnessRequirement`] is either met
+/// or rejected with [`QueryError::FreshnessNotMet`] — a `RequireFresh`
+/// request must never be silently served from a stale snapshot. Methods are
+/// synchronous: v0.1 queries run against an in-memory snapshot and are
+/// cheap; async concerns live in the adapters.
 pub trait QueryService: Send + Sync {
     fn status(&self, request: StatusRequest) -> Result<QueryEnvelope<StatusData>, QueryError>;
     fn repo_map(&self, request: RepoMapRequest) -> Result<QueryEnvelope<RepoMapData>, QueryError>;
@@ -331,5 +341,16 @@ mod tests {
     fn unsupported_is_a_typed_error() {
         let error = QueryError::Unsupported("search");
         assert!(error.to_string().contains("search"));
+    }
+
+    #[test]
+    fn freshness_violation_is_a_typed_error() {
+        let error = QueryError::FreshnessNotMet {
+            required: FreshnessRequirement::RequireFresh,
+            actual: Freshness::Stale,
+        };
+        let message = error.to_string();
+        assert!(message.contains("RequireFresh"));
+        assert!(message.contains("Stale"));
     }
 }

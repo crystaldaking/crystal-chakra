@@ -203,12 +203,15 @@ impl SymbolGraph {
             return Err(ConsistencyError::FileIndexMismatch);
         }
 
-        // Edges: stored under the correct key, endpoints exist, mirrored in
-        // the incoming index, and the recorded count matches reality.
-        let mut actual_edge_count = 0_u64;
+        // Edges: stored under the correct key, endpoints exist, and both
+        // adjacency indexes mirror each other exactly. Two independent
+        // passes: outgoing → incoming, then incoming → outgoing, so a ghost
+        // entry in either direction is caught (it would otherwise be served
+        // by `callers`/`context` while passing the audit).
+        let mut outgoing_total = 0_u64;
         for (key, edges) in &self.outgoing {
             for edge in edges {
-                actual_edge_count += 1;
+                outgoing_total += 1;
                 if edge.from != *key {
                     return Err(ConsistencyError::EdgeWrongOutgoingKey {
                         key: *key,
@@ -231,10 +234,37 @@ impl SymbolGraph {
                 }
             }
         }
-        if actual_edge_count != self.edge_count {
+        let mut incoming_total = 0_u64;
+        for (key, edges) in &self.incoming {
+            for edge in edges {
+                incoming_total += 1;
+                if edge.to != *key {
+                    return Err(ConsistencyError::EdgeWrongIncomingKey {
+                        key: *key,
+                        to: edge.to,
+                    });
+                }
+                self.symbol(edge.from)
+                    .ok_or(ConsistencyError::UnknownEntity(edge.from))?;
+                self.symbol(edge.to)
+                    .ok_or(ConsistencyError::UnknownEntity(edge.to))?;
+                let mirrored = self
+                    .outgoing
+                    .get(&edge.from)
+                    .is_some_and(|outgoing| outgoing.contains(edge));
+                if !mirrored {
+                    return Err(ConsistencyError::EdgeIncomingMirrorMissing {
+                        from: edge.from,
+                        to: edge.to,
+                    });
+                }
+            }
+        }
+        if outgoing_total != self.edge_count || incoming_total != self.edge_count {
             return Err(ConsistencyError::EdgeCountMismatch {
                 recorded: self.edge_count,
-                actual: actual_edge_count,
+                outgoing: outgoing_total,
+                incoming: incoming_total,
             });
         }
         Ok(())
@@ -250,10 +280,20 @@ pub enum ConsistencyError {
     IdPositionMismatch { id: EntityId, index: usize },
     #[error("edge stored under outgoing key {key:?} but its from is {from:?}")]
     EdgeWrongOutgoingKey { key: EntityId, from: EntityId },
+    #[error("edge stored under incoming key {key:?} but its to is {to:?}")]
+    EdgeWrongIncomingKey { key: EntityId, to: EntityId },
     #[error("edge from {from:?} to {to:?} is missing from the incoming index")]
     EdgeMirrorMissing { from: EntityId, to: EntityId },
-    #[error("recorded edge count {recorded} does not match actual {actual}")]
-    EdgeCountMismatch { recorded: u64, actual: u64 },
+    #[error("edge from {from:?} to {to:?} is in the incoming index but has no outgoing twin")]
+    EdgeIncomingMirrorMissing { from: EntityId, to: EntityId },
+    #[error(
+        "recorded edge count {recorded} does not match the indexes ({outgoing} outgoing, {incoming} incoming)"
+    )]
+    EdgeCountMismatch {
+        recorded: u64,
+        outgoing: u64,
+        incoming: u64,
+    },
     #[error("file index does not cover exactly the arena symbols")]
     FileIndexMismatch,
 }
@@ -384,6 +424,93 @@ mod tests {
         assert_eq!(graph.symbol_count(), 2);
         assert_eq!(graph.edge_count(), 1);
         assert_eq!(graph.file_count(), 2);
+        Ok(())
+    }
+
+    // Corruption tests reach into private fields on purpose: they simulate a
+    // botched incremental update that the public `add_*` API would never
+    // produce, and prove the audit catches it before readers are served.
+
+    #[test]
+    fn audit_catches_ghost_incoming_edge() -> Result<(), Box<dyn std::error::Error>> {
+        let mut graph = SymbolGraph::new();
+        let a = add_fn(&mut graph, "a", "src/a.rs")?;
+        let b = add_fn(&mut graph, "b", "src/b.rs")?;
+        graph.add_edge(
+            EdgeKind::Calls,
+            a,
+            b,
+            Provenance::TreeSitter,
+            Precision::Syntax,
+            None,
+        )?;
+        // An incoming edge no outgoing entry mirrors: `incoming_edges(a)`
+        // (and therefore `callers`) would serve it, so the audit must not.
+        graph.incoming.entry(a).or_default().push(Edge {
+            kind: EdgeKind::Calls,
+            from: b,
+            to: a,
+            provenance: Provenance::TreeSitter,
+            precision: Precision::Syntax,
+            location: None,
+        });
+        assert!(matches!(
+            graph.validate_consistency(),
+            Err(ConsistencyError::EdgeIncomingMirrorMissing { from, to }) if from == b && to == a
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn audit_catches_incoming_edge_under_wrong_key() -> Result<(), Box<dyn std::error::Error>> {
+        let mut graph = SymbolGraph::new();
+        let a = add_fn(&mut graph, "a", "src/a.rs")?;
+        let b = add_fn(&mut graph, "b", "src/b.rs")?;
+        graph.add_edge(
+            EdgeKind::Calls,
+            a,
+            b,
+            Provenance::TreeSitter,
+            Precision::Syntax,
+            None,
+        )?;
+        graph.incoming.entry(a).or_default().push(Edge {
+            kind: EdgeKind::Calls,
+            from: a,
+            to: b,
+            provenance: Provenance::TreeSitter,
+            precision: Precision::Syntax,
+            location: None,
+        });
+        assert!(matches!(
+            graph.validate_consistency(),
+            Err(ConsistencyError::EdgeWrongIncomingKey { key, to }) if key == a && to == b
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn audit_catches_recorded_count_drift() -> Result<(), Box<dyn std::error::Error>> {
+        let mut graph = SymbolGraph::new();
+        let a = add_fn(&mut graph, "a", "src/a.rs")?;
+        let b = add_fn(&mut graph, "b", "src/b.rs")?;
+        graph.add_edge(
+            EdgeKind::Calls,
+            a,
+            b,
+            Provenance::TreeSitter,
+            Precision::Syntax,
+            None,
+        )?;
+        graph.edge_count += 1;
+        assert!(matches!(
+            graph.validate_consistency(),
+            Err(ConsistencyError::EdgeCountMismatch {
+                recorded: 2,
+                outgoing: 1,
+                incoming: 1
+            })
+        ));
         Ok(())
     }
 }
