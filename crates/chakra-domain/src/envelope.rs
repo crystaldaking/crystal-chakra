@@ -80,8 +80,8 @@ mod tests {
         assert_eq!(json["provider_state"], "catching_up");
         assert_eq!(json["truncated"], false);
         let workspace_id = json["workspace_id"].as_str().unwrap_or("");
-        assert!(workspace_id.starts_with("path:"));
-        assert!(workspace_id.ends_with(":primary"));
+        assert!(workspace_id.starts_with("standalone-path:"));
+        assert!(workspace_id.contains(":worktree:"));
         assert!(json["data"].is_object());
         Ok(())
     }

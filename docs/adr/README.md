@@ -31,5 +31,6 @@ Accepted v0.1 decisions:
 - ADR-006: optional rust-analyzer precise enrichment
 - ADR-007: agent queries and Git diff scope
 - ADR-008: PHP syntax support and multi-language composition
+- ADR-009: Git-aware repository and worktree identity
 
 Do not pre-create empty ADRs merely to satisfy a list.

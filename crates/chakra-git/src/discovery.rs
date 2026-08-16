@@ -7,6 +7,7 @@ use std::process::{Command, ExitStatus, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use chakra_domain::identity::{IdentityError, RepositoryId, WorkspaceIdentity};
 use chakra_domain::location::{RepoPathError, RepoRelativePath};
 use chakra_domain::symbol::Language;
 use thiserror::Error;
@@ -15,6 +16,7 @@ const MAX_GIT_STDOUT_BYTES: usize = 64 * 1024 * 1024;
 const MAX_GIT_STDERR_BYTES: usize = 16 * 1024;
 const GIT_COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
 const CHILD_POLL_INTERVAL: Duration = Duration::from_millis(1);
+const MAX_REPOSITORY_ROOTS: usize = 64;
 
 #[derive(Debug)]
 struct BoundedRead {
@@ -61,6 +63,26 @@ pub enum DiscoveryError {
     OutputTooLarge { command: &'static str, limit: usize },
     #[error("Git command `{command}` exceeded the {seconds} second process deadline")]
     Timeout { command: &'static str, seconds: u64 },
+    #[error("Git returned an invalid repository root object id: {0}")]
+    InvalidRootObjectId(String),
+    #[error("repository has more than the {MAX_REPOSITORY_ROOTS} supported root objects")]
+    TooManyRootObjects,
+    #[error("Git returned a non-UTF-8 administrative path")]
+    NonUtf8AdministrativePath,
+    #[error("failed to canonicalize Git administrative path {path}: {source}")]
+    CanonicalizeAdministrativePath {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+    #[error("failed to inspect Git administrative path {path}: {source}")]
+    AdministrativeMetadata {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+    #[error(transparent)]
+    Identity(#[from] IdentityError),
 }
 
 fn read_bounded(mut reader: impl Read, limit: usize) -> io::Result<BoundedRead> {
@@ -240,6 +262,141 @@ pub fn resolve_repository_root(candidate: &Path) -> Result<PathBuf, DiscoveryErr
     let root = PathBuf::from(raw.strip_suffix('\r').unwrap_or(raw));
     std::fs::canonicalize(&root)
         .map_err(|source| DiscoveryError::Canonicalize { path: root, source })
+}
+
+/// Resolves a repository identity from Git object history rather than an
+/// absolute worktree path.
+///
+/// Root commit ids are stable across ordinary path moves, linked worktrees,
+/// repositories without remotes, and remote URL changes. An unborn
+/// repository has no objects to identify it, so Chakra uses the filesystem
+/// identity of the Git-reported common administrative directory on supported
+/// platforms. No `.git` layout is assumed.
+pub fn resolve_repository_identity(candidate: &Path) -> Result<RepositoryId, DiscoveryError> {
+    let root = resolve_repository_root(candidate)?;
+    let roots = git_output(
+        &root,
+        "rev-list --max-parents=0 --all",
+        &[
+            OsStr::new("rev-list"),
+            OsStr::new("--max-parents=0"),
+            OsStr::new("--all"),
+        ],
+    )?;
+    let mut object_ids = parse_root_object_ids(&roots.stdout)?;
+    if !object_ids.is_empty() {
+        object_ids.sort_unstable();
+        object_ids.dedup();
+        return Ok(RepositoryId::from_stable_key(format!(
+            "git-roots:{}",
+            object_ids.join(",")
+        ))?);
+    }
+
+    let common_dir = git_output(
+        &root,
+        "rev-parse --git-common-dir",
+        &[
+            OsStr::new("rev-parse"),
+            OsStr::new("--path-format=absolute"),
+            OsStr::new("--git-common-dir"),
+        ],
+    )?;
+    let common_dir = parse_single_path(&common_dir.stdout)?;
+    let common_dir = std::fs::canonicalize(&common_dir).map_err(|source| {
+        DiscoveryError::CanonicalizeAdministrativePath {
+            path: common_dir,
+            source,
+        }
+    })?;
+    unborn_repository_id(&common_dir)
+}
+
+/// Resolves both Git-aware repository identity and the current worktree
+/// identity for production engine startup.
+pub fn resolve_workspace_identity(candidate: &Path) -> Result<WorkspaceIdentity, DiscoveryError> {
+    let root = resolve_repository_root(candidate)?;
+    let repository = resolve_repository_identity(&root)?;
+    Ok(WorkspaceIdentity::for_repository(&root, repository)?)
+}
+
+fn parse_root_object_ids(output: &[u8]) -> Result<Vec<String>, DiscoveryError> {
+    let text = std::str::from_utf8(output)
+        .map_err(|_| DiscoveryError::InvalidRootObjectId("non-UTF-8 output".to_owned()))?;
+    let mut roots = Vec::new();
+    for raw in text.lines() {
+        let value = raw.trim();
+        if value.is_empty() {
+            continue;
+        }
+        if roots.len() == MAX_REPOSITORY_ROOTS {
+            return Err(DiscoveryError::TooManyRootObjects);
+        }
+        if !matches!(value.len(), 40 | 64) || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err(DiscoveryError::InvalidRootObjectId(
+                value.chars().take(80).collect(),
+            ));
+        }
+        roots.push(value.to_ascii_lowercase());
+    }
+    Ok(roots)
+}
+
+fn parse_single_path(output: &[u8]) -> Result<PathBuf, DiscoveryError> {
+    let raw = std::str::from_utf8(output).map_err(|_| DiscoveryError::NonUtf8AdministrativePath)?;
+    let raw = raw.strip_suffix('\n').unwrap_or(raw);
+    Ok(PathBuf::from(raw.strip_suffix('\r').unwrap_or(raw)))
+}
+
+#[cfg(unix)]
+fn unborn_repository_id(common_dir: &Path) -> Result<RepositoryId, DiscoveryError> {
+    use std::os::unix::fs::MetadataExt;
+
+    let metadata =
+        std::fs::metadata(common_dir).map_err(|source| DiscoveryError::AdministrativeMetadata {
+            path: common_dir.to_path_buf(),
+            source,
+        })?;
+    Ok(RepositoryId::from_stable_key(format!(
+        "git-unborn:unix:{:x}:{:x}",
+        metadata.dev(),
+        metadata.ino()
+    ))?)
+}
+
+#[cfg(windows)]
+fn unborn_repository_id(common_dir: &Path) -> Result<RepositoryId, DiscoveryError> {
+    use std::os::windows::fs::MetadataExt;
+
+    let metadata =
+        std::fs::metadata(common_dir).map_err(|source| DiscoveryError::AdministrativeMetadata {
+            path: common_dir.to_path_buf(),
+            source,
+        })?;
+    let volume =
+        metadata
+            .volume_serial_number()
+            .ok_or_else(|| DiscoveryError::AdministrativeMetadata {
+                path: common_dir.to_path_buf(),
+                source: io::Error::other("volume serial number is unavailable"),
+            })?;
+    let file = metadata
+        .file_index()
+        .ok_or_else(|| DiscoveryError::AdministrativeMetadata {
+            path: common_dir.to_path_buf(),
+            source: io::Error::other("file index is unavailable"),
+        })?;
+    Ok(RepositoryId::from_stable_key(format!(
+        "git-unborn:windows:{volume:x}:{file:x}"
+    ))?)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn unborn_repository_id(common_dir: &Path) -> Result<RepositoryId, DiscoveryError> {
+    Ok(RepositoryId::from_stable_key(format!(
+        "git-unborn:path:{}",
+        common_dir.display()
+    ))?)
 }
 
 fn is_excluded(path: &Path) -> bool {

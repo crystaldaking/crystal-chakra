@@ -24,8 +24,8 @@ use chakra_engine::{
 mod discovery;
 
 pub use discovery::{
-    DiscoveryError, discover_language_files, discover_source_files, resolve_repository_root,
-    source_language,
+    DiscoveryError, discover_language_files, discover_source_files, resolve_repository_identity,
+    resolve_repository_root, resolve_workspace_identity, source_language,
 };
 
 const MAX_GIT_OUTPUT_BYTES: usize = 8 * 1024 * 1024;

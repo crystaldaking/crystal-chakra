@@ -8,7 +8,6 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
 
-use chakra_domain::identity::WorkspaceIdentity;
 use chakra_domain::state::{Freshness, WorkspaceStatus};
 use chakra_engine::WorkspaceEngine;
 use clap::{Args, CommandFactory, Parser, Subcommand};
@@ -93,7 +92,7 @@ async fn serve(args: ServeArgs) -> ExitCode {
                 return ExitCode::FAILURE;
             }
         };
-    let identity = match WorkspaceIdentity::for_primary_worktree(&report.repository_root) {
+    let identity = match chakra_git::resolve_workspace_identity(&report.repository_root) {
         Ok(identity) => identity,
         Err(error) => {
             eprintln!("chakra: {error}");
