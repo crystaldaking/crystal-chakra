@@ -112,6 +112,25 @@ Do not claim a test passed unless it was actually executed in the current worktr
 
 Git history is part of the project from the first implementation step.
 
+### Mandatory Gitflow after v0.1.0
+
+The annotated `v0.1.0` tag is the workflow boundary. Once that tag exists,
+all repository development uses Gitflow:
+
+- `main` contains released code only;
+- `develop` is the integration branch for the next release;
+- `feature/*`, `fix/*`, `refactor/*`, and `docs/*` branch from `develop` and
+  merge back through reviewed pull requests;
+- `release/*` branches from `develop`, merges to `main` for an annotated
+  `vX.Y.Z` tag, and is merged back to `develop`;
+- `hotfix/*` branches from `main`, merges to `main` for a patch tag, and is
+  merged back to `develop`.
+
+Do not commit directly to `main` or `develop` after `v0.1.0`, including for
+documentation or CI changes. Before editing, agents must verify the current
+branch and create the correctly based topic branch when necessary. See
+`CONTRIBUTING.md` for the contributor-facing workflow.
+
 Before editing:
 
 - Inspect `git status --short` and current branch.

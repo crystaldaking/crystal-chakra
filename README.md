@@ -94,7 +94,9 @@ tool_timeout_sec = 60
 ```
 
 After connecting, `status` should report a published revision and fresh syntax
-state. Useful starting calls are:
+state. Its provider list also reports provider languages and capabilities, so
+the Rust-only precise enrichment boundary is machine-visible. Useful starting
+calls are:
 
 ```json
 {"query":"refund","limit":20}
@@ -115,6 +117,10 @@ when a name is ambiguous. For current changes:
 
 with `diff_context` summarizes changed Rust/PHP files, current declarations in
 those files, and bounded related callers/tests.
+
+All seven MCP tools advertise read-only, non-destructive, idempotent,
+closed-world annotations. Current Codex clients can therefore use Chakra's
+queries under their normal read-tool policy without treating them as writes.
 
 ## Freshness, bounds, and cancellation
 
@@ -178,6 +184,14 @@ run are in [docs/evaluation/v0.1-readiness.md](docs/evaluation/v0.1-readiness.md
 Use [docs/evaluation/v0.1-template.md](docs/evaluation/v0.1-template.md) for
 real agent comparisons before expanding scope.
 
+## Contributing and release flow
+
+See [CONTRIBUTING.md](CONTRIBUTING.md). The annotated `v0.1.0` tag is the
+mandatory Gitflow boundary: released code lives on `main`, next-release
+integration lives on `develop`, and all later work goes through topic,
+release, or hotfix branches and pull requests. Direct post-v0.1.0 commits to
+`main` or `develop` are prohibited by project policy.
+
 ## Repository layout
 
 - `crates/chakra-cli` — user-facing `chakra` binary.
@@ -194,6 +208,11 @@ real agent comparisons before expanding scope.
 - `docs/SPEC.md` — architectural source of truth.
 - `docs/roadmap/v0.1.md` — v0.1 scope authority.
 - `docs/adr/` — accepted architectural decisions.
+
+Production startup derives repository identity from Git root objects rather
+than the checkout path or remote URL. Linked worktrees share a repository id
+and receive distinct workspace ids; an unborn repository uses the filesystem
+identity of Git's reported common administrative directory.
 
 ## Known v0.1 limits
 
