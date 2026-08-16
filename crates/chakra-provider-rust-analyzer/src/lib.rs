@@ -192,6 +192,10 @@ impl RustAnalyzerProvider {
 }
 
 impl PreciseProvider for RustAnalyzerProvider {
+    fn supports(&self, language: chakra_domain::symbol::Language) -> bool {
+        language == chakra_domain::symbol::Language::Rust
+    }
+
     fn state_for(&self, revision: Revision) -> ProviderState {
         if self.stopped.load(Ordering::Acquire) {
             return ProviderState::Degraded;
@@ -324,6 +328,7 @@ mod tests {
                 documents: vec![ProviderDocument {
                     path: RepoRelativePath::new("src/lib.rs")?,
                     source: Arc::from("fn target() {}\n"),
+                    language: chakra_domain::symbol::Language::Rust,
                 }],
             },
         );
@@ -347,6 +352,7 @@ mod tests {
             documents: vec![ProviderDocument {
                 path: RepoRelativePath::new("src/lib.rs")?,
                 source: Arc::from("fn target() {}\n"),
+                language: chakra_domain::symbol::Language::Rust,
             }],
         };
         let provider = RustAnalyzerProvider::start(
@@ -368,6 +374,7 @@ mod tests {
                     position,
                     TextPosition::new(1, 15)?,
                 )?,
+                language: chakra_domain::symbol::Language::Rust,
             },
             directions: CallHierarchyDirections {
                 incoming: true,

@@ -76,7 +76,7 @@ mentions both.
 - `crates/chakra-mcp/tests/contract.rs`: in-process clients over a duplex
   transport verify server identity, all seven tools, a structured `status`
   call against a domain-only stub, and every high-level query against a real
-  indexed Rust fixture.
+  indexed Rust and PHP fixtures.
 - A unit regression exhausts both blocking-query permits, cancels a queued
   request, and proves the synchronous service closure is never dispatched.
 - A unit regression rejects an envelope whose serialized representation

@@ -23,8 +23,9 @@ The upstream Tree-sitter project currently publishes the maintained
 
 - Add `chakra-language-rust` as a real adapter crate. It depends inward on
   Chakra domain/engine types and the core crates do not depend on the Rust
-  parser. It owns Git discovery, Tree-sitter parsing, Rust-specific syntax
-  extraction, and graph construction.
+  parser. It owns Tree-sitter parsing, Rust-specific syntax extraction, and
+  graph construction. Shared Git source discovery later moved to `chakra-git`
+  under ADR-008 so Rust and PHP use one inventory policy.
 - Use workspace-managed `tree-sitter` 0.26 and `tree-sitter-rust` 0.24. The
   grammar exposes `LANGUAGE` through the current `tree-sitter-language`
   binding and is loaded through `Parser::set_language`.

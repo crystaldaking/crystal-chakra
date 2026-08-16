@@ -33,7 +33,7 @@ would also violate atomic revision semantics.
   the 10,000-file work-inventory cap instead of processing the retained output
   only to truncate its response.
 - Define the v0.1 default diff scope as `HEAD` to the final materialized
-  worktree for indexed regular Rust files:
+  worktree for indexed regular Rust and PHP files:
   - tracked staged and unstaged edits are combined; final worktree content wins;
   - materialized changes hidden by `assume-unchanged` or `skip-worktree` index
     bits are still compared with the `HEAD` blob;
@@ -41,10 +41,10 @@ would also violate atomic revision semantics.
   - a staged index removal whose non-ignored file remains materialized is
     compared with the HEAD blob: unchanged content is absent and changed
     content is modified;
-  - untracked, non-ignored Rust files are added;
-  - ignored files, `target/`, non-Rust files, and skipped symlinks are excluded;
-  - in an unborn repository, every indexed Rust document is added;
-  - deleted tracked Rust files are returned by their former path;
+  - untracked, non-ignored Rust/PHP files are added;
+  - ignored files, `target/`, unsupported-language files, and skipped symlinks are excluded;
+  - in an unborn repository, every indexed Rust/PHP document is added;
+  - deleted tracked Rust/PHP files are returned by their former path;
   - Git-detected staged renames use the current path plus `previous_path` and
     heuristic precision because rename detection is similarity-based;
   - an unstaged filesystem move is returned as a deletion plus an untracked
@@ -104,8 +104,9 @@ would also violate atomic revision semantics.
 - Real temporary repositories cover staged, unstaged, untracked, ignored,
   canceled, rename, delete, unborn-HEAD, hidden index bits, unrelated non-UTF-8
   paths, skipped symlink deletion, and snapshot-race behavior.
-- The Rust fixture exercises structured `context`, ambiguity, callers,
-  `diff_context`, budgets, and provenance through an in-process MCP client.
+- Rust and PHP fixtures exercise structured `context`, ambiguity, callers,
+  `diff_context`, budgets, explicit symbol language, and provenance through
+  an in-process MCP client.
 - Fixture measurements record initial indexing, `symbol_search`, `context`, and
   `diff_context` latency; `docs/evaluation/v0.1-readiness.md` records the
   current local values and reproduction commands.

@@ -132,6 +132,19 @@ fn provider_state_for(engine: &WorkspaceEngine, snapshot: &WorkspaceSnapshot) ->
         })
 }
 
+fn provider_state_for_language(
+    engine: &WorkspaceEngine,
+    snapshot: &WorkspaceSnapshot,
+    language: chakra_domain::symbol::Language,
+) -> ProviderState {
+    engine
+        .precise_provider()
+        .filter(|provider| provider.supports(language))
+        .map_or(ProviderState::NotConfigured, |provider| {
+            provider.state_for(snapshot.revision())
+        })
+}
+
 fn precise_related(graph: &SymbolGraph, relation: PreciseRelation) -> Option<RelatedSymbol> {
     let position = relation.declaration.start();
     let symbol = graph
@@ -562,16 +575,19 @@ impl QueryService for WorkspaceEngine {
             .filter(|edge| edge.kind == EdgeKind::Calls)
             .filter_map(|edge| related(graph, edge, edge.to))
             .collect();
-        let mut provider_state = provider_state_for(self, &snapshot);
+        let mut provider_state = provider_state_for_language(self, &snapshot, symbol.key.language);
         let mut provider_truncated = false;
         if snapshot.freshness() == Freshness::Fresh
-            && let Some(provider) = self.precise_provider()
+            && let Some(provider) = self
+                .precise_provider()
+                .filter(|provider| provider.supports(symbol.key.language))
         {
             let result = provider.enrich(PreciseQueryRequest {
                 workspace: ProviderWorkspace::from_snapshot(&snapshot),
                 symbol: ProviderSymbol {
                     name: symbol.name().to_owned(),
                     declaration: symbol.location.clone(),
+                    language: symbol.key.language,
                 },
                 directions: CallHierarchyDirections {
                     incoming: true,
@@ -661,16 +677,19 @@ impl QueryService for WorkspaceEngine {
             .filter_map(|edge| related(graph, edge, edge.from))
             .collect();
         let limit = clamp_limit(request.limit);
-        let mut provider_state = provider_state_for(self, &snapshot);
+        let mut provider_state = provider_state_for_language(self, &snapshot, target.key.language);
         let mut provider_truncated = false;
         if snapshot.freshness() == Freshness::Fresh
-            && let Some(provider) = self.precise_provider()
+            && let Some(provider) = self
+                .precise_provider()
+                .filter(|provider| provider.supports(target.key.language))
         {
             let result = provider.enrich(PreciseQueryRequest {
                 workspace: ProviderWorkspace::from_snapshot(&snapshot),
                 symbol: ProviderSymbol {
                     name: target.name().to_owned(),
                     declaration: target.location.clone(),
+                    language: target.key.language,
                 },
                 directions: CallHierarchyDirections {
                     incoming: true,

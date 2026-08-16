@@ -386,6 +386,11 @@ Avoid orphan processes.
 
 Do not assume that rust-analyzer can cheaply provide a whole-repository precise call graph.
 
+For v0.1, rust-analyzer advertises Rust-only capability. The provider adapter
+must ignore PHP documents, and the query layer must not send PHP symbols to it.
+PHP remains fully usable through current Tree-sitter syntax intelligence when
+no precise PHP provider is configured.
+
 ## 17. Future multi-worktree provider resource model
 
 Long term, precise language providers are logically worktree-scoped because uncommitted worktree states must not leak into each other.
@@ -793,6 +798,7 @@ chakra-domain
 chakra-graph
 chakra-git
 chakra-language
+chakra-language-php
 chakra-language-rust
 chakra-storage (when needed)
 chakra-engine
@@ -894,7 +900,7 @@ The complete architecture is intentionally larger than the first product slice.
 
 v0.1 exists to answer:
 
-> Does Chakra make a real coding agent measurably better at navigating and understanding a live Rust repository?
+> Does Chakra make a real coding agent measurably better at navigating and understanding live Rust and PHP repositories?
 
 If the answer is not demonstrated, do not blindly build every later feature in this document.
 
@@ -902,7 +908,6 @@ If the answer is not demonstrated, do not blindly build every later feature in t
 
 Unless promoted by a later roadmap decision, do not build:
 
-- PHP support;
 - multi-worktree orchestration;
 - arbitrary historical commit materialization;
 - persistent graph snapshot reuse;

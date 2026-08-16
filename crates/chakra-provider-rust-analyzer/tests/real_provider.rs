@@ -34,6 +34,7 @@ fn current_rust_analyzer_returns_precise_incoming_call() -> Result<(), Box<dyn E
         documents: vec![ProviderDocument {
             path: path.clone(),
             source,
+            language: chakra_domain::symbol::Language::Rust,
         }],
     };
     let provider = RustAnalyzerProvider::start(
@@ -53,6 +54,7 @@ fn current_rust_analyzer_returns_precise_incoming_call() -> Result<(), Box<dyn E
                 TextPosition::new(1, 1)?,
                 TextPosition::new(1, 19)?,
             )?,
+            language: chakra_domain::symbol::Language::Rust,
         },
         directions: CallHierarchyDirections {
             incoming: true,
@@ -91,6 +93,7 @@ fn current_rust_analyzer_returns_precise_incoming_call() -> Result<(), Box<dyn E
             documents: vec![ProviderDocument {
                 path: path.clone(),
                 source: changed_source,
+                language: chakra_domain::symbol::Language::Rust,
             }],
         },
         symbol: ProviderSymbol {
@@ -100,6 +103,7 @@ fn current_rust_analyzer_returns_precise_incoming_call() -> Result<(), Box<dyn E
                 TextPosition::new(1, 1)?,
                 TextPosition::new(1, 19)?,
             )?,
+            language: chakra_domain::symbol::Language::Rust,
         },
         directions: CallHierarchyDirections {
             incoming: true,

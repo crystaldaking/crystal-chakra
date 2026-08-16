@@ -971,6 +971,7 @@ impl Worker {
 fn document_map(documents: &[ProviderDocument]) -> BTreeMap<RepoRelativePath, Arc<str>> {
     documents
         .iter()
+        .filter(|document| document.language == chakra_domain::symbol::Language::Rust)
         .map(|document| (document.path.clone(), document.source.clone()))
         .collect()
 }

@@ -12,11 +12,24 @@ use serde::{Deserialize, Serialize};
 use crate::location::SourceRange;
 use crate::provenance::{Precision, Provenance};
 
-/// Programming language of a symbol. v0.1 indexes Rust only.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, schemars::JsonSchema)]
+/// Programming language of a symbol indexed by Chakra v0.1.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Serialize,
+    Deserialize,
+    schemars::JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum Language {
     Rust,
+    Php,
 }
 
 /// Kind of a code entity (SPEC §8 plus the impl-block/import facts v0.1 §7
@@ -28,10 +41,13 @@ pub enum SymbolKind {
     Function,
     Method,
     Struct,
+    Class,
     Enum,
     Trait,
+    Interface,
     Constant,
     Field,
+    Property,
     /// An `impl` block entity (container for methods).
     ImplBlock,
     /// A `use` declaration.

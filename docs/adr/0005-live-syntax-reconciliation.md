@@ -23,7 +23,7 @@ over native filesystem mechanisms:
 
 - Use workspace-managed `notify` 8.2.0 and `recommended_watcher`, selecting
   the current stable release rather than a release candidate. Watch only the
-  repository root and the existing ancestor directories of indexed Rust
+  repository root and the existing ancestor directories of indexed Rust/PHP
   files, non-recursively. This avoids recursive watches inside `.git`,
   `target`, ignored, and generated trees. The directory set is capped at
   4,096; exceeding the cap degrades watcher health but does not disable exact
@@ -42,14 +42,15 @@ over native filesystem mechanisms:
   temporary-file and rename-over-target save sequences without unbounded
   delay or queue growth. Parsing, Git subprocesses, and filesystem reads do
   not block Tokio runtime workers.
-- Make `FreshnessBarrier` a small language-neutral engine contract. The Rust
-  adapter implements it with monotonic request/completion generations plus a
+- Make `FreshnessBarrier` a small language-neutral engine contract. The
+  `chakra-language` workspace owner implements it with monotonic
+  request/completion generations plus a
   condition variable. Every syntax query using `RequireFresh` requests a
   reconciliation and waits for its generation; MCP runs these synchronous
   domain queries on its bounded blocking executor. Static engines retain the
   previously published freshness behavior when no live owner is installed.
 - Reconcile by asking Git for the current tracked plus untracked non-ignored
-  Rust inventory, reading exact current contents, and requiring two identical
+  Rust/PHP inventory, reading exact current contents, and requiring two identical
   scans with an unchanged watcher epoch. A bounded retry handles replacement
   races. This scan is authoritative even when events were missed or reordered.
   Unchanged source text is compared exactly and is never reparsed. If an event

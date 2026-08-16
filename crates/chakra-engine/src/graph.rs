@@ -26,6 +26,8 @@ pub enum GraphError {
     UnknownEntity(EntityId),
     #[error("source file is already indexed: {0}")]
     DuplicateFile(RepoRelativePath),
+    #[error("merged graph is inconsistent: {0}")]
+    Consistency(#[from] ConsistencyError),
 }
 
 #[derive(Debug, Clone)]
@@ -59,6 +61,63 @@ pub struct SymbolGraph {
 impl SymbolGraph {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Combines independently built language graphs into one revision-local
+    /// workspace graph, remapping arena ids while preserving every fact's
+    /// language, provenance, precision, and source range.
+    pub fn merge(graphs: impl IntoIterator<Item = SymbolGraph>) -> Result<Self, GraphError> {
+        let mut merged = Self::new();
+        for graph in graphs {
+            merged.append(graph)?;
+        }
+        merged
+            .validate_consistency()
+            .map_err(GraphError::Consistency)?;
+        Ok(merged)
+    }
+
+    fn append(&mut self, graph: SymbolGraph) -> Result<(), GraphError> {
+        let mut ids = HashMap::with_capacity(graph.symbols.len());
+        for (path, file) in &graph.files {
+            if let Some(source) = &file.source {
+                self.add_file(path.clone(), source.clone())?;
+            }
+        }
+        for symbol in &graph.symbols {
+            let id = self.add_symbol(
+                symbol.key.clone(),
+                symbol.location.clone(),
+                symbol.signature.clone(),
+                symbol.provenance,
+                symbol.precision,
+            )?;
+            ids.insert(symbol.id, id);
+        }
+        for edges in graph.outgoing.values() {
+            for edge in edges {
+                let from = ids
+                    .get(&edge.from)
+                    .copied()
+                    .ok_or(GraphError::UnknownEntity(edge.from))?;
+                let to = ids
+                    .get(&edge.to)
+                    .copied()
+                    .ok_or(GraphError::UnknownEntity(edge.to))?;
+                self.add_edge(
+                    edge.kind,
+                    from,
+                    to,
+                    edge.provenance,
+                    edge.precision,
+                    edge.location.clone(),
+                )?;
+            }
+        }
+        self.truncated_call_sites = self
+            .truncated_call_sites
+            .saturating_add(graph.truncated_call_sites);
+        Ok(())
     }
 
     /// Adds one discovered source file and the exact text parsed for this

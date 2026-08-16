@@ -55,10 +55,10 @@ Precise provider data is not an intrinsic property of an arbitrary Git commit.
 
 For v0.1, prefer the smallest useful implementation that proves agent value:
 
-- Rust only.
+- Rust and PHP syntax intelligence.
 - One repository and one active materialized worktree.
 - Tree-sitter syntax intelligence.
-- rust-analyzer precise enrichment on demand.
+- rust-analyzer precise enrichment on demand for Rust; honest syntax fallback for PHP.
 - Git diff awareness.
 - Filesystem watcher and fresh query semantics.
 - In-memory graph.
@@ -67,7 +67,6 @@ For v0.1, prefer the smallest useful implementation that proves agent value:
 
 Explicitly deferred unless the task is specifically about a later milestone:
 
-- PHP.
 - Multi-worktree orchestration.
 - Historical commit materialization.
 - Persistent graph snapshots and restoration.

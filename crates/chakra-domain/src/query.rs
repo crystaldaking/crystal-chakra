@@ -15,7 +15,7 @@ use crate::location::{RepoRelativePath, SourceRange};
 use crate::provenance::{Precision, Provenance};
 use crate::revision::Revision;
 use crate::state::{Freshness, FreshnessRequirement, ProviderState};
-use crate::symbol::{EdgeKind, EntityId, SymbolKind};
+use crate::symbol::{EdgeKind, EntityId, Language, SymbolKind};
 
 /// Default result budget when a request does not specify one (SPEC §29).
 pub const DEFAULT_QUERY_LIMIT: u32 = 20;
@@ -43,6 +43,7 @@ pub enum SymbolRef {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct SymbolView {
     pub id: EntityId,
+    pub language: Language,
     pub name: String,
     pub qualified_name: String,
     pub kind: SymbolKind,
@@ -56,6 +57,7 @@ impl From<&crate::symbol::Symbol> for SymbolView {
     fn from(symbol: &crate::symbol::Symbol) -> Self {
         Self {
             id: symbol.id,
+            language: symbol.key.language,
             name: symbol.name().to_owned(),
             qualified_name: symbol.key.qualified_name.clone(),
             kind: symbol.key.kind,

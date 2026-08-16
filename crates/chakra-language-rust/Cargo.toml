@@ -9,14 +9,13 @@ publish = false
 [dependencies]
 chakra-domain = { path = "../chakra-domain", version = "0.1.0" }
 chakra-engine = { path = "../chakra-engine", version = "0.1.0" }
-notify.workspace = true
+chakra-git = { path = "../chakra-git", version = "0.1.0" }
 thiserror.workspace = true
 tracing.workspace = true
 tree-sitter.workspace = true
 tree-sitter-rust.workspace = true
 
 [dev-dependencies]
-chakra-git = { path = "../chakra-git", version = "0.1.0" }
 tempfile.workspace = true
 
 [lints]

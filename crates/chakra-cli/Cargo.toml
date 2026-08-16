@@ -14,7 +14,7 @@ path = "src/main.rs"
 chakra-domain = { path = "../chakra-domain", version = "0.1.0" }
 chakra-engine = { path = "../chakra-engine", version = "0.1.0" }
 chakra-git = { path = "../chakra-git", version = "0.1.0" }
-chakra-language-rust = { path = "../chakra-language-rust", version = "0.1.0" }
+chakra-language = { path = "../chakra-language", version = "0.1.0" }
 chakra-mcp = { path = "../chakra-mcp", version = "0.1.0" }
 chakra-provider-rust-analyzer = { path = "../chakra-provider-rust-analyzer", version = "0.1.0" }
 clap.workspace = true

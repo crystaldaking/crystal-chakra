@@ -1,6 +1,6 @@
 [package]
-name = "chakra-git"
-description = "Git worktree change adapter for Chakra"
+name = "chakra-language"
+description = "Multi-language syntax index composition and live reconciliation for Chakra"
 version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
@@ -9,7 +9,11 @@ publish = false
 [dependencies]
 chakra-domain = { path = "../chakra-domain", version = "0.1.0" }
 chakra-engine = { path = "../chakra-engine", version = "0.1.0" }
+chakra-language-php = { path = "../chakra-language-php", version = "0.1.0" }
+chakra-language-rust = { path = "../chakra-language-rust", version = "0.1.0" }
+notify.workspace = true
 thiserror.workspace = true
+tracing.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

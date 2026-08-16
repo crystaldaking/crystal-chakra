@@ -1,7 +1,7 @@
-//! Current Git/worktree change adapter (SPEC §12, §26).
+//! Git-backed source discovery and current worktree change adapter.
 //!
 //! The adapter asks Git to compare `HEAD` with the final materialized
-//! worktree and adds untracked, non-ignored Rust files. It never constructs
+//! worktree and adds untracked, non-ignored supported source files. It never constructs
 //! or inspects an administrative Git path, and repository-controlled paths
 //! are passed as data rather than through a shell.
 
@@ -9,7 +9,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ffi::OsStr;
 use std::fs;
 use std::io::{self, Read};
-use std::path::{Component, Path};
+use std::path::Path;
 use std::process::{Command, ExitStatus, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -19,6 +19,13 @@ use chakra_domain::provenance::{Precision, Provenance};
 use chakra_domain::query::ChangeKind;
 use chakra_engine::{
     DiffWorkspace, WorkspaceDiff, WorkspaceDiffError, WorkspaceDiffProvider, WorkspaceFileChange,
+};
+
+mod discovery;
+
+pub use discovery::{
+    DiscoveryError, discover_language_files, discover_source_files, resolve_repository_root,
+    source_language,
 };
 
 const MAX_GIT_OUTPUT_BYTES: usize = 8 * 1024 * 1024;
@@ -236,21 +243,17 @@ fn has_head(root: &Path) -> Result<bool, WorkspaceDiffError> {
     }
 }
 
-fn is_rust_source(path: &str) -> bool {
-    let path = Path::new(path);
-    path.extension() == Some(OsStr::new("rs"))
-        && !path.components().any(|component| {
-            matches!(component, Component::Normal(value) if value == OsStr::new(".git") || value == OsStr::new("target"))
-        })
+fn is_supported_source(path: &str) -> bool {
+    source_language(path).is_some()
 }
 
-fn raw_is_rust_source(raw: &[u8]) -> Result<bool, WorkspaceDiffError> {
-    if !raw.ends_with(b".rs") {
+fn raw_is_supported_source(raw: &[u8]) -> Result<bool, WorkspaceDiffError> {
+    if !raw.ends_with(b".rs") && !raw.ends_with(b".php") {
         return Ok(false);
     }
     let path = std::str::from_utf8(raw)
-        .map_err(|_| WorkspaceDiffError::new("Git returned a non-UTF-8 Rust path"))?;
-    Ok(is_rust_source(path))
+        .map_err(|_| WorkspaceDiffError::new("Git returned a non-UTF-8 source path"))?;
+    Ok(is_supported_source(path))
 }
 
 fn parse_path(raw: &[u8]) -> Result<RepoRelativePath, WorkspaceDiffError> {
@@ -303,9 +306,9 @@ fn parse_tracked_changes(
             let new = fields
                 .next()
                 .ok_or_else(|| WorkspaceDiffError::new("Git rename is missing its current path"))?;
-            let old_is_rust = raw_is_rust_source(old)?;
-            let new_is_rust = raw_is_rust_source(new)?;
-            match (old_is_rust, new_is_rust, status) {
+            let old_is_source = raw_is_supported_source(old)?;
+            let new_is_source = raw_is_supported_source(new)?;
+            match (old_is_source, new_is_source, status) {
                 (true, true, b'R') => insert_change(
                     &mut changes,
                     parse_path(new)?,
@@ -336,7 +339,7 @@ fn parse_tracked_changes(
         let raw_path = fields
             .next()
             .ok_or_else(|| WorkspaceDiffError::new("Git change is missing its path"))?;
-        if !raw_is_rust_source(raw_path)? {
+        if !raw_is_supported_source(raw_path)? {
             continue;
         }
         let change = match status {
@@ -374,7 +377,7 @@ fn add_untracked_changes(
         if changes.len() > MAX_WORKSPACE_CHANGES {
             break;
         }
-        if !raw_is_rust_source(raw_path)? {
+        if !raw_is_supported_source(raw_path)? {
             continue;
         }
         let path = parse_path(raw_path)?;
@@ -425,7 +428,7 @@ fn add_index_hidden_changes(
         // `git ls-files -v` lowercases the normal tag for assume-unchanged
         // entries; `S` denotes skip-worktree. Both can suppress ordinary
         // `git diff` inspection even when a regular file is materialized.
-        if !(tag.is_ascii_lowercase() || tag == b'S') || !raw_is_rust_source(raw_path)? {
+        if !(tag.is_ascii_lowercase() || tag == b'S') || !raw_is_supported_source(raw_path)? {
             continue;
         }
         let path = parse_path(raw_path)?;
@@ -610,7 +613,7 @@ impl WorkspaceDiffProvider for GitWorkspaceDiff {
         } else {
             let mut unborn = BTreeMap::new();
             for document in &workspace.documents {
-                if is_rust_source(document.path.as_str()) {
+                if is_supported_source(document.path.as_str()) {
                     insert_change(
                         &mut unborn,
                         document.path.clone(),
@@ -982,6 +985,34 @@ mod tests {
             &mut changes,
         )?;
         assert!(changes.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn php_modify_untracked_and_delete_use_the_same_diff_scope() -> Result<(), Box<dyn Error>> {
+        let repository = TempDir::new()?;
+        let root = repository.path();
+        git(root, &["init", "--quiet"])?;
+        git(root, &["config", "user.email", "tests@example.invalid"])?;
+        git(root, &["config", "user.name", "Chakra Tests"])?;
+        write(root, "src/service.php", "<?php function pay() {}\n")?;
+        write(root, "src/deleted.php", "<?php function removed() {}\n")?;
+        git(root, &["add", "src"])?;
+        git(root, &["commit", "--quiet", "-m", "base"])?;
+
+        write(root, "src/service.php", "<?php function payNow() {}\n")?;
+        fs::remove_file(root.join("src/deleted.php"))?;
+        write(root, "src/untracked.php", "<?php function added() {}\n")?;
+        let workspace = workspace(root, &["src/service.php", "src/untracked.php"])?;
+        let diff = GitWorkspaceDiff.diff(workspace)?;
+        let changes: BTreeMap<_, _> = diff
+            .files
+            .iter()
+            .map(|change| (change.path.as_str(), change.change))
+            .collect();
+        assert_eq!(changes["src/service.php"], ChangeKind::Modified);
+        assert_eq!(changes["src/deleted.php"], ChangeKind::Deleted);
+        assert_eq!(changes["src/untracked.php"], ChangeKind::Added);
         Ok(())
     }
 }

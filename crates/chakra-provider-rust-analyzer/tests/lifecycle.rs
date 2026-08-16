@@ -161,6 +161,7 @@ fn request(root: &Path, revision: Revision) -> Result<PreciseQueryRequest, Box<d
             documents: vec![ProviderDocument {
                 path: path.clone(),
                 source,
+                language: chakra_domain::symbol::Language::Rust,
             }],
         },
         symbol: ProviderSymbol {
@@ -170,6 +171,7 @@ fn request(root: &Path, revision: Revision) -> Result<PreciseQueryRequest, Box<d
                 TextPosition::new(1, 1)?,
                 TextPosition::new(1, 19)?,
             )?,
+            language: chakra_domain::symbol::Language::Rust,
         },
         directions: CallHierarchyDirections {
             incoming: true,
@@ -270,6 +272,7 @@ fn every_snapshot_document_is_opened_before_precise_queries() -> Result<(), Box<
     request.workspace.documents.push(ProviderDocument {
         path: second_path,
         source: second_source,
+        language: chakra_domain::symbol::Language::Rust,
     });
     let provider = RustAnalyzerProvider::start(request.workspace.clone(), config(&executable))?;
 

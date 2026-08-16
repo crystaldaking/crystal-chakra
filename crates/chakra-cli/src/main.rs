@@ -60,6 +60,10 @@ async fn main() -> ExitCode {
     }
 }
 
+fn should_start_rust_analyzer(disabled: bool, has_rust_sources: bool) -> bool {
+    !disabled && has_rust_sources
+}
+
 async fn serve(args: ServeArgs) -> ExitCode {
     // MCP owns stdout; logs go to stderr only.
     let _ = tracing_subscriber::fmt()
@@ -78,9 +82,7 @@ async fn serve(args: ServeArgs) -> ExitCode {
         rust_analyzer_path,
     } = args;
     let report =
-        match tokio::task::spawn_blocking(move || chakra_language_rust::index_repository(&repo))
-            .await
-        {
+        match tokio::task::spawn_blocking(move || chakra_language::index_repository(&repo)).await {
             Ok(Ok(report)) => report,
             Ok(Err(error)) => {
                 eprintln!("chakra: {error}");
@@ -117,35 +119,44 @@ async fn serve(args: ServeArgs) -> ExitCode {
         return ExitCode::FAILURE;
     }
     let initial_metrics = report.metrics;
+    let has_rust_sources = initial_metrics.rust_files > 0;
     tracing::info!(
         files = initial_metrics.parsed_files,
+        rust_files = initial_metrics.rust_files,
+        php_files = initial_metrics.php_files,
         syntax_error_files = initial_metrics.syntax_error_files,
         truncated_call_sites = initial_metrics.truncated_call_sites,
         symbols = initial_metrics.symbols,
         edges = initial_metrics.edges,
         elapsed_micros = initial_metrics.elapsed.as_micros(),
-        "initial Rust syntax revision published as stale pending live reconciliation"
+        "initial Rust/PHP syntax revision published as stale pending live reconciliation"
     );
     let repository_root = report.repository_root;
     let syntax_index = report.syntax_index;
     let live_engine = engine.clone();
     let live = match tokio::task::spawn_blocking(move || {
-        chakra_language_rust::start_live_rust_index(repository_root, syntax_index, live_engine)
+        chakra_language::start_live_index(repository_root, syntax_index, live_engine)
     })
     .await
     {
         Ok(Ok(live)) => live,
         Ok(Err(error)) => {
-            eprintln!("chakra: failed to start live Rust index: {error}");
+            eprintln!("chakra: failed to start live syntax index: {error}");
             return ExitCode::FAILURE;
         }
         Err(error) => {
-            eprintln!("chakra: live Rust index startup task failed: {error}");
+            eprintln!("chakra: live syntax index startup task failed: {error}");
             return ExitCode::FAILURE;
         }
     };
-    let precise_provider = if no_rust_analyzer {
-        tracing::info!("rust-analyzer precise enrichment is disabled");
+    let precise_provider = if !should_start_rust_analyzer(no_rust_analyzer, has_rust_sources) {
+        if no_rust_analyzer {
+            tracing::info!("rust-analyzer precise enrichment is disabled");
+        } else {
+            tracing::info!(
+                "rust-analyzer was not started because the workspace has no Rust sources"
+            );
+        }
         None
     } else {
         let config = chakra_provider_rust_analyzer::RustAnalyzerConfig {
@@ -187,11 +198,11 @@ async fn serve(args: ServeArgs) -> ExitCode {
     match tokio::task::spawn_blocking(move || live.shutdown()).await {
         Ok(Ok(())) => {}
         Ok(Err(error)) => {
-            eprintln!("chakra: failed to stop live Rust index: {error}");
+            eprintln!("chakra: failed to stop live syntax index: {error}");
             return ExitCode::FAILURE;
         }
         Err(error) => {
-            eprintln!("chakra: live Rust index shutdown task failed: {error}");
+            eprintln!("chakra: live syntax index shutdown task failed: {error}");
             return ExitCode::FAILURE;
         }
     }
@@ -250,5 +261,12 @@ mod tests {
             }) if args.no_rust_analyzer
                 && args.rust_analyzer_path == "/opt/bin/rust-analyzer"
         ));
+    }
+
+    #[test]
+    fn rust_analyzer_start_policy_requires_rust_sources_and_permission() {
+        assert!(should_start_rust_analyzer(false, true));
+        assert!(!should_start_rust_analyzer(false, false));
+        assert!(!should_start_rust_analyzer(true, true));
     }
 }

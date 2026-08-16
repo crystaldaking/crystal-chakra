@@ -12,6 +12,7 @@ use chakra_domain::location::{RepoRelativePath, SourceRange};
 use chakra_domain::provenance::Provenance;
 use chakra_domain::revision::Revision;
 use chakra_domain::state::ProviderState;
+use chakra_domain::symbol::Language;
 
 use crate::WorkspaceSnapshot;
 
@@ -20,6 +21,7 @@ use crate::WorkspaceSnapshot;
 pub struct ProviderDocument {
     pub path: RepoRelativePath,
     pub source: Arc<str>,
+    pub language: Language,
 }
 
 /// Immutable input used to synchronize a live provider without giving it
@@ -37,7 +39,19 @@ impl ProviderWorkspace {
             .graph()
             .snapshot_documents()
             .into_iter()
-            .map(|(path, source)| ProviderDocument { path, source })
+            .filter_map(|(path, source)| {
+                let language = snapshot
+                    .graph()
+                    .symbols_in_file(&path)
+                    .next()
+                    .map(|symbol| symbol.key.language)
+                    .or_else(|| language_from_path(path.as_str()))?;
+                Some(ProviderDocument {
+                    path,
+                    source,
+                    language,
+                })
+            })
             .collect();
         Self {
             repository_root: snapshot.identity().root.clone(),
@@ -52,6 +66,7 @@ impl ProviderWorkspace {
 pub struct ProviderSymbol {
     pub name: String,
     pub declaration: SourceRange,
+    pub language: Language,
 }
 
 /// The two bounded call-hierarchy directions needed by v0.1 queries.
@@ -105,6 +120,9 @@ impl PreciseQueryResult {
 
 /// Optional precise-provider adapter installed for one active workspace.
 pub trait PreciseProvider: std::fmt::Debug + Send + Sync {
+    /// Whether this adapter can enrich symbols in `language`.
+    fn supports(&self, language: Language) -> bool;
+
     /// State relative to a specific published syntax revision.
     fn state_for(&self, revision: Revision) -> ProviderState;
 
@@ -117,4 +135,15 @@ pub trait PreciseProvider: std::fmt::Debug + Send + Sync {
     /// Lazily enrich one selected symbol. Implementations must bound waiting
     /// and return `CatchingUp`/`Degraded` rather than stale precise facts.
     fn enrich(&self, request: PreciseQueryRequest) -> PreciseQueryResult;
+}
+
+fn language_from_path(path: &str) -> Option<Language> {
+    match std::path::Path::new(path)
+        .extension()
+        .and_then(std::ffi::OsStr::to_str)
+    {
+        Some("rs") => Some(Language::Rust),
+        Some("php") => Some(Language::Php),
+        _ => None,
+    }
 }

@@ -1,4 +1,4 @@
-//! Bounded filesystem notifications plus deterministic Git-aware freshness.
+//! Bounded filesystem notifications plus deterministic multi-language freshness.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -15,7 +15,8 @@ use thiserror::Error;
 use tracing::{error, info, warn};
 
 use crate::indexer::{
-    ReconcileMetrics, ReconcileReport, RustIndexError, RustSyntaxIndex, scan_repository_sources,
+    ReconcileMetrics, ReconcileReport, WorkspaceIndexError, WorkspaceSources, WorkspaceSyntaxIndex,
+    scan_repository_sources,
 };
 
 const EVENT_QUEUE_CAPACITY: usize = 256;
@@ -247,14 +248,14 @@ impl FreshnessBarrier for LiveFreshnessBarrier {
 
 /// Owner of the watcher, worker cancellation, and live instrumentation.
 #[derive(Debug)]
-pub struct LiveRustIndex {
+pub struct LiveIndex {
     sender: SyncSender<WorkerSignal>,
     shared: Arc<BarrierShared>,
     metrics: Arc<MetricsState>,
     worker: Option<JoinHandle<()>>,
 }
 
-impl LiveRustIndex {
+impl LiveIndex {
     pub fn metrics(&self) -> LiveIndexMetrics {
         self.metrics.snapshot()
     }
@@ -273,10 +274,10 @@ impl LiveRustIndex {
     }
 }
 
-impl Drop for LiveRustIndex {
+impl Drop for LiveIndex {
     fn drop(&mut self) {
         if let Err(error) = self.stop_and_join() {
-            error!(%error, "failed to stop live Rust index worker");
+            error!(%error, "failed to stop live syntax index worker");
         }
     }
 }
@@ -306,11 +307,11 @@ impl DebounceWindow {
 
 /// Starts the owned live pipeline and performs a mandatory reconciliation
 /// after the watcher is active, closing the initial-index/startup race.
-pub fn start_live_rust_index(
+pub fn start_live_index(
     repository_root: PathBuf,
-    syntax_index: RustSyntaxIndex,
+    syntax_index: WorkspaceSyntaxIndex,
     engine: Arc<WorkspaceEngine>,
-) -> Result<LiveRustIndex, LiveIndexError> {
+) -> Result<LiveIndex, LiveIndexError> {
     let (sender, receiver) = mpsc::sync_channel(EVENT_QUEUE_CAPACITY);
     let (ready_sender, ready_receiver) = mpsc::sync_channel(1);
     let shared = Arc::new(BarrierShared {
@@ -325,7 +326,7 @@ pub fn start_live_rust_index(
     let worker_engine = engine.clone();
     let worker_publication_gate = publication_gate.clone();
     let worker = thread::Builder::new()
-        .name("chakra-rust-live-index".to_owned())
+        .name("chakra-live-syntax-index".to_owned())
         .spawn(move || {
             run_worker(
                 repository_root,
@@ -361,7 +362,7 @@ pub fn start_live_rust_index(
     });
     let engine_barrier: Arc<dyn FreshnessBarrier> = barrier.clone();
     if engine.install_freshness_barrier(engine_barrier).is_err() {
-        let mut live = LiveRustIndex {
+        let mut live = LiveIndex {
             sender,
             shared,
             metrics,
@@ -371,7 +372,7 @@ pub fn start_live_rust_index(
         return Err(LiveIndexError::BarrierAlreadyInstalled);
     }
     if let Err(error) = barrier.require_fresh() {
-        let mut live = LiveRustIndex {
+        let mut live = LiveIndex {
             sender,
             shared,
             metrics,
@@ -380,7 +381,7 @@ pub fn start_live_rust_index(
         let _ = live.stop_and_join();
         return Err(LiveIndexError::Freshness(error));
     }
-    Ok(LiveRustIndex {
+    Ok(LiveIndex {
         sender,
         shared,
         metrics,
@@ -391,7 +392,7 @@ pub fn start_live_rust_index(
 #[allow(clippy::too_many_arguments)]
 fn run_worker(
     repository_root: PathBuf,
-    mut syntax_index: RustSyntaxIndex,
+    mut syntax_index: WorkspaceSyntaxIndex,
     engine: Arc<WorkspaceEngine>,
     receiver: Receiver<WorkerSignal>,
     sender: SyncSender<WorkerSignal>,
@@ -549,7 +550,7 @@ fn run_worker(
         }
     }
     shared.stop();
-    info!("live Rust index worker stopped");
+    info!("live syntax index worker stopped");
 }
 
 fn invalidate_for_event(
@@ -571,7 +572,7 @@ fn invalidate_for_event(
 #[allow(clippy::too_many_arguments)]
 fn reconcile(
     repository_root: &Path,
-    syntax_index: &mut RustSyntaxIndex,
+    syntax_index: &mut WorkspaceSyntaxIndex,
     engine: &WorkspaceEngine,
     watcher: &mut RecommendedWatcher,
     watched: &mut BTreeSet<PathBuf>,
@@ -608,8 +609,8 @@ fn reconcile(
             if metrics.event_epoch.load(Ordering::Acquire) != event_epoch {
                 continue;
             }
-            let published =
-                publish_fresh(engine, graph.as_ref(), status).map_err(RustIndexError::Update)?;
+            let published = publish_fresh(engine, graph.as_ref(), status)
+                .map_err(WorkspaceIndexError::Update)?;
             if let Some(next_index) = next_index {
                 *syntax_index = next_index;
             }
@@ -620,7 +621,7 @@ fn reconcile(
             *reconciled_event_epoch = event_epoch;
             return Ok(());
         }
-        Err(RustIndexError::Update(
+        Err(WorkspaceIndexError::Update(
             "worktree changed before fresh revision publication".to_owned(),
         ))
     })();
@@ -632,7 +633,7 @@ fn reconcile(
                 .fetch_add(1, Ordering::Relaxed);
             mark_failed_reconciliation(engine);
             let message = error.to_string();
-            error!(%error, "live Rust reconciliation failed");
+            error!(%error, "live syntax reconciliation failed");
             shared.complete(generation, Err(message));
         }
     }
@@ -641,13 +642,7 @@ fn reconcile(
 fn stable_scan(
     repository_root: &Path,
     metrics: &MetricsState,
-) -> Result<
-    (
-        std::collections::BTreeMap<chakra_domain::location::RepoRelativePath, Arc<str>>,
-        u64,
-    ),
-    RustIndexError,
-> {
+) -> Result<(WorkspaceSources, u64), WorkspaceIndexError> {
     let mut last_error = None;
     for _ in 0..MAX_STABLE_SCAN_ATTEMPTS {
         let epoch = metrics.event_epoch.load(Ordering::Acquire);
@@ -670,13 +665,15 @@ fn stable_scan(
         }
     }
     Err(last_error.unwrap_or_else(|| {
-        RustIndexError::Update("worktree kept changing during freshness reconciliation".to_owned())
+        WorkspaceIndexError::Update(
+            "worktree kept changing during freshness reconciliation".to_owned(),
+        )
     }))
 }
 
 fn desired_watch_directories(
     repository_root: &Path,
-    syntax_index: &RustSyntaxIndex,
+    syntax_index: &WorkspaceSyntaxIndex,
 ) -> (BTreeSet<PathBuf>, bool) {
     let mut desired = BTreeSet::from([repository_root.to_path_buf()]);
     for path in syntax_index.paths() {
@@ -706,10 +703,10 @@ fn desired_watch_directories(
 fn refresh_watches(
     watcher: &mut RecommendedWatcher,
     repository_root: &Path,
-    syntax_index: &RustSyntaxIndex,
+    syntax_index: &WorkspaceSyntaxIndex,
     watched: &mut BTreeSet<PathBuf>,
     metrics: &MetricsState,
-) -> Result<bool, RustIndexError> {
+) -> Result<bool, WorkspaceIndexError> {
     let (desired, mut degraded) = desired_watch_directories(repository_root, syntax_index);
     if degraded {
         metrics.watcher_errors.fetch_add(1, Ordering::Relaxed);
@@ -732,7 +729,7 @@ fn refresh_watches(
                 watched.insert(directory);
             }
             Err(error) if directory == repository_root => {
-                return Err(RustIndexError::Update(format!(
+                return Err(WorkspaceIndexError::Update(format!(
                     "failed to watch repository root {}: {error}",
                     repository_root.display()
                 )));

@@ -27,6 +27,10 @@ background work is quiescent:
   domain crates do not depend on LSP types. URI handling, zero-based UTF-16
   positions, JSON-RPC messages, and rust-analyzer lifecycle stay inside the
   adapter.
+- Advertise Rust-only capability through the engine's language-neutral
+  provider contract. The query layer gates enrichment by symbol language and
+  the adapter filters workspace documents to Rust, so PHP syntax facts can
+  never be mislabeled as rust-analyzer output.
 - Use maintained `lsp-server` 0.10.0 for LSP framing/message types and
   `lsp-types` 0.97.0 for protocol structures. Use `url` 2.x for correct file
   URI conversion and `crossbeam-channel` 0.5 for bounded process/command

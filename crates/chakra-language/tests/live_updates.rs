@@ -10,8 +10,9 @@ use std::time::Instant;
 use chakra_domain::identity::WorkspaceIdentity;
 use chakra_domain::query::{QueryService, RepoMapRequest, SymbolSearchRequest};
 use chakra_domain::state::{Freshness, FreshnessRequirement, WorkspaceStatus};
+use chakra_domain::symbol::Language;
 use chakra_engine::WorkspaceEngine;
-use chakra_language_rust::{LiveRustIndex, index_repository, start_live_rust_index};
+use chakra_language::{LiveIndex, index_repository, start_live_index};
 use tempfile::TempDir;
 
 fn write(root: &Path, path: &str, source: &str) -> Result<(), Box<dyn Error>> {
@@ -42,7 +43,7 @@ fn repository() -> Result<TempDir, Box<dyn Error>> {
     Ok(repository)
 }
 
-fn start(repository: &TempDir) -> Result<(Arc<WorkspaceEngine>, LiveRustIndex), Box<dyn Error>> {
+fn start(repository: &TempDir) -> Result<(Arc<WorkspaceEngine>, LiveIndex), Box<dyn Error>> {
     let report = index_repository(repository.path())?;
     let identity = WorkspaceIdentity::for_primary_worktree(&report.repository_root)?;
     let engine = Arc::new(WorkspaceEngine::new(identity));
@@ -51,7 +52,7 @@ fn start(repository: &TempDir) -> Result<(Arc<WorkspaceEngine>, LiveRustIndex), 
     update.set_status(WorkspaceStatus::Indexing);
     update.set_freshness(Freshness::Stale);
     engine.publish(update)?;
-    let live = start_live_rust_index(report.repository_root, report.syntax_index, engine.clone())?;
+    let live = start_live_index(report.repository_root, report.syntax_index, engine.clone())?;
     Ok((engine, live))
 }
 
@@ -244,6 +245,53 @@ fn atomic_save_and_temporary_syntax_error_publish_complete_revisions() -> Result
     assert_eq!(symbols(&engine, "recovered")?, ["one::recovered"]);
     assert_eq!(live.metrics().syntax_error_files, 0);
     assert!(engine.snapshot().revision() > broken_revision.revision());
+    live.shutdown()?;
+    Ok(())
+}
+
+#[test]
+fn php_edit_is_immediately_fresh_and_does_not_reparse_rust() -> Result<(), Box<dyn Error>> {
+    let repository = repository()?;
+    write(
+        repository.path(),
+        "src/PaymentService.php",
+        "<?php namespace App; class PaymentService { public function refund(): void {} }\n",
+    )?;
+    let (engine, live) = start(&repository)?;
+    let baseline = live.metrics();
+
+    write(
+        repository.path(),
+        "src/PaymentService.php",
+        "<?php namespace App; class PaymentService { public function refundNow(): void {} }\n",
+    )?;
+    let response = engine.symbol_search(SymbolSearchRequest {
+        query: "refundNow".to_owned(),
+        limit: None,
+        freshness: FreshnessRequirement::RequireFresh,
+    })?;
+    assert_eq!(response.freshness, Freshness::Fresh);
+    assert_eq!(response.data.candidates.len(), 1);
+    assert_eq!(response.data.candidates[0].language, Language::Php);
+    assert_eq!(
+        response.data.candidates[0].qualified_name,
+        "App::PaymentService::refundNow"
+    );
+    assert!(
+        engine
+            .snapshot()
+            .graph()
+            .resolve_name("App::PaymentService::refund")
+            .is_empty()
+    );
+
+    let metrics = live.metrics();
+    assert_eq!(metrics.files_reparsed - baseline.files_reparsed, 1);
+    assert_eq!(
+        metrics.relationship_files_recomputed - baseline.relationship_files_recomputed,
+        1
+    );
+    engine.snapshot().graph().validate_consistency()?;
     live.shutdown()?;
     Ok(())
 }

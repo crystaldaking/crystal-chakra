@@ -30,5 +30,6 @@ Accepted v0.1 decisions:
 - ADR-005: live syntax reconciliation and freshness barriers
 - ADR-006: optional rust-analyzer precise enrichment
 - ADR-007: agent queries and Git diff scope
+- ADR-008: PHP syntax support and multi-language composition
 
 Do not pre-create empty ADRs merely to satisfy a list.

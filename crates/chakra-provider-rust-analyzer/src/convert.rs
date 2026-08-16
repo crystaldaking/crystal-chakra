@@ -263,6 +263,7 @@ mod tests {
             documents: vec![ProviderDocument {
                 path: path.clone(),
                 source: Arc::<str>::from("fn inside() {}\n"),
+                language: chakra_domain::symbol::Language::Rust,
             }],
         };
         let outside_root = TempDir::new()?;

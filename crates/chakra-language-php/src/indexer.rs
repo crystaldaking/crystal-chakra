@@ -1,4 +1,4 @@
-//! Deterministic Rust syntax indexing with reusable per-file facts.
+//! Deterministic PHP syntax indexing with reusable per-file facts.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs;
@@ -9,32 +9,28 @@ use std::time::{Duration, Instant};
 
 use chakra_domain::location::{RepoRelativePath, SourceRange};
 use chakra_domain::provenance::{Precision, Provenance};
-use chakra_domain::symbol::{EdgeKind, EntityId, SymbolKind};
+use chakra_domain::symbol::{EdgeKind, EntityId, Language, SymbolKind};
 use chakra_engine::{ConsistencyError, GraphError, SymbolGraph};
 use thiserror::Error;
 use tracing::{info, info_span};
 
-use crate::discovery::{DiscoveryError, discover_rust_files, resolve_repository_root};
-use crate::parser::{ParsedFile, RustParser, SymbolDraft};
+use crate::parser::{ParsedFile, PhpParser, SymbolDraft};
 
 const MAX_CANDIDATES_PER_CALL_SITE: usize = 64;
 const MAX_SOURCE_FILE_BYTES: usize = 8 * 1024 * 1024;
 const MAX_REPOSITORY_SOURCE_BYTES: usize = 256 * 1024 * 1024;
 
-/// Measurements captured during a deterministic initial syntax index.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct IndexMetrics {
     pub discovered_files: u64,
     pub parsed_files: u64,
     pub syntax_error_files: u64,
-    /// Call sites whose same-name candidate set exceeded the safety bound.
     pub truncated_call_sites: u64,
     pub symbols: u64,
     pub edges: u64,
     pub elapsed: Duration,
 }
 
-/// Work performed by one content reconciliation.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ReconcileMetrics {
     pub scanned_files: u64,
@@ -48,51 +44,45 @@ pub struct ReconcileMetrics {
     pub truncated_call_sites: u64,
 }
 
-/// Result of reconciling exact worktree contents with the reusable index.
 #[derive(Debug)]
 pub struct ReconcileReport {
-    /// Present only when source content changed and a new graph is ready.
     pub graph: Option<SymbolGraph>,
     pub metrics: ReconcileMetrics,
-    pub next_index: Option<RustSyntaxIndex>,
+    pub next_index: Option<PhpSyntaxIndex>,
 }
 
-/// Complete private initial index, ready for atomic publication by the
-/// workspace engine owner. `syntax_index` remains private to the live owner
-/// after the first graph is published.
 #[derive(Debug)]
 pub struct IndexReport {
     pub repository_root: PathBuf,
     pub graph: SymbolGraph,
     pub metrics: IndexMetrics,
-    pub syntax_index: RustSyntaxIndex,
+    pub syntax_index: PhpSyntaxIndex,
 }
 
-/// Failure to discover, read, parse, or validate the Rust syntax index.
 #[derive(Debug, Error)]
-pub enum RustIndexError {
+pub enum PhpIndexError {
     #[error(transparent)]
-    Discovery(#[from] DiscoveryError),
-    #[error("failed to read Rust source {path}: {source}")]
+    Discovery(#[from] chakra_git::DiscoveryError),
+    #[error("failed to read PHP source {path}: {source}")]
     Read {
         path: RepoRelativePath,
         #[source]
         source: io::Error,
     },
-    #[error("Rust source {path} exceeds the {limit}-byte indexing budget")]
+    #[error("PHP source {path} exceeds the {limit}-byte indexing budget")]
     SourceTooLarge {
         path: RepoRelativePath,
         limit: usize,
     },
-    #[error("indexed Rust sources exceed the {limit}-byte repository budget")]
+    #[error("indexed PHP sources exceed the {limit}-byte repository budget")]
     RepositoryTooLarge { limit: usize },
-    #[error("failed to parse Rust source: {0}")]
+    #[error("failed to parse PHP source: {0}")]
     Parse(String),
-    #[error("Rust syntax index update failed: {0}")]
+    #[error("PHP syntax index update failed: {0}")]
     Update(String),
     #[error(transparent)]
     Graph(#[from] GraphError),
-    #[error("constructed syntax graph is inconsistent: {0}")]
+    #[error("constructed PHP syntax graph is inconsistent: {0}")]
     Consistency(#[from] ConsistencyError),
 }
 
@@ -172,7 +162,8 @@ impl<'a> SymbolCatalog<'a> {
     }
 
     fn unique_exact(&self, qualified_name: &str, kind: SymbolKind) -> Option<SymbolAddress> {
-        unique(self.exact.get(&(qualified_name.to_owned(), kind)))
+        let matches = self.exact.get(&(qualified_name.to_owned(), kind))?;
+        (matches.len() == 1).then(|| matches[0].clone())
     }
 
     fn call_candidates(&self, name: &str, qualifier: Option<&str>) -> (Vec<SymbolAddress>, bool) {
@@ -204,21 +195,17 @@ impl<'a> SymbolCatalog<'a> {
     }
 }
 
-/// Reusable per-file syntax facts and per-owner relationship contributions.
-///
-/// Entity ids are intentionally absent here: they are revision-scoped and
-/// assigned only while a complete immutable graph is materialized.
 #[derive(Debug, Clone, Default)]
-pub struct RustSyntaxIndex {
+pub struct PhpSyntaxIndex {
     files: BTreeMap<RepoRelativePath, Arc<ParsedFile>>,
     relationships: BTreeMap<RepoRelativePath, Arc<RelationshipContribution>>,
 }
 
-impl RustSyntaxIndex {
+impl PhpSyntaxIndex {
     pub fn from_sources(
         sources: BTreeMap<RepoRelativePath, Arc<str>>,
-    ) -> Result<(Self, SymbolGraph), RustIndexError> {
-        let mut parser = RustParser::new().map_err(parse_error)?;
+    ) -> Result<(Self, SymbolGraph), PhpIndexError> {
+        let mut parser = PhpParser::new().map_err(parse_error)?;
         let mut files = BTreeMap::new();
         for (path, source) in sources {
             let parsed = parser.parse(path.clone(), source).map_err(parse_error)?;
@@ -246,13 +233,10 @@ impl RustSyntaxIndex {
         self.files.keys().cloned().collect()
     }
 
-    /// Reconciles exact discovered source contents. Unchanged text is not
-    /// reparsed. Changed files and relationship owners are prepared in a
-    /// private copy and become the reusable state only after graph validation.
     pub fn reconcile_sources(
         &self,
         sources: BTreeMap<RepoRelativePath, Arc<str>>,
-    ) -> Result<ReconcileReport, RustIndexError> {
+    ) -> Result<ReconcileReport, PhpIndexError> {
         let mut metrics = ReconcileMetrics {
             scanned_files: sources.len() as u64,
             ..ReconcileMetrics::default()
@@ -296,7 +280,7 @@ impl RustSyntaxIndex {
                 changed_dependencies.extend(exported_dependencies(previous));
             }
         }
-        let mut parser = RustParser::new().map_err(parse_error)?;
+        let mut parser = PhpParser::new().map_err(parse_error)?;
         for path in &changed_paths {
             match sources.get(path) {
                 Some(source) => {
@@ -325,7 +309,6 @@ impl RustSyntaxIndex {
                 })
                 .map(|(path, _)| path.clone()),
         );
-
         let catalog = SymbolCatalog::new(&next_files);
         let mut next_relationships = self.relationships.clone();
         for path in &affected_owners {
@@ -342,7 +325,6 @@ impl RustSyntaxIndex {
                 }
             }
         }
-
         let next = Self {
             files: next_files,
             relationships: next_relationships,
@@ -368,7 +350,7 @@ impl RustSyntaxIndex {
             .sum()
     }
 
-    fn materialize_graph(&self) -> Result<SymbolGraph, RustIndexError> {
+    fn materialize_graph(&self) -> Result<SymbolGraph, PhpIndexError> {
         let mut graph = SymbolGraph::new();
         let mut ids = BTreeMap::new();
         for (path, file) in &self.files {
@@ -413,30 +395,17 @@ impl RustSyntaxIndex {
 fn address_id(
     ids: &BTreeMap<SymbolAddress, EntityId>,
     address: &SymbolAddress,
-) -> Result<EntityId, RustIndexError> {
+) -> Result<EntityId, PhpIndexError> {
     ids.get(address).copied().ok_or_else(|| {
-        RustIndexError::Update(format!(
+        PhpIndexError::Update(format!(
             "relationship references missing symbol {}#{}",
             address.path, address.index
         ))
     })
 }
 
-fn parse_error(error: impl std::fmt::Display) -> RustIndexError {
-    RustIndexError::Parse(error.to_string())
-}
-
-fn unique(matches: Option<&Vec<SymbolAddress>>) -> Option<SymbolAddress> {
-    let matches = matches?;
-    (matches.len() == 1).then(|| matches[0].clone())
-}
-
-fn qualified(prefix: &str, name: &str) -> String {
-    if prefix.is_empty() {
-        name.to_owned()
-    } else {
-        format!("{prefix}::{name}")
-    }
+fn parse_error(error: impl std::fmt::Display) -> PhpIndexError {
+    PhpIndexError::Parse(error.to_string())
 }
 
 fn symbol_name(symbol: &SymbolDraft) -> &str {
@@ -479,117 +448,38 @@ fn relationships_for_file(
         path: path.clone(),
         index,
     };
-
-    let physical_module = if file.module_path.is_empty() {
-        None
-    } else {
-        let name = file.module_path.join("::");
-        contribution
-            .dependencies
-            .insert(DependencyKey::Exact(name.clone(), SymbolKind::Module));
-        catalog.unique_exact(&name, SymbolKind::Module)
-    };
     for (index, symbol) in file.symbols.iter().enumerate() {
-        let parent = symbol
-            .parent
-            .map(&address)
-            .or_else(|| physical_module.clone());
-        let Some(parent) = parent else {
+        let Some(parent) = symbol.parent.map(&address) else {
             continue;
         };
-        let child = address(index);
-        if parent != child {
-            let physical = symbol.parent.is_none();
-            contribution.edges.push(RelationshipEdge {
-                kind: EdgeKind::Contains,
-                from: parent,
-                to: child,
-                provenance: if physical {
-                    Provenance::Heuristic
-                } else {
-                    Provenance::TreeSitter
-                },
-                precision: if physical {
-                    Precision::Heuristic
-                } else {
-                    Precision::Syntax
-                },
-                location: None,
-            });
-        }
+        contribution.edges.push(RelationshipEdge {
+            kind: EdgeKind::Contains,
+            from: parent,
+            to: address(index),
+            provenance: Provenance::TreeSitter,
+            precision: Precision::Syntax,
+            location: None,
+        });
     }
-
-    for implementation in &file.implementations {
-        let module = implementation.module_path.join("::");
-        let mut target = None;
-        if let Some(target_lookup) = implementation.target_lookup.as_ref() {
-            for kind in [SymbolKind::Struct, SymbolKind::Enum] {
-                let name = qualified(&module, target_lookup);
-                contribution
-                    .dependencies
-                    .insert(DependencyKey::Exact(name.clone(), kind));
-                target = target.or_else(|| catalog.unique_exact(&name, kind));
-            }
-        }
-        if let Some(target) = target.clone() {
-            contribution.edges.push(RelationshipEdge {
-                kind: EdgeKind::Contains,
-                from: target,
-                to: address(implementation.symbol),
-                provenance: Provenance::TreeSitter,
-                precision: Precision::Heuristic,
-                location: None,
-            });
-        }
-
-        let Some(trait_lookup) = implementation.trait_lookup.as_ref() else {
-            continue;
-        };
-        let trait_name = qualified(&module, trait_lookup);
-        contribution
-            .dependencies
-            .insert(DependencyKey::Exact(trait_name.clone(), SymbolKind::Trait));
-        let Some(trait_address) = catalog.unique_exact(&trait_name, SymbolKind::Trait) else {
-            continue;
-        };
-        if let Some(target) = target {
-            contribution.edges.push(RelationshipEdge {
-                kind: EdgeKind::Implements,
-                from: target,
-                to: trait_address.clone(),
-                provenance: Provenance::TreeSitter,
-                precision: Precision::Heuristic,
-                location: None,
-            });
-        }
-        let Some(trait_symbol) = catalog.symbol(&trait_address) else {
-            continue;
-        };
-        for (method_index, method) in file.symbols.iter().enumerate() {
-            if method.parent != Some(implementation.symbol) || method.key.kind != SymbolKind::Method
-            {
+    for relation in &file.named_relations {
+        for target_kind in &relation.target_kinds {
+            contribution
+                .dependencies
+                .insert(DependencyKey::Exact(relation.target.clone(), *target_kind));
+            let Some(target) = catalog.unique_exact(&relation.target, *target_kind) else {
                 continue;
-            }
-            let trait_method_name =
-                qualified(&trait_symbol.key.qualified_name, symbol_name(method));
-            contribution.dependencies.insert(DependencyKey::Exact(
-                trait_method_name.clone(),
-                SymbolKind::Method,
-            ));
-            if let Some(trait_method) = catalog.unique_exact(&trait_method_name, SymbolKind::Method)
-            {
-                contribution.edges.push(RelationshipEdge {
-                    kind: EdgeKind::Implements,
-                    from: address(method_index),
-                    to: trait_method,
-                    provenance: Provenance::TreeSitter,
-                    precision: Precision::Heuristic,
-                    location: None,
-                });
-            }
+            };
+            contribution.edges.push(RelationshipEdge {
+                kind: relation.kind,
+                from: address(relation.from),
+                to: target,
+                provenance: Provenance::TreeSitter,
+                precision: Precision::Heuristic,
+                location: None,
+            });
+            break;
         }
     }
-
     for call in &file.calls {
         contribution
             .dependencies
@@ -628,13 +518,13 @@ fn relationships_for_file(
 
 fn read_sources(
     repository_root: &Path,
-) -> Result<BTreeMap<RepoRelativePath, Arc<str>>, RustIndexError> {
-    let files = discover_rust_files(repository_root)?;
+) -> Result<BTreeMap<RepoRelativePath, Arc<str>>, PhpIndexError> {
+    let files = chakra_git::discover_language_files(repository_root, Language::Php)?;
     let mut sources = BTreeMap::new();
     let mut total_bytes = 0_usize;
     for path in files {
         let file = fs::File::open(repository_root.join(path.as_str())).map_err(|source| {
-            RustIndexError::Read {
+            PhpIndexError::Read {
                 path: path.clone(),
                 source,
             }
@@ -642,12 +532,12 @@ fn read_sources(
         let mut source = String::new();
         file.take((MAX_SOURCE_FILE_BYTES + 1) as u64)
             .read_to_string(&mut source)
-            .map_err(|source| RustIndexError::Read {
+            .map_err(|source| PhpIndexError::Read {
                 path: path.clone(),
                 source,
             })?;
         if source.len() > MAX_SOURCE_FILE_BYTES {
-            return Err(RustIndexError::SourceTooLarge {
+            return Err(PhpIndexError::SourceTooLarge {
                 path,
                 limit: MAX_SOURCE_FILE_BYTES,
             });
@@ -655,11 +545,11 @@ fn read_sources(
         total_bytes =
             total_bytes
                 .checked_add(source.len())
-                .ok_or(RustIndexError::RepositoryTooLarge {
+                .ok_or(PhpIndexError::RepositoryTooLarge {
                     limit: MAX_REPOSITORY_SOURCE_BYTES,
                 })?;
         if total_bytes > MAX_REPOSITORY_SOURCE_BYTES {
-            return Err(RustIndexError::RepositoryTooLarge {
+            return Err(PhpIndexError::RepositoryTooLarge {
                 limit: MAX_REPOSITORY_SOURCE_BYTES,
             });
         }
@@ -668,16 +558,14 @@ fn read_sources(
     Ok(sources)
 }
 
-/// Builds a complete Rust syntax index from the actual materialized Git
-/// worktree. The caller owns atomic publication into `WorkspaceEngine`.
-pub fn index_repository(root: &Path) -> Result<IndexReport, RustIndexError> {
+pub fn index_repository(root: &Path) -> Result<IndexReport, PhpIndexError> {
     let started = Instant::now();
-    let repository_root = resolve_repository_root(root)?;
-    let span = info_span!("rust_repository_index", root = %repository_root.display());
+    let repository_root = chakra_git::resolve_repository_root(root)?;
+    let span = info_span!("php_repository_index", root = %repository_root.display());
     let _entered = span.enter();
     let sources = read_sources(&repository_root)?;
     let discovered_files = sources.len() as u64;
-    let (syntax_index, graph) = RustSyntaxIndex::from_sources(sources)?;
+    let (syntax_index, graph) = PhpSyntaxIndex::from_sources(sources)?;
     let metrics = IndexMetrics {
         discovered_files,
         parsed_files: discovered_files,
@@ -694,7 +582,7 @@ pub fn index_repository(root: &Path) -> Result<IndexReport, RustIndexError> {
         symbols = metrics.symbols,
         edges = metrics.edges,
         elapsed_micros = metrics.elapsed.as_micros(),
-        "Rust syntax index completed"
+        "PHP syntax index completed"
     );
     Ok(IndexReport {
         repository_root,
@@ -704,43 +592,84 @@ pub fn index_repository(root: &Path) -> Result<IndexReport, RustIndexError> {
     })
 }
 
-/// Reads the latest Git-aware Rust file inventory and exact contents.
 pub fn scan_repository_sources(
     repository_root: &Path,
-) -> Result<BTreeMap<RepoRelativePath, Arc<str>>, RustIndexError> {
+) -> Result<BTreeMap<RepoRelativePath, Arc<str>>, PhpIndexError> {
     read_sources(repository_root)
 }
 
 #[cfg(test)]
 mod tests {
     use std::error::Error;
-    use std::fs::{self, File};
+    use std::fs;
     use std::process::Command;
 
     use tempfile::TempDir;
 
     use super::*;
 
-    #[test]
-    fn rejects_a_source_larger_than_the_file_budget() -> Result<(), Box<dyn Error>> {
+    fn repository() -> Result<TempDir, Box<dyn Error>> {
         let repository = TempDir::new()?;
         let status = Command::new("git")
             .current_dir(repository.path())
             .args(["init", "--quiet"])
             .status()?;
-        assert!(status.success());
-        fs::create_dir_all(repository.path().join("src"))?;
-        let file = File::create(repository.path().join("src/large.rs"))?;
-        file.set_len((MAX_SOURCE_FILE_BYTES + 1) as u64)?;
+        if !status.success() {
+            return Err("git init failed".into());
+        }
+        Ok(repository)
+    }
 
-        let error = match read_sources(repository.path()) {
-            Ok(_) => return Err("oversized source was indexed".into()),
-            Err(error) => error,
-        };
-        assert!(matches!(
-            error,
-            RustIndexError::SourceTooLarge { limit, .. } if limit == MAX_SOURCE_FILE_BYTES
-        ));
+    #[test]
+    fn indexes_php_relationships_and_ambiguity_without_claiming_precision()
+    -> Result<(), Box<dyn Error>> {
+        let repository = repository()?;
+        fs::create_dir_all(repository.path().join("src"))?;
+        fs::write(
+            repository.path().join("src/service.php"),
+            r#"<?php
+namespace App;
+class Service { public function refund(): void { helper(); } }
+function helper(): void {}
+"#,
+        )?;
+        fs::write(
+            repository.path().join("src/other.php"),
+            "<?php namespace Other; function helper(): void {}\n",
+        )?;
+        let report = index_repository(repository.path())?;
+        assert_eq!(report.metrics.parsed_files, 2);
+        let refund = report.graph.resolve_name("refund");
+        assert_eq!(refund.len(), 1);
+        let calls = report.graph.outgoing_edges(refund[0]);
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|edge| edge.kind == EdgeKind::Calls)
+                .count(),
+            2
+        );
+        assert!(
+            calls
+                .iter()
+                .all(|edge| edge.precision == Precision::Heuristic)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn unchanged_php_is_not_reparsed() -> Result<(), Box<dyn Error>> {
+        let repository = repository()?;
+        fs::write(
+            repository.path().join("service.php"),
+            "<?php function pay() {}\n",
+        )?;
+        let report = index_repository(repository.path())?;
+        let sources = scan_repository_sources(repository.path())?;
+        let reconciled = report.syntax_index.reconcile_sources(sources)?;
+        assert!(reconciled.graph.is_none());
+        assert_eq!(reconciled.metrics.reparsed_files, 0);
+        assert_eq!(reconciled.metrics.unchanged_files, 1);
         Ok(())
     }
 }

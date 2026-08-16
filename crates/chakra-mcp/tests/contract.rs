@@ -17,7 +17,7 @@ use chakra_domain::query::{
 use chakra_domain::revision::Revision;
 use chakra_domain::state::{Freshness, ProviderState, WorkspaceStatus};
 use chakra_engine::WorkspaceEngine;
-use chakra_language_rust::index_repository;
+use chakra_language::index_repository;
 use chakra_mcp::ChakraMcpServer;
 use rmcp::ServiceExt;
 use rmcp::model::CallToolRequestParams;
@@ -287,7 +287,9 @@ async fn indexed_fixture_is_queryable_through_structured_mcp_tools()
         .ok_or("symbol candidates missing")?;
     assert!(candidates.len() >= 7);
     assert!(candidates.iter().all(|candidate| {
-        candidate["precision"] == "syntax" && candidate["provenance"] == "tree_sitter"
+        candidate["language"] == "rust"
+            && candidate["precision"] == "syntax"
+            && candidate["provenance"] == "tree_sitter"
     }));
     let service_refund = candidates
         .iter()
@@ -421,6 +423,136 @@ async fn indexed_fixture_is_queryable_through_structured_mcp_tools()
                 .is_some_and(|items| items.len() <= 1)
         );
     }
+
+    client.cancel().await?;
+    let running = server_task
+        .await
+        .map_err(|error| std::io::Error::other(format!("server task join: {error}")))?
+        .map_err(|error| std::io::Error::other(format!("server serve: {error}")))?;
+    running.cancel().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn php_symbols_context_and_diff_are_queryable_through_mcp()
+-> Result<(), Box<dyn Error + Send + Sync>> {
+    let repository = TempDir::new()?;
+    git(repository.path(), &["init", "--quiet"])?;
+    git(
+        repository.path(),
+        &["config", "user.email", "tests@example.invalid"],
+    )?;
+    git(repository.path(), &["config", "user.name", "Chakra Tests"])?;
+    fs::create_dir_all(repository.path().join("src"))?;
+    let service_path = repository.path().join("src/PaymentService.php");
+    fs::write(
+        &service_path,
+        r#"<?php
+namespace App\Service;
+final class PaymentService {
+    public function refund(int $amount): void {}
+}
+"#,
+    )?;
+    fs::write(
+        repository.path().join("src/PaymentController.php"),
+        r#"<?php
+namespace App\Api;
+final class PaymentController {
+    public function refund(): void { $this->service->refund(100); }
+}
+"#,
+    )?;
+    git(repository.path(), &["add", "src"])?;
+    git(repository.path(), &["commit", "--quiet", "-m", "base"])?;
+    let source = fs::read_to_string(&service_path)?;
+    fs::write(
+        &service_path,
+        source.replace(
+            "public function refund",
+            "// current worktree edit\n    public function refund",
+        ),
+    )?;
+
+    let report = index_repository(repository.path())?;
+    let identity = WorkspaceIdentity::for_primary_worktree(&report.repository_root)?;
+    let engine = WorkspaceEngine::new(identity);
+    let mut update = engine.begin_update();
+    update.replace_graph(report.graph);
+    update.set_status(WorkspaceStatus::Ready);
+    update.set_freshness(Freshness::Fresh);
+    engine.publish(update)?;
+    engine.install_diff_provider(Arc::new(chakra_git::GitWorkspaceDiff))?;
+
+    let server = ChakraMcpServer::new(Arc::new(engine));
+    let (server_transport, client_transport) = tokio::io::duplex(32 * 1024);
+    let server_task = tokio::spawn(async move { server.serve(server_transport).await });
+    let client = ().serve(client_transport).await?;
+
+    let symbols = client
+        .call_tool(CallToolRequestParams::new("symbol_search").with_arguments(
+            serde_json::from_value(serde_json::json!({ "query": "refund", "limit": 20 }))?,
+        ))
+        .await?
+        .structured_content
+        .ok_or("PHP symbol_search must return structured content")?;
+    let candidates = symbols["data"]["candidates"]
+        .as_array()
+        .ok_or("PHP candidates missing")?;
+    assert!(
+        candidates
+            .iter()
+            .all(|candidate| candidate["language"] == "php")
+    );
+    let service_refund = candidates
+        .iter()
+        .find(|candidate| candidate["qualified_name"] == "App::Service::PaymentService::refund")
+        .ok_or("PHP service refund missing")?;
+
+    let context =
+        client
+            .call_tool(CallToolRequestParams::new("context").with_arguments(
+                serde_json::from_value(serde_json::json!({
+                    "symbol": { "by_id": {
+                        "id": service_refund["id"],
+                        "revision": symbols["revision"]
+                    }},
+                    "limit": 20
+                }))?,
+            ))
+            .await?
+            .structured_content
+            .ok_or("PHP context must return structured content")?;
+    assert_eq!(context["data"]["symbol"]["language"], "php");
+    assert!(context["data"]["callers"].as_array().is_some_and(|items| {
+        items.iter().any(|item| {
+            item["symbol"]["qualified_name"] == "App::Api::PaymentController::refund"
+                && item["precision"] == "heuristic"
+        })
+    }));
+
+    let diff = client
+        .call_tool(
+            CallToolRequestParams::new("diff_context")
+                .with_arguments(serde_json::from_value(serde_json::json!({ "limit": 20 }))?),
+        )
+        .await?
+        .structured_content
+        .ok_or("PHP diff_context must return structured content")?;
+    assert_eq!(
+        diff["data"]["changed_files"][0]["path"],
+        "src/PaymentService.php"
+    );
+    assert!(
+        diff["data"]["changed_symbols"]
+            .as_array()
+            .is_some_and(|items| {
+                items.iter().any(|item| {
+                    item["symbol"]["qualified_name"] == "App::Service::PaymentService::refund"
+                        && item["symbol"]["language"] == "php"
+                })
+            })
+    );
 
     client.cancel().await?;
     let running = server_task

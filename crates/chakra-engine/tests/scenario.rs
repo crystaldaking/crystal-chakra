@@ -4,8 +4,9 @@ mod common;
 
 use std::error::Error;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
-use chakra_domain::location::RepoRelativePath;
+use chakra_domain::location::{RepoRelativePath, SourceRange, TextPosition};
 use chakra_domain::provenance::{Precision, Provenance};
 use chakra_domain::query::{
     CallersRequest, ContextRequest, DiffContextRequest, QueryError, QueryService, RepoMapRequest,
@@ -13,7 +14,7 @@ use chakra_domain::query::{
 };
 use chakra_domain::revision::Revision;
 use chakra_domain::state::{Freshness, ProviderState, WorkspaceStatus};
-use chakra_domain::symbol::SymbolKind;
+use chakra_domain::symbol::{Language, SymbolKey, SymbolKind};
 use chakra_engine::{
     PreciseProvider, PreciseQueryRequest, PreciseQueryResult, PreciseRelation, SymbolGraph,
 };
@@ -26,7 +27,31 @@ struct FixedProvider {
     last_error: Option<&'static str>,
 }
 
+#[derive(Debug)]
+struct CountingRustProvider {
+    calls: Arc<AtomicUsize>,
+}
+
+impl PreciseProvider for CountingRustProvider {
+    fn supports(&self, language: Language) -> bool {
+        language == Language::Rust
+    }
+
+    fn state_for(&self, _revision: Revision) -> ProviderState {
+        ProviderState::Ready
+    }
+
+    fn enrich(&self, request: PreciseQueryRequest) -> PreciseQueryResult {
+        self.calls.fetch_add(1, Ordering::Relaxed);
+        PreciseQueryResult::unavailable(request.workspace.revision, ProviderState::Degraded)
+    }
+}
+
 impl PreciseProvider for FixedProvider {
+    fn supports(&self, language: chakra_domain::symbol::Language) -> bool {
+        language == chakra_domain::symbol::Language::Rust
+    }
+
     fn state_for(&self, revision: Revision) -> ProviderState {
         if self.result.state == ProviderState::Ready && self.result.revision != revision {
             ProviderState::CatchingUp
@@ -285,6 +310,50 @@ fn degraded_provider_preserves_useful_syntax_callers() -> Result<(), Box<dyn Err
         status.data.providers[0].last_error.as_deref(),
         Some("provider process stopped")
     );
+    Ok(())
+}
+
+#[test]
+fn rust_provider_is_not_invoked_for_php_symbols() -> Result<(), Box<dyn Error>> {
+    let identity = chakra_domain::identity::WorkspaceIdentity::for_primary_worktree(
+        std::path::Path::new("."),
+    )?;
+    let engine = chakra_engine::WorkspaceEngine::new(identity);
+    let path = RepoRelativePath::new("src/PaymentService.php")?;
+    let position = TextPosition::new(1, 1)?;
+    let mut graph = SymbolGraph::new();
+    graph.add_file(path.clone(), "<?php function refund(): void {}\n")?;
+    graph.add_symbol(
+        SymbolKey {
+            language: Language::Php,
+            qualified_name: "refund".to_owned(),
+            container: None,
+            kind: SymbolKind::Function,
+            path: path.clone(),
+        },
+        SourceRange::new(path, position, TextPosition::new(1, 31)?)?,
+        Some("function refund(): void".to_owned()),
+        Provenance::TreeSitter,
+        Precision::Syntax,
+    )?;
+    let mut update = engine.begin_update();
+    update.replace_graph(graph);
+    update.set_status(WorkspaceStatus::Ready);
+    update.set_freshness(Freshness::Fresh);
+    engine.publish(update)?;
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    engine.install_precise_provider(Arc::new(CountingRustProvider {
+        calls: calls.clone(),
+    }))?;
+    let context = engine.context(ContextRequest {
+        symbol: Some(SymbolRef::ByName("refund".to_owned())),
+        ..ContextRequest::default()
+    })?;
+    assert_eq!(context.data.symbol.language, Language::Php);
+    assert_eq!(context.data.symbol.precision, Precision::Syntax);
+    assert_eq!(context.provider_state, ProviderState::NotConfigured);
+    assert_eq!(calls.load(Ordering::Relaxed), 0);
     Ok(())
 }
 
