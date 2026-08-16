@@ -5,12 +5,16 @@ Date: 2026-08-16
 
 ## Context
 
-The intended v0.1 product scope includes useful current intelligence for both
-Rust and PHP, while the imported governance and roadmap mistakenly declared
-PHP deferred. The implemented Rust index owned both language extraction and
-the workspace watcher, which could not honestly publish a second language in
-the same atomic revision. Query symbol views also omitted their language, and
-the optional rust-analyzer adapter could be asked to enrich any symbol.
+The original implementation pack deliberately scoped v0.1 to Rust and
+deferred PHP. A later explicit product decision expanded the release scope to
+include useful current intelligence for both Rust and PHP. This ADR records
+that scope change; it does not reinterpret the original roadmap as mistaken.
+
+At the time of the decision, the implemented Rust index owned both language
+extraction and the workspace watcher, which could not honestly publish a
+second language in the same atomic revision. Query symbol views also omitted
+their language, and the optional rust-analyzer adapter could be asked to
+enrich any symbol.
 
 The official maintained `tree-sitter-php` project publishes a Rust grammar
 binding compatible with Chakra's Tree-sitter runtime:
@@ -20,7 +24,7 @@ binding compatible with Chakra's Tree-sitter runtime:
 
 ## Decision
 
-- Promote PHP syntax intelligence into the v0.1 roadmap. PHP support covers
+- Promote PHP syntax intelligence into the v0.1 release scope. PHP support covers
   Git-aware `.php` discovery, namespaces, functions/methods, classes,
   interfaces, traits, enums, properties, constants, imports, inheritance
   candidates, call candidates, test hints, ranges, snippets, live updates,
@@ -44,6 +48,10 @@ binding compatible with Chakra's Tree-sitter runtime:
   only, receives only Rust documents, and is never invoked for PHP symbols.
   The CLI does not start it for a PHP-only workspace. PHP queries remain
   current and useful at syntax/heuristic precision.
+- Treat this as product-level parity under SPEC §15: PHP participates in the
+  same lifecycle, freshness, Git, query, MCP, bounds, provenance, and testing
+  contracts. The optional Rust-only provider remains an advertised capability
+  difference, not a hidden PHP precision claim.
 
 ## Alternatives considered
 
@@ -76,8 +84,9 @@ binding compatible with Chakra's Tree-sitter runtime:
 ## Validation / follow-up
 
 - Unit and fixture tests cover PHP syntax extraction, ambiguous duplicate
-  names, temporary syntax errors, call/test candidates, and unchanged-content
-  avoidance.
+  names, temporary syntax errors, nested declarations and closure calls,
+  namespace-level identity for PHP nested named functions, Unicode source
+  ranges, call/test candidates, and unchanged-content avoidance.
 - Live integration tests prove an immediate fresh PHP edit appears in one
   atomic revision and reparses exactly one file without reparsing Rust.
 - MCP end-to-end coverage exercises PHP `symbol_search`, `context`, callers,

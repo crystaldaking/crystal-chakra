@@ -81,10 +81,15 @@ mentions both.
   request, and proves the synchronous service closure is never dispatched.
 - A unit regression rejects an envelope whose serialized representation
   exceeds the transport budget.
+- All seven tools advertise read-only, non-destructive, idempotent, closed-world
+  MCP annotations. A contract regression verifies these hints so
+  non-interactive clients need not treat code-intelligence reads as writes.
 - Manual smoke: piped `initialize`/`tools/list` frames into
   `chakra serve --repo .` and received correct responses (2026-08-15).
 - The documented Codex CLI command/config shape was rechecked against the
   current CLI and official OpenAI MCP documentation on 2026-08-16.
-- External Codex CLI/Desktop connectivity with the real indexed tools remains
-  a product-level v0.1 evaluation step; the in-process real-index client
-  covers the protocol contract in CI.
+- External Codex CLI 0.146.0 connectivity was executed on 2026-08-16 with
+  ephemeral config overrides: a real agent completed `status` and
+  `symbol_search` against the indexed Chakra repository under the default
+  approval policy. The in-process real-index client continues to cover the
+  deterministic protocol contract in CI.

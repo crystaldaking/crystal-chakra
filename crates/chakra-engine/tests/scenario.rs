@@ -84,6 +84,18 @@ fn status_reports_scenario_counts() -> Result<(), Box<dyn Error>> {
     assert_eq!(envelope.data.counts.files, 3);
     assert_eq!(envelope.data.providers.len(), 1);
     assert_eq!(envelope.data.providers[0].name, "rust-analyzer");
+    assert_eq!(
+        envelope.data.providers[0].languages,
+        vec![chakra_domain::symbol::Language::Rust]
+    );
+    assert_eq!(
+        envelope.data.providers[0].capabilities,
+        vec![
+            chakra_domain::query::ProviderCapability::IncomingCalls,
+            chakra_domain::query::ProviderCapability::OutgoingCalls,
+            chakra_domain::query::ProviderCapability::SynchronizationState,
+        ]
+    );
     Ok(())
 }
 

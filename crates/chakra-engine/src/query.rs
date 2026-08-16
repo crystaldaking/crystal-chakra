@@ -16,10 +16,10 @@ use chakra_domain::provenance::{Precision, Provenance};
 use chakra_domain::query::{
     CallersData, CallersRequest, ChangedFile, ChangedSymbol, ChangedSymbolBasis, ContextData,
     ContextRequest, DEFAULT_QUERY_LIMIT, DiffContextData, DiffContextRequest, DiffRelatedSymbol,
-    FileSummary, IndexCounts, MAX_QUERY_LIMIT, ProviderInfo, QueryError, QueryService,
-    RelatedSymbol, RepoMapData, RepoMapRequest, SearchData, SearchRequest, SourceSnippet,
-    StatusData, StatusRequest, SymbolRef, SymbolSearchData, SymbolSearchRequest, SymbolView,
-    TextMatch,
+    FileSummary, IndexCounts, MAX_QUERY_LIMIT, ProviderCapability, ProviderInfo, QueryError,
+    QueryService, RelatedSymbol, RepoMapData, RepoMapRequest, SearchData, SearchRequest,
+    SourceSnippet, StatusData, StatusRequest, SymbolRef, SymbolSearchData, SymbolSearchRequest,
+    SymbolView, TextMatch,
 };
 use chakra_domain::revision::Revision;
 use chakra_domain::state::{Freshness, FreshnessRequirement, ProviderState};
@@ -413,6 +413,12 @@ impl QueryService for WorkspaceEngine {
         };
         let providers = vec![ProviderInfo {
             name: "rust-analyzer".to_owned(),
+            languages: vec![chakra_domain::symbol::Language::Rust],
+            capabilities: vec![
+                ProviderCapability::IncomingCalls,
+                ProviderCapability::OutgoingCalls,
+                ProviderCapability::SynchronizationState,
+            ],
             state: provider_state,
             last_error: self
                 .precise_provider()

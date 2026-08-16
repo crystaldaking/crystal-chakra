@@ -117,6 +117,11 @@ async fn status_tool_is_listed_and_callable() -> Result<(), Box<dyn Error + Send
         .as_ref()
         .ok_or("server implementation missing")?;
     assert_eq!(implementation.name, "chakra");
+    let instructions = server_info
+        .instructions
+        .as_deref()
+        .ok_or("server instructions missing")?;
+    assert!(instructions.contains("Rust and PHP code intelligence"));
 
     let tools = client.list_all_tools().await?;
     let mut tool_names: Vec<&str> = tools.iter().map(|tool| tool.name.as_ref()).collect();
@@ -138,6 +143,31 @@ async fn status_tool_is_listed_and_callable() -> Result<(), Box<dyn Error + Send
         .find(|tool| tool.name == "status")
         .ok_or("status tool not listed")?;
     assert!(status_tool.description.is_some());
+    for name in [
+        "repo_map",
+        "symbol_search",
+        "context",
+        "callers",
+        "diff_context",
+    ] {
+        let description = tools
+            .iter()
+            .find(|tool| tool.name == name)
+            .and_then(|tool| tool.description.as_deref())
+            .ok_or("tool description missing")?;
+        assert!(
+            description.contains("PHP"),
+            "{name} description: {description}"
+        );
+    }
+    assert!(tools.iter().all(|tool| {
+        tool.annotations.as_ref().is_some_and(|annotations| {
+            annotations.read_only_hint == Some(true)
+                && annotations.destructive_hint == Some(false)
+                && annotations.idempotent_hint == Some(true)
+                && annotations.open_world_hint == Some(false)
+        })
+    }));
 
     let result = client
         .call_tool(CallToolRequestParams::new("status"))
@@ -242,6 +272,19 @@ async fn indexed_fixture_is_queryable_through_structured_mcp_tools()
     let (server_transport, client_transport) = tokio::io::duplex(64 * 1024);
     let server_task = tokio::spawn(async move { server.serve(server_transport).await });
     let client = ().serve(client_transport).await?;
+
+    let status = client
+        .call_tool(CallToolRequestParams::new("status"))
+        .await?
+        .structured_content
+        .ok_or("indexed status must return structured content")?;
+    assert_eq!(status["data"]["providers"][0]["name"], "rust-analyzer");
+    assert_eq!(status["data"]["providers"][0]["languages"][0], "rust");
+    assert!(
+        status["data"]["providers"][0]["capabilities"]
+            .as_array()
+            .is_some_and(|items| items.iter().any(|item| item == "incoming_calls"))
+    );
 
     let repo_map_args = serde_json::from_value(serde_json::json!({ "limit": 20 }))?;
     let repo_map = client

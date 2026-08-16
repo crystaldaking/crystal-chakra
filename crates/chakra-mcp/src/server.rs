@@ -119,7 +119,13 @@ impl ChakraMcpServer {
 
     #[tool(
         name = "status",
-        description = "Chakra workspace status: identity, published revision, index counts, provider state"
+        description = "Chakra workspace status: identity, published revision, index counts, provider state",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
     )]
     async fn status(&self) -> Result<Json<QueryEnvelope<StatusData>>, ErrorData> {
         let envelope = self.service.status(StatusRequest).map_err(to_error_data)?;
@@ -129,7 +135,13 @@ impl ChakraMcpServer {
 
     #[tool(
         name = "repo_map",
-        description = "List indexed Rust files with bounded syntax-symbol counts"
+        description = "List indexed Rust and PHP files with bounded syntax-symbol counts",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
     )]
     async fn repo_map(
         &self,
@@ -141,7 +153,13 @@ impl ChakraMcpServer {
 
     #[tool(
         name = "search",
-        description = "Search the atomically indexed source snapshot using literal or regex text matching"
+        description = "Search the atomically indexed source snapshot using literal or regex text matching",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
     )]
     async fn search(
         &self,
@@ -153,7 +171,13 @@ impl ChakraMcpServer {
 
     #[tool(
         name = "symbol_search",
-        description = "Find bounded Rust syntax symbol candidates by simple or qualified name"
+        description = "Find bounded Rust and PHP syntax symbol candidates by simple or qualified name",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
     )]
     async fn symbol_search(
         &self,
@@ -165,7 +189,13 @@ impl ChakraMcpServer {
 
     #[tool(
         name = "context",
-        description = "Get bounded syntax context for one resolved symbol, with optional current rust-analyzer callers and callees"
+        description = "Get bounded syntax context for one resolved Rust or PHP symbol, with optional current precise enrichment when supported",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
     )]
     async fn context(
         &self,
@@ -177,7 +207,13 @@ impl ChakraMcpServer {
 
     #[tool(
         name = "callers",
-        description = "Get bounded callers for one resolved symbol, preferring current rust-analyzer precision and retaining honest syntax fallback"
+        description = "Get bounded callers for one resolved Rust or PHP symbol, preferring current provider precision when supported and retaining honest syntax fallback",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
     )]
     async fn callers(
         &self,
@@ -189,7 +225,13 @@ impl ChakraMcpServer {
 
     #[tool(
         name = "diff_context",
-        description = "Summarize bounded Rust changes from HEAD to the materialized worktree, with changed symbols and related callers/tests"
+        description = "Summarize bounded Rust and PHP changes from HEAD to the materialized worktree, with changed symbols and related callers/tests",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
     )]
     async fn diff_context(
         &self,
@@ -202,7 +244,7 @@ impl ChakraMcpServer {
 
 #[tool_handler(
     name = "chakra",
-    instructions = "Chakra Rust code intelligence: inspect status and repo_map, search indexed source, resolve ambiguous names through symbol_search, request context or callers for one entity, and use diff_context for current worktree changes. Results are bounded and carry revision, freshness, provider state, provenance, and precision.",
+    instructions = "Chakra Rust and PHP code intelligence: inspect status and repo_map, search indexed source, resolve ambiguous names through symbol_search, request context or callers for one entity, and use diff_context for current worktree changes. Results are bounded and carry language, revision, freshness, provider state and capabilities, provenance, and precision.",
     router = self.tool_router
 )]
 impl ServerHandler for ChakraMcpServer {}

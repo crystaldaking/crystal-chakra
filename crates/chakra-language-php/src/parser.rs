@@ -74,6 +74,9 @@ struct Context {
     container: Option<String>,
     parent: Option<usize>,
     method_container: bool,
+    namespace_prefix: Vec<String>,
+    namespace_container: Option<String>,
+    namespace_parent: Option<usize>,
 }
 
 #[derive(Debug)]
@@ -278,6 +281,9 @@ impl Extraction<'_> {
             container: None,
             parent: None,
             method_container: false,
+            namespace_prefix: Vec::new(),
+            namespace_container: None,
+            namespace_parent: None,
         };
         let parent = self.add_symbol(
             &root,
@@ -287,10 +293,13 @@ impl Extraction<'_> {
             self.signature(node),
         )?;
         let child = Context {
-            prefix: segments,
-            container: Some(display),
+            prefix: segments.clone(),
+            container: Some(display.clone()),
             parent: Some(parent),
             method_container: false,
+            namespace_prefix: segments,
+            namespace_container: Some(display),
+            namespace_parent: Some(parent),
         };
         if let Some(body) = node.child_by_field_name("body") {
             self.visit_sequence(body, &child)?;
@@ -323,6 +332,9 @@ impl Extraction<'_> {
                     container: Some(name),
                     parent: Some(parent),
                     method_container: true,
+                    namespace_prefix: context.namespace_prefix.clone(),
+                    namespace_container: context.namespace_container.clone(),
+                    namespace_parent: context.namespace_parent,
                 },
             )?;
         }
@@ -382,6 +394,25 @@ impl Extraction<'_> {
         let caller = self.add_symbol(context, &name, kind, node, self.signature(node))?;
         if let Some(body) = node.child_by_field_name("body") {
             self.collect_calls(body, caller, context.container.as_deref())?;
+            // Named nested functions own their declarations and calls. Walk
+            // the body a second time through the declaration visitor; it
+            // does not collect ordinary expressions, so calls already
+            // attributed above are not duplicated.
+            // PHP nested named functions are declared in the surrounding
+            // namespace, not in a lexical `outer::inner` namespace and not as
+            // class methods. They still own the calls in their own bodies.
+            self.visit_sequence(
+                body,
+                &Context {
+                    prefix: context.namespace_prefix.clone(),
+                    container: context.namespace_container.clone(),
+                    parent: context.namespace_parent,
+                    method_container: false,
+                    namespace_prefix: context.namespace_prefix.clone(),
+                    namespace_container: context.namespace_container.clone(),
+                    namespace_parent: context.namespace_parent,
+                },
+            )?;
         }
         Ok(())
     }
@@ -461,10 +492,7 @@ impl Extraction<'_> {
         caller: usize,
         current_container: Option<&str>,
     ) -> Result<(), ParseError> {
-        if matches!(
-            node.kind(),
-            "function_definition" | "method_declaration" | "anonymous_function" | "arrow_function"
-        ) {
+        if matches!(node.kind(), "function_definition" | "method_declaration") {
             return Ok(());
         }
         if let Some((name, qualifier, location)) = self.call_target(node, current_container) {
@@ -579,6 +607,9 @@ impl PhpParser {
                 container: None,
                 parent: None,
                 method_container: false,
+                namespace_prefix: Vec::new(),
+                namespace_container: None,
+                namespace_parent: None,
             },
         )?;
         Ok(ParsedFile {
@@ -672,6 +703,93 @@ function helper(): void {}
                 .symbols
                 .iter()
                 .any(|symbol| symbol.key.qualified_name == "still_visible")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn converts_tree_sitter_byte_columns_to_unicode_scalar_columns()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let source = "<?php function caller(): void { $gem = '💎'; target(); }";
+        let mut parser = PhpParser::new()?;
+        let parsed = parser.parse(
+            RepoRelativePath::new("src/functions.php")?,
+            Arc::from(source),
+        )?;
+        let call = parsed
+            .calls
+            .iter()
+            .find(|call| call.name == "target")
+            .ok_or("target call missing")?;
+        let byte = source.find("target").ok_or("target text missing")?;
+        assert_eq!(
+            call.location.start().column() as usize,
+            source[..byte]
+                .rsplit_once('\n')
+                .map_or(&source[..byte], |(_, line)| line)
+                .chars()
+                .count()
+                + 1
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn nested_functions_own_calls_while_closures_belong_to_the_enclosing_symbol()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let source = r#"<?php
+namespace App;
+function target(): void {}
+function outer(): void {
+    function inner(): void { target(); }
+    $closure = function (): void { target(); };
+    $arrow = fn () => target();
+    inner();
+}
+"#;
+        let mut parser = PhpParser::new()?;
+        let parsed = parser.parse(
+            RepoRelativePath::new("src/functions.php")?,
+            Arc::from(source),
+        )?;
+        let outer = parsed
+            .symbols
+            .iter()
+            .position(|symbol| symbol.key.qualified_name == "App::outer")
+            .ok_or("outer symbol missing")?;
+        let inner = parsed
+            .symbols
+            .iter()
+            .position(|symbol| symbol.key.qualified_name == "App::inner")
+            .ok_or("inner symbol missing")?;
+        assert_ne!(parsed.symbols[inner].parent, Some(outer));
+        assert!(
+            parsed
+                .symbols
+                .iter()
+                .all(|symbol| symbol.key.qualified_name != "App::outer::inner")
+        );
+        assert_eq!(
+            parsed
+                .calls
+                .iter()
+                .filter(|call| call.caller == inner && call.name == "target")
+                .count(),
+            1
+        );
+        assert_eq!(
+            parsed
+                .calls
+                .iter()
+                .filter(|call| call.caller == outer && call.name == "target")
+                .count(),
+            2
+        );
+        assert!(
+            parsed
+                .calls
+                .iter()
+                .any(|call| call.caller == outer && call.name == "inner")
         );
         Ok(())
     }

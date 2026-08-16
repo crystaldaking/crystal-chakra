@@ -93,9 +93,21 @@ pub struct IndexCounts {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderCapability {
+    IncomingCalls,
+    OutgoingCalls,
+    SynchronizationState,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ProviderInfo {
     /// Provider name, e.g. `rust-analyzer`.
     pub name: String,
+    /// Languages for which this provider may supply precise facts.
+    pub languages: Vec<Language>,
+    /// Chakra operations backed by this provider adapter.
+    pub capabilities: Vec<ProviderCapability>,
     pub state: ProviderState,
     pub last_error: Option<String>,
 }
