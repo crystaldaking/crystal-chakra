@@ -4,6 +4,8 @@ description = "In-memory workspace engine: symbol graph, atomic revisions, query
 version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
 publish = false
 
 [dependencies]

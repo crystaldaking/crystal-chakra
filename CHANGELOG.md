@@ -27,6 +27,7 @@ No changes yet.
 
 - Core indexing requires Git but no API key, database, PHP runtime, Composer,
   embedding service, or telemetry service.
+- Chakra is released under the MIT License.
 - PHP v0.1 is first-class at the syntax/query lifecycle level; PHP dynamic
   dispatch and runtime type resolution remain heuristic and no precise PHP
   provider is bundled.

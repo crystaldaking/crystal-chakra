@@ -59,6 +59,11 @@ cargo test -p chakra-provider-rust-analyzer --test real_provider -- --ignored --
 The repository's `AGENTS.md` defines additional mandatory self-review,
 architecture-review, validation, staging, and commit gates for coding agents.
 
+## Licensing
+
+Unless explicitly stated otherwise, contributions are submitted under the
+project's MIT License. See `LICENSE` for the full terms.
+
 ## Architecture and scope
 
 Read only the relevant sections of `docs/SPEC.md`, `docs/roadmap/v0.1.md`, and

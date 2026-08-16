@@ -231,4 +231,4 @@ enrichment. Live Rust syntax intelligence does not require that restart.
 
 ## License
 
-Not yet chosen; all crates are currently `publish = false`.
+Chakra is licensed under the [MIT License](LICENSE).
