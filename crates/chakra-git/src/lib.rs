@@ -12,6 +12,7 @@ use std::io::{self, Read};
 use std::path::{Component, Path};
 use std::process::{Command, ExitStatus, Stdio};
 use std::thread;
+use std::time::{Duration, Instant};
 
 use chakra_domain::location::RepoRelativePath;
 use chakra_domain::provenance::{Precision, Provenance};
@@ -24,6 +25,8 @@ const MAX_GIT_OUTPUT_BYTES: usize = 8 * 1024 * 1024;
 const MAX_WORKSPACE_CHANGES: usize = 10_000;
 const MAX_ERROR_CHARS: usize = 1_024;
 const MAX_GIT_STDERR_BYTES: usize = 16 * 1024;
+const GIT_COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
+const CHILD_POLL_INTERVAL: Duration = Duration::from_millis(1);
 
 /// Fixed-argument Git implementation for the active materialized worktree.
 #[derive(Debug, Default)]
@@ -113,31 +116,56 @@ fn capture_git(
             )));
         }
     };
-    let stderr = match read_bounded(stderr, MAX_GIT_STDERR_BYTES) {
-        Ok(stderr) => stderr,
+    let stderr_reader = match thread::Builder::new()
+        .name("chakra-git-diff-stderr".to_owned())
+        .spawn(move || read_bounded(stderr, MAX_GIT_STDERR_BYTES))
+    {
+        Ok(reader) => reader,
         Err(error) => {
             terminate_child(&mut child);
             let _ = stdout_reader.join();
             return Err(WorkspaceDiffError::new(format!(
-                "failed to read `{display}` stderr: {error}"
+                "failed to start `{display}` stderr reader: {error}"
             )));
         }
     };
-    let status = match child.wait() {
-        Ok(status) => status,
-        Err(error) => {
-            terminate_child(&mut child);
-            let _ = stdout_reader.join();
-            return Err(WorkspaceDiffError::new(format!(
-                "failed to wait for `{display}`: {error}"
-            )));
+    let deadline = Instant::now() + GIT_COMMAND_TIMEOUT;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if Instant::now() < deadline => thread::sleep(CHILD_POLL_INTERVAL),
+            Ok(None) => {
+                terminate_child(&mut child);
+                let _ = stdout_reader.join();
+                let _ = stderr_reader.join();
+                return Err(WorkspaceDiffError::new(format!(
+                    "`{display}` exceeded the {} second process deadline",
+                    GIT_COMMAND_TIMEOUT.as_secs()
+                )));
+            }
+            Err(error) => {
+                terminate_child(&mut child);
+                let _ = stdout_reader.join();
+                let _ = stderr_reader.join();
+                return Err(WorkspaceDiffError::new(format!(
+                    "failed to wait for `{display}`: {error}"
+                )));
+            }
         }
     };
-    let stdout = stdout_reader
-        .join()
+    // Join both pipe owners before propagating either result. Returning after
+    // the first failed join would detach the other reader thread.
+    let stdout = stdout_reader.join();
+    let stderr = stderr_reader.join();
+    let stdout = stdout
         .map_err(|_| WorkspaceDiffError::new(format!("`{display}` stdout reader panicked")))?
         .map_err(|error| {
             WorkspaceDiffError::new(format!("failed to read `{display}` stdout: {error}"))
+        })?;
+    let stderr = stderr
+        .map_err(|_| WorkspaceDiffError::new(format!("`{display}` stderr reader panicked")))?
+        .map_err(|error| {
+            WorkspaceDiffError::new(format!("failed to read `{display}` stderr: {error}"))
         })?;
     Ok(GitOutput {
         status,
@@ -216,6 +244,15 @@ fn is_rust_source(path: &str) -> bool {
         })
 }
 
+fn raw_is_rust_source(raw: &[u8]) -> Result<bool, WorkspaceDiffError> {
+    if !raw.ends_with(b".rs") {
+        return Ok(false);
+    }
+    let path = std::str::from_utf8(raw)
+        .map_err(|_| WorkspaceDiffError::new("Git returned a non-UTF-8 Rust path"))?;
+    Ok(is_rust_source(path))
+}
+
 fn parse_path(raw: &[u8]) -> Result<RepoRelativePath, WorkspaceDiffError> {
     let path = std::str::from_utf8(raw)
         .map_err(|_| WorkspaceDiffError::new("Git returned a non-UTF-8 path"))?;
@@ -245,13 +282,16 @@ fn insert_change(
 
 fn parse_tracked_changes(
     output: &[u8],
-) -> Result<BTreeMap<RepoRelativePath, WorkspaceFileChange>, WorkspaceDiffError> {
+) -> Result<(BTreeMap<RepoRelativePath, WorkspaceFileChange>, bool), WorkspaceDiffError> {
     let mut fields = output
         .split(|byte| *byte == 0)
         .filter(|field| !field.is_empty());
     let mut changes = BTreeMap::new();
 
     while let Some(raw_status) = fields.next() {
+        if changes.len() > MAX_WORKSPACE_CHANGES {
+            return Ok((changes, true));
+        }
         let status = raw_status
             .first()
             .copied()
@@ -263,11 +303,9 @@ fn parse_tracked_changes(
             let new = fields
                 .next()
                 .ok_or_else(|| WorkspaceDiffError::new("Git rename is missing its current path"))?;
-            let old_text = std::str::from_utf8(old)
-                .map_err(|_| WorkspaceDiffError::new("Git returned a non-UTF-8 path"))?;
-            let new_text = std::str::from_utf8(new)
-                .map_err(|_| WorkspaceDiffError::new("Git returned a non-UTF-8 path"))?;
-            match (is_rust_source(old_text), is_rust_source(new_text), status) {
+            let old_is_rust = raw_is_rust_source(old)?;
+            let new_is_rust = raw_is_rust_source(new)?;
+            match (old_is_rust, new_is_rust, status) {
                 (true, true, b'R') => insert_change(
                     &mut changes,
                     parse_path(new)?,
@@ -298,9 +336,7 @@ fn parse_tracked_changes(
         let raw_path = fields
             .next()
             .ok_or_else(|| WorkspaceDiffError::new("Git change is missing its path"))?;
-        let path_text = std::str::from_utf8(raw_path)
-            .map_err(|_| WorkspaceDiffError::new("Git returned a non-UTF-8 path"))?;
-        if !is_rust_source(path_text) {
+        if !raw_is_rust_source(raw_path)? {
             continue;
         }
         let change = match status {
@@ -322,7 +358,7 @@ fn parse_tracked_changes(
             Precision::Precise,
         );
     }
-    Ok(changes)
+    Ok((changes, false))
 }
 
 fn add_untracked_changes(
@@ -335,9 +371,10 @@ fn add_untracked_changes(
         .split(|byte| *byte == 0)
         .filter(|field| !field.is_empty())
     {
-        let path_text = std::str::from_utf8(raw_path)
-            .map_err(|_| WorkspaceDiffError::new("Git returned a non-UTF-8 path"))?;
-        if !is_rust_source(path_text) {
+        if changes.len() > MAX_WORKSPACE_CHANGES {
+            break;
+        }
+        if !raw_is_rust_source(raw_path)? {
             continue;
         }
         let path = parse_path(raw_path)?;
@@ -366,7 +403,52 @@ fn add_untracked_changes(
     Ok(())
 }
 
-fn head_blob_id(root: &Path, path: &RepoRelativePath) -> Result<String, WorkspaceDiffError> {
+fn add_index_hidden_changes(
+    root: &Path,
+    output: &[u8],
+    document_paths: &HashSet<&RepoRelativePath>,
+    changes: &mut BTreeMap<RepoRelativePath, WorkspaceFileChange>,
+) -> Result<(), WorkspaceDiffError> {
+    for record in output
+        .split(|byte| *byte == 0)
+        .filter(|record| !record.is_empty())
+    {
+        if changes.len() > MAX_WORKSPACE_CHANGES {
+            break;
+        }
+        let Some((&tag, raw_path)) = record.split_first() else {
+            continue;
+        };
+        let raw_path = raw_path.strip_prefix(b" ").ok_or_else(|| {
+            WorkspaceDiffError::new("Git returned an invalid ls-files status record")
+        })?;
+        // `git ls-files -v` lowercases the normal tag for assume-unchanged
+        // entries; `S` denotes skip-worktree. Both can suppress ordinary
+        // `git diff` inspection even when a regular file is materialized.
+        if !(tag.is_ascii_lowercase() || tag == b'S') || !raw_is_rust_source(raw_path)? {
+            continue;
+        }
+        let path = parse_path(raw_path)?;
+        if changes.contains_key(&path) || !document_paths.contains(&path) {
+            continue;
+        }
+        if head_blob_id(root, &path)? != worktree_blob_id(root, &path)? {
+            insert_change(
+                changes,
+                path,
+                None,
+                ChangeKind::Modified,
+                Precision::Precise,
+            );
+        }
+    }
+    Ok(())
+}
+
+fn head_entry(
+    root: &Path,
+    path: &RepoRelativePath,
+) -> Result<Option<(String, String)>, WorkspaceDiffError> {
     let output = git_output(
         root,
         "git ls-tree HEAD",
@@ -378,22 +460,36 @@ fn head_blob_id(root: &Path, path: &RepoRelativePath) -> Result<String, Workspac
             OsStr::new(path.as_str()),
         ],
     )?;
-    let record = output
+    let Some(record) = output
         .stdout
         .split(|byte| *byte == 0)
         .find(|field| !field.is_empty())
-        .ok_or_else(|| WorkspaceDiffError::new(format!("HEAD has no blob for `{path}`")))?;
+    else {
+        return Ok(None);
+    };
     let metadata = record
         .split(|byte| *byte == b'\t')
         .next()
         .ok_or_else(|| WorkspaceDiffError::new("Git returned an invalid ls-tree record"))?;
     let metadata = std::str::from_utf8(metadata)
         .map_err(|_| WorkspaceDiffError::new("Git returned a non-UTF-8 object id"))?;
-    metadata
-        .split_whitespace()
-        .nth(2)
-        .map(str::to_owned)
-        .ok_or_else(|| WorkspaceDiffError::new("Git returned an invalid ls-tree record"))
+    let mut fields = metadata.split_whitespace();
+    let mode = fields
+        .next()
+        .ok_or_else(|| WorkspaceDiffError::new("Git returned an invalid ls-tree mode"))?;
+    let _kind = fields
+        .next()
+        .ok_or_else(|| WorkspaceDiffError::new("Git returned an invalid ls-tree kind"))?;
+    let object_id = fields
+        .next()
+        .ok_or_else(|| WorkspaceDiffError::new("Git returned an invalid ls-tree object id"))?;
+    Ok(Some((mode.to_owned(), object_id.to_owned())))
+}
+
+fn head_blob_id(root: &Path, path: &RepoRelativePath) -> Result<String, WorkspaceDiffError> {
+    head_entry(root, path)?
+        .map(|(_, object_id)| object_id)
+        .ok_or_else(|| WorkspaceDiffError::new(format!("HEAD has no blob for `{path}`")))
 }
 
 fn worktree_blob_id(root: &Path, path: &RepoRelativePath) -> Result<String, WorkspaceDiffError> {
@@ -451,6 +547,42 @@ fn validate_current_sources(
     Ok(())
 }
 
+fn validate_deleted_sources(
+    workspace: &DiffWorkspace,
+    changes: &mut BTreeMap<RepoRelativePath, WorkspaceFileChange>,
+) -> Result<(), WorkspaceDiffError> {
+    let deleted: Vec<_> = changes
+        .values()
+        .filter(|change| change.change == ChangeKind::Deleted)
+        .map(|change| change.path.clone())
+        .collect();
+    for path in deleted {
+        // A tracked symlink (or submodule) with an `.rs` suffix can appear in
+        // Git's name diff, but syntax discovery never indexed it as a source.
+        if !head_entry(&workspace.repository_root, &path)?
+            .is_some_and(|(mode, _)| mode == "100644" || mode == "100755")
+        {
+            changes.remove(&path);
+            continue;
+        }
+        match fs::symlink_metadata(workspace.repository_root.join(path.as_str())) {
+            Ok(_) => {
+                return Err(WorkspaceDiffError::new(format!(
+                    "materialized path `{path}` reappeared after syntax revision {} was published",
+                    workspace.revision
+                )));
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(WorkspaceDiffError::new(format!(
+                    "failed to verify deleted path `{path}`: {error}"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
 impl WorkspaceDiffProvider for GitWorkspaceDiff {
     fn diff(&self, workspace: DiffWorkspace) -> Result<WorkspaceDiff, WorkspaceDiffError> {
         let document_paths: HashSet<_> = workspace
@@ -459,7 +591,7 @@ impl WorkspaceDiffProvider for GitWorkspaceDiff {
             .map(|document| &document.path)
             .collect();
         let head_exists = has_head(&workspace.repository_root)?;
-        let mut changes = if head_exists {
+        let (mut changes, mut work_truncated) = if head_exists {
             let tracked = git_output(
                 &workspace.repository_root,
                 "git diff --name-status HEAD",
@@ -488,10 +620,23 @@ impl WorkspaceDiffProvider for GitWorkspaceDiff {
                     );
                 }
             }
-            unborn
+            let truncated = unborn.len() > MAX_WORKSPACE_CHANGES;
+            (unborn, truncated)
         };
 
         if head_exists {
+            let hidden = git_output(
+                &workspace.repository_root,
+                "git ls-files -v",
+                &[OsStr::new("ls-files"), OsStr::new("-v"), OsStr::new("-z")],
+            )?;
+            add_index_hidden_changes(
+                &workspace.repository_root,
+                &hidden.stdout,
+                &document_paths,
+                &mut changes,
+            )?;
+
             let untracked = git_output(
                 &workspace.repository_root,
                 "git ls-files --others --exclude-standard",
@@ -516,13 +661,14 @@ impl WorkspaceDiffProvider for GitWorkspaceDiff {
         changes.retain(|_, change| {
             change.change == ChangeKind::Deleted || document_paths.contains(&change.path)
         });
+        validate_deleted_sources(&workspace, &mut changes)?;
         validate_current_sources(&workspace, &changes)?;
-        let truncated = changes.len() > MAX_WORKSPACE_CHANGES;
+        work_truncated |= changes.len() > MAX_WORKSPACE_CHANGES;
         let files = changes.into_values().take(MAX_WORKSPACE_CHANGES).collect();
         Ok(WorkspaceDiff {
             revision: workspace.revision,
             files,
-            truncated,
+            truncated: work_truncated,
         })
     }
 }
@@ -756,12 +902,86 @@ mod tests {
     }
 
     #[test]
+    fn materialized_assume_unchanged_file_is_still_reported() -> Result<(), Box<dyn Error>> {
+        let repository = repository()?;
+        let root = repository.path();
+        git(
+            root,
+            &["update-index", "--assume-unchanged", "src/unstaged.rs"],
+        )?;
+        write(root, "src/unstaged.rs", "pub fn hidden_edit() {}\n")?;
+        let workspace = workspace(root, &["src/unstaged.rs"])?;
+
+        let diff = GitWorkspaceDiff.diff(workspace)?;
+        assert_eq!(diff.files.len(), 1);
+        assert_eq!(diff.files[0].path.as_str(), "src/unstaged.rs");
+        assert_eq!(diff.files[0].change, ChangeKind::Modified);
+        assert_eq!(diff.files[0].precision, Precision::Precise);
+        Ok(())
+    }
+
+    #[test]
+    fn a_deleted_path_that_reappeared_is_not_joined_to_an_older_snapshot()
+    -> Result<(), Box<dyn Error>> {
+        let repository = repository()?;
+        let path = RepoRelativePath::new("src/deleted.rs")?;
+        let mut changes = BTreeMap::from([(
+            path.clone(),
+            WorkspaceFileChange {
+                path,
+                previous_path: None,
+                change: ChangeKind::Deleted,
+                provenance: Provenance::Git,
+                precision: Precision::Precise,
+            },
+        )]);
+        let snapshot = workspace(repository.path(), &[])?;
+
+        let error = match validate_deleted_sources(&snapshot, &mut changes) {
+            Ok(()) => return Err("reappeared path was accepted as deleted".into()),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("reappeared"));
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_deleted_tracked_symlink_is_not_reported_as_a_source() -> Result<(), Box<dyn Error>> {
+        use std::os::unix::fs::symlink;
+
+        let repository = repository()?;
+        let root = repository.path();
+        symlink("unstaged.rs", root.join("src/linked.rs"))?;
+        git(root, &["add", "src/linked.rs"])?;
+        git(root, &["commit", "--quiet", "-m", "track symlink"])?;
+        fs::remove_file(root.join("src/linked.rs"))?;
+
+        let diff = GitWorkspaceDiff.diff(workspace(root, &[])?)?;
+        assert!(diff.files.is_empty());
+        Ok(())
+    }
+
+    #[test]
     fn bounded_reader_drains_but_retains_only_the_budget() -> Result<(), Box<dyn Error>> {
         let mut input = std::io::Cursor::new(b"0123456789");
         let captured = read_bounded(&mut input, 4)?;
         assert_eq!(captured.bytes, b"0123");
         assert!(captured.exceeded);
         assert_eq!(input.position(), 10);
+        Ok(())
+    }
+
+    #[test]
+    fn unrelated_non_utf8_file_does_not_break_rust_diff() -> Result<(), Box<dyn Error>> {
+        let mut changes = BTreeMap::new();
+        add_untracked_changes(
+            Path::new("."),
+            b"unrelated-\xff.bin\0",
+            &HashSet::new(),
+            &mut changes,
+        )?;
+        assert!(changes.is_empty());
         Ok(())
     }
 }

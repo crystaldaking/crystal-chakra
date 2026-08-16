@@ -43,8 +43,6 @@ pub struct LiveIndexMetrics {
     pub dropped_watcher_events: u64,
     pub watcher_errors: u64,
     pub watched_directories: u64,
-    /// Live reconciliation never invokes the initial full-index path.
-    pub full_repository_reindexes: u64,
 }
 
 #[derive(Debug, Default)]
@@ -86,7 +84,6 @@ impl MetricsState {
             dropped_watcher_events: load(&self.dropped_watcher_events),
             watcher_errors: load(&self.watcher_errors),
             watched_directories: load(&self.watched_directories),
-            full_repository_reindexes: 0,
         }
     }
 
@@ -321,10 +318,12 @@ pub fn start_live_rust_index(
         completed: Condvar::new(),
     });
     let metrics = Arc::new(MetricsState::default());
+    let publication_gate = Arc::new(Mutex::new(()));
     let worker_sender = sender.clone();
     let worker_shared = shared.clone();
     let worker_metrics = metrics.clone();
     let worker_engine = engine.clone();
+    let worker_publication_gate = publication_gate.clone();
     let worker = thread::Builder::new()
         .name("chakra-rust-live-index".to_owned())
         .spawn(move || {
@@ -336,6 +335,7 @@ pub fn start_live_rust_index(
                 worker_sender,
                 worker_shared,
                 worker_metrics,
+                worker_publication_gate,
                 ready_sender,
             );
         })?;
@@ -397,12 +397,19 @@ fn run_worker(
     sender: SyncSender<WorkerSignal>,
     shared: Arc<BarrierShared>,
     metrics: Arc<MetricsState>,
+    publication_gate: Arc<Mutex<()>>,
     ready: SyncSender<Result<(), String>>,
 ) {
     let callback_sender = sender.clone();
     let callback_metrics = metrics.clone();
+    let callback_engine = engine.clone();
+    let callback_publication_gate = publication_gate.clone();
     let watcher = notify::recommended_watcher(move |event: notify::Result<Event>| {
-        let epoch = callback_metrics.event_epoch.fetch_add(1, Ordering::AcqRel) + 1;
+        let epoch = invalidate_for_event(
+            &callback_engine,
+            &callback_metrics,
+            &callback_publication_gate,
+        );
         match event {
             Ok(_) => {
                 callback_metrics
@@ -473,6 +480,7 @@ fn run_worker(
                         &shared,
                         &mut watcher_degraded,
                         &mut reconciled_event_epoch,
+                        &publication_gate,
                     );
                 }
             }
@@ -515,6 +523,7 @@ fn run_worker(
                     &shared,
                     &mut watcher_degraded,
                     &mut reconciled_event_epoch,
+                    &publication_gate,
                 );
             }
         }
@@ -535,11 +544,28 @@ fn run_worker(
                 &shared,
                 &mut watcher_degraded,
                 &mut reconciled_event_epoch,
+                &publication_gate,
             );
         }
     }
     shared.stop();
     info!("live Rust index worker stopped");
+}
+
+fn invalidate_for_event(
+    engine: &WorkspaceEngine,
+    metrics: &MetricsState,
+    publication_gate: &Mutex<()>,
+) -> u64 {
+    // Serialize event invalidation with fresh publication. Freshness is
+    // revoked before the event epoch advances, so an observed epoch can
+    // never coexist with an older graph still labeled Fresh.
+    let _publication = match publication_gate.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    mark_stale(engine);
+    metrics.event_epoch.fetch_add(1, Ordering::AcqRel) + 1
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -553,45 +579,51 @@ fn reconcile(
     shared: &BarrierShared,
     watcher_degraded: &mut bool,
     reconciled_event_epoch: &mut u64,
+    publication_gate: &Mutex<()>,
 ) {
     let generation = shared
         .pending_generation()
         .map_or(0, |(requested, _)| requested);
-    let result = stable_scan(repository_root, metrics).and_then(|(sources, event_epoch)| {
-        let ReconcileReport {
-            graph,
-            metrics: reconcile_metrics,
-            next_index,
-        } = syntax_index.reconcile_sources(sources)?;
-        let attempt = (|| {
+    let result = (|| {
+        for _ in 0..MAX_STABLE_SCAN_ATTEMPTS {
+            let (sources, event_epoch) = stable_scan(repository_root, metrics)?;
+            let ReconcileReport {
+                graph,
+                metrics: reconcile_metrics,
+                next_index,
+            } = syntax_index.reconcile_sources(sources)?;
             let watch_index = next_index.as_ref().unwrap_or(syntax_index);
-            *watcher_degraded |=
+            *watcher_degraded =
                 refresh_watches(watcher, repository_root, watch_index, watched, metrics)?;
-            *watcher_degraded |= metrics.watcher_errors.load(Ordering::Relaxed) > 0;
             let status = if *watcher_degraded {
                 WorkspaceStatus::Degraded
             } else {
                 WorkspaceStatus::Ready
             };
+
+            let _publication = match publication_gate.lock() {
+                Ok(guard) => guard,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            if metrics.event_epoch.load(Ordering::Acquire) != event_epoch {
+                continue;
+            }
             let published =
                 publish_fresh(engine, graph.as_ref(), status).map_err(RustIndexError::Update)?;
-            Ok(published)
-        })();
-        match attempt {
-            Ok(published) => {
-                if let Some(next_index) = next_index {
-                    *syntax_index = next_index;
-                }
-                metrics.record_reconcile(reconcile_metrics);
-                if published {
-                    metrics.published_revisions.fetch_add(1, Ordering::Relaxed);
-                }
-                *reconciled_event_epoch = event_epoch;
-                Ok(())
+            if let Some(next_index) = next_index {
+                *syntax_index = next_index;
             }
-            Err(error) => Err(error),
+            metrics.record_reconcile(reconcile_metrics);
+            if published {
+                metrics.published_revisions.fetch_add(1, Ordering::Relaxed);
+            }
+            *reconciled_event_epoch = event_epoch;
+            return Ok(());
         }
-    });
+        Err(RustIndexError::Update(
+            "worktree changed before fresh revision publication".to_owned(),
+        ))
+    })();
     match result {
         Ok(()) => shared.complete(generation, Ok(())),
         Err(error) => {
@@ -771,6 +803,7 @@ fn mark_failed_reconciliation(engine: &WorkspaceEngine) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chakra_domain::identity::WorkspaceIdentity;
 
     #[test]
     fn debounce_has_quiet_and_absolute_bounds_without_sleeping() {
@@ -781,5 +814,26 @@ mod tests {
         assert_eq!(window.deadline(), start + Duration::from_millis(90));
         window.observe(start + DEBOUNCE_MAX);
         assert_eq!(window.deadline(), start + DEBOUNCE_MAX);
+    }
+
+    #[test]
+    fn event_epoch_advances_only_after_freshness_is_revoked()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let identity = WorkspaceIdentity::for_primary_worktree(Path::new("."))?;
+        let engine = WorkspaceEngine::new(identity);
+        let mut update = engine.begin_update();
+        update.set_status(WorkspaceStatus::Ready);
+        update.set_freshness(Freshness::Fresh);
+        engine.publish(update)?;
+        let metrics = MetricsState::default();
+        let publication_gate = Mutex::new(());
+
+        assert_eq!(
+            invalidate_for_event(&engine, &metrics, &publication_gate),
+            1
+        );
+        assert_eq!(metrics.event_epoch.load(Ordering::Acquire), 1);
+        assert_eq!(engine.snapshot().freshness(), Freshness::Stale);
+        Ok(())
     }
 }

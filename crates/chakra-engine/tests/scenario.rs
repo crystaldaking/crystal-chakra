@@ -23,6 +23,7 @@ use common::{scenario_engine, scenario_graph};
 #[derive(Debug)]
 struct FixedProvider {
     result: PreciseQueryResult,
+    last_error: Option<&'static str>,
 }
 
 impl PreciseProvider for FixedProvider {
@@ -32,6 +33,10 @@ impl PreciseProvider for FixedProvider {
         } else {
             self.result.state
         }
+    }
+
+    fn last_error(&self) -> Option<String> {
+        self.last_error.map(str::to_owned)
     }
 
     fn enrich(&self, _request: PreciseQueryRequest) -> PreciseQueryResult {
@@ -187,6 +192,7 @@ fn current_precise_callers_replace_matching_syntax_candidates() -> Result<(), Bo
             outgoing: Vec::new(),
             truncated: false,
         },
+        last_error: None,
     }))?;
 
     let envelope = engine.callers(CallersRequest {
@@ -231,6 +237,7 @@ fn older_precise_result_is_never_labeled_current_after_revision_change()
             outgoing: Vec::new(),
             truncated: false,
         },
+        last_error: None,
     }))?;
     let mut update = engine.begin_update();
     update.graph_mut().add_file(
@@ -260,6 +267,7 @@ fn degraded_provider_preserves_useful_syntax_callers() -> Result<(), Box<dyn Err
     let revision = engine.snapshot().revision();
     engine.install_precise_provider(Arc::new(FixedProvider {
         result: PreciseQueryResult::unavailable(revision, ProviderState::Degraded),
+        last_error: Some("provider process stopped"),
     }))?;
     let envelope = engine.callers(CallersRequest {
         symbol: Some(SymbolRef::ById {
@@ -272,6 +280,11 @@ fn degraded_provider_preserves_useful_syntax_callers() -> Result<(), Box<dyn Err
     assert_eq!(envelope.data.callers.len(), 1);
     assert_eq!(envelope.data.callers[0].symbol.id, ids.service_refund);
     assert_eq!(envelope.data.callers[0].precision, Precision::Syntax);
+    let status = engine.status(StatusRequest)?;
+    assert_eq!(
+        status.data.providers[0].last_error.as_deref(),
+        Some("provider process stopped")
+    );
     Ok(())
 }
 

@@ -3,6 +3,7 @@
 //! `chakra serve` indexes the materialized Git worktree, starts the live
 //! reconciliation owner, then runs MCP over stdio (ADR-0003).
 
+use std::ffi::OsString;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -31,6 +32,14 @@ struct ServeArgs {
     /// Repository root to serve (single repository, single worktree in v0.1).
     #[arg(long, value_name = "PATH", default_value = ".")]
     repo: PathBuf,
+
+    /// Run syntax-only and do not start the optional rust-analyzer provider.
+    #[arg(long)]
+    no_rust_analyzer: bool,
+
+    /// rust-analyzer executable to use for optional precise enrichment.
+    #[arg(long, value_name = "PATH", default_value = "rust-analyzer")]
+    rust_analyzer_path: OsString,
 }
 
 #[tokio::main]
@@ -63,21 +72,25 @@ async fn serve(args: ServeArgs) -> ExitCode {
 
     // Parsing is CPU-heavy and filesystem/Git discovery is blocking. Keep it
     // on Tokio's owned blocking pool instead of a runtime worker.
-    let report = match tokio::task::spawn_blocking(move || {
-        chakra_language_rust::index_repository(&args.repo)
-    })
-    .await
-    {
-        Ok(Ok(report)) => report,
-        Ok(Err(error)) => {
-            eprintln!("chakra: {error}");
-            return ExitCode::FAILURE;
-        }
-        Err(error) => {
-            eprintln!("chakra: syntax index task failed: {error}");
-            return ExitCode::FAILURE;
-        }
-    };
+    let ServeArgs {
+        repo,
+        no_rust_analyzer,
+        rust_analyzer_path,
+    } = args;
+    let report =
+        match tokio::task::spawn_blocking(move || chakra_language_rust::index_repository(&repo))
+            .await
+        {
+            Ok(Ok(report)) => report,
+            Ok(Err(error)) => {
+                eprintln!("chakra: {error}");
+                return ExitCode::FAILURE;
+            }
+            Err(error) => {
+                eprintln!("chakra: syntax index task failed: {error}");
+                return ExitCode::FAILURE;
+            }
+        };
     let identity = match WorkspaceIdentity::for_primary_worktree(&report.repository_root) {
         Ok(identity) => identity,
         Err(error) => {
@@ -131,23 +144,32 @@ async fn serve(args: ServeArgs) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let precise_provider = match chakra_provider_rust_analyzer::RustAnalyzerProvider::start(
-        engine.provider_workspace(),
-        chakra_provider_rust_analyzer::RustAnalyzerConfig::default(),
-    ) {
-        Ok(provider) => {
-            let adapter: Arc<dyn chakra_engine::PreciseProvider> = provider.clone();
-            if let Err(error) = engine.install_precise_provider(adapter) {
-                tracing::warn!(%error, "precise provider was not installed");
-                let _ = provider.shutdown();
-                None
-            } else {
-                Some(provider)
+    let precise_provider = if no_rust_analyzer {
+        tracing::info!("rust-analyzer precise enrichment is disabled");
+        None
+    } else {
+        let config = chakra_provider_rust_analyzer::RustAnalyzerConfig {
+            executable: rust_analyzer_path,
+            ..chakra_provider_rust_analyzer::RustAnalyzerConfig::default()
+        };
+        match chakra_provider_rust_analyzer::RustAnalyzerProvider::start(
+            engine.provider_workspace(),
+            config,
+        ) {
+            Ok(provider) => {
+                let adapter: Arc<dyn chakra_engine::PreciseProvider> = provider.clone();
+                if let Err(error) = engine.install_precise_provider(adapter) {
+                    tracing::warn!(%error, "precise provider was not installed");
+                    let _ = provider.shutdown();
+                    None
+                } else {
+                    Some(provider)
+                }
             }
-        }
-        Err(error) => {
-            tracing::warn!(%error, "precise provider could not start; syntax intelligence remains available");
-            None
+            Err(error) => {
+                tracing::warn!(%error, "precise provider could not start; syntax intelligence remains available");
+                None
+            }
         }
     };
     let serve_result = chakra_mcp::serve_stdio(engine).await;
@@ -207,6 +229,26 @@ mod tests {
             Ok(Cli {
                 command: Some(Commands::Serve(ref args)),
             }) if args.repo == Path::new("/tmp/example")
+                && !args.no_rust_analyzer
+                && args.rust_analyzer_path == "rust-analyzer"
+        ));
+    }
+
+    #[test]
+    fn serve_accepts_precise_provider_controls() {
+        let cli = Cli::try_parse_from([
+            "chakra",
+            "serve",
+            "--no-rust-analyzer",
+            "--rust-analyzer-path",
+            "/opt/bin/rust-analyzer",
+        ]);
+        assert!(matches!(
+            cli,
+            Ok(Cli {
+                command: Some(Commands::Serve(ref args)),
+            }) if args.no_rust_analyzer
+                && args.rust_analyzer_path == "/opt/bin/rust-analyzer"
         ));
     }
 }

@@ -108,6 +108,12 @@ pub trait PreciseProvider: std::fmt::Debug + Send + Sync {
     /// State relative to a specific published syntax revision.
     fn state_for(&self, revision: Revision) -> ProviderState;
 
+    /// Bounded operator-facing reason for the current degraded/catching-up
+    /// state, when the adapter has one.
+    fn last_error(&self) -> Option<String> {
+        None
+    }
+
     /// Lazily enrich one selected symbol. Implementations must bound waiting
     /// and return `CatchingUp`/`Degraded` rather than stale precise facts.
     fn enrich(&self, request: PreciseQueryRequest) -> PreciseQueryResult;

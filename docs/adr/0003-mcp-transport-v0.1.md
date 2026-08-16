@@ -41,6 +41,11 @@ mentions both.
   while retaining its permit, so cancelled work cannot escape the two-query
   resource bound. Provider requests have their own deadlines and active LSP
   cancellation.
+- Stream each completed query envelope through a non-retaining 1 MiB
+  transport-budget writer before returning it to rmcp. An oversized response
+  is rejected without constructing a full serialized buffer, with a bounded
+  error directing the caller to lower its collection limit. This is a
+  total-payload guard in addition to per-collection semantic truncation.
 - Stdout is owned by the protocol stream; logging goes to stderr only.
 
 ## Alternatives considered
@@ -59,6 +64,8 @@ mentions both.
   Git discovery and CPU-heavy initial parsing through an owned
   `spawn_blocking` task before serving requests, keeping it off runtime
   worker paths.
+- `serde` and `serde_json` are direct adapter dependencies because the MCP
+  boundary itself enforces the serialized response budget.
 - Protocol upgrades arrive by upgrading `rmcp`, not by rewriting protocol
   framing in Chakra.
 - Adding the HTTP transport later is additive in `chakra-mcp`; the query
@@ -72,6 +79,8 @@ mentions both.
   indexed Rust fixture.
 - A unit regression exhausts both blocking-query permits, cancels a queued
   request, and proves the synchronous service closure is never dispatched.
+- A unit regression rejects an envelope whose serialized representation
+  exceeds the transport budget.
 - Manual smoke: piped `initialize`/`tools/list` frames into
   `chakra serve --repo .` and received correct responses (2026-08-15).
 - The documented Codex CLI command/config shape was rechecked against the

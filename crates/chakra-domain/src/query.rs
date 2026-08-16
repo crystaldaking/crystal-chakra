@@ -95,6 +95,7 @@ pub struct ProviderInfo {
     /// Provider name, e.g. `rust-analyzer`.
     pub name: String,
     pub state: ProviderState,
+    pub last_error: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]

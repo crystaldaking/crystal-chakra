@@ -40,18 +40,27 @@ background work is quiescent:
   worktree. Startup, initialize/initialized, health, bounded requests,
   `$/cancelRequest`, one automatic restart after transport failure,
   shutdown/exit, child termination fallback, stderr draining, and thread
-  joining are explicit. Command and incoming-message queues are bounded.
-- Treat the atomically published syntax snapshot as canonical. A precise
-  query receives captured `Arc<str>` documents and the selected symbol from
-  one pinned snapshot. It compares exact source text with its last synchronized
-  document set and sends full-text `didOpen`/`didChange`, `didClose`, and
-  watched-file notifications only for changed paths. Rename is represented as
-  delete plus create.
-- A request sent after document notifications is an LSP FIFO barrier for the
-  in-memory document versions. Precise facts are returned only after a healthy
-  `experimental/serverStatus` reports `quiescent`; if the bounded barrier
-  expires, the adapter returns no precise facts and reports `CatchingUp`.
-  Warning/error health and process/protocol failures report `Degraded`.
+  joining are explicit. Startup uses its own 15-second default deadline rather
+  than the ordinary request deadline. Command and incoming-message queues are
+  bounded. A dedicated writer thread owns child stdin; the worker sends framed
+  messages through a bounded queue and requires a deadline-bound completion
+  acknowledgement, so a child that stops reading cannot hang provider shutdown.
+- Treat the atomically published syntax snapshot as canonical. A precise query
+  receives captured `Arc<str>` documents and the selected symbol from one
+  pinned snapshot. Every snapshot document is opened into the provider, not
+  only the selected file, so incoming callers cannot be read from newer disk
+  state. Exact changes use full-text `didChange`; removed paths use `didClose`.
+  Watched-file notifications are sent only for actual content changes, with a
+  rename represented as delete plus create.
+- A prepare-call-hierarchy request sent after document notifications is the LSP
+  FIFO barrier for that synchronization generation. A healthy, quiescent
+  `experimental/serverStatus` may establish provider health, but it cannot be
+  relabeled as readiness for a newer generation until the post-sync request
+  completes. This is deliberately stricter than treating the experimental
+  display-oriented status notification as a document-version acknowledgement.
+  If the bounded barrier expires, the adapter returns no precise facts and
+  reports `CatchingUp`; warning/error health and process/protocol failures
+  report `Degraded` with a bounded operator-visible reason.
 - Every precise result carries the exact workspace revision it enriches. The
   query layer accepts `RustAnalyzer`/`Precise` relations only when that revision
   equals its pinned syntax snapshot and provider state is `Ready`; otherwise it
@@ -62,7 +71,13 @@ background work is quiescent:
 - Cache only completed ready results, keyed by workspace revision, provider
   process epoch, selected declaration, requested directions, and result limit.
   A workspace revision change removes older entries; restart increments the
-  provider epoch and clears the cache.
+  provider epoch and clears the cache. Idle transport/status messages are
+  drained and provider health is rechecked before a cache entry can be served.
+- `prepareCallHierarchy` results are selected only when exactly one item has
+  the requested name, file, and selection range inside the Chakra declaration.
+  A mismatch or ambiguity degrades precise enrichment rather than guessing the
+  first item. Provider result limits are applied after excluding out-of-workspace
+  items, and cuts propagate truncation metadata.
 - Start the provider opportunistically in `chakra serve`. A missing or failing
   executable cannot prevent syntax indexing or MCP service. `context` and
   `callers` run through MCP's existing bounded blocking-query executor.
@@ -93,6 +108,10 @@ background work is quiescent:
 - The first precise request in a large workspace may return syntax with
   `CatchingUp` when the bounded quiescence wait expires. A later request can
   use the now-ready provider; callers never need to sleep for correctness.
+- Opening every captured Rust document makes the first precise request scale
+  with current indexed source size. The syntax index already enforces its file
+  and repository source budgets; eager precise graph enumeration remains out of
+  scope.
 - Precise relations are bounded at the Chakra response boundary. The local
   provider protocol may still produce a larger single Call Hierarchy response;
   v0.1 trusts its owned local rust-analyzer process rather than adding a second
@@ -111,6 +130,11 @@ background work is quiescent:
   automatic process restart before honest degradation, and that a timed-out
   request sends `$/cancelRequest` before cooperative shutdown. These tests do
   not require a global rust-analyzer installation.
+- Hermetic peers also prove that all snapshot documents are opened before a
+  precise request and that a child which stops reading stdin reaches a bounded
+  write-timeout/degraded state and shuts down cleanly. A unit regression proves
+  a prior quiescent status cannot make a newer sync generation ready without
+  its request barrier.
 - An ignored real-provider smoke test exercises initialization, quiescence,
   incoming Call Hierarchy before and after an edit, conversion, measured
   enrichment latency, and cooperative shutdown when rust-analyzer is

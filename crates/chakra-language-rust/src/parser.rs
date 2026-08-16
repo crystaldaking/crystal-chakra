@@ -303,6 +303,17 @@ impl Extraction<'_> {
         let caller = self.add_symbol(context, &name, kind, node, self.signature(node))?;
         if let Some(body) = node.child_by_field_name("body") {
             self.collect_calls(body, caller)?;
+            let mut prefix = context.prefix.clone();
+            prefix.push(name.clone());
+            self.visit(
+                body,
+                &Context {
+                    container: Some(name),
+                    prefix,
+                    parent: Some(caller),
+                    method_container: false,
+                },
+            )?;
         }
         Ok(())
     }
@@ -468,6 +479,12 @@ impl Extraction<'_> {
     }
 
     fn collect_calls(&mut self, node: Node<'_>, caller: usize) -> Result<(), ParseError> {
+        // Nested item bodies own their calls and are visited separately by
+        // `visit_function`; walking through them here would attribute their
+        // calls to the enclosing function.
+        if matches!(node.kind(), "function_item" | "function_signature_item") {
+            return Ok(());
+        }
         if node.kind() == "call_expression"
             && let Some(function) = node.child_by_field_name("function")
             && let Some((name, qualifier, location_node)) = self.call_target(function)
@@ -720,6 +737,43 @@ mod tests {
         assert_eq!(
             call.location.start().column() as usize,
             source[..byte].chars().count() + 1
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn nested_functions_own_their_symbols_and_calls() -> Result<(), Box<dyn std::error::Error>> {
+        let source = "pub fn outer() { fn inner() { target(); } inner(); } pub fn target() {}";
+        let mut parser = RustParser::new()?;
+        let parsed = parser.parse(RepoRelativePath::new("src/lib.rs")?, source.to_owned())?;
+
+        let outer = parsed
+            .symbols
+            .iter()
+            .position(|symbol| symbol.key.qualified_name == "outer")
+            .ok_or("outer symbol missing")?;
+        let inner = parsed
+            .symbols
+            .iter()
+            .position(|symbol| symbol.key.qualified_name == "outer::inner")
+            .ok_or("inner symbol missing")?;
+        assert!(
+            parsed
+                .calls
+                .iter()
+                .any(|call| call.caller == outer && call.name == "inner")
+        );
+        assert!(
+            parsed
+                .calls
+                .iter()
+                .any(|call| call.caller == inner && call.name == "target")
+        );
+        assert!(
+            parsed
+                .calls
+                .iter()
+                .all(|call| !(call.caller == outer && call.name == "target"))
         );
         Ok(())
     }

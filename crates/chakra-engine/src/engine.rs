@@ -28,7 +28,7 @@ pub struct WorkspaceSnapshot {
     /// reconciliation against the filesystem may claim `Fresh` (SPEC §6).
     freshness: Freshness,
     provider_state: ProviderState,
-    graph: SymbolGraph,
+    graph: Arc<SymbolGraph>,
 }
 
 impl WorkspaceSnapshot {
@@ -53,7 +53,7 @@ impl WorkspaceSnapshot {
     }
 
     pub fn graph(&self) -> &SymbolGraph {
-        &self.graph
+        self.graph.as_ref()
     }
 }
 
@@ -115,7 +115,7 @@ pub struct UpdateBuilder {
     status: WorkspaceStatus,
     freshness: Freshness,
     provider_state: ProviderState,
-    graph: SymbolGraph,
+    graph: Arc<SymbolGraph>,
 }
 
 impl UpdateBuilder {
@@ -132,7 +132,7 @@ impl UpdateBuilder {
     /// [`UpdateBuilder::set_freshness`] *after* its graph edits.
     pub fn graph_mut(&mut self) -> &mut SymbolGraph {
         self.freshness = Freshness::Stale;
-        &mut self.graph
+        Arc::make_mut(&mut self.graph)
     }
 
     /// Replaces the whole graph (used by the initial full index).
@@ -142,7 +142,7 @@ impl UpdateBuilder {
     /// worktree was reconciled.
     pub fn replace_graph(&mut self, graph: SymbolGraph) {
         self.freshness = Freshness::Stale;
-        self.graph = graph;
+        self.graph = Arc::new(graph);
     }
 
     pub fn set_status(&mut self, status: WorkspaceStatus) {
@@ -189,7 +189,7 @@ impl WorkspaceEngine {
             status: WorkspaceStatus::Initializing,
             freshness: Freshness::Stale,
             provider_state: ProviderState::NotConfigured,
-            graph: SymbolGraph::new(),
+            graph: Arc::new(SymbolGraph::new()),
         };
         Self {
             current: ArcSwap::from_pointee(snapshot),

@@ -31,8 +31,10 @@ non-deferrable because retrofitting it would distort the engine.
 - Publication is an atomic pointer swap: the engine holds
   `ArcSwap<WorkspaceSnapshot>`; a query pins one `Arc<WorkspaceSnapshot>`
   up front and observes exactly one revision.
-- Updates are built privately in an `UpdateBuilder` (clone of the current
-  graph, or a replacement graph for full rebuilds) and committed via
+- Snapshots and update builders hold `Arc<SymbolGraph>`. Metadata-only
+  publications share the immutable graph allocation; the first graph mutation
+  in a builder uses copy-on-write, while a rebuilt graph replaces the `Arc`.
+  Updates are committed via
   compare-and-publish: `publish` fails with `PublishError::Conflict` when
   the builder's base revision no longer matches, using
   `ArcSwap::compare_and_swap` so even concurrent publishers cannot
@@ -57,9 +59,9 @@ non-deferrable because retrofitting it would distort the engine.
 
 - One extra dependency: `arc-swap` (small, mature, no transitive weight of
   note).
-- Every update currently clones the graph. At v0.1 fixture scale this is
-  noise; if measurements show it matters, the snapshot internals can switch
-  to structural sharing without changing the publication model.
+- Metadata-only lifecycle/freshness updates do not clone the graph. Graph
+  mutations still clone on first write, which keeps private construction
+  simple without adding a persistent-collection dependency.
 - A lost update race surfaces as a typed `Conflict`. The live reconciliation
   publisher retries from a fresh base with a fixed attempt bound rather than
   overwriting a newer revision.
@@ -75,4 +77,5 @@ non-deferrable because retrofitting it would distort the engine.
   `RequireFresh` is rejected with a typed error until reconciliation claims
   `Fresh`, `AllowStale` is served with a stale envelope, and status/freshness
   combinations stay independent.
-- Revisit clone-per-update only with benchmark data (roadmap §18).
+- Revisit copy-on-write graph mutations only with benchmark data (roadmap
+  §18).

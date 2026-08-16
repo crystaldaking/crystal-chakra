@@ -29,10 +29,13 @@ use serde_json::{Value, json};
 use thiserror::Error;
 
 use crate::convert::{
-    convert_incoming, convert_outgoing, directory_uri, find_symbol_position, path_to_uri,
+    convert_incoming, convert_outgoing, directory_uri, find_symbol_position, item_declaration,
+    path_to_uri,
 };
 use crate::protocol::{Session, TransportError, TransportEvent};
 use crate::{Command, RustAnalyzerConfig, SharedState};
+
+const MAX_PROVIDER_ERROR_CHARS: usize = 1_024;
 
 const IDLE_POLL: Duration = Duration::from_millis(50);
 const MAX_PROVIDER_RESULTS: usize = 500;
@@ -93,6 +96,12 @@ pub(crate) enum ProviderError {
     RequestIdOverflow,
     #[error("document version overflow")]
     DocumentVersionOverflow,
+    #[error("provider synchronization generation overflow")]
+    SyncGenerationOverflow,
+    #[error("rust-analyzer returned no call hierarchy item matching the selected symbol")]
+    HierarchyItemMismatch,
+    #[error("rust-analyzer returned multiple call hierarchy items matching the selected symbol")]
+    AmbiguousHierarchyItem,
 }
 
 impl ProviderError {
@@ -114,7 +123,6 @@ pub(crate) struct Worker {
     force_stop: Arc<AtomicBool>,
     config: RustAnalyzerConfig,
     root: std::path::PathBuf,
-    startup_revision: Revision,
     known_revision: Revision,
     session: Option<Session>,
     server_status: Option<ServerStatus>,
@@ -122,6 +130,9 @@ pub(crate) struct Worker {
     provider_epoch: u64,
     known_documents: BTreeMap<RepoRelativePath, Arc<str>>,
     opened_versions: HashMap<RepoRelativePath, i32>,
+    sync_generation: u64,
+    barrier_generation: Option<u64>,
+    quiescent_generation: Option<u64>,
     cache: HashMap<CacheKey, PreciseQueryResult>,
     shutting_down: bool,
 }
@@ -141,7 +152,6 @@ impl Worker {
             force_stop,
             config,
             root: initial_workspace.repository_root,
-            startup_revision: initial_workspace.revision,
             known_revision: initial_workspace.revision,
             session: None,
             server_status: None,
@@ -149,13 +159,16 @@ impl Worker {
             provider_epoch: 0,
             known_documents,
             opened_versions: HashMap::new(),
+            sync_generation: 0,
+            barrier_generation: None,
+            quiescent_generation: None,
             cache: HashMap::new(),
             shutting_down: false,
         }
     }
 
     pub(crate) fn run(mut self) {
-        if let Err(error) = self.start_session(Some(self.startup_revision)) {
+        if let Err(error) = self.start_session() {
             self.set_state(ProviderState::Degraded, None, Some(error.to_string()));
         }
         while !self.force_stop.load(Ordering::Acquire) {
@@ -183,6 +196,7 @@ impl Worker {
         let mut request = request;
         request.limit = request.limit.min(MAX_PROVIDER_RESULTS);
         let revision = request.workspace.revision;
+        self.drain_idle_messages();
         if revision < self.known_revision {
             return PreciseQueryResult::unavailable(revision, ProviderState::CatchingUp);
         }
@@ -194,16 +208,17 @@ impl Worker {
             directions: request.directions,
             limit: request.limit,
         };
-        if let Some(cached) = self.cache.get(&key).cloned() {
-            self.set_state(ProviderState::Ready, Some(revision), None);
-            return cached;
-        }
-
         if self.session.is_none()
             && let Err(error) = self.restart_for(&request.workspace)
         {
             self.set_state(ProviderState::Degraded, None, Some(error.to_string()));
             return PreciseQueryResult::unavailable(revision, ProviderState::Degraded);
+        }
+        if self.provider_is_quiescent().unwrap_or(false)
+            && let Some(cached) = self.cache.get(&key).cloned()
+        {
+            self.set_state(ProviderState::Ready, Some(revision), None);
+            return cached;
         }
 
         let first = self.query_with_owned_session(&request);
@@ -258,14 +273,20 @@ impl Worker {
         request: &PreciseQueryRequest,
     ) -> Result<PreciseQueryResult, ProviderError> {
         self.set_state(ProviderState::CatchingUp, None, None);
-        self.synchronize_documents(session, &request.workspace, &request.symbol.declaration)?;
         let deadline = Instant::now() + self.config.request_timeout;
+        self.synchronize_documents(
+            session,
+            &request.workspace,
+            &request.symbol.declaration,
+            deadline,
+        )?;
         let mut last_incoming = Vec::new();
         let mut last_outgoing = Vec::new();
 
         for attempt in 0..2 {
             let items = self.prepare_call_hierarchy(session, request, deadline)?;
-            let Some(item) = items.into_iter().next() else {
+            self.confirm_sync_barrier();
+            let Some(item) = self.select_hierarchy_item(items, request)? else {
                 if self.provider_is_quiescent()? {
                     return Ok(PreciseQueryResult {
                         revision: request.workspace.revision,
@@ -381,20 +402,92 @@ impl Worker {
             .unwrap_or_default())
     }
 
+    fn select_hierarchy_item(
+        &self,
+        items: Vec<CallHierarchyItem>,
+        request: &PreciseQueryRequest,
+    ) -> Result<Option<CallHierarchyItem>, ProviderError> {
+        if items.is_empty() {
+            return Ok(None);
+        }
+        let mut matching = items.into_iter().filter(|item| {
+            if item.name != request.symbol.name {
+                return false;
+            }
+            item_declaration(item, &request.workspace).is_some_and(|(path, selection)| {
+                path == *request.symbol.declaration.file()
+                    && selection.start() >= request.symbol.declaration.start()
+                    && selection.end() <= request.symbol.declaration.end()
+            })
+        });
+        let item = matching
+            .next()
+            .ok_or(ProviderError::HierarchyItemMismatch)?;
+        if matching.next().is_some() {
+            return Err(ProviderError::AmbiguousHierarchyItem);
+        }
+        Ok(Some(item))
+    }
+
+    fn confirm_sync_barrier(&mut self) {
+        self.barrier_generation = Some(self.sync_generation);
+        if self
+            .server_status
+            .as_ref()
+            .is_some_and(|status| status.health == Health::Ok && status.quiescent)
+        {
+            self.quiescent_generation = Some(self.sync_generation);
+            self.set_state(ProviderState::Ready, Some(self.known_revision), None);
+        }
+    }
+
+    fn documents_synchronized(&self) -> bool {
+        self.opened_versions.len() == self.known_documents.len()
+            && self
+                .known_documents
+                .keys()
+                .all(|path| self.opened_versions.contains_key(path))
+    }
+
     fn synchronize_documents(
         &mut self,
         session: &mut Session,
         workspace: &ProviderWorkspace,
         target: &SourceRange,
+        deadline: Instant,
     ) -> Result<(), ProviderError> {
         let current = document_map(&workspace.documents);
-        let mut events = Vec::new();
+        if !current.contains_key(target.file()) {
+            return Err(ProviderError::InvalidPosition);
+        }
         let deleted: Vec<_> = self
             .known_documents
             .keys()
             .filter(|path| !current.contains_key(*path))
             .cloned()
             .collect();
+        let upserts: Vec<_> = current
+            .iter()
+            .filter_map(|(path, source)| {
+                let content_changed = self.known_documents.get(path).is_none_or(|known| {
+                    !Arc::ptr_eq(known, source) && known.as_ref() != source.as_ref()
+                });
+                let needs_open = !self.opened_versions.contains_key(path);
+                (content_changed || needs_open)
+                    .then(|| (path.clone(), source.clone(), content_changed))
+            })
+            .collect();
+        if !deleted.is_empty() || !upserts.is_empty() {
+            self.sync_generation = self
+                .sync_generation
+                .checked_add(1)
+                .ok_or(ProviderError::SyncGenerationOverflow)?;
+            self.barrier_generation = None;
+            self.quiescent_generation = None;
+            self.set_state(ProviderState::CatchingUp, None, None);
+        }
+
+        let mut events = Vec::new();
         for path in deleted {
             if self.opened_versions.remove(&path).is_some() {
                 self.send_notification(
@@ -405,6 +498,7 @@ impl Worker {
                             uri: path_to_uri(&workspace.repository_root, &path)?,
                         },
                     },
+                    deadline,
                 )?;
             }
             events.push(FileEvent {
@@ -412,39 +506,32 @@ impl Worker {
                 typ: FileChangeType::DELETED,
             });
         }
-        for (path, source) in &current {
-            let changed = self.known_documents.get(path).is_none_or(|known| {
-                !Arc::ptr_eq(known, source) && known.as_ref() != source.as_ref()
-            });
-            if changed {
-                let change_type = if self.known_documents.contains_key(path) {
+        for (path, source, content_changed) in upserts {
+            if content_changed {
+                let change_type = if self.known_documents.contains_key(&path) {
                     FileChangeType::CHANGED
                 } else {
                     FileChangeType::CREATED
                 };
                 events.push(FileEvent {
-                    uri: path_to_uri(&workspace.repository_root, path)?,
+                    uri: path_to_uri(&workspace.repository_root, &path)?,
                     typ: change_type,
                 });
-                self.open_or_change(session, &workspace.repository_root, path, source)?;
             }
+            self.open_or_change(
+                session,
+                &workspace.repository_root,
+                &path,
+                &source,
+                deadline,
+            )?;
         }
         if !events.is_empty() {
             self.send_notification(
                 session,
                 "workspace/didChangeWatchedFiles",
                 DidChangeWatchedFilesParams { changes: events },
-            )?;
-        }
-        let target_source = current
-            .get(target.file())
-            .ok_or(ProviderError::InvalidPosition)?;
-        if !self.opened_versions.contains_key(target.file()) {
-            self.open_or_change(
-                session,
-                &workspace.repository_root,
-                target.file(),
-                target_source,
+                deadline,
             )?;
         }
         self.known_documents = current;
@@ -460,6 +547,7 @@ impl Worker {
         root: &Path,
         path: &RepoRelativePath,
         source: &Arc<str>,
+        deadline: Instant,
     ) -> Result<(), ProviderError> {
         let uri = path_to_uri(root, path)?;
         if let Some(version) = self.opened_versions.get_mut(path) {
@@ -478,6 +566,7 @@ impl Worker {
                         text: source.to_string(),
                     }],
                 },
+                deadline,
             )
         } else {
             self.opened_versions.insert(path.clone(), 1);
@@ -492,15 +581,20 @@ impl Worker {
                         text: source.to_string(),
                     },
                 },
+                deadline,
             )
         }
     }
 
-    fn start_session(&mut self, baseline_revision: Option<Revision>) -> Result<(), ProviderError> {
+    fn start_session(&mut self) -> Result<(), ProviderError> {
         self.set_state(ProviderState::Initializing, None, None);
         let mut session = Session::spawn(&self.config.executable, &self.root)?;
         self.server_status = None;
+        self.sync_generation = 0;
+        self.barrier_generation = None;
+        self.quiescent_generation = None;
         self.next_request_id = 1;
+        let startup_deadline = Instant::now() + self.config.startup_timeout;
         let root_uri = directory_uri(&self.root)?;
         #[allow(deprecated)]
         let params = InitializeParams {
@@ -529,12 +623,8 @@ impl Worker {
             locale: None,
             work_done_progress_params: WorkDoneProgressParams::default(),
         };
-        let result: InitializeResult = self.send_request(
-            &mut session,
-            "initialize",
-            params,
-            Instant::now() + self.config.request_timeout,
-        )?;
+        let result: InitializeResult =
+            self.send_request(&mut session, "initialize", params, startup_deadline)?;
         let supports_call_hierarchy = matches!(
             result.capabilities.call_hierarchy_provider,
             Some(CallHierarchyServerCapability::Simple(true))
@@ -543,13 +633,18 @@ impl Worker {
         if !supports_call_hierarchy {
             return Err(ProviderError::Unsupported);
         }
-        self.send_notification(&mut session, "initialized", InitializedParams {})?;
+        self.send_notification(
+            &mut session,
+            "initialized",
+            InitializedParams {},
+            startup_deadline,
+        )?;
         self.provider_epoch = self.provider_epoch.saturating_add(1);
         self.cache.clear();
         self.opened_versions.clear();
         self.session = Some(session);
         if self.provider_is_quiescent().unwrap_or(false) {
-            self.set_state(ProviderState::Ready, baseline_revision, None);
+            self.set_state(ProviderState::Ready, Some(self.known_revision), None);
         } else {
             self.set_state(ProviderState::CatchingUp, None, None);
         }
@@ -560,7 +655,7 @@ impl Worker {
         self.root = workspace.repository_root.clone();
         self.known_documents = document_map(&workspace.documents);
         self.known_revision = workspace.revision;
-        self.start_session(Some(workspace.revision))
+        self.start_session()
     }
 
     fn stop_session(&mut self) {
@@ -573,7 +668,7 @@ impl Worker {
         let shutdown =
             self.send_request::<_, Value>(&mut session, "shutdown", Value::Null, deadline);
         if shutdown.is_ok() {
-            let _ = self.send_notification(&mut session, "exit", Value::Null);
+            let _ = self.send_notification(&mut session, "exit", Value::Null, deadline);
         }
         session.terminate();
         self.shutting_down = was_shutting_down;
@@ -598,11 +693,16 @@ impl Worker {
             method: method.to_owned(),
             params: serde_json::to_value(params)?,
         };
-        session.send(&Message::Request(request))?;
+        session.send(&Message::Request(request), deadline)?;
         let value = match self.wait_for_response(session, &id, deadline) {
             Ok(value) => value,
             Err(ProviderError::Timeout) => {
-                let _ = self.send_notification(session, "$/cancelRequest", json!({ "id": id }));
+                let _ = self.send_notification(
+                    session,
+                    "$/cancelRequest",
+                    json!({ "id": id }),
+                    Instant::now() + self.config.barrier_timeout,
+                );
                 return Err(ProviderError::Timeout);
             }
             Err(error) => return Err(error),
@@ -615,12 +715,16 @@ impl Worker {
         session: &mut Session,
         method: &str,
         params: P,
+        deadline: Instant,
     ) -> Result<(), ProviderError> {
         session
-            .send(&Message::Notification(Notification {
-                method: method.to_owned(),
-                params: serde_json::to_value(params)?,
-            }))
+            .send(
+                &Message::Notification(Notification {
+                    method: method.to_owned(),
+                    params: serde_json::to_value(params)?,
+                }),
+                deadline,
+            )
             .map_err(ProviderError::Transport)
     }
 
@@ -632,7 +736,12 @@ impl Worker {
     ) -> Result<Value, ProviderError> {
         loop {
             if self.force_stop.load(Ordering::Acquire) && !self.shutting_down {
-                let _ = self.send_notification(session, "$/cancelRequest", json!({ "id": id }));
+                let _ = self.send_notification(
+                    session,
+                    "$/cancelRequest",
+                    json!({ "id": id }),
+                    Instant::now() + self.config.barrier_timeout,
+                );
                 return Err(ProviderError::CatchingUp);
             }
             let remaining = deadline
@@ -661,7 +770,7 @@ impl Worker {
                         });
                 }
                 TransportEvent::Message(Message::Request(request)) => {
-                    self.respond_to_server(session, request)?;
+                    self.respond_to_server(session, request, deadline)?;
                 }
                 TransportEvent::Message(Message::Notification(notification)) => {
                     self.handle_notification(notification);
@@ -678,6 +787,7 @@ impl Worker {
         &mut self,
         session: &mut Session,
         request: Request,
+        deadline: Instant,
     ) -> Result<(), ProviderError> {
         let result = match request.method.as_str() {
             "workspace/configuration" => {
@@ -698,10 +808,13 @@ impl Worker {
             }),
         };
         session
-            .send(&Message::Response(Response {
-                id: request.id,
-                response_result: result,
-            }))
+            .send(
+                &Message::Response(Response {
+                    id: request.id,
+                    response_result: result,
+                }),
+                deadline,
+            )
             .map_err(ProviderError::Transport)
     }
 
@@ -735,12 +848,26 @@ impl Worker {
                 health: Health::Ok,
                 quiescent: true,
                 ..
-            }) => self.set_state(ProviderState::Ready, Some(self.known_revision), None),
+            }) if self.documents_synchronized()
+                && (self.sync_generation == 0
+                    || self.barrier_generation == Some(self.sync_generation)) =>
+            {
+                self.quiescent_generation = Some(self.sync_generation);
+                self.set_state(ProviderState::Ready, Some(self.known_revision), None);
+            }
+            Some(ServerStatus {
+                health: Health::Ok,
+                quiescent: true,
+                ..
+            }) => self.set_state(ProviderState::CatchingUp, None, None),
             Some(ServerStatus {
                 health: Health::Ok,
                 quiescent: false,
                 ..
-            }) => self.set_state(ProviderState::CatchingUp, None, None),
+            }) => {
+                self.quiescent_generation = None;
+                self.set_state(ProviderState::CatchingUp, None, None);
+            }
             Some(status) => self.set_state(ProviderState::Degraded, None, status.message.clone()),
             None => {}
         }
@@ -759,7 +886,10 @@ impl Worker {
                     .unwrap_or_else(|| "no status message".to_owned()),
             });
         }
-        Ok(status.quiescent)
+        Ok(self.documents_synchronized()
+            && status.quiescent
+            && (self.sync_generation == 0
+                || self.quiescent_generation == Some(self.sync_generation)))
     }
 
     fn wait_for_quiescence(&mut self, session: &mut Session) -> Result<(), ProviderError> {
@@ -783,7 +913,7 @@ impl Worker {
                     self.handle_notification(notification);
                 }
                 TransportEvent::Message(Message::Request(request)) => {
-                    self.respond_to_server(session, request)?;
+                    self.respond_to_server(session, request, deadline)?;
                 }
                 TransportEvent::Message(Message::Response(_)) => {}
                 TransportEvent::Closed(message) => {
@@ -803,7 +933,11 @@ impl Worker {
                     self.handle_notification(notification);
                 }
                 TransportEvent::Message(Message::Request(request)) => {
-                    if let Err(error) = self.respond_to_server(&mut session, request) {
+                    if let Err(error) = self.respond_to_server(
+                        &mut session,
+                        request,
+                        Instant::now() + self.config.barrier_timeout,
+                    ) {
                         self.set_state(ProviderState::Degraded, None, Some(error.to_string()));
                     }
                 }
@@ -828,7 +962,8 @@ impl Worker {
             shared.state = state;
             shared.synced_revision = synced_revision;
             shared.provider_epoch = self.provider_epoch;
-            shared.last_error = last_error;
+            shared.last_error =
+                last_error.map(|message| message.chars().take(MAX_PROVIDER_ERROR_CHARS).collect());
         }
     }
 }
@@ -838,4 +973,49 @@ fn document_map(documents: &[ProviderDocument]) -> BTreeMap<RepoRelativePath, Ar
         .iter()
         .map(|document| (document.path.clone(), document.source.clone()))
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use crossbeam_channel::bounded;
+    use serde_json::json;
+
+    use super::*;
+    use crate::SharedState;
+
+    #[test]
+    fn quiescent_status_needs_a_post_sync_request_barrier() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let root = tempfile::tempdir()?;
+        let (_sender, commands) = bounded(1);
+        let shared = Arc::new(Mutex::new(SharedState::default()));
+        let mut worker = Worker::new(
+            commands,
+            shared.clone(),
+            Arc::new(AtomicBool::new(false)),
+            RustAnalyzerConfig::default(),
+            ProviderWorkspace {
+                repository_root: root.path().to_path_buf(),
+                revision: Revision(7),
+                documents: Vec::new(),
+            },
+        );
+        worker.sync_generation = 1;
+        worker.known_revision = Revision(8);
+        worker.handle_notification(Notification {
+            method: "experimental/serverStatus".to_owned(),
+            params: json!({ "health": "ok", "quiescent": true, "message": null }),
+        });
+        {
+            let state = shared.lock().map_err(|_| "shared state lock poisoned")?;
+            assert_eq!(state.state, ProviderState::CatchingUp);
+            assert_eq!(state.synced_revision, None);
+        }
+
+        worker.confirm_sync_barrier();
+        let state = shared.lock().map_err(|_| "shared state lock poisoned")?;
+        assert_eq!(state.state, ProviderState::Ready);
+        assert_eq!(state.synced_revision, Some(Revision(8)));
+        Ok(())
+    }
 }

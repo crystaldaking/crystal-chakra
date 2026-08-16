@@ -28,10 +28,15 @@ would also violate atomic revision semantics.
 - Git commands use fixed structured arguments and stream their pipes. The
   adapter drains stdout while retaining at most 8 MiB and captures only a
   bounded stderr prefix, so an oversized diff becomes a typed unavailable
-  result without unbounded output allocation.
+  result without unbounded output allocation. Each child has a 30-second
+  process deadline. Change-record parsing stops after enough records to prove
+  the 10,000-file work-inventory cap instead of processing the retained output
+  only to truncate its response.
 - Define the v0.1 default diff scope as `HEAD` to the final materialized
   worktree for indexed regular Rust files:
   - tracked staged and unstaged edits are combined; final worktree content wins;
+  - materialized changes hidden by `assume-unchanged` or `skip-worktree` index
+    bits are still compared with the `HEAD` blob;
   - an index-only edit that is undone in the worktree is absent;
   - a staged index removal whose non-ignored file remains materialized is
     compared with the HEAD blob: unchanged content is absent and changed
@@ -45,6 +50,10 @@ would also violate atomic revision semantics.
   - an unstaged filesystem move is returned as a deletion plus an untracked
     addition when Git has not recorded enough evidence to call it a rename;
   - Git copy detection is not enabled; a copied current file is an addition.
+  - unrelated non-UTF-8 non-Rust paths are ignored before path decoding;
+  - a `.rs` symlink deleted from `HEAD` is excluded because it was never an
+    indexed regular source, and a deleted path that reappears during the Git
+    read makes the join retry rather than returning mixed state.
 - `diff_context` first obtains a syntax freshness barrier, pins one immutable
   revision, reads Git state, then runs the barrier again. A revision change
   retries the whole operation instead of returning a mixed graph/worktree view.
@@ -58,7 +67,8 @@ would also violate atomic revision semantics.
   intentionally contains no historical declaration nodes.
 - Apply the request limit to every returned collection, cap it at the shared
   query maximum, and set the envelope `truncated` flag whenever any section,
-  provider result, diff inventory, or source snippet is cut. `diff_context`
+  provider result, diff inventory, source snippet, or syntax call-candidate set
+  is cut. `diff_context`
   relationships are one hop from the returned changed-symbol slice, and each
   carries the exact revision-scoped changed symbol id that explains its
   inclusion.
@@ -92,7 +102,8 @@ would also violate atomic revision semantics.
 ## Validation / follow-up
 
 - Real temporary repositories cover staged, unstaged, untracked, ignored,
-  canceled, rename, delete, unborn-HEAD, and snapshot-race behavior.
+  canceled, rename, delete, unborn-HEAD, hidden index bits, unrelated non-UTF-8
+  paths, skipped symlink deletion, and snapshot-race behavior.
 - The Rust fixture exercises structured `context`, ambiguity, callers,
   `diff_context`, budgets, and provenance through an in-process MCP client.
 - Fixture measurements record initial indexing, `symbol_search`, `context`, and

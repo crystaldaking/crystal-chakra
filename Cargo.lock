@@ -194,6 +194,7 @@ dependencies = [
  "chakra-git",
  "chakra-language-rust",
  "rmcp",
+ "serde",
  "serde_json",
  "tempfile",
  "thiserror",

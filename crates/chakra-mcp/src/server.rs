@@ -1,5 +1,6 @@
 //! MCP server: typed tools over stdio (ADR-0003).
 
+use std::io::{self, Write};
 use std::sync::Arc;
 
 use chakra_domain::envelope::QueryEnvelope;
@@ -12,10 +13,12 @@ use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::{Json, Parameters};
 use rmcp::transport::stdio;
 use rmcp::{ErrorData, ServerHandler, ServiceExt, tool, tool_handler, tool_router};
+use serde::Serialize;
 use thiserror::Error;
 use tokio::sync::Semaphore;
 
 const MAX_CONCURRENT_QUERIES: usize = 2;
+const MAX_MCP_RESPONSE_BYTES: usize = 1024 * 1024;
 
 /// MCP server handle. Cloneable so transports can share one query service.
 #[derive(Clone)]
@@ -39,6 +42,46 @@ fn to_error_data(error: QueryError) -> ErrorData {
     }
 }
 
+struct ResponseBudgetWriter {
+    remaining: usize,
+    exceeded: bool,
+}
+
+impl Write for ResponseBudgetWriter {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        if bytes.len() > self.remaining {
+            self.exceeded = true;
+            return Err(io::Error::other("MCP response budget exceeded"));
+        }
+        self.remaining -= bytes.len();
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+fn enforce_response_budget<T: Serialize>(value: &T) -> Result<(), ErrorData> {
+    let mut writer = ResponseBudgetWriter {
+        remaining: MAX_MCP_RESPONSE_BYTES,
+        exceeded: false,
+    };
+    match serde_json::to_writer(&mut writer, value) {
+        Ok(()) => Ok(()),
+        Err(_) if writer.exceeded => Err(ErrorData::internal_error(
+            format!(
+                "query response exceeds the {MAX_MCP_RESPONSE_BYTES}-byte MCP budget; lower the requested limit"
+            ),
+            None,
+        )),
+        Err(error) => Err(ErrorData::internal_error(
+            format!("failed to size query response: {error}"),
+            None,
+        )),
+    }
+}
+
 #[tool_router]
 impl ChakraMcpServer {
     pub fn new(service: Arc<dyn QueryService>) -> Self {
@@ -51,7 +94,7 @@ impl ChakraMcpServer {
 
     async fn execute_query<T, F>(&self, query: F) -> Result<Json<QueryEnvelope<T>>, ErrorData>
     where
-        T: Send + 'static,
+        T: Send + Serialize + 'static,
         F: FnOnce(&dyn QueryService) -> Result<QueryEnvelope<T>, QueryError> + Send + 'static,
     {
         let permit = self
@@ -61,14 +104,17 @@ impl ChakraMcpServer {
             .await
             .map_err(|_| ErrorData::internal_error("query executor is shutting down", None))?;
         let service = self.service.clone();
-        tokio::task::spawn_blocking(move || {
+        let envelope = tokio::task::spawn_blocking(move || -> Result<_, ErrorData> {
             let _permit = permit;
-            query(service.as_ref())
+            let envelope = query(service.as_ref()).map_err(to_error_data)?;
+            enforce_response_budget(&envelope)?;
+            Ok(envelope)
         })
         .await
-        .map_err(|error| ErrorData::internal_error(format!("query worker failed: {error}"), None))?
-        .map(Json)
-        .map_err(to_error_data)
+        .map_err(|error| {
+            ErrorData::internal_error(format!("query worker failed: {error}"), None)
+        })??;
+        Ok(Json(envelope))
     }
 
     #[tool(
@@ -76,10 +122,9 @@ impl ChakraMcpServer {
         description = "Chakra workspace status: identity, published revision, index counts, provider state"
     )]
     async fn status(&self) -> Result<Json<QueryEnvelope<StatusData>>, ErrorData> {
-        self.service
-            .status(StatusRequest)
-            .map(Json)
-            .map_err(to_error_data)
+        let envelope = self.service.status(StatusRequest).map_err(to_error_data)?;
+        enforce_response_budget(&envelope)?;
+        Ok(Json(envelope))
     }
 
     #[tool(
@@ -224,6 +269,33 @@ mod tests {
         drop((first, second));
         tokio::task::yield_now().await;
         assert!(!called.load(Ordering::Acquire));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn oversized_serialized_response_is_rejected()
+    -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let identity = WorkspaceIdentity::for_primary_worktree(std::path::Path::new("."))?;
+        let workspace_id = identity.workspace.clone();
+        let server = ChakraMcpServer::new(Arc::new(WorkspaceEngine::new(identity)));
+        let result = server
+            .execute_query::<String, _>(move |_| {
+                Ok(QueryEnvelope::new(
+                    workspace_id,
+                    chakra_domain::revision::Revision(1),
+                    chakra_domain::state::Freshness::Fresh,
+                    chakra_domain::state::WorkspaceStatus::Ready,
+                    chakra_domain::state::ProviderState::NotConfigured,
+                    false,
+                    "x".repeat(MAX_MCP_RESPONSE_BYTES),
+                ))
+            })
+            .await;
+        let error = match result {
+            Ok(_) => return Err("oversized response unexpectedly succeeded".into()),
+            Err(error) => error,
+        };
+        assert!(error.message.contains("MCP budget"));
         Ok(())
     }
 }

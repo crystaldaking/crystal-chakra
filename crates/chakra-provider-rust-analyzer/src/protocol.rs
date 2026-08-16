@@ -1,17 +1,18 @@
 use std::ffi::OsStr;
 use std::io::{BufReader, BufWriter, Write};
 use std::path::Path;
-use std::process::{Child, ChildStdin, Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use crossbeam_channel::{Receiver, SendTimeoutError, Sender, bounded};
+use crossbeam_channel::{Receiver, RecvTimeoutError, SendTimeoutError, Sender, bounded};
 use lsp_server::Message;
 use thiserror::Error;
 
 const INCOMING_MESSAGE_CAPACITY: usize = 64;
+const OUTGOING_MESSAGE_CAPACITY: usize = 8;
 const READER_SEND_POLL: Duration = Duration::from_millis(50);
 const PROCESS_EXIT_GRACE: Duration = Duration::from_millis(500);
 
@@ -32,7 +33,9 @@ pub(crate) enum TransportError {
         source: std::io::Error,
     },
     #[error("failed to write an LSP message: {0}")]
-    Write(#[source] std::io::Error),
+    Write(String),
+    #[error("timed out writing an LSP message")]
+    WriteTimeout,
     #[error("rust-analyzer output closed: {0}")]
     Closed(String),
 }
@@ -43,11 +46,17 @@ pub(crate) enum TransportEvent {
     Closed(String),
 }
 
+struct WriteCommand {
+    bytes: Vec<u8>,
+    completed: Sender<Result<(), String>>,
+}
+
 pub(crate) struct Session {
     child: Child,
-    stdin: Option<BufWriter<ChildStdin>>,
+    outgoing: Option<Sender<WriteCommand>>,
     incoming: Receiver<TransportEvent>,
     stopping: Arc<AtomicBool>,
+    writer: Option<JoinHandle<()>>,
     reader: Option<JoinHandle<()>>,
     stderr: Option<JoinHandle<()>>,
 }
@@ -74,7 +83,39 @@ impl Session {
             return Err(TransportError::MissingStderr);
         };
         let (sender, incoming) = bounded(INCOMING_MESSAGE_CAPACITY);
+        let (outgoing, writer_commands) = bounded::<WriteCommand>(OUTGOING_MESSAGE_CAPACITY);
         let stopping = Arc::new(AtomicBool::new(false));
+        let writer_stopping = stopping.clone();
+        let writer = match thread::Builder::new()
+            .name("chakra-ra-stdin".to_owned())
+            .spawn(move || {
+                let mut stdin = BufWriter::new(stdin);
+                while !writer_stopping.load(Ordering::Acquire) {
+                    let command = match writer_commands.recv_timeout(READER_SEND_POLL) {
+                        Ok(command) => command,
+                        Err(RecvTimeoutError::Timeout) => continue,
+                        Err(RecvTimeoutError::Disconnected) => break,
+                    };
+                    let result = stdin
+                        .write_all(&command.bytes)
+                        .and_then(|()| stdin.flush())
+                        .map_err(|error| error.to_string());
+                    let failed = result.is_err();
+                    let _ = command.completed.send(result);
+                    if failed {
+                        break;
+                    }
+                }
+            }) {
+            Ok(writer) => writer,
+            Err(source) => {
+                terminate_unowned_child(&mut child);
+                return Err(TransportError::ThreadSpawn {
+                    name: "stdin writer",
+                    source,
+                });
+            }
+        };
         let reader_stopping = stopping.clone();
         let reader = match thread::Builder::new()
             .name("chakra-ra-stdout".to_owned())
@@ -112,7 +153,10 @@ impl Session {
             }) {
             Ok(reader) => reader,
             Err(source) => {
+                stopping.store(true, Ordering::Release);
                 terminate_unowned_child(&mut child);
+                drop(outgoing);
+                let _ = writer.join();
                 return Err(TransportError::ThreadSpawn {
                     name: "stdout reader",
                     source,
@@ -138,6 +182,8 @@ impl Session {
             Err(source) => {
                 stopping.store(true, Ordering::Release);
                 terminate_unowned_child(&mut child);
+                drop(outgoing);
+                let _ = writer.join();
                 let _ = reader.join();
                 return Err(TransportError::ThreadSpawn {
                     name: "stderr reader",
@@ -147,18 +193,49 @@ impl Session {
         };
         Ok(Self {
             child,
-            stdin: Some(BufWriter::new(stdin)),
+            outgoing: Some(outgoing),
             incoming,
             stopping,
+            writer: Some(writer),
             reader: Some(reader),
             stderr: Some(stderr),
         })
     }
 
-    pub(crate) fn send(&mut self, message: &Message) -> Result<(), TransportError> {
-        let stdin = self.stdin.as_mut().ok_or(TransportError::MissingStdin)?;
-        message.write(stdin).map_err(TransportError::Write)?;
-        stdin.flush().map_err(TransportError::Write)
+    pub(crate) fn send(
+        &mut self,
+        message: &Message,
+        deadline: Instant,
+    ) -> Result<(), TransportError> {
+        let outgoing = self.outgoing.as_ref().ok_or(TransportError::MissingStdin)?;
+        let mut bytes = Vec::new();
+        message
+            .write(&mut bytes)
+            .map_err(|error| TransportError::Write(error.to_string()))?;
+        let (completed, result) = bounded(1);
+        let remaining = deadline
+            .checked_duration_since(Instant::now())
+            .ok_or(TransportError::WriteTimeout)?;
+        outgoing
+            .send_timeout(WriteCommand { bytes, completed }, remaining)
+            .map_err(|error| match error {
+                SendTimeoutError::Timeout(_) => TransportError::WriteTimeout,
+                SendTimeoutError::Disconnected(_) => {
+                    TransportError::Closed("stdin writer stopped".to_owned())
+                }
+            })?;
+        let remaining = deadline
+            .checked_duration_since(Instant::now())
+            .ok_or(TransportError::WriteTimeout)?;
+        result
+            .recv_timeout(remaining)
+            .map_err(|error| match error {
+                RecvTimeoutError::Timeout => TransportError::WriteTimeout,
+                RecvTimeoutError::Disconnected => {
+                    TransportError::Closed("stdin writer stopped".to_owned())
+                }
+            })?
+            .map_err(TransportError::Write)
     }
 
     pub(crate) fn incoming(&self) -> &Receiver<TransportEvent> {
@@ -169,7 +246,7 @@ impl Session {
     /// the worker before this transport-level fallback runs.
     pub(crate) fn terminate(&mut self) {
         self.stopping.store(true, Ordering::Release);
-        self.stdin.take();
+        self.outgoing.take();
         let deadline = Instant::now() + PROCESS_EXIT_GRACE;
         loop {
             match self.child.try_wait() {
@@ -183,6 +260,9 @@ impl Session {
                     break;
                 }
             }
+        }
+        if let Some(writer) = self.writer.take() {
+            let _ = writer.join();
         }
         if let Some(reader) = self.reader.take() {
             let _ = reader.join();

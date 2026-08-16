@@ -39,7 +39,10 @@ The upstream Tree-sitter project currently publishes the maintained
 - Git stdout is drained while only a fixed 64 MiB prefix can be retained;
   stderr capture is separately bounded. Discovery fails explicitly when the
   inventory exceeds that budget instead of allocating the complete output
-  before checking its size.
+  before checking its size. Every Git discovery child has a 30-second process
+  deadline, and paths known not to be Rust are rejected from their raw bytes
+  before UTF-8 conversion so an unrelated non-UTF-8 filename cannot disable
+  indexing.
 - Parse files in sorted repository-relative order and build the graph in
   deterministic passes: files/source, declarations, containment and impl
   relations, then call candidates. Declarations and direct AST containment
@@ -58,6 +61,12 @@ The upstream Tree-sitter project currently publishes the maintained
 - Tree-sitter error trees are accepted. Valid declarations elsewhere in a
   temporarily invalid file remain indexable, and the index reports how many
   files contain syntax errors.
+- Read source files through a bounded reader. One Rust source is capped at
+  8 MiB and the repository's captured Rust text at 256 MiB; exceeding either
+  budget aborts the private build before any fresh revision is published.
+- Nested function declarations own their own contained symbols and call
+  candidates. The outer function records the nested declaration but does not
+  absorb calls from the nested body.
 
 ## Alternatives considered
 
@@ -90,17 +99,22 @@ The upstream Tree-sitter project currently publishes the maintained
 - Initial indexing is a full deterministic rebuild. Per-file replacement,
   watcher coalescing, and reconciliation reuse this representation in the
   live-update slice; they are not silently simulated here.
-- Source bodies consume memory, but `Arc<str>` prevents graph snapshot clones
-  from duplicating them. Measure before introducing persistence or a second
-  text index.
+- Source bodies consume bounded memory, and `Arc<str>` prevents graph snapshot
+  clones from duplicating them. Measure before introducing persistence or a
+  second text index.
+- Physical module qualification covers conventional Rust file layouts and
+  inline modules. Cross-file remapping introduced by a custom `#[path]`
+  attribute is a documented v0.1 limitation rather than a guessed relation.
 
 ## Validation / follow-up
 
 - Discovery tests cover tracked, untracked, ignored, `target`, tracked files
-  matching ignore rules, and a real linked worktree whose `.git` is a file.
+  matching ignore rules, an unrelated non-UTF-8 filename, and a real linked
+  worktree whose `.git` is a file.
 - Parser tests cover declarations, fields, impl containers, calls, test
   attributes, Unicode-aware source positions, bounded import signatures, and
   partial extraction from an error tree.
+- An indexer regression rejects a source one byte above the file budget.
 - Fixture integration tests cover ambiguous `refund` symbols, imports,
   containment, impls, rejection of false qualified impl links,
   call-candidate quality, exact/regex text search, bounded source output,

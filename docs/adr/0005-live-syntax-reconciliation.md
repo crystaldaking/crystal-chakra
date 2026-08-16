@@ -28,10 +28,14 @@ over native filesystem mechanisms:
   `target`, ignored, and generated trees. The directory set is capped at
   4,096; exceeding the cap degrades watcher health but does not disable exact
   freshness reconciliation.
-- Treat watcher events as wake-up hints. The callback performs no I/O or
-  parsing: it increments an event epoch and uses `try_send` into a bounded
-  256-item channel. A full channel increments an observable dropped-event
-  counter. Correctness never depends on every event reaching the worker.
+- Treat watcher events as wake-up hints. The callback performs no filesystem
+  I/O or parsing. Under a small publication gate it first atomically publishes
+  stale lifecycle metadata (sharing the immutable graph), then advances the
+  event epoch and uses `try_send` into a bounded 256-item channel. The worker
+  holds the same gate only for the final epoch check and fresh publication, so
+  a newly observed event can never coexist with an older graph labeled fresh.
+  A full channel increments an observable dropped-event counter. Correctness
+  never depends on every event reaching the worker.
 - Own the watcher and syntax state in one named blocking worker thread. The
   worker has an explicit shutdown signal and join path. It coalesces event
   bursts with a 50 ms quiet window capped at 250 ms, which tolerates common
@@ -48,7 +52,9 @@ over native filesystem mechanisms:
   Rust inventory, reading exact current contents, and requiring two identical
   scans with an unchanged watcher epoch. A bounded retry handles replacement
   races. This scan is authoritative even when events were missed or reordered.
-  Unchanged source text is compared exactly and is never reparsed.
+  Unchanged source text is compared exactly and is never reparsed. If an event
+  advances the epoch after a stable scan, the private candidate is discarded
+  and reconciliation retries instead of publishing it.
 - Cache parsed facts per file and resolved relationship contributions per
   relationship-owner file. An edit reparses only created or modified files.
   Relationship owners are recomputed only when they own a changed file or
@@ -63,9 +69,13 @@ over native filesystem mechanisms:
   errors do not expose a partial graph or erase valid declarations elsewhere.
 - Instrument reconciliations, publications, scanned/unchanged/reparsed files,
   recomputed relationship owners, create/modify/delete counts, syntax-error
-  files, watcher events/errors/drops, and watched directories. The live path
-  exposes a separate `full_repository_reindexes` counter fixed at zero; the
-  initial full index remains a distinct startup operation.
+  files, watcher events/errors/drops, and watched directories. Evidence for an
+  incremental edit comes from actual reparsed-file and recomputed-owner counts;
+  there is no constant-valued surrogate “full reindex” counter. The initial
+  full index remains a distinct startup operation.
+- Watcher degradation is current-state metadata. A later successful watch-set
+  refresh can return the workspace to `Ready`; cumulative error counters remain
+  available for diagnostics but do not permanently poison current health.
 
 ## Alternatives considered
 
@@ -115,8 +125,11 @@ over native filesystem mechanisms:
 - A pure unit test checks both quiet and absolute debounce deadlines using
   synthetic instants.
 - The hardening measurement records the fresh barrier and reparse counters for
-  both one ordinary edit and a 32-replacement burst; neither path increments
-  the full-repository reindex counter.
+  both one ordinary edit and a 32-replacement burst. The ordinary edit reparses
+  one file and recomputes only the affected relationship owner set.
+- A unit regression proves the callback revokes freshness before publishing
+  its epoch, and integration tests verify old snapshots remain immutable while
+  the new revision is published atomically.
 - Periodic background reconciliation is deferred. v0.1 recovers missed events
   on every fresh-query barrier, which is the correctness boundary required by
   the current query contract.

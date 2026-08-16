@@ -60,7 +60,9 @@ chakra serve --repo /absolute/path/to/a/git-worktree
 ```
 
 Logging goes to stderr (`RUST_LOG=debug` for more detail). Stdout is reserved
-for the MCP protocol stream.
+for the MCP protocol stream. Use `--no-rust-analyzer` for deterministic
+syntax-only operation, or `--rust-analyzer-path /absolute/path/to/rust-analyzer`
+when the provider is not on `PATH`.
 
 ## Connect Codex
 
@@ -121,11 +123,19 @@ returned with `catching_up` or `degraded` provider metadata.
 
 Collection limits default to 20 and are capped at 500. Search patterns are
 capped at 1,024 characters, returned match lines at 512 characters, and source
-snippets at 20 lines / 4,096 characters. Every cut response sets `truncated`.
+snippets at 20 lines / 4,096 characters. A complete serialized MCP query
+response is capped at 1 MiB. Every semantic collection cut sets `truncated`;
+an over-budget serialized response is rejected with a request to lower the
+limit without emitting it or constructing a full serialized buffer.
 Potentially expensive MCP queries share two execution slots. Cancellation
 before dispatch removes queued work; an already-dispatched synchronous query
 finishes inside that bound. Timed-out rust-analyzer requests send
 `$/cancelRequest`, and all provider waits have fixed deadlines.
+
+Indexing admits at most 8 MiB per Rust source and 256 MiB of Rust source text
+per repository. Git discovery/diff subprocesses have a 30-second deadline and
+bounded retained output. Exceeding one of these resource budgets fails
+explicitly; Chakra does not publish a partial index as fresh.
 
 ## Git diff scope
 
@@ -148,8 +158,10 @@ changed hunk, and deleted historical declarations are not reconstructed.
 
 ```sh
 cargo fmt --all -- --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace
+cargo clippy --locked --workspace --all-targets -- -D warnings
+cargo test --locked --workspace
+cargo test --locked --manifest-path fixtures/rust/controller-service-provider/Cargo.toml
+RUSTDOCFLAGS='-D warnings' cargo doc --locked --workspace --no-deps
 cargo deny check
 
 # Optional real-provider smoke when rust-analyzer is installed:
@@ -182,6 +194,9 @@ v0.1 supports one repository, one active materialized worktree, Rust only,
 and an in-memory index rebuilt at startup. It intentionally has no historical
 commit materialization, persistent graph snapshots, provider pool, eager
 precise call graph, semantic/vector search, PHP support, or web UI.
+Rust module qualification follows conventional `src/foo.rs`, `foo/mod.rs`,
+and inline-module layouts; custom external module remapping through `#[path]`
+is not modeled in v0.1.
 
 ## License
 

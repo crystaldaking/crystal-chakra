@@ -2,7 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs;
-use std::io;
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -18,6 +18,8 @@ use crate::discovery::{DiscoveryError, discover_rust_files, resolve_repository_r
 use crate::parser::{ParsedFile, RustParser, SymbolDraft};
 
 const MAX_CANDIDATES_PER_CALL_SITE: usize = 64;
+const MAX_SOURCE_FILE_BYTES: usize = 8 * 1024 * 1024;
+const MAX_REPOSITORY_SOURCE_BYTES: usize = 256 * 1024 * 1024;
 
 /// Measurements captured during a deterministic initial syntax index.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -77,6 +79,13 @@ pub enum RustIndexError {
         #[source]
         source: io::Error,
     },
+    #[error("Rust source {path} exceeds the {limit}-byte indexing budget")]
+    SourceTooLarge {
+        path: RepoRelativePath,
+        limit: usize,
+    },
+    #[error("indexed Rust sources exceed the {limit}-byte repository budget")]
+    RepositoryTooLarge { limit: usize },
     #[error("failed to parse Rust source: {0}")]
     Parse(String),
     #[error("Rust syntax index update failed: {0}")]
@@ -395,6 +404,7 @@ impl RustSyntaxIndex {
                 )?;
             }
         }
+        graph.set_truncated_call_sites(self.truncated_call_sites());
         graph.validate_consistency()?;
         Ok(graph)
     }
@@ -621,13 +631,38 @@ fn read_sources(
 ) -> Result<BTreeMap<RepoRelativePath, Arc<str>>, RustIndexError> {
     let files = discover_rust_files(repository_root)?;
     let mut sources = BTreeMap::new();
+    let mut total_bytes = 0_usize;
     for path in files {
-        let source = fs::read_to_string(repository_root.join(path.as_str())).map_err(|source| {
+        let file = fs::File::open(repository_root.join(path.as_str())).map_err(|source| {
             RustIndexError::Read {
                 path: path.clone(),
                 source,
             }
         })?;
+        let mut source = String::new();
+        file.take((MAX_SOURCE_FILE_BYTES + 1) as u64)
+            .read_to_string(&mut source)
+            .map_err(|source| RustIndexError::Read {
+                path: path.clone(),
+                source,
+            })?;
+        if source.len() > MAX_SOURCE_FILE_BYTES {
+            return Err(RustIndexError::SourceTooLarge {
+                path,
+                limit: MAX_SOURCE_FILE_BYTES,
+            });
+        }
+        total_bytes =
+            total_bytes
+                .checked_add(source.len())
+                .ok_or(RustIndexError::RepositoryTooLarge {
+                    limit: MAX_REPOSITORY_SOURCE_BYTES,
+                })?;
+        if total_bytes > MAX_REPOSITORY_SOURCE_BYTES {
+            return Err(RustIndexError::RepositoryTooLarge {
+                limit: MAX_REPOSITORY_SOURCE_BYTES,
+            });
+        }
         sources.insert(path, Arc::<str>::from(source));
     }
     Ok(sources)
@@ -674,4 +709,38 @@ pub(crate) fn scan_repository_sources(
     repository_root: &Path,
 ) -> Result<BTreeMap<RepoRelativePath, Arc<str>>, RustIndexError> {
     read_sources(repository_root)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::error::Error;
+    use std::fs::{self, File};
+    use std::process::Command;
+
+    use tempfile::TempDir;
+
+    use super::*;
+
+    #[test]
+    fn rejects_a_source_larger_than_the_file_budget() -> Result<(), Box<dyn Error>> {
+        let repository = TempDir::new()?;
+        let status = Command::new("git")
+            .current_dir(repository.path())
+            .args(["init", "--quiet"])
+            .status()?;
+        assert!(status.success());
+        fs::create_dir_all(repository.path().join("src"))?;
+        let file = File::create(repository.path().join("src/large.rs"))?;
+        file.set_len((MAX_SOURCE_FILE_BYTES + 1) as u64)?;
+
+        let error = match read_sources(repository.path()) {
+            Ok(_) => return Err("oversized source was indexed".into()),
+            Err(error) => error,
+        };
+        assert!(matches!(
+            error,
+            RustIndexError::SourceTooLarge { limit, .. } if limit == MAX_SOURCE_FILE_BYTES
+        ));
+        Ok(())
+    }
 }

@@ -50,6 +50,10 @@ pub struct SymbolGraph {
     outgoing: HashMap<EntityId, Vec<Edge>>,
     incoming: HashMap<EntityId, Vec<Edge>>,
     edge_count: u64,
+    /// Number of syntax call sites whose candidate targets were cut while
+    /// building this exact graph revision. Query envelopes use this to avoid
+    /// presenting an incomplete call slice as complete.
+    truncated_call_sites: u64,
 }
 
 impl SymbolGraph {
@@ -168,6 +172,16 @@ impl SymbolGraph {
 
     pub fn edge_count(&self) -> u64 {
         self.edge_count
+    }
+
+    /// Records call-candidate incompleteness discovered by a language index.
+    pub fn set_truncated_call_sites(&mut self, truncated_call_sites: u64) {
+        self.truncated_call_sites = truncated_call_sites;
+    }
+
+    /// Call sites whose syntax candidate set was cut in this graph revision.
+    pub fn truncated_call_sites(&self) -> u64 {
+        self.truncated_call_sites
     }
 
     pub fn file_count(&self) -> u64 {

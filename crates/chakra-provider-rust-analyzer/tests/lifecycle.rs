@@ -35,6 +35,13 @@ fn send(id: &str, result: &str) -> io::Result<()> {
     stdout.flush()
 }
 
+fn notify(method: &str, params: &str) -> io::Result<()> {
+    let body = format!("{{\"jsonrpc\":\"2.0\",\"method\":\"{method}\",\"params\":{params}}}");
+    let mut stdout = io::stdout().lock();
+    write!(stdout, "Content-Length: {}\r\n\r\n{body}", body.len())?;
+    stdout.flush()
+}
+
 fn main() -> io::Result<()> {
     let executable = std::env::current_exe()?;
     let count_path = executable.with_extension("count");
@@ -48,7 +55,16 @@ fn main() -> io::Result<()> {
         .file_stem()
         .and_then(|name| name.to_str())
         .is_some_and(|name| name.contains("hang"));
+    let no_read = executable
+        .file_stem()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.contains("no-read"));
+    let record_open = executable
+        .file_stem()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.contains("record-open"));
     let cancelled_path: PathBuf = executable.with_extension("cancelled");
+    let opened_path: PathBuf = executable.with_extension("opened");
     let stdin = io::stdin();
     let mut stdin = stdin.lock();
 
@@ -75,8 +91,29 @@ fn main() -> io::Result<()> {
         let body = String::from_utf8_lossy(&body);
         if body.contains("\"method\":\"initialize\"") {
             send("1", "{\"capabilities\":{\"callHierarchyProvider\":true}}")?;
+            if no_read {
+                loop {
+                    std::thread::park();
+                }
+            }
+        } else if body.contains("\"method\":\"initialized\"") && record_open {
+            notify(
+                "experimental/serverStatus",
+                "{\"health\":\"ok\",\"quiescent\":true,\"message\":null}",
+            )?;
+        } else if body.contains("\"method\":\"textDocument/didOpen\"") && record_open {
+            let opened = fs::read_to_string(&opened_path)
+                .ok()
+                .and_then(|value| value.parse::<u64>().ok())
+                .unwrap_or(0)
+                .saturating_add(1);
+            fs::write(&opened_path, opened.to_string())?;
         } else if body.contains("\"method\":\"textDocument/prepareCallHierarchy\"") {
-            if !hang {
+            if record_open {
+                if let Some(id) = request_id(&body) {
+                    send(id, "[]")?;
+                }
+            } else if !hang {
                 std::process::exit(17);
             }
         } else if body.contains("\"method\":\"$/cancelRequest\"") {
@@ -145,6 +182,7 @@ fn request(root: &Path, revision: Revision) -> Result<PreciseQueryRequest, Box<d
 fn config(executable: &Path) -> RustAnalyzerConfig {
     RustAnalyzerConfig {
         executable: executable.as_os_str().to_owned(),
+        startup_timeout: Duration::from_secs(5),
         request_timeout: Duration::from_secs(1),
         barrier_timeout: Duration::from_millis(250),
         ..RustAnalyzerConfig::default()
@@ -186,5 +224,66 @@ fn timed_out_request_is_cancelled_before_shutdown() -> Result<(), Box<dyn Error>
     let cancellation = fs::read_to_string(executable.with_extension("cancelled"))?;
     assert!(cancellation.contains("$/cancelRequest"));
     assert!(cancellation.contains("\"id\":2"));
+    Ok(())
+}
+
+#[test]
+fn blocked_provider_stdin_is_bounded_and_shutdown_completes() -> Result<(), Box<dyn Error>> {
+    let repository = tempfile::tempdir()?;
+    let executable = compile_fake_server(repository.path(), "fake-ra-no-read")?;
+    let mut request = request(repository.path(), Revision(1))?;
+    let source: Arc<str> = Arc::from(format!(
+        "pub fn target() {{}}\n// {}\n",
+        "x".repeat(2 * 1024 * 1024)
+    ));
+    fs::write(repository.path().join("src/lib.rs"), source.as_ref())?;
+    request.workspace.documents[0].source = source;
+    let provider = RustAnalyzerProvider::start(request.workspace.clone(), config(&executable))?;
+
+    let result = provider.enrich(request);
+    assert_eq!(
+        result.state,
+        ProviderState::Degraded,
+        "last_error={:?}",
+        provider.last_error()
+    );
+    assert!(
+        provider
+            .last_error()
+            .is_some_and(|error| error.contains("timed out writing"))
+    );
+    provider.shutdown()?;
+    Ok(())
+}
+
+#[test]
+fn every_snapshot_document_is_opened_before_precise_queries() -> Result<(), Box<dyn Error>> {
+    let repository = tempfile::tempdir()?;
+    let executable = compile_fake_server(repository.path(), "fake-ra-record-open")?;
+    let mut request = request(repository.path(), Revision(1))?;
+    let second_path = RepoRelativePath::new("src/caller.rs")?;
+    let second_source: Arc<str> = Arc::from("pub fn caller() { crate::target(); }\n");
+    fs::write(
+        repository.path().join(second_path.as_str()),
+        second_source.as_ref(),
+    )?;
+    request.workspace.documents.push(ProviderDocument {
+        path: second_path,
+        source: second_source,
+    });
+    let provider = RustAnalyzerProvider::start(request.workspace.clone(), config(&executable))?;
+
+    let result = provider.enrich(request);
+    assert_eq!(
+        result.state,
+        ProviderState::Ready,
+        "last_error={:?}",
+        provider.last_error()
+    );
+    assert_eq!(
+        fs::read_to_string(executable.with_extension("opened"))?,
+        "2"
+    );
+    provider.shutdown()?;
     Ok(())
 }

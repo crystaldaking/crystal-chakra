@@ -30,6 +30,7 @@ const DEFAULT_CACHE_CAPACITY: usize = 128;
 #[derive(Debug, Clone)]
 pub struct RustAnalyzerConfig {
     pub executable: OsString,
+    pub startup_timeout: Duration,
     pub request_timeout: Duration,
     pub barrier_timeout: Duration,
     pub command_capacity: usize,
@@ -40,6 +41,7 @@ impl Default for RustAnalyzerConfig {
     fn default() -> Self {
         Self {
             executable: OsString::from("rust-analyzer"),
+            startup_timeout: Duration::from_secs(15),
             request_timeout: Duration::from_secs(5),
             barrier_timeout: Duration::from_millis(750),
             command_capacity: DEFAULT_COMMAND_CAPACITY,
@@ -52,7 +54,7 @@ impl Default for RustAnalyzerConfig {
 pub enum StartError {
     #[error("provider command and cache capacities must be non-zero")]
     InvalidCapacity,
-    #[error("provider request and barrier timeouts must be non-zero")]
+    #[error("provider startup, request, and barrier timeouts must be non-zero")]
     InvalidTimeout,
     #[error("failed to spawn rust-analyzer owner thread: {0}")]
     ThreadSpawn(#[source] std::io::Error),
@@ -123,7 +125,10 @@ impl RustAnalyzerProvider {
         if config.command_capacity == 0 || config.cache_capacity == 0 {
             return Err(StartError::InvalidCapacity);
         }
-        if config.request_timeout.is_zero() || config.barrier_timeout.is_zero() {
+        if config.startup_timeout.is_zero()
+            || config.request_timeout.is_zero()
+            || config.barrier_timeout.is_zero()
+        {
             return Err(StartError::InvalidTimeout);
         }
         let (commands, receiver) = bounded(config.command_capacity);
@@ -199,6 +204,10 @@ impl PreciseProvider for RustAnalyzerProvider {
         }
     }
 
+    fn last_error(&self) -> Option<String> {
+        RustAnalyzerProvider::last_error(self)
+    }
+
     fn enrich(&self, request: PreciseQueryRequest) -> PreciseQueryResult {
         let revision = request.workspace.revision;
         if self.stopped.load(Ordering::Acquire) {
@@ -218,11 +227,14 @@ impl PreciseProvider for RustAnalyzerProvider {
         {
             return PreciseQueryResult::unavailable(revision, ProviderState::CatchingUp);
         }
+        // Cover initial startup, a lazy start, one transport restart, both
+        // query attempts, and bounded cancellation/shutdown acknowledgements.
         let wait = self
             .config
-            .request_timeout
+            .startup_timeout
             .saturating_mul(3)
-            .saturating_add(self.config.barrier_timeout.saturating_mul(2));
+            .saturating_add(self.config.request_timeout.saturating_mul(2))
+            .saturating_add(self.config.barrier_timeout.saturating_mul(4));
         receiver.recv_timeout(wait).unwrap_or_else(|_| {
             PreciseQueryResult::unavailable(revision, ProviderState::CatchingUp)
         })
@@ -292,6 +304,36 @@ mod tests {
         let state = shared.lock().map_err(|_| "shared state lock poisoned")?;
         assert_eq!(state.state, ProviderState::Ready);
         assert_eq!(state.synced_revision, Some(Revision(7)));
+        Ok(())
+    }
+
+    #[test]
+    fn quiescent_status_does_not_claim_unopened_documents_are_current()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = tempfile::tempdir()?;
+        let (_sender, commands) = bounded(1);
+        let shared = Arc::new(Mutex::new(SharedState::default()));
+        let mut worker = Worker::new(
+            commands,
+            shared.clone(),
+            Arc::new(AtomicBool::new(false)),
+            RustAnalyzerConfig::default(),
+            ProviderWorkspace {
+                repository_root: root.path().to_path_buf(),
+                revision: Revision(7),
+                documents: vec![ProviderDocument {
+                    path: RepoRelativePath::new("src/lib.rs")?,
+                    source: Arc::from("fn target() {}\n"),
+                }],
+            },
+        );
+        worker.handle_notification(Notification {
+            method: "experimental/serverStatus".to_owned(),
+            params: json!({ "health": "ok", "quiescent": true, "message": null }),
+        });
+        let state = shared.lock().map_err(|_| "shared state lock poisoned")?;
+        assert_eq!(state.state, ProviderState::CatchingUp);
+        assert_eq!(state.synced_revision, None);
         Ok(())
     }
 

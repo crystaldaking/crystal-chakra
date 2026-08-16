@@ -54,8 +54,9 @@ results.
 - Lookups used by v0.1 queries are map hits or single linear scans with
   documented budgets; naive ranking is deliberate until benchmarks say
   otherwise (SPEC §33, roadmap §18).
-- The representation is clone-friendly, which keeps ADR-001's private
-  update construction trivial. Source bodies are shared across the clone.
+- The complete graph is shared between immutable snapshots with `Arc`;
+  private graph mutation is copy-on-write. Source bodies have their own
+  `Arc<str>` values, so even a graph clone does not duplicate file text.
 - If future phases need deep traversal (`impact`), the adjacency maps
   extend without changing the public engine API.
 

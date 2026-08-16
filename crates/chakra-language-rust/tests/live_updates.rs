@@ -119,12 +119,10 @@ fn immediate_fresh_read_is_atomic_and_reindexes_only_one_file() -> Result<(), Bo
         1,
         "unrelated relationship owners must not be recomputed"
     );
-    assert_eq!(metrics.full_repository_reindexes, 0);
     eprintln!(
-        "live_single_file_reindex: elapsed={reindex_elapsed:?}, reparsed={}, relationship_files_recomputed={}, full_repository_reindexes={}",
+        "live_single_file_reindex: elapsed={reindex_elapsed:?}, reparsed={}, relationship_files_recomputed={}",
         metrics.files_reparsed - baseline.files_reparsed,
         metrics.relationship_files_recomputed - baseline.relationship_files_recomputed,
-        metrics.full_repository_reindexes,
     );
     live.shutdown()?;
     Ok(())
@@ -161,11 +159,10 @@ fn rapid_editor_replacements_converge_to_the_latest_source() -> Result<(), Box<d
         reparsed <= EDITS,
         "coalescing must not invent more parses than materialized edits"
     );
-    assert_eq!(metrics.full_repository_reindexes, 0);
     engine.snapshot().graph().validate_consistency()?;
     eprintln!(
-        "live_rapid_replacement: edits={EDITS}, fresh_barrier={fresh_elapsed:?}, reparsed={reparsed}, reconciliations={}, dropped_events={}, full_repository_reindexes={}",
-        metrics.reconciliations, metrics.dropped_watcher_events, metrics.full_repository_reindexes,
+        "live_rapid_replacement: edits={EDITS}, fresh_barrier={fresh_elapsed:?}, reparsed={reparsed}, reconciliations={}, dropped_events={}",
+        metrics.reconciliations, metrics.dropped_watcher_events,
     );
 
     live.shutdown()?;

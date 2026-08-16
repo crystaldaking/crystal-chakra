@@ -420,6 +420,61 @@ fn context_source_budget_sets_both_local_and_envelope_truncation() -> Result<(),
 }
 
 #[test]
+fn call_candidate_cut_is_visible_in_query_envelopes() -> Result<(), Box<dyn Error>> {
+    let repository = TempDir::new()?;
+    let status = Command::new("git")
+        .current_dir(repository.path())
+        .args(["init", "--quiet"])
+        .status()?;
+    if !status.success() {
+        return Err("git init failed".into());
+    }
+    fs::create_dir_all(repository.path().join("src"))?;
+    fs::write(
+        repository.path().join("src/lib.rs"),
+        "pub fn invoke() { target(); }\n",
+    )?;
+    for index in 0..65 {
+        fs::write(
+            repository.path().join(format!("src/module_{index:02}.rs")),
+            "pub fn target() {}\n",
+        )?;
+    }
+
+    let report = index_repository(repository.path())?;
+    assert_eq!(report.metrics.truncated_call_sites, 1);
+    assert_eq!(report.graph.truncated_call_sites(), 1);
+    let identity = WorkspaceIdentity::for_primary_worktree(&report.repository_root)?;
+    let engine = WorkspaceEngine::new(identity);
+    let mut update = engine.begin_update();
+    update.replace_graph(report.graph);
+    update.set_status(WorkspaceStatus::Ready);
+    update.set_freshness(Freshness::Fresh);
+    let revision = engine.publish(update)?.revision();
+
+    let candidates = engine.symbol_search(SymbolSearchRequest {
+        query: "target".to_owned(),
+        limit: Some(500),
+        ..SymbolSearchRequest::default()
+    })?;
+    assert_eq!(candidates.data.candidates.len(), 65);
+    let target = candidates
+        .data
+        .candidates
+        .last()
+        .ok_or("target candidate missing")?;
+    let callers = engine.callers(CallersRequest {
+        symbol: Some(SymbolRef::ById {
+            id: target.id,
+            revision,
+        }),
+        ..CallersRequest::default()
+    })?;
+    assert!(callers.truncated);
+    Ok(())
+}
+
+#[test]
 fn indexing_and_query_latencies_are_directly_measurable() -> Result<(), Box<dyn Error>> {
     let (_repository, engine, metrics) = indexed_engine()?;
     let symbol_started = Instant::now();

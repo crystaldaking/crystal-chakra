@@ -5,12 +5,15 @@ use std::io::{self, Read};
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
 use std::thread;
+use std::time::{Duration, Instant};
 
 use chakra_domain::location::{RepoPathError, RepoRelativePath};
 use thiserror::Error;
 
 const MAX_GIT_STDOUT_BYTES: usize = 64 * 1024 * 1024;
 const MAX_GIT_STDERR_BYTES: usize = 16 * 1024;
+const GIT_COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
+const CHILD_POLL_INTERVAL: Duration = Duration::from_millis(1);
 
 #[derive(Debug)]
 struct BoundedRead {
@@ -55,6 +58,8 @@ pub enum DiscoveryError {
     InvalidPath(#[from] RepoPathError),
     #[error("Git command `{command}` output exceeded the {limit}-byte safety budget")]
     OutputTooLarge { command: &'static str, limit: usize },
+    #[error("Git command `{command}` exceeded the {seconds} second process deadline")]
+    Timeout { command: &'static str, seconds: u64 },
 }
 
 fn read_bounded(mut reader: impl Read, limit: usize) -> io::Result<BoundedRead> {
@@ -122,8 +127,11 @@ fn capture_git(
             });
         }
     };
-    let stderr = match read_bounded(stderr, MAX_GIT_STDERR_BYTES) {
-        Ok(stderr) => stderr,
+    let stderr_reader = match thread::Builder::new()
+        .name("chakra-git-discovery-stderr".to_owned())
+        .spawn(move || read_bounded(stderr, MAX_GIT_STDERR_BYTES))
+    {
+        Ok(reader) => reader,
         Err(source) => {
             terminate_child(&mut child);
             let _ = stdout_reader.join();
@@ -133,22 +141,48 @@ fn capture_git(
             });
         }
     };
-    let status = match child.wait() {
-        Ok(status) => status,
-        Err(source) => {
-            terminate_child(&mut child);
-            let _ = stdout_reader.join();
-            return Err(DiscoveryError::Spawn {
-                command: command_name,
-                source,
-            });
+    let deadline = Instant::now() + GIT_COMMAND_TIMEOUT;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if Instant::now() < deadline => thread::sleep(CHILD_POLL_INTERVAL),
+            Ok(None) => {
+                terminate_child(&mut child);
+                let _ = stdout_reader.join();
+                let _ = stderr_reader.join();
+                return Err(DiscoveryError::Timeout {
+                    command: command_name,
+                    seconds: GIT_COMMAND_TIMEOUT.as_secs(),
+                });
+            }
+            Err(source) => {
+                terminate_child(&mut child);
+                let _ = stdout_reader.join();
+                let _ = stderr_reader.join();
+                return Err(DiscoveryError::Spawn {
+                    command: command_name,
+                    source,
+                });
+            }
         }
     };
-    let stdout = stdout_reader
-        .join()
+    // Join both pipe owners before propagating either result. Returning after
+    // the first failed join would detach the other reader thread.
+    let stdout = stdout_reader.join();
+    let stderr = stderr_reader.join();
+    let stdout = stdout
         .map_err(|_| DiscoveryError::Spawn {
             command: command_name,
             source: io::Error::other("Git stdout reader panicked"),
+        })?
+        .map_err(|source| DiscoveryError::Spawn {
+            command: command_name,
+            source,
+        })?;
+    let stderr = stderr
+        .map_err(|_| DiscoveryError::Spawn {
+            command: command_name,
+            source: io::Error::other("Git stderr reader panicked"),
         })?
         .map_err(|source| DiscoveryError::Spawn {
             command: command_name,
@@ -229,9 +263,19 @@ pub fn discover_rust_files(root: &Path) -> Result<Vec<RepoRelativePath>, Discove
         ],
     )?;
 
+    rust_files_from_git_output(&root, &output.stdout)
+}
+
+fn rust_files_from_git_output(
+    root: &Path,
+    output: &[u8],
+) -> Result<Vec<RepoRelativePath>, DiscoveryError> {
     let mut files = Vec::new();
-    for raw in output.stdout.split(|byte| *byte == 0) {
+    for raw in output.split(|byte| *byte == 0) {
         if raw.is_empty() {
+            continue;
+        }
+        if !raw.ends_with(b".rs") {
             continue;
         }
         let raw = std::str::from_utf8(raw).map_err(|_| DiscoveryError::NonUtf8Path)?;
@@ -372,6 +416,16 @@ mod tests {
         assert_eq!(captured.bytes, b"0123");
         assert!(captured.exceeded);
         assert_eq!(input.position(), 10);
+        Ok(())
+    }
+
+    #[test]
+    fn unrelated_non_utf8_file_does_not_break_rust_discovery() -> Result<(), Box<dyn Error>> {
+        let repository = repository()?;
+        let files =
+            rust_files_from_git_output(repository.path(), b"src/lib.rs\0unrelated-\xff.bin\0")?;
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].as_str(), "src/lib.rs");
         Ok(())
     }
 }

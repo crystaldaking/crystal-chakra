@@ -141,7 +141,7 @@ fn identifier_boundary(line: &str, byte: usize, length: usize) -> bool {
         && !after.is_some_and(|character| character == '_' || character.is_alphanumeric())
 }
 
-fn item_declaration(
+pub(crate) fn item_declaration(
     item: &CallHierarchyItem,
     workspace: &ProviderWorkspace,
 ) -> Option<(RepoRelativePath, SourceRange)> {
@@ -162,14 +162,15 @@ pub(crate) fn convert_incoming(
     limit: usize,
     truncated: &mut bool,
 ) -> Vec<PreciseRelation> {
-    if calls.len() > limit {
-        *truncated = true;
-    }
     let mut result = Vec::new();
-    for call in calls.into_iter().take(limit) {
+    for call in calls {
         let Some((path, declaration)) = item_declaration(&call.from, workspace) else {
             continue;
         };
+        if result.len() == limit {
+            *truncated = true;
+            break;
+        }
         let source = workspace
             .documents
             .iter()
@@ -203,13 +204,14 @@ pub(crate) fn convert_outgoing(
         .find(|document| document.path == *caller_path)
         .map(|document| document.source.as_ref());
     let mut result = Vec::new();
-    if calls.len() > limit {
-        *truncated = true;
-    }
-    for call in calls.into_iter().take(limit) {
+    for call in calls {
         let Some((_, declaration)) = item_declaration(&call.to, workspace) else {
             continue;
         };
+        if result.len() == limit {
+            *truncated = true;
+            break;
+        }
         let call_site = caller_source.and_then(|source| {
             call.from_ranges
                 .first()
@@ -223,4 +225,65 @@ pub(crate) fn convert_outgoing(
         });
     }
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use std::error::Error;
+    use std::sync::Arc;
+
+    use chakra_domain::revision::Revision;
+    use chakra_engine::ProviderDocument;
+    use lsp_types::SymbolKind;
+    use tempfile::TempDir;
+
+    use super::*;
+
+    fn item(name: &str, uri: Uri) -> CallHierarchyItem {
+        let selection = Range::new(Position::new(0, 3), Position::new(0, 9));
+        CallHierarchyItem {
+            name: name.to_owned(),
+            kind: SymbolKind::FUNCTION,
+            tags: None,
+            detail: None,
+            uri,
+            range: selection,
+            selection_range: selection,
+            data: None,
+        }
+    }
+
+    #[test]
+    fn incoming_limit_is_applied_after_workspace_filtering() -> Result<(), Box<dyn Error>> {
+        let repository = TempDir::new()?;
+        let path = RepoRelativePath::new("src/lib.rs")?;
+        let workspace = ProviderWorkspace {
+            repository_root: repository.path().to_path_buf(),
+            revision: Revision(4),
+            documents: vec![ProviderDocument {
+                path: path.clone(),
+                source: Arc::<str>::from("fn inside() {}\n"),
+            }],
+        };
+        let outside_root = TempDir::new()?;
+        let outside = path_to_uri(outside_root.path(), &path)?;
+        let inside = path_to_uri(repository.path(), &path)?;
+        let calls = vec![
+            CallHierarchyIncomingCall {
+                from: item("outside", outside),
+                from_ranges: Vec::new(),
+            },
+            CallHierarchyIncomingCall {
+                from: item("inside", inside),
+                from_ranges: Vec::new(),
+            },
+        ];
+        let mut truncated = false;
+
+        let converted = convert_incoming(calls, &workspace, 1, &mut truncated);
+        assert_eq!(converted.len(), 1);
+        assert_eq!(converted[0].name, "inside");
+        assert!(!truncated);
+        Ok(())
+    }
 }

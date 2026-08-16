@@ -401,6 +401,9 @@ impl QueryService for WorkspaceEngine {
         let providers = vec![ProviderInfo {
             name: "rust-analyzer".to_owned(),
             state: provider_state,
+            last_error: self
+                .precise_provider()
+                .and_then(|provider| provider.last_error()),
         }];
         let data = StatusData {
             workspace: snapshot.identity().clone(),
@@ -629,7 +632,8 @@ impl QueryService for WorkspaceEngine {
             || tests_truncated
             || files_truncated
             || provider_truncated
-            || source_truncated;
+            || source_truncated
+            || graph.truncated_call_sites() > 0;
         let data = ContextData {
             symbol: SymbolView::from(symbol),
             source,
@@ -693,7 +697,7 @@ impl QueryService for WorkspaceEngine {
         Ok(envelope(
             &snapshot,
             provider_state,
-            truncated || provider_truncated,
+            truncated || provider_truncated || graph.truncated_call_sites() > 0,
             data,
         ))
     }
@@ -787,7 +791,8 @@ impl QueryService for WorkspaceEngine {
             || files_truncated
             || symbols_truncated
             || callers_truncated
-            || tests_truncated;
+            || tests_truncated
+            || graph.truncated_call_sites() > 0;
         let data = DiffContextData {
             changed_files,
             changed_symbols,
