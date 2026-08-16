@@ -28,14 +28,19 @@ over native filesystem mechanisms:
   `target`, ignored, and generated trees. The directory set is capped at
   4,096; exceeding the cap degrades watcher health but does not disable exact
   freshness reconciliation.
-- Treat watcher events as wake-up hints. The callback performs no filesystem
-  I/O or parsing. Under a small publication gate it first atomically publishes
-  stale lifecycle metadata (sharing the immutable graph), then advances the
-  event epoch and uses `try_send` into a bounded 256-item channel. The worker
-  holds the same gate only for the final epoch check and fresh publication, so
-  a newly observed event can never coexist with an older graph labeled fresh.
-  A full channel increments an observable dropped-event counter. Correctness
-  never depends on every event reaching the worker.
+- Treat mutation-capable watcher events as wake-up hints. Pure access/open/read
+  events are ignored: Linux inotify reports the indexer's own content reads,
+  and allowing those events to advance the epoch would make a stable scan
+  invalidate itself. Create/modify/remove/unknown events, close-after-write,
+  and watcher errors remain conservative reconciliation signals. The callback
+  performs no filesystem I/O or parsing. Under a small publication gate it
+  first atomically publishes stale lifecycle metadata (sharing the immutable
+  graph), then advances the event epoch and uses `try_send` into a bounded
+  256-item channel. The worker holds the same gate only for the final epoch
+  check and fresh publication, so a newly observed event can never coexist
+  with an older graph labeled fresh. A full channel increments an observable
+  dropped-event counter. Correctness never depends on every event reaching the
+  worker.
 - Own the watcher and syntax state in one named blocking worker thread. The
   worker has an explicit shutdown signal and join path. It coalesces event
   bursts with a 50 ms quiet window capped at 250 ms, which tolerates common
@@ -131,6 +136,8 @@ over native filesystem mechanisms:
 - A unit regression proves the callback revokes freshness before publishing
   its epoch, and integration tests verify old snapshots remain immutable while
   the new revision is published atomically.
+- A deterministic event-classification regression proves source read/open
+  access does not invalidate reconciliation while mutation-capable events do.
 - Periodic background reconciliation is deferred. v0.1 recovers missed events
   on every fresh-query barrier, which is the correctness boundary required by
   the current query contract.

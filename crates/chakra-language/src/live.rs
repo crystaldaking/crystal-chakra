@@ -10,7 +10,8 @@ use std::time::{Duration, Instant};
 
 use chakra_domain::state::{Freshness, WorkspaceStatus};
 use chakra_engine::{FreshnessBarrier, FreshnessBarrierError, SymbolGraph, WorkspaceEngine};
-use notify::{Event, RecommendedWatcher, RecursiveMode, Watcher};
+use notify::event::{AccessKind, AccessMode};
+use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use thiserror::Error;
 use tracing::{error, info, warn};
 
@@ -406,16 +407,14 @@ fn run_worker(
     let callback_engine = engine.clone();
     let callback_publication_gate = publication_gate.clone();
     let watcher = notify::recommended_watcher(move |event: notify::Result<Event>| {
-        let epoch = invalidate_for_event(
-            &callback_engine,
-            &callback_metrics,
-            &callback_publication_gate,
-        );
         match event {
-            Ok(_) => {
+            Ok(event) => {
                 callback_metrics
                     .watcher_events
                     .fetch_add(1, Ordering::Relaxed);
+                if !event_may_change_workspace(&event) {
+                    return;
+                }
             }
             Err(error) => {
                 callback_metrics
@@ -424,6 +423,11 @@ fn run_worker(
                 warn!(%error, "filesystem watcher reported an error");
             }
         }
+        let epoch = invalidate_for_event(
+            &callback_engine,
+            &callback_metrics,
+            &callback_publication_gate,
+        );
         match callback_sender.try_send(WorkerSignal::Filesystem(epoch)) {
             Ok(()) => {}
             Err(TrySendError::Full(_)) => {
@@ -551,6 +555,18 @@ fn run_worker(
     }
     shared.stop();
     info!("live syntax index worker stopped");
+}
+
+fn event_may_change_workspace(event: &Event) -> bool {
+    match event.kind {
+        // Linux inotify reports the indexer's own source reads as open/close
+        // access events. Treating them as mutations makes every stable scan
+        // invalidate itself. A close-after-write remains a conservative
+        // mutation signal in addition to the backend's Modify event.
+        EventKind::Access(AccessKind::Close(AccessMode::Write)) => true,
+        EventKind::Access(_) => false,
+        _ => true,
+    }
 }
 
 fn invalidate_for_event(
@@ -801,6 +817,7 @@ fn mark_failed_reconciliation(engine: &WorkspaceEngine) {
 mod tests {
     use super::*;
     use chakra_domain::identity::WorkspaceIdentity;
+    use notify::event::{DataChange, ModifyKind};
 
     #[test]
     fn debounce_has_quiet_and_absolute_bounds_without_sleeping() {
@@ -832,5 +849,19 @@ mod tests {
         assert_eq!(metrics.event_epoch.load(Ordering::Acquire), 1);
         assert_eq!(engine.snapshot().freshness(), Freshness::Stale);
         Ok(())
+    }
+
+    #[test]
+    fn watcher_access_reads_do_not_invalidate_stable_scans() {
+        let opened = Event::new(EventKind::Access(AccessKind::Open(AccessMode::Any)));
+        let read = Event::new(EventKind::Access(AccessKind::Close(AccessMode::Read)));
+        let write = Event::new(EventKind::Access(AccessKind::Close(AccessMode::Write)));
+        let modified = Event::new(EventKind::Modify(ModifyKind::Data(DataChange::Content)));
+
+        assert!(!event_may_change_workspace(&opened));
+        assert!(!event_may_change_workspace(&read));
+        assert!(event_may_change_workspace(&write));
+        assert!(event_may_change_workspace(&modified));
+        assert!(event_may_change_workspace(&Event::new(EventKind::Any)));
     }
 }
