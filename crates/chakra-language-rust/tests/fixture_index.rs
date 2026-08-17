@@ -350,10 +350,16 @@ fn real_index_serves_bounded_repo_text_symbol_and_context_queries() -> Result<()
     assert_eq!(snippet.provenance, Provenance::TreeSitter);
     assert_eq!(snippet.precision, Precision::Syntax);
     assert!(snippet.text.chars().count() <= 4_096);
-    assert!(!context.data.callers.is_empty());
-    assert!(!context.data.callees.is_empty());
-    assert!(!context.data.tests.is_empty());
-    assert!(!context.data.related_files.is_empty());
+    assert!(context.data.callers.is_empty());
+    assert!(context.data.callees.is_empty());
+    assert!(context.data.tests.is_empty());
+    assert!(!context.data.syntax_call_candidates.is_empty());
+    assert!(context.data.syntax_call_candidates.iter().any(|call_site| {
+        call_site.name == "refund"
+            && call_site.candidate_target.is_none()
+            && call_site.resolution == chakra_domain::symbol::CallResolution::Unresolved
+            && call_site.precision == Precision::Syntax
+    }));
     Ok(())
 }
 
@@ -420,7 +426,7 @@ fn context_source_budget_sets_both_local_and_envelope_truncation() -> Result<(),
 }
 
 #[test]
-fn call_candidate_cut_is_visible_in_query_envelopes() -> Result<(), Box<dyn Error>> {
+fn ambiguous_call_candidates_are_lazy_and_bounded() -> Result<(), Box<dyn Error>> {
     let repository = TempDir::new()?;
     let status = Command::new("git")
         .current_dir(repository.path())
@@ -442,8 +448,20 @@ fn call_candidate_cut_is_visible_in_query_envelopes() -> Result<(), Box<dyn Erro
     }
 
     let report = index_repository(repository.path())?;
-    assert_eq!(report.metrics.truncated_call_sites, 1);
-    assert_eq!(report.graph.truncated_call_sites(), 1);
+    assert_eq!(report.metrics.truncated_call_sites, 0);
+    assert_eq!(report.graph.truncated_call_sites(), 0);
+    assert_eq!(report.graph.call_site_count(), 1);
+    assert_eq!(report.graph.ambiguous_call_site_count(), 1);
+    assert_eq!(
+        report
+            .graph
+            .symbols()
+            .iter()
+            .flat_map(|symbol| report.graph.outgoing_edges(symbol.id))
+            .filter(|edge| edge.kind == EdgeKind::Calls)
+            .count(),
+        0
+    );
     let identity = WorkspaceIdentity::for_primary_worktree(&report.repository_root)?;
     let engine = WorkspaceEngine::new(identity);
     let mut update = engine.begin_update();
@@ -470,7 +488,21 @@ fn call_candidate_cut_is_visible_in_query_envelopes() -> Result<(), Box<dyn Erro
         }),
         ..CallersRequest::default()
     })?;
-    assert!(callers.truncated);
+    assert!(callers.data.callers.is_empty());
+    assert_eq!(callers.data.syntax_candidates.len(), 1);
+    assert_eq!(
+        callers.data.syntax_candidates[0].resolution,
+        chakra_domain::symbol::CallResolution::Ambiguous { candidates: 65 }
+    );
+    assert!(!callers.truncated);
+
+    let context = engine.context(ContextRequest {
+        symbol: Some(SymbolRef::ByName("invoke".to_owned())),
+        ..ContextRequest::default()
+    })?;
+    assert!(context.data.callees.is_empty());
+    assert_eq!(context.data.syntax_call_candidates.len(), 20);
+    assert!(context.truncated);
     Ok(())
 }
 
@@ -500,17 +532,20 @@ fn indexing_and_query_latencies_are_directly_measurable() -> Result<(), Box<dyn 
     assert!(context_elapsed.as_nanos() > 0);
     assert!(diff_context_elapsed.as_nanos() > 0);
     assert!(!result.data.candidates.is_empty());
-    assert!(!context.data.callees.is_empty());
+    assert!(!context.data.callees.is_empty() || !context.data.syntax_call_candidates.is_empty());
     assert!(!diff.data.changed_files.is_empty());
     eprintln!(
-        "syntax_index_fixture: initial={:?}, symbol_search={:?}, context={:?}, diff_context={:?}, files={}, symbols={}, edges={}",
+        "syntax_index_fixture: initial={:?}, symbol_search={:?}, context={:?}, diff_context={:?}, files={}, symbols={}, edges={}, call_sites={}, ambiguous_call_sites={}, unresolved_call_sites={}",
         metrics.elapsed,
         symbol_search_elapsed,
         context_elapsed,
         diff_context_elapsed,
         metrics.parsed_files,
         metrics.symbols,
-        metrics.edges
+        metrics.edges,
+        metrics.call_sites,
+        metrics.ambiguous_call_sites,
+        metrics.unresolved_call_sites,
     );
     Ok(())
 }

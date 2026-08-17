@@ -10,13 +10,12 @@ use std::time::{Duration, Instant};
 use chakra_domain::location::{RepoRelativePath, SourceRange};
 use chakra_domain::provenance::{Precision, Provenance};
 use chakra_domain::symbol::{EdgeKind, EntityId, Language, SymbolKind};
-use chakra_engine::{ConsistencyError, GraphError, SymbolGraph};
+use chakra_engine::{CallSiteInput, ConsistencyError, GraphError, SymbolGraph};
 use thiserror::Error;
 use tracing::{info, info_span};
 
-use crate::parser::{ParsedFile, PhpParser, SymbolDraft};
+use crate::parser::{ParsedFile, PhpParser};
 
-const MAX_CANDIDATES_PER_CALL_SITE: usize = 64;
 const MAX_SOURCE_FILE_BYTES: usize = 8 * 1024 * 1024;
 const MAX_REPOSITORY_SOURCE_BYTES: usize = 256 * 1024 * 1024;
 
@@ -25,9 +24,14 @@ pub struct IndexMetrics {
     pub discovered_files: u64,
     pub parsed_files: u64,
     pub syntax_error_files: u64,
+    /// Legacy eager-resolution truncation counter. Lazy candidates are now
+    /// bounded at query time, so new indexes report zero here.
     pub truncated_call_sites: u64,
     pub symbols: u64,
     pub edges: u64,
+    pub call_sites: u64,
+    pub ambiguous_call_sites: u64,
+    pub unresolved_call_sites: u64,
     pub elapsed: Duration,
 }
 
@@ -95,7 +99,6 @@ struct SymbolAddress {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum DependencyKey {
     Exact(String, SymbolKind),
-    CallableName(String),
 }
 
 #[derive(Debug, Clone)]
@@ -112,20 +115,16 @@ struct RelationshipEdge {
 struct RelationshipContribution {
     dependencies: HashSet<DependencyKey>,
     edges: Vec<RelationshipEdge>,
-    truncated_call_sites: u64,
 }
 
 #[derive(Debug)]
-struct SymbolCatalog<'a> {
-    files: &'a BTreeMap<RepoRelativePath, Arc<ParsedFile>>,
+struct SymbolCatalog {
     exact: HashMap<(String, SymbolKind), Vec<SymbolAddress>>,
-    callable: HashMap<String, Vec<SymbolAddress>>,
 }
 
-impl<'a> SymbolCatalog<'a> {
-    fn new(files: &'a BTreeMap<RepoRelativePath, Arc<ParsedFile>>) -> Self {
+impl SymbolCatalog {
+    fn new(files: &BTreeMap<RepoRelativePath, Arc<ParsedFile>>) -> Self {
         let mut exact: HashMap<(String, SymbolKind), Vec<SymbolAddress>> = HashMap::new();
-        let mut callable: HashMap<String, Vec<SymbolAddress>> = HashMap::new();
         for (path, file) in files {
             for (index, symbol) in file.symbols.iter().enumerate() {
                 let address = SymbolAddress {
@@ -136,62 +135,17 @@ impl<'a> SymbolCatalog<'a> {
                     .entry((symbol.key.qualified_name.clone(), symbol.key.kind))
                     .or_default()
                     .push(address.clone());
-                if is_callable(symbol.key.kind) {
-                    callable
-                        .entry(symbol_name(symbol).to_owned())
-                        .or_default()
-                        .push(address);
-                }
             }
         }
         for addresses in exact.values_mut() {
             addresses.sort();
         }
-        for addresses in callable.values_mut() {
-            addresses.sort();
-        }
-        Self {
-            files,
-            exact,
-            callable,
-        }
-    }
-
-    fn symbol(&self, address: &SymbolAddress) -> Option<&SymbolDraft> {
-        self.files.get(&address.path)?.symbols.get(address.index)
+        Self { exact }
     }
 
     fn unique_exact(&self, qualified_name: &str, kind: SymbolKind) -> Option<SymbolAddress> {
         let matches = self.exact.get(&(qualified_name.to_owned(), kind))?;
         (matches.len() == 1).then(|| matches[0].clone())
-    }
-
-    fn call_candidates(&self, name: &str, qualifier: Option<&str>) -> (Vec<SymbolAddress>, bool) {
-        let mut candidates = self.callable.get(name).cloned().unwrap_or_default();
-        if let Some(qualifier) = qualifier {
-            let qualified: Vec<_> = candidates
-                .iter()
-                .filter(|address| {
-                    self.symbol(address).is_some_and(|symbol| {
-                        symbol.key.container.as_deref() == Some(qualifier)
-                            || symbol.key.qualified_name.rsplit_once("::").is_some_and(
-                                |(container, _)| {
-                                    container == qualifier
-                                        || container.rsplit("::").next() == Some(qualifier)
-                                },
-                            )
-                    })
-                })
-                .cloned()
-                .collect();
-            if !qualified.is_empty() {
-                candidates = qualified;
-            }
-        }
-        candidates.sort();
-        let truncated = candidates.len() > MAX_CANDIDATES_PER_CALL_SITE;
-        candidates.truncate(MAX_CANDIDATES_PER_CALL_SITE);
-        (candidates, truncated)
     }
 }
 
@@ -344,10 +298,7 @@ impl PhpSyntaxIndex {
     }
 
     fn truncated_call_sites(&self) -> u64 {
-        self.relationships
-            .values()
-            .map(|contribution| contribution.truncated_call_sites)
-            .sum()
+        0
     }
 
     fn materialize_graph(&self) -> Result<SymbolGraph, PhpIndexError> {
@@ -386,6 +337,27 @@ impl PhpSyntaxIndex {
                 )?;
             }
         }
+        for (path, file) in &self.files {
+            for call_site in &file.calls {
+                graph.add_call_site(CallSiteInput {
+                    caller: address_id(
+                        &ids,
+                        &SymbolAddress {
+                            path: path.clone(),
+                            index: call_site.caller,
+                        },
+                    )?,
+                    form: call_site.form,
+                    target_kind: call_site.target_kind,
+                    name: call_site.name.clone(),
+                    qualifier: call_site.qualifier.clone(),
+                    receiver_hint: call_site.receiver_hint.clone(),
+                    location: call_site.location.clone(),
+                    provenance: Provenance::TreeSitter,
+                    precision: Precision::Syntax,
+                })?;
+            }
+        }
         graph.set_truncated_call_sites(self.truncated_call_sites());
         graph.validate_consistency()?;
         Ok(graph)
@@ -408,22 +380,6 @@ fn parse_error(error: impl std::fmt::Display) -> PhpIndexError {
     PhpIndexError::Parse(error.to_string())
 }
 
-fn symbol_name(symbol: &SymbolDraft) -> &str {
-    symbol
-        .key
-        .qualified_name
-        .rsplit("::")
-        .next()
-        .unwrap_or(&symbol.key.qualified_name)
-}
-
-fn is_callable(kind: SymbolKind) -> bool {
-    matches!(
-        kind,
-        SymbolKind::Function | SymbolKind::Method | SymbolKind::Test
-    )
-}
-
 fn exported_dependencies(file: &ParsedFile) -> HashSet<DependencyKey> {
     let mut keys = HashSet::new();
     for symbol in &file.symbols {
@@ -431,9 +387,6 @@ fn exported_dependencies(file: &ParsedFile) -> HashSet<DependencyKey> {
             symbol.key.qualified_name.clone(),
             symbol.key.kind,
         ));
-        if is_callable(symbol.key.kind) {
-            keys.insert(DependencyKey::CallableName(symbol_name(symbol).to_owned()));
-        }
     }
     keys
 }
@@ -441,7 +394,7 @@ fn exported_dependencies(file: &ParsedFile) -> HashSet<DependencyKey> {
 fn relationships_for_file(
     path: &RepoRelativePath,
     file: &ParsedFile,
-    catalog: &SymbolCatalog<'_>,
+    catalog: &SymbolCatalog,
 ) -> RelationshipContribution {
     let mut contribution = RelationshipContribution::default();
     let address = |index| SymbolAddress {
@@ -478,39 +431,6 @@ fn relationships_for_file(
                 location: None,
             });
             break;
-        }
-    }
-    for call in &file.calls {
-        contribution
-            .dependencies
-            .insert(DependencyKey::CallableName(call.name.clone()));
-        let (candidates, truncated) =
-            catalog.call_candidates(&call.name, call.qualifier.as_deref());
-        contribution.truncated_call_sites += u64::from(truncated);
-        let caller = address(call.caller);
-        let is_test = file
-            .symbols
-            .get(call.caller)
-            .is_some_and(|symbol| symbol.key.kind == SymbolKind::Test);
-        for target in candidates {
-            contribution.edges.push(RelationshipEdge {
-                kind: EdgeKind::Calls,
-                from: caller.clone(),
-                to: target.clone(),
-                provenance: Provenance::TreeSitter,
-                precision: Precision::Heuristic,
-                location: Some(call.location.clone()),
-            });
-            if is_test {
-                contribution.edges.push(RelationshipEdge {
-                    kind: EdgeKind::Tests,
-                    from: caller.clone(),
-                    to: target,
-                    provenance: Provenance::Heuristic,
-                    precision: Precision::Heuristic,
-                    location: Some(call.location.clone()),
-                });
-            }
         }
     }
     contribution
@@ -573,6 +493,9 @@ pub fn index_repository(root: &Path) -> Result<IndexReport, PhpIndexError> {
         truncated_call_sites: syntax_index.truncated_call_sites(),
         symbols: graph.symbol_count(),
         edges: graph.edge_count(),
+        call_sites: graph.call_site_count(),
+        ambiguous_call_sites: graph.ambiguous_call_site_count(),
+        unresolved_call_sites: graph.unresolved_call_site_count(),
         elapsed: started.elapsed(),
     };
     info!(
@@ -581,6 +504,9 @@ pub fn index_repository(root: &Path) -> Result<IndexReport, PhpIndexError> {
         truncated_call_sites = metrics.truncated_call_sites,
         symbols = metrics.symbols,
         edges = metrics.edges,
+        call_sites = metrics.call_sites,
+        ambiguous_call_sites = metrics.ambiguous_call_sites,
+        unresolved_call_sites = metrics.unresolved_call_sites,
         elapsed_micros = metrics.elapsed.as_micros(),
         "PHP syntax index completed"
     );
@@ -647,13 +573,21 @@ function helper(): void {}
                 .iter()
                 .filter(|edge| edge.kind == EdgeKind::Calls)
                 .count(),
-            2
+            0
         );
-        assert!(
-            calls
-                .iter()
-                .all(|edge| edge.precision == Precision::Heuristic)
+        let call_site = report
+            .graph
+            .call_sites_from(refund[0])
+            .next()
+            .ok_or("helper call site missing")?;
+        assert_eq!(
+            call_site.resolution,
+            chakra_domain::symbol::CallResolution::Ambiguous { candidates: 2 }
         );
+        let (candidates, truncated) = report.graph.call_candidates(call_site, 10);
+        assert_eq!(candidates.len(), 2);
+        assert!(!truncated);
+        assert_eq!(call_site.precision, Precision::Syntax);
         Ok(())
     }
 

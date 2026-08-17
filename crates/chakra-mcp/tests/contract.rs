@@ -51,6 +51,9 @@ impl QueryService for StubService {
                     files: 1,
                     symbols: 2,
                     edges: 3,
+                    call_sites: 0,
+                    ambiguous_call_sites: 0,
+                    unresolved_call_sites: 0,
                 },
                 providers: vec![],
             },
@@ -378,7 +381,7 @@ async fn indexed_fixture_is_queryable_through_structured_mcp_tools()
         .ok_or("context must return structured content")?;
     assert_eq!(context["data"]["symbol"]["id"], service_refund["id"]);
     assert!(
-        context["data"]["callees"]
+        context["data"]["syntax_call_candidates"]
             .as_array()
             .is_some_and(|items| !items.is_empty())
     );
@@ -431,19 +434,18 @@ async fn indexed_fixture_is_queryable_through_structured_mcp_tools()
     assert!(
         diff["data"]["related_callers"]
             .as_array()
-            .is_some_and(|items| items.iter().any(|item| {
-                item["changed_symbol_id"] == *changed_refund_id
-                    && item["relation"]["symbol"]["qualified_name"]
-                        == "api::controller::PaymentController::refund"
-                    && item["relation"]["precision"] == "heuristic"
+            .is_some_and(|items| items.iter().all(|item| {
+                item["changed_symbol_id"] != *changed_refund_id
+                    || item["relation"]["symbol"]["qualified_name"]
+                        != "api::controller::PaymentController::refund"
             }))
     );
     assert!(
         diff["data"]["related_tests"]
             .as_array()
-            .is_some_and(|items| items.iter().any(|item| {
-                item["changed_symbol_id"] == *changed_refund_id
-                    && item["relation"]["edge_kind"] == "TESTS"
+            .is_some_and(|items| items.iter().all(|item| {
+                item["changed_symbol_id"] != *changed_refund_id
+                    || item["relation"]["edge_kind"] != "TESTS"
             }))
     );
 
@@ -459,6 +461,7 @@ async fn indexed_fixture_is_queryable_through_structured_mcp_tools()
         "changed_symbols",
         "related_callers",
         "related_tests",
+        "related_call_candidates",
     ] {
         assert!(
             bounded["data"][section]
@@ -551,6 +554,10 @@ final class PaymentController {
         .iter()
         .find(|candidate| candidate["qualified_name"] == "App::Service::PaymentService::refund")
         .ok_or("PHP service refund missing")?;
+    let controller_refund = candidates
+        .iter()
+        .find(|candidate| candidate["qualified_name"] == "App::Api::PaymentController::refund")
+        .ok_or("PHP controller refund missing")?;
 
     let context =
         client
@@ -567,12 +574,38 @@ final class PaymentController {
             .structured_content
             .ok_or("PHP context must return structured content")?;
     assert_eq!(context["data"]["symbol"]["language"], "php");
-    assert!(context["data"]["callers"].as_array().is_some_and(|items| {
-        items.iter().any(|item| {
-            item["symbol"]["qualified_name"] == "App::Api::PaymentController::refund"
-                && item["precision"] == "heuristic"
-        })
-    }));
+    assert!(
+        context["data"]["callers"]
+            .as_array()
+            .is_some_and(|items| items.is_empty())
+    );
+    let controller_context =
+        client
+            .call_tool(CallToolRequestParams::new("context").with_arguments(
+                serde_json::from_value(serde_json::json!({
+                    "symbol": { "by_id": {
+                        "id": controller_refund["id"],
+                        "revision": symbols["revision"]
+                    }},
+                    "limit": 20
+                }))?,
+            ))
+            .await?
+            .structured_content
+            .ok_or("PHP controller context must return structured content")?;
+    assert!(
+        controller_context["data"]["syntax_call_candidates"]
+            .as_array()
+            .is_some_and(|items| {
+                items.iter().any(|item| {
+                    item["caller"]["qualified_name"] == "App::Api::PaymentController::refund"
+                        && item["name"] == "refund"
+                        && item["candidate_target"].is_null()
+                        && item["resolution"] == "unresolved"
+                        && item["precision"] == "syntax"
+                })
+            })
+    );
 
     let diff = client
         .call_tool(

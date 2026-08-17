@@ -15,7 +15,9 @@ use crate::location::{RepoRelativePath, SourceRange};
 use crate::provenance::{Precision, Provenance};
 use crate::revision::Revision;
 use crate::state::{Freshness, FreshnessRequirement, ProviderState};
-use crate::symbol::{EdgeKind, EntityId, Language, SymbolKind};
+use crate::symbol::{
+    CallForm, CallResolution, CallTargetKind, EdgeKind, EntityId, Language, SymbolKind,
+};
 
 /// Default result budget when a request does not specify one (SPEC §29).
 pub const DEFAULT_QUERY_LIMIT: u32 = 20;
@@ -80,6 +82,25 @@ pub struct RelatedSymbol {
     pub location: Option<SourceRange>,
 }
 
+/// Bounded syntax call-site evidence that was not materialized as a graph
+/// edge because its target is ambiguous or unresolved.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct CallSiteView {
+    pub caller: SymbolView,
+    /// One possible target for an ambiguous call, or `None` when no target can
+    /// be justified from syntax alone.
+    pub candidate_target: Option<SymbolView>,
+    pub form: CallForm,
+    pub target_kind: CallTargetKind,
+    pub name: String,
+    pub qualifier: Option<String>,
+    pub receiver_hint: Option<String>,
+    pub location: SourceRange,
+    pub resolution: CallResolution,
+    pub provenance: Provenance,
+    pub precision: Precision,
+}
+
 // --- status ---
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -90,6 +111,9 @@ pub struct IndexCounts {
     pub files: u64,
     pub symbols: u64,
     pub edges: u64,
+    pub call_sites: u64,
+    pub ambiguous_call_sites: u64,
+    pub unresolved_call_sites: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -226,6 +250,7 @@ pub struct ContextData {
     pub callees: Vec<RelatedSymbol>,
     pub implementations: Vec<RelatedSymbol>,
     pub tests: Vec<RelatedSymbol>,
+    pub syntax_call_candidates: Vec<CallSiteView>,
     pub related_files: Vec<RepoRelativePath>,
 }
 
@@ -244,6 +269,7 @@ pub struct CallersRequest {
 pub struct CallersData {
     pub target: SymbolView,
     pub callers: Vec<RelatedSymbol>,
+    pub syntax_candidates: Vec<CallSiteView>,
 }
 
 // --- diff_context ---
@@ -302,6 +328,13 @@ pub struct DiffRelatedSymbol {
     pub relation: RelatedSymbol,
 }
 
+/// One ambiguous syntax call candidate anchored to a changed symbol.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct DiffCallSite {
+    pub changed_symbol_id: EntityId,
+    pub call_site: CallSiteView,
+}
+
 /// Bounded structured result of a diff walk (SPEC §26). Facts must be
 /// distinguishable from heuristics through their precision fields.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -310,6 +343,7 @@ pub struct DiffContextData {
     pub changed_symbols: Vec<ChangedSymbol>,
     pub related_callers: Vec<DiffRelatedSymbol>,
     pub related_tests: Vec<DiffRelatedSymbol>,
+    pub related_call_candidates: Vec<DiffCallSite>,
 }
 
 // --- errors and the service contract ---

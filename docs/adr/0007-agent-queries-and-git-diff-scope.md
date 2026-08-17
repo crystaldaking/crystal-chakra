@@ -19,8 +19,10 @@ would also violate atomic revision semantics.
 
 - Keep `context` and `callers` as one-hop, entity-based graph queries. A name
   resolves only when unique; ambiguous names return a typed error and require
-  `symbol_search` plus a revision-scoped entity id. Tree-sitter call candidates
-  retain heuristic precision. Lazy rust-analyzer Call Hierarchy facts replace
+  `symbol_search` plus a revision-scoped entity id. Under ADR-010,
+  Tree-sitter ambiguity is returned in dedicated bounded call-site candidate
+  collections with heuristic precision rather than as one edge per target.
+  Lazy rust-analyzer Call Hierarchy facts replace
   matching candidates only when they are ready for the exact syntax revision.
 - Add `chakra-git` as an outward adapter over a small Chakra-native
   `WorkspaceDiffProvider` contract. The engine and domain crates contain no Git

@@ -4,7 +4,9 @@ use std::num::TryFromIntError;
 use std::sync::Arc;
 
 use chakra_domain::location::{RepoRelativePath, SourceRange, TextPosition};
-use chakra_domain::symbol::{EdgeKind, Language, SymbolKey, SymbolKind};
+use chakra_domain::symbol::{
+    CallForm, CallTargetKind, EdgeKind, Language, MAX_RECEIVER_HINT_CHARS, SymbolKey, SymbolKind,
+};
 use thiserror::Error;
 use tree_sitter::{Node, Parser, Point};
 
@@ -55,9 +57,21 @@ pub(crate) struct SymbolDraft {
 #[derive(Debug, Clone)]
 pub(crate) struct CallDraft {
     pub caller: usize,
+    pub form: CallForm,
+    pub target_kind: CallTargetKind,
     pub name: String,
     pub qualifier: Option<String>,
+    pub receiver_hint: Option<String>,
     pub location: SourceRange,
+}
+
+struct CallTarget<'tree> {
+    form: CallForm,
+    target_kind: CallTargetKind,
+    name: String,
+    qualifier: Option<String>,
+    receiver_hint: Option<String>,
+    location: Node<'tree>,
 }
 
 #[derive(Debug, Clone)]
@@ -495,12 +509,15 @@ impl Extraction<'_> {
         if matches!(node.kind(), "function_definition" | "method_declaration") {
             return Ok(());
         }
-        if let Some((name, qualifier, location)) = self.call_target(node, current_container) {
+        if let Some(target) = self.call_target(node, current_container) {
             self.calls.push(CallDraft {
                 caller,
-                name,
-                qualifier,
-                location: self.range(location)?,
+                form: target.form,
+                target_kind: target.target_kind,
+                name: target.name,
+                qualifier: target.qualifier,
+                receiver_hint: target.receiver_hint,
+                location: self.range(target.location)?,
             });
         }
         let mut cursor = node.walk();
@@ -514,7 +531,7 @@ impl Extraction<'_> {
         &self,
         node: Node<'a>,
         current_container: Option<&str>,
-    ) -> Option<(String, Option<String>, Node<'a>)> {
+    ) -> Option<CallTarget<'a>> {
         match node.kind() {
             "function_call_expression" => {
                 let target = node.child_by_field_name("function")?;
@@ -525,7 +542,14 @@ impl Extraction<'_> {
                 let parts = name_segments(raw);
                 let name = parts.last()?.clone();
                 let qualifier = (parts.len() > 1).then(|| parts[..parts.len() - 1].join("::"));
-                Some((name, qualifier, target))
+                Some(CallTarget {
+                    form: CallForm::Function,
+                    target_kind: CallTargetKind::Function,
+                    name,
+                    qualifier,
+                    receiver_hint: None,
+                    location: target,
+                })
             }
             "member_call_expression" | "nullsafe_member_call_expression" => {
                 let name_node = node.child_by_field_name("name")?;
@@ -536,12 +560,23 @@ impl Extraction<'_> {
                 let object = node
                     .child_by_field_name("object")
                     .and_then(|object| self.text(object));
+                let receiver_hint = object.and_then(bounded_receiver_hint);
                 let qualifier = match object {
                     Some("$this") => current_container.map(str::to_owned),
-                    Some(raw) if !raw.starts_with('$') => Some(normalize_name(raw)),
                     _ => None,
                 };
-                Some((name, qualifier, name_node))
+                Some(CallTarget {
+                    form: if node.kind() == "nullsafe_member_call_expression" {
+                        CallForm::NullsafeMember
+                    } else {
+                        CallForm::Member
+                    },
+                    target_kind: CallTargetKind::Method,
+                    name,
+                    qualifier,
+                    receiver_hint,
+                    location: name_node,
+                })
             }
             "scoped_call_expression" => {
                 let name_node = node.child_by_field_name("name")?;
@@ -555,7 +590,14 @@ impl Extraction<'_> {
                     "self" | "static" => current_container.map(str::to_owned),
                     _ => Some(normalize_name(raw_scope)),
                 };
-                Some((name, qualifier, name_node))
+                Some(CallTarget {
+                    form: CallForm::Scoped,
+                    target_kind: CallTargetKind::Method,
+                    name,
+                    qualifier,
+                    receiver_hint: bounded_receiver_hint(raw_scope),
+                    location: name_node,
+                })
             }
             _ => None,
         }
@@ -635,6 +677,11 @@ fn normalize_name(raw: &str) -> String {
     name_segments(raw).join("::")
 }
 
+fn bounded_receiver_hint(raw: &str) -> Option<String> {
+    let hint = normalize_name(raw).trim_start_matches('$').to_owned();
+    (!hint.is_empty() && hint.chars().count() <= MAX_RECEIVER_HINT_CHARS).then_some(hint)
+}
+
 fn qualified_reference(namespace: &[String], raw: &str) -> String {
     let absolute = raw.starts_with('\\');
     let normalized = normalize_name(raw);
@@ -687,6 +734,31 @@ function helper(): void {}
         );
         assert!(parsed.calls.iter().any(|call| call.name == "audit"));
         assert!(parsed.calls.iter().any(|call| call.name == "helper"));
+        let member_call = parsed
+            .calls
+            .iter()
+            .find(|call| call.name == "audit")
+            .ok_or("member call missing")?;
+        assert_eq!(member_call.form, CallForm::Member);
+        assert_eq!(member_call.target_kind, CallTargetKind::Method);
+        assert_eq!(member_call.receiver_hint.as_deref(), Some("this"));
+        assert_eq!(member_call.qualifier.as_deref(), Some("PaymentService"));
+        let scoped_call = parsed
+            .calls
+            .iter()
+            .find(|call| call.name == "send")
+            .ok_or("scoped call missing")?;
+        assert_eq!(scoped_call.form, CallForm::Scoped);
+        assert_eq!(scoped_call.target_kind, CallTargetKind::Method);
+        assert_eq!(scoped_call.receiver_hint.as_deref(), Some("Provider"));
+        assert_eq!(scoped_call.qualifier.as_deref(), Some("Provider"));
+        let function_call = parsed
+            .calls
+            .iter()
+            .find(|call| call.name == "helper")
+            .ok_or("function call missing")?;
+        assert_eq!(function_call.form, CallForm::Function);
+        assert_eq!(function_call.target_kind, CallTargetKind::Function);
         Ok(())
     }
 

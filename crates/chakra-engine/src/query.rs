@@ -14,16 +14,16 @@ use chakra_domain::envelope::QueryEnvelope;
 use chakra_domain::location::{SourceRange, TextPosition};
 use chakra_domain::provenance::{Precision, Provenance};
 use chakra_domain::query::{
-    CallersData, CallersRequest, ChangedFile, ChangedSymbol, ChangedSymbolBasis, ContextData,
-    ContextRequest, DEFAULT_QUERY_LIMIT, DiffContextData, DiffContextRequest, DiffRelatedSymbol,
-    FileSummary, IndexCounts, MAX_QUERY_LIMIT, ProviderCapability, ProviderInfo, QueryError,
-    QueryService, RelatedSymbol, RepoMapData, RepoMapRequest, SearchData, SearchRequest,
-    SourceSnippet, StatusData, StatusRequest, SymbolRef, SymbolSearchData, SymbolSearchRequest,
-    SymbolView, TextMatch,
+    CallSiteView, CallersData, CallersRequest, ChangedFile, ChangedSymbol, ChangedSymbolBasis,
+    ContextData, ContextRequest, DEFAULT_QUERY_LIMIT, DiffCallSite, DiffContextData,
+    DiffContextRequest, DiffRelatedSymbol, FileSummary, IndexCounts, MAX_QUERY_LIMIT,
+    ProviderCapability, ProviderInfo, QueryError, QueryService, RelatedSymbol, RepoMapData,
+    RepoMapRequest, SearchData, SearchRequest, SourceSnippet, StatusData, StatusRequest, SymbolRef,
+    SymbolSearchData, SymbolSearchRequest, SymbolView, TextMatch,
 };
 use chakra_domain::revision::Revision;
 use chakra_domain::state::{Freshness, FreshnessRequirement, ProviderState};
-use chakra_domain::symbol::{Edge, EdgeKind, Symbol};
+use chakra_domain::symbol::{CallResolution, CallSite, Edge, EdgeKind, EntityId, Symbol};
 
 use crate::engine::{WorkspaceEngine, WorkspaceSnapshot};
 use crate::graph::SymbolGraph;
@@ -122,6 +122,116 @@ fn sort_diff_related(items: &mut [DiffRelatedSymbol]) {
             .then(a.changed_symbol_id.cmp(&b.changed_symbol_id))
             .then(a.relation.symbol.id.cmp(&b.relation.symbol.id))
     });
+}
+
+fn call_site_view(
+    graph: &SymbolGraph,
+    call_site: &CallSite,
+    candidate_target: Option<&Symbol>,
+) -> Option<CallSiteView> {
+    let caller = graph.symbol(call_site.caller)?;
+    Some(CallSiteView {
+        caller: SymbolView::from(caller),
+        candidate_target: candidate_target.map(SymbolView::from),
+        form: call_site.form,
+        target_kind: call_site.target_kind,
+        name: call_site.name.clone(),
+        qualifier: call_site.qualifier.clone(),
+        receiver_hint: call_site.receiver_hint.clone(),
+        location: call_site.location.clone(),
+        resolution: call_site.resolution.clone(),
+        provenance: call_site.provenance,
+        precision: if candidate_target.is_some() {
+            Precision::Heuristic
+        } else {
+            call_site.precision
+        },
+    })
+}
+
+fn sort_call_sites(items: &mut [CallSiteView]) {
+    items.sort_by(|a, b| {
+        a.caller
+            .qualified_name
+            .cmp(&b.caller.qualified_name)
+            .then_with(|| {
+                a.candidate_target
+                    .as_ref()
+                    .map(|target| (&target.qualified_name, target.id))
+                    .cmp(
+                        &b.candidate_target
+                            .as_ref()
+                            .map(|target| (&target.qualified_name, target.id)),
+                    )
+            })
+            .then(a.location.file().cmp(b.location.file()))
+            .then(a.location.start().line().cmp(&b.location.start().line()))
+            .then(
+                a.location
+                    .start()
+                    .column()
+                    .cmp(&b.location.start().column()),
+            )
+    });
+}
+
+fn outgoing_call_candidates(
+    graph: &SymbolGraph,
+    caller: EntityId,
+    limit: usize,
+) -> (Vec<CallSiteView>, bool) {
+    let capacity = limit.saturating_add(1);
+    let mut items = Vec::with_capacity(capacity);
+    let mut truncated = false;
+    for call_site in graph.call_sites_from(caller) {
+        match call_site.resolution {
+            CallResolution::Resolved { .. } => continue,
+            CallResolution::Unresolved => {
+                if let Some(view) = call_site_view(graph, call_site, None) {
+                    items.push(view);
+                }
+            }
+            CallResolution::Ambiguous { .. } => {
+                let remaining = capacity.saturating_sub(items.len());
+                if remaining == 0 {
+                    truncated = true;
+                    break;
+                }
+                let (candidates, candidate_truncated) = graph.call_candidates(call_site, remaining);
+                truncated |= candidate_truncated;
+                items.extend(
+                    candidates
+                        .into_iter()
+                        .filter_map(|target| call_site_view(graph, call_site, Some(target))),
+                );
+            }
+        }
+        if items.len() >= capacity {
+            truncated = true;
+            break;
+        }
+    }
+    sort_call_sites(&mut items);
+    truncated |= items.len() > limit;
+    items.truncate(limit);
+    (items, truncated)
+}
+
+fn incoming_call_candidates(
+    graph: &SymbolGraph,
+    target: EntityId,
+    limit: usize,
+) -> (Vec<CallSiteView>, bool) {
+    let (call_sites, mut truncated) = graph.call_sites_for_target(target, limit.saturating_add(1));
+    let target = graph.symbol(target);
+    let mut items: Vec<_> = call_sites
+        .into_iter()
+        .filter_map(|call_site| call_site_view(graph, call_site, target))
+        .collect();
+    sort_call_sites(&mut items);
+    truncated |= items.len() > limit;
+    items.truncate(limit);
+    (items, truncated)
 }
 
 fn provider_state_for(engine: &WorkspaceEngine, snapshot: &WorkspaceSnapshot) -> ProviderState {
@@ -410,6 +520,9 @@ impl QueryService for WorkspaceEngine {
             files: snapshot.graph().file_count(),
             symbols: snapshot.graph().symbol_count(),
             edges: snapshot.graph().edge_count(),
+            call_sites: snapshot.graph().call_site_count(),
+            ambiguous_call_sites: snapshot.graph().ambiguous_call_site_count(),
+            unresolved_call_sites: snapshot.graph().unresolved_call_site_count(),
         };
         let providers = vec![ProviderInfo {
             name: "rust-analyzer".to_owned(),
@@ -614,6 +727,10 @@ impl QueryService for WorkspaceEngine {
         }
         sort_related(&mut callers);
         sort_related(&mut callees);
+        let resolved_caller_ids: std::collections::HashSet<_> =
+            callers.iter().map(|caller| caller.symbol.id).collect();
+        let resolved_callee_ids: std::collections::HashSet<_> =
+            callees.iter().map(|callee| callee.symbol.id).collect();
         let (callers, callers_truncated) = bounded(callers, limit);
         let (callees, callees_truncated) = bounded(callees, limit);
 
@@ -635,6 +752,25 @@ impl QueryService for WorkspaceEngine {
         sort_related(&mut tests);
         let (tests, tests_truncated) = bounded(tests, limit);
 
+        let (mut syntax_call_candidates, outgoing_candidates_truncated) =
+            outgoing_call_candidates(graph, symbol.id, limit);
+        let (incoming_candidates, incoming_candidates_truncated) =
+            incoming_call_candidates(graph, symbol.id, limit);
+        syntax_call_candidates.extend(incoming_candidates);
+        syntax_call_candidates.retain(|candidate| {
+            if candidate.caller.id == symbol.id {
+                candidate
+                    .candidate_target
+                    .as_ref()
+                    .is_none_or(|target| !resolved_callee_ids.contains(&target.id))
+            } else {
+                !resolved_caller_ids.contains(&candidate.caller.id)
+            }
+        });
+        sort_call_sites(&mut syntax_call_candidates);
+        let (syntax_call_candidates, combined_candidates_truncated) =
+            bounded(syntax_call_candidates, limit);
+
         let mut related_files: Vec<chakra_domain::location::RepoRelativePath> = callers
             .iter()
             .chain(callees.iter())
@@ -642,6 +778,14 @@ impl QueryService for WorkspaceEngine {
             .chain(tests.iter())
             .map(|item| item.symbol.location.file().clone())
             .collect();
+        for call_site in &syntax_call_candidates {
+            if call_site.caller.id != symbol.id {
+                related_files.push(call_site.caller.location.file().clone());
+            }
+            if let Some(target) = &call_site.candidate_target {
+                related_files.push(target.location.file().clone());
+            }
+        }
         related_files.sort();
         related_files.dedup();
         let (related_files, files_truncated) = bounded(related_files, limit);
@@ -655,7 +799,9 @@ impl QueryService for WorkspaceEngine {
             || files_truncated
             || provider_truncated
             || source_truncated
-            || graph.truncated_call_sites() > 0;
+            || outgoing_candidates_truncated
+            || incoming_candidates_truncated
+            || combined_candidates_truncated;
         let data = ContextData {
             symbol: SymbolView::from(symbol),
             source,
@@ -663,6 +809,7 @@ impl QueryService for WorkspaceEngine {
             callees,
             implementations,
             tests,
+            syntax_call_candidates,
             related_files,
         };
         Ok(envelope(&snapshot, provider_state, truncated, data))
@@ -685,6 +832,8 @@ impl QueryService for WorkspaceEngine {
         let limit = clamp_limit(request.limit);
         let mut provider_state = provider_state_for_language(self, &snapshot, target.key.language);
         let mut provider_truncated = false;
+        let (mut syntax_candidates, candidates_truncated) =
+            incoming_call_candidates(graph, target.id, limit);
         if snapshot.freshness() == Freshness::Fresh
             && let Some(provider) = self
                 .precise_provider()
@@ -713,16 +862,20 @@ impl QueryService for WorkspaceEngine {
                 provider_truncated = result.truncated;
             }
         }
+        let resolved_caller_ids: std::collections::HashSet<_> =
+            callers.iter().map(|caller| caller.symbol.id).collect();
+        syntax_candidates.retain(|candidate| !resolved_caller_ids.contains(&candidate.caller.id));
         sort_related(&mut callers);
         let (callers, truncated) = bounded(callers, limit);
         let data = CallersData {
             target: SymbolView::from(target),
             callers,
+            syntax_candidates,
         };
         Ok(envelope(
             &snapshot,
             provider_state,
-            truncated || provider_truncated || graph.truncated_call_sites() > 0,
+            truncated || provider_truncated || candidates_truncated,
             data,
         ))
     }
@@ -753,6 +906,8 @@ impl QueryService for WorkspaceEngine {
 
         let mut callers = BTreeMap::new();
         let mut tests = BTreeMap::new();
+        let mut call_candidates = Vec::with_capacity(limit.saturating_add(1));
+        let mut call_candidates_truncated = false;
         for id in &symbol_ids {
             for edge in graph.incoming_edges(*id) {
                 let Some(item) = related(graph, edge, edge.from) else {
@@ -783,6 +938,19 @@ impl QueryService for WorkspaceEngine {
                         .or_insert(diff_relation);
                 }
             }
+            let remaining = limit
+                .saturating_add(1)
+                .saturating_sub(call_candidates.len());
+            if remaining == 0 {
+                call_candidates_truncated = true;
+                continue;
+            }
+            let (candidates, truncated) = incoming_call_candidates(graph, *id, remaining);
+            call_candidates_truncated |= truncated;
+            call_candidates.extend(candidates.into_iter().map(|call_site| DiffCallSite {
+                changed_symbol_id: *id,
+                call_site,
+            }));
         }
 
         let mut related_callers: Vec<_> = callers.into_values().collect();
@@ -791,6 +959,20 @@ impl QueryService for WorkspaceEngine {
         sort_diff_related(&mut related_tests);
         let (related_callers, callers_truncated) = bounded(related_callers, limit);
         let (related_tests, tests_truncated) = bounded(related_tests, limit);
+        call_candidates.sort_by(|a, b| {
+            a.changed_symbol_id
+                .cmp(&b.changed_symbol_id)
+                .then(a.call_site.caller.id.cmp(&b.call_site.caller.id))
+                .then(
+                    a.call_site
+                        .location
+                        .start()
+                        .line()
+                        .cmp(&b.call_site.location.start().line()),
+                )
+        });
+        call_candidates_truncated |= call_candidates.len() > limit;
+        call_candidates.truncate(limit);
 
         let changed_files = file_changes
             .into_iter()
@@ -817,12 +999,13 @@ impl QueryService for WorkspaceEngine {
             || symbols_truncated
             || callers_truncated
             || tests_truncated
-            || graph.truncated_call_sites() > 0;
+            || call_candidates_truncated;
         let data = DiffContextData {
             changed_files,
             changed_symbols,
             related_callers,
             related_tests,
+            related_call_candidates: call_candidates,
         };
         Ok(envelope(
             &snapshot,

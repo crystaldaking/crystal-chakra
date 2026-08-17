@@ -46,10 +46,12 @@ The upstream Tree-sitter project currently publishes the maintained
   indexing.
 - Parse files in sorted repository-relative order and build the graph in
   deterministic passes: files/source, declarations, containment and impl
-  relations, then call candidates. Declarations and direct AST containment
-  use Tree-sitter/syntax quality. Cross-declaration name links, including
-  impl targets, trait methods, and call candidates, use Tree-sitter
-  provenance with heuristic precision. Impl linking only considers unique,
+  relations, then compact call sites under ADR-010. Declarations and direct
+  AST containment use Tree-sitter/syntax quality. Cross-declaration name
+  links, including impl targets, trait methods, and uniquely resolved call
+  sites, use Tree-sitter provenance with heuristic precision.
+  Ambiguous/unresolved calls remain separately queryable syntax evidence
+  rather than candidate edges. Impl linking only considers unique,
   unqualified names in the same logical module; qualified/external and
   compound paths are not collapsed to a same-named local declaration.
 - Capture source text in the same immutable graph revision as syntax facts.

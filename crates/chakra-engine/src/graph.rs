@@ -6,12 +6,15 @@
 //! are one hop deep and the whole structure is cloned privately per update;
 //! see `docs/adr/0002-in-memory-graph-representation.md`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use chakra_domain::location::{RepoRelativePath, SourceRange};
 use chakra_domain::provenance::{Precision, Provenance};
-use chakra_domain::symbol::{Edge, EdgeKind, EntityId, Symbol, SymbolKey};
+use chakra_domain::symbol::{
+    CallForm, CallResolution, CallSite, CallTargetKind, Edge, EdgeKind, EntityId, Language,
+    MAX_RECEIVER_HINT_CHARS, Symbol, SymbolKey, SymbolKind,
+};
 use thiserror::Error;
 
 /// Why a graph mutation was rejected.
@@ -26,8 +29,42 @@ pub enum GraphError {
     UnknownEntity(EntityId),
     #[error("source file is already indexed: {0}")]
     DuplicateFile(RepoRelativePath),
+    #[error("call-site name must be non-empty")]
+    EmptyCallSiteName,
+    #[error("call-site receiver hint exceeds the {limit}-character budget")]
+    ReceiverHintTooLong { limit: usize },
+    #[error("call site for {caller:?} is in `{site_path}`, not caller file `{caller_path}`")]
+    CallSiteLocationMismatch {
+        caller: EntityId,
+        site_path: RepoRelativePath,
+        caller_path: RepoRelativePath,
+    },
+    #[error("cannot merge more than one independently resolved {language:?} graph")]
+    OverlappingLanguageGraph { language: Language },
     #[error("merged graph is inconsistent: {0}")]
     Consistency(#[from] ConsistencyError),
+}
+
+/// Input for adding one syntax call expression to a private graph revision.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CallSiteInput {
+    pub caller: EntityId,
+    pub form: CallForm,
+    pub target_kind: CallTargetKind,
+    pub name: String,
+    pub qualifier: Option<String>,
+    pub receiver_hint: Option<String>,
+    pub location: SourceRange,
+    pub provenance: Provenance,
+    pub precision: Precision,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct CallLookupKey {
+    language: Language,
+    target_kind: CallTargetKind,
+    name: String,
+    qualifier: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -52,9 +89,15 @@ pub struct SymbolGraph {
     outgoing: HashMap<EntityId, Vec<Edge>>,
     incoming: HashMap<EntityId, Vec<Edge>>,
     edge_count: u64,
-    /// Number of syntax call sites whose candidate targets were cut while
-    /// building this exact graph revision. Query envelopes use this to avoid
-    /// presenting an incomplete call slice as complete.
+    call_sites: Vec<CallSite>,
+    call_sites_by_caller: HashMap<EntityId, Vec<usize>>,
+    call_sites_by_lookup: HashMap<CallLookupKey, Vec<usize>>,
+    callables: HashMap<CallLookupKey, Vec<EntityId>>,
+    ambiguous_call_sites: u64,
+    unresolved_call_sites: u64,
+    /// Legacy eager-resolution truncation count. Lazy call candidates are
+    /// retained compactly and bounded only when a query expands them, so
+    /// current language indexes keep this at zero.
     truncated_call_sites: u64,
 }
 
@@ -63,12 +106,25 @@ impl SymbolGraph {
         Self::default()
     }
 
-    /// Combines independently built language graphs into one revision-local
-    /// workspace graph, remapping arena ids while preserving every fact's
-    /// language, provenance, precision, and source range.
+    /// Combines independently built, disjoint language graphs into one
+    /// revision-local workspace graph, remapping arena ids while preserving
+    /// every fact's language, provenance, precision, and source range.
+    /// Overlapping languages are rejected because each input has already
+    /// resolved its call sites against its own callable catalog.
     pub fn merge(graphs: impl IntoIterator<Item = SymbolGraph>) -> Result<Self, GraphError> {
         let mut merged = Self::new();
+        let mut languages = HashSet::new();
         for graph in graphs {
+            let graph_languages: HashSet<_> = graph
+                .symbols
+                .iter()
+                .map(|symbol| symbol.key.language)
+                .collect();
+            for language in graph_languages {
+                if !languages.insert(language) {
+                    return Err(GraphError::OverlappingLanguageGraph { language });
+                }
+            }
             merged.append(graph)?;
         }
         merged
@@ -113,6 +169,33 @@ impl SymbolGraph {
                     edge.location.clone(),
                 )?;
             }
+        }
+        for call_site in graph.call_sites {
+            let caller = ids
+                .get(&call_site.caller)
+                .copied()
+                .ok_or(GraphError::UnknownEntity(call_site.caller))?;
+            let resolution = match call_site.resolution {
+                CallResolution::Resolved { target } => CallResolution::Resolved {
+                    target: ids
+                        .get(&target)
+                        .copied()
+                        .ok_or(GraphError::UnknownEntity(target))?,
+                },
+                other => other,
+            };
+            self.insert_call_site(CallSite {
+                caller,
+                form: call_site.form,
+                target_kind: call_site.target_kind,
+                name: call_site.name,
+                qualifier: call_site.qualifier,
+                receiver_hint: call_site.receiver_hint,
+                location: call_site.location,
+                resolution,
+                provenance: call_site.provenance,
+                precision: call_site.precision,
+            })?;
         }
         self.truncated_call_sites = self
             .truncated_call_sites
@@ -184,6 +267,9 @@ impl SymbolGraph {
             })
             .symbols
             .push(id);
+        for lookup in callable_lookup_keys(&symbol) {
+            self.callables.entry(lookup).or_default().push(id);
+        }
         self.symbols.push(symbol);
         Ok(id)
     }
@@ -233,12 +319,78 @@ impl SymbolGraph {
         self.edge_count
     }
 
-    /// Records call-candidate incompleteness discovered by a language index.
+    pub fn call_site_count(&self) -> u64 {
+        self.call_sites.len() as u64
+    }
+
+    pub fn ambiguous_call_site_count(&self) -> u64 {
+        self.ambiguous_call_sites
+    }
+
+    pub fn unresolved_call_site_count(&self) -> u64 {
+        self.unresolved_call_sites
+    }
+
+    /// Adds one compact syntax call site and materializes graph edges only
+    /// when its target resolves to exactly one declaration.
+    pub fn add_call_site(&mut self, input: CallSiteInput) -> Result<CallResolution, GraphError> {
+        self.validate_call_site_input(&input)?;
+        let language = self
+            .symbol(input.caller)
+            .ok_or(GraphError::UnknownEntity(input.caller))?
+            .key
+            .language;
+        let resolution = self.resolve_call(
+            language,
+            input.form,
+            input.target_kind,
+            &input.name,
+            input.qualifier.as_deref(),
+        );
+        if let CallResolution::Resolved { target } = resolution {
+            self.add_edge(
+                EdgeKind::Calls,
+                input.caller,
+                target,
+                input.provenance,
+                Precision::Heuristic,
+                Some(input.location.clone()),
+            )?;
+            if self
+                .symbol(input.caller)
+                .is_some_and(|symbol| symbol.key.kind == SymbolKind::Test)
+            {
+                self.add_edge(
+                    EdgeKind::Tests,
+                    input.caller,
+                    target,
+                    Provenance::Heuristic,
+                    Precision::Heuristic,
+                    Some(input.location.clone()),
+                )?;
+            }
+        }
+        self.insert_call_site(CallSite {
+            caller: input.caller,
+            form: input.form,
+            target_kind: input.target_kind,
+            name: input.name,
+            qualifier: input.qualifier,
+            receiver_hint: input.receiver_hint,
+            location: input.location,
+            resolution: resolution.clone(),
+            provenance: input.provenance,
+            precision: input.precision,
+        })?;
+        Ok(resolution)
+    }
+
+    /// Records legacy eager call-candidate incompleteness.
     pub fn set_truncated_call_sites(&mut self, truncated_call_sites: u64) {
         self.truncated_call_sites = truncated_call_sites;
     }
 
-    /// Call sites whose syntax candidate set was cut in this graph revision.
+    /// Legacy eager call sites cut while building this graph revision.
     pub fn truncated_call_sites(&self) -> u64 {
         self.truncated_call_sites
     }
@@ -345,6 +497,169 @@ impl SymbolGraph {
         self.incoming.get(&id).map_or(&[], Vec::as_slice)
     }
 
+    /// Syntax call sites owned by one caller, in deterministic source-index
+    /// insertion order.
+    pub fn call_sites_from(&self, caller: EntityId) -> impl Iterator<Item = &CallSite> + '_ {
+        self.call_sites_by_caller
+            .get(&caller)
+            .into_iter()
+            .flatten()
+            .filter_map(|index| self.call_sites.get(*index))
+    }
+
+    /// Bounded candidate declarations for one ambiguous call site.
+    pub fn call_candidates<'a>(
+        &'a self,
+        call_site: &CallSite,
+        limit: usize,
+    ) -> (Vec<&'a Symbol>, bool) {
+        if !matches!(call_site.resolution, CallResolution::Ambiguous { .. }) {
+            return (Vec::new(), false);
+        }
+        let Some(key) = call_site_lookup_key(
+            self.symbol(call_site.caller)
+                .map(|symbol| symbol.key.language),
+            call_site.form,
+            call_site.target_kind,
+            &call_site.name,
+            call_site.qualifier.as_deref(),
+        ) else {
+            return (Vec::new(), false);
+        };
+        let Some(ids) = self.callables.get(&key) else {
+            return (Vec::new(), false);
+        };
+        let truncated = ids.len() > limit;
+        let candidates = ids
+            .iter()
+            .take(limit)
+            .filter_map(|id| self.symbol(*id))
+            .collect();
+        (candidates, truncated)
+    }
+
+    /// Bounded ambiguous call sites for which `target` is one candidate.
+    pub fn call_sites_for_target(&self, target: EntityId, limit: usize) -> (Vec<&CallSite>, bool) {
+        let Some(symbol) = self.symbol(target) else {
+            return (Vec::new(), false);
+        };
+        let mut indexes = Vec::with_capacity(limit.saturating_add(1));
+        'keys: for key in callable_lookup_keys(symbol) {
+            let Some(call_sites) = self.call_sites_by_lookup.get(&key) else {
+                continue;
+            };
+            for index in call_sites {
+                if !indexes.contains(index) {
+                    indexes.push(*index);
+                    if indexes.len() > limit {
+                        break 'keys;
+                    }
+                }
+            }
+        }
+        indexes.sort_unstable();
+        let truncated = indexes.len() > limit;
+        indexes.truncate(limit);
+        let call_sites = indexes
+            .into_iter()
+            .filter_map(|index| self.call_sites.get(index))
+            .collect();
+        (call_sites, truncated)
+    }
+
+    fn validate_call_site_input(&self, input: &CallSiteInput) -> Result<(), GraphError> {
+        if input.name.trim().is_empty() {
+            return Err(GraphError::EmptyCallSiteName);
+        }
+        if input
+            .receiver_hint
+            .as_ref()
+            .is_some_and(|hint| hint.chars().count() > MAX_RECEIVER_HINT_CHARS)
+        {
+            return Err(GraphError::ReceiverHintTooLong {
+                limit: MAX_RECEIVER_HINT_CHARS,
+            });
+        }
+        let caller = self
+            .symbol(input.caller)
+            .ok_or(GraphError::UnknownEntity(input.caller))?;
+        if caller.location.file() != input.location.file() {
+            return Err(GraphError::CallSiteLocationMismatch {
+                caller: input.caller,
+                site_path: input.location.file().clone(),
+                caller_path: caller.location.file().clone(),
+            });
+        }
+        Ok(())
+    }
+
+    fn insert_call_site(&mut self, call_site: CallSite) -> Result<(), GraphError> {
+        let input = CallSiteInput {
+            caller: call_site.caller,
+            form: call_site.form,
+            target_kind: call_site.target_kind,
+            name: call_site.name.clone(),
+            qualifier: call_site.qualifier.clone(),
+            receiver_hint: call_site.receiver_hint.clone(),
+            location: call_site.location.clone(),
+            provenance: call_site.provenance,
+            precision: call_site.precision,
+        };
+        self.validate_call_site_input(&input)?;
+        if let CallResolution::Resolved { target } = call_site.resolution {
+            self.symbol(target)
+                .ok_or(GraphError::UnknownEntity(target))?;
+        }
+        let index = self.call_sites.len();
+        self.call_sites_by_caller
+            .entry(call_site.caller)
+            .or_default()
+            .push(index);
+        match call_site.resolution {
+            CallResolution::Ambiguous { .. } => {
+                self.ambiguous_call_sites += 1;
+                if let Some(key) = call_site_lookup_key(
+                    self.symbol(call_site.caller)
+                        .map(|symbol| symbol.key.language),
+                    call_site.form,
+                    call_site.target_kind,
+                    &call_site.name,
+                    call_site.qualifier.as_deref(),
+                ) {
+                    self.call_sites_by_lookup
+                        .entry(key)
+                        .or_default()
+                        .push(index);
+                }
+            }
+            CallResolution::Unresolved => self.unresolved_call_sites += 1,
+            CallResolution::Resolved { .. } => {}
+        }
+        self.call_sites.push(call_site);
+        Ok(())
+    }
+
+    fn resolve_call(
+        &self,
+        language: Language,
+        form: CallForm,
+        target_kind: CallTargetKind,
+        name: &str,
+        qualifier: Option<&str>,
+    ) -> CallResolution {
+        let Some(key) = call_site_lookup_key(Some(language), form, target_kind, name, qualifier)
+        else {
+            return CallResolution::Unresolved;
+        };
+        match self.callables.get(&key).map(Vec::as_slice).unwrap_or(&[]) {
+            [] => CallResolution::Unresolved,
+            [target] => CallResolution::Resolved { target: *target },
+            candidates => CallResolution::Ambiguous {
+                candidates: candidates.len() as u64,
+            },
+        }
+    }
+
     /// Independent consistency audit used by the atomic-revision regression
     /// tests: every derived structure is recomputed from the arena and
     /// compared, so a hybrid snapshot would be caught here.
@@ -381,6 +696,97 @@ impl SymbolGraph {
         }
         if actual_by_file != expected_by_file {
             return Err(ConsistencyError::FileIndexMismatch);
+        }
+
+        // The compact call-site index is derived from the same symbol arena
+        // and must resolve against the exact callable catalog of this
+        // revision. Ambiguous sites are indexed by lookup key without
+        // materializing one edge per candidate.
+        let mut expected_callables: HashMap<CallLookupKey, Vec<EntityId>> = HashMap::new();
+        for symbol in &self.symbols {
+            for key in callable_lookup_keys(symbol) {
+                expected_callables.entry(key).or_default().push(symbol.id);
+            }
+        }
+        if expected_callables != self.callables {
+            return Err(ConsistencyError::CallableIndexMismatch);
+        }
+        let mut expected_by_caller: HashMap<EntityId, Vec<usize>> = HashMap::new();
+        let mut expected_by_lookup: HashMap<CallLookupKey, Vec<usize>> = HashMap::new();
+        let mut ambiguous = 0_u64;
+        let mut unresolved = 0_u64;
+        for (index, call_site) in self.call_sites.iter().enumerate() {
+            let caller = self
+                .symbol(call_site.caller)
+                .ok_or(ConsistencyError::UnknownEntity(call_site.caller))?;
+            if caller.location.file() != call_site.location.file() {
+                return Err(ConsistencyError::CallSiteLocationMismatch { index });
+            }
+            let expected_resolution = self.resolve_call(
+                caller.key.language,
+                call_site.form,
+                call_site.target_kind,
+                &call_site.name,
+                call_site.qualifier.as_deref(),
+            );
+            if expected_resolution != call_site.resolution {
+                return Err(ConsistencyError::CallSiteResolutionMismatch { index });
+            }
+            expected_by_caller
+                .entry(call_site.caller)
+                .or_default()
+                .push(index);
+            match call_site.resolution {
+                CallResolution::Resolved { target } => {
+                    self.symbol(target)
+                        .ok_or(ConsistencyError::UnknownEntity(target))?;
+                    let has_call_edge = self.outgoing_edges(call_site.caller).iter().any(|edge| {
+                        edge.kind == EdgeKind::Calls
+                            && edge.to == target
+                            && edge.location.as_ref() == Some(&call_site.location)
+                    });
+                    if !has_call_edge {
+                        return Err(ConsistencyError::ResolvedCallEdgeMissing { index });
+                    }
+                    if caller.key.kind == SymbolKind::Test {
+                        let has_test_edge =
+                            self.outgoing_edges(call_site.caller).iter().any(|edge| {
+                                edge.kind == EdgeKind::Tests
+                                    && edge.to == target
+                                    && edge.location.as_ref() == Some(&call_site.location)
+                            });
+                        if !has_test_edge {
+                            return Err(ConsistencyError::ResolvedTestEdgeMissing { index });
+                        }
+                    }
+                }
+                CallResolution::Ambiguous { .. } => {
+                    ambiguous += 1;
+                    let key = call_site_lookup_key(
+                        Some(caller.key.language),
+                        call_site.form,
+                        call_site.target_kind,
+                        &call_site.name,
+                        call_site.qualifier.as_deref(),
+                    )
+                    .ok_or(ConsistencyError::CallSiteResolutionMismatch { index })?;
+                    expected_by_lookup.entry(key).or_default().push(index);
+                }
+                CallResolution::Unresolved => unresolved += 1,
+            }
+        }
+        if expected_by_caller != self.call_sites_by_caller
+            || expected_by_lookup != self.call_sites_by_lookup
+        {
+            return Err(ConsistencyError::CallSiteIndexMismatch);
+        }
+        if ambiguous != self.ambiguous_call_sites || unresolved != self.unresolved_call_sites {
+            return Err(ConsistencyError::CallSiteCountMismatch {
+                ambiguous,
+                recorded_ambiguous: self.ambiguous_call_sites,
+                unresolved,
+                recorded_unresolved: self.unresolved_call_sites,
+            });
         }
 
         // Edges: stored under the correct key, endpoints exist, and both
@@ -451,6 +857,75 @@ impl SymbolGraph {
     }
 }
 
+fn call_target_kind(kind: SymbolKind) -> Option<CallTargetKind> {
+    match kind {
+        SymbolKind::Function => Some(CallTargetKind::Function),
+        SymbolKind::Method => Some(CallTargetKind::Method),
+        SymbolKind::Test => Some(CallTargetKind::Test),
+        _ => None,
+    }
+}
+
+fn callable_lookup_keys(symbol: &Symbol) -> Vec<CallLookupKey> {
+    let Some(target_kind) = call_target_kind(symbol.key.kind) else {
+        return Vec::new();
+    };
+    let name = symbol.name().to_owned();
+    let mut qualifiers = vec![None];
+    if let Some(container) = symbol.key.container.as_ref() {
+        qualifiers.push(Some(container.clone()));
+    }
+    if let Some((container, _)) = symbol.key.qualified_name.rsplit_once("::") {
+        let qualified = Some(container.to_owned());
+        if !qualifiers.contains(&qualified) {
+            qualifiers.push(qualified);
+        }
+        let simple = Some(
+            container
+                .rsplit("::")
+                .next()
+                .unwrap_or(container)
+                .to_owned(),
+        );
+        if !qualifiers.contains(&simple) {
+            qualifiers.push(simple);
+        }
+    }
+    qualifiers
+        .into_iter()
+        .map(|qualifier| CallLookupKey {
+            language: symbol.key.language,
+            target_kind,
+            name: name.clone(),
+            qualifier,
+        })
+        .collect()
+}
+
+fn call_site_lookup_key(
+    language: Option<Language>,
+    form: CallForm,
+    target_kind: CallTargetKind,
+    name: &str,
+    qualifier: Option<&str>,
+) -> Option<CallLookupKey> {
+    let language = language?;
+    if qualifier.is_none()
+        && matches!(
+            form,
+            CallForm::Member | CallForm::NullsafeMember | CallForm::Scoped
+        )
+    {
+        return None;
+    }
+    Some(CallLookupKey {
+        language,
+        target_kind,
+        name: name.to_owned(),
+        qualifier: qualifier.map(str::to_owned),
+    })
+}
+
 /// A broken internal graph invariant found by [`SymbolGraph::validate_consistency`].
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum ConsistencyError {
@@ -476,6 +951,27 @@ pub enum ConsistencyError {
     },
     #[error("file index does not cover exactly the arena symbols")]
     FileIndexMismatch,
+    #[error("callable lookup index does not match the symbol arena")]
+    CallableIndexMismatch,
+    #[error("call site at index {index} is not in its caller's file")]
+    CallSiteLocationMismatch { index: usize },
+    #[error("call site at index {index} has a stale or incorrect resolution")]
+    CallSiteResolutionMismatch { index: usize },
+    #[error("resolved call site at index {index} has no corresponding CALLS edge")]
+    ResolvedCallEdgeMissing { index: usize },
+    #[error("resolved test call site at index {index} has no corresponding TESTS edge")]
+    ResolvedTestEdgeMissing { index: usize },
+    #[error("call-site lookup indexes do not match the call-site arena")]
+    CallSiteIndexMismatch,
+    #[error(
+        "call-site counts do not match: ambiguous {recorded_ambiguous} recorded/{ambiguous} actual, unresolved {recorded_unresolved} recorded/{unresolved} actual"
+    )]
+    CallSiteCountMismatch {
+        ambiguous: u64,
+        recorded_ambiguous: u64,
+        unresolved: u64,
+        recorded_unresolved: u64,
+    },
 }
 
 #[cfg(test)]
@@ -517,6 +1013,51 @@ mod tests {
             Provenance::TreeSitter,
             Precision::Syntax,
         )?)
+    }
+
+    fn add_callable(
+        graph: &mut SymbolGraph,
+        qualified_name: &str,
+        container: Option<&str>,
+        kind: SymbolKind,
+        path: &str,
+    ) -> Result<EntityId, Box<dyn std::error::Error>> {
+        let path = file(path)?;
+        Ok(graph.add_symbol(
+            SymbolKey {
+                language: Language::Rust,
+                qualified_name: qualified_name.to_owned(),
+                container: container.map(str::to_owned),
+                kind,
+                path: path.clone(),
+            },
+            range(path)?,
+            None,
+            Provenance::TreeSitter,
+            Precision::Syntax,
+        )?)
+    }
+
+    fn call_site_input(
+        caller: EntityId,
+        form: CallForm,
+        target_kind: CallTargetKind,
+        name: &str,
+        qualifier: Option<&str>,
+        receiver_hint: Option<&str>,
+        path: &str,
+    ) -> Result<CallSiteInput, Box<dyn std::error::Error>> {
+        Ok(CallSiteInput {
+            caller,
+            form,
+            target_kind,
+            name: name.to_owned(),
+            qualifier: qualifier.map(str::to_owned),
+            receiver_hint: receiver_hint.map(str::to_owned),
+            location: range(file(path)?)?,
+            provenance: Provenance::TreeSitter,
+            precision: Precision::Syntax,
+        })
     }
 
     #[test]
@@ -608,6 +1149,220 @@ mod tests {
         assert_eq!(graph.symbol_count(), 2);
         assert_eq!(graph.edge_count(), 1);
         assert_eq!(graph.file_count(), 2);
+        Ok(())
+    }
+
+    #[test]
+    fn call_sites_separate_domains_and_materialize_only_unique_targets()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut graph = SymbolGraph::new();
+        let caller = add_fn(&mut graph, "caller", "src/caller.rs")?;
+        let test_caller = add_callable(
+            &mut graph,
+            "save_buffer_works",
+            None,
+            SymbolKind::Test,
+            "tests/save_buffer.rs",
+        )?;
+        let _same_name_test = add_callable(
+            &mut graph,
+            "save_buffer",
+            None,
+            SymbolKind::Test,
+            "tests/same_name.rs",
+        )?;
+        let free_function = add_fn(&mut graph, "save_buffer", "src/free.rs")?;
+        let project = add_callable(
+            &mut graph,
+            "Project::save_buffer",
+            Some("Project"),
+            SymbolKind::Method,
+            "src/project.rs",
+        )?;
+        let buffer_store = add_callable(
+            &mut graph,
+            "BufferStore::save_buffer",
+            Some("BufferStore"),
+            SymbolKind::Method,
+            "src/buffer_store.rs",
+        )?;
+        add_fn(&mut graph, "a::helper", "src/a.rs")?;
+        add_fn(&mut graph, "b::helper", "src/b.rs")?;
+
+        assert_eq!(
+            graph.add_call_site(call_site_input(
+                caller,
+                CallForm::Function,
+                CallTargetKind::Function,
+                "save_buffer",
+                None,
+                None,
+                "src/caller.rs",
+            )?)?,
+            CallResolution::Resolved {
+                target: free_function
+            }
+        );
+        assert_eq!(
+            graph.add_call_site(call_site_input(
+                caller,
+                CallForm::Member,
+                CallTargetKind::Method,
+                "save_buffer",
+                None,
+                Some("store"),
+                "src/caller.rs",
+            )?)?,
+            CallResolution::Unresolved
+        );
+        assert_eq!(
+            graph.add_call_site(call_site_input(
+                caller,
+                CallForm::Member,
+                CallTargetKind::Method,
+                "save_buffer",
+                Some("Project"),
+                Some("self"),
+                "src/caller.rs",
+            )?)?,
+            CallResolution::Resolved { target: project }
+        );
+        assert_eq!(
+            graph.add_call_site(call_site_input(
+                caller,
+                CallForm::Function,
+                CallTargetKind::Function,
+                "helper",
+                None,
+                None,
+                "src/caller.rs",
+            )?)?,
+            CallResolution::Ambiguous { candidates: 2 }
+        );
+        assert_eq!(
+            graph.add_call_site(call_site_input(
+                test_caller,
+                CallForm::Function,
+                CallTargetKind::Function,
+                "save_buffer",
+                None,
+                None,
+                "tests/save_buffer.rs",
+            )?)?,
+            CallResolution::Resolved {
+                target: free_function
+            }
+        );
+
+        assert_eq!(graph.call_site_count(), 5);
+        assert_eq!(graph.ambiguous_call_site_count(), 1);
+        assert_eq!(graph.unresolved_call_site_count(), 1);
+        let call_targets: Vec<_> = graph
+            .outgoing_edges(caller)
+            .iter()
+            .filter(|edge| edge.kind == EdgeKind::Calls)
+            .map(|edge| edge.to)
+            .collect();
+        assert_eq!(call_targets, [free_function, project]);
+        assert!(graph.call_sites_for_target(buffer_store, 10).0.is_empty());
+        let ambiguous = graph
+            .call_sites_from(caller)
+            .find(|call_site| call_site.name == "helper")
+            .ok_or("ambiguous call site missing")?;
+        assert_eq!(graph.call_candidates(ambiguous, 1).0.len(), 1);
+        assert!(graph.call_candidates(ambiguous, 1).1);
+        assert_eq!(
+            graph
+                .outgoing_edges(test_caller)
+                .iter()
+                .filter(|edge| edge.kind == EdgeKind::Calls)
+                .count(),
+            1
+        );
+        assert_eq!(
+            graph
+                .outgoing_edges(test_caller)
+                .iter()
+                .filter(|edge| edge.kind == EdgeKind::Tests)
+                .count(),
+            1
+        );
+        graph.validate_consistency()?;
+        Ok(())
+    }
+
+    #[test]
+    fn call_site_receiver_hints_are_bounded() -> Result<(), Box<dyn std::error::Error>> {
+        let mut graph = SymbolGraph::new();
+        let caller = add_fn(&mut graph, "caller", "src/caller.rs")?;
+        let oversized = "r".repeat(MAX_RECEIVER_HINT_CHARS + 1);
+        let result = graph.add_call_site(call_site_input(
+            caller,
+            CallForm::Member,
+            CallTargetKind::Method,
+            "target",
+            None,
+            Some(&oversized),
+            "src/caller.rs",
+        )?);
+        let error = match result {
+            Ok(_) => return Err("oversized receiver hint was accepted".into()),
+            Err(error) => error,
+        };
+        assert_eq!(
+            error,
+            GraphError::ReceiverHintTooLong {
+                limit: MAX_RECEIVER_HINT_CHARS
+            }
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn merge_rejects_overlapping_language_resolution_domains()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut first = SymbolGraph::new();
+        add_fn(&mut first, "first", "src/first.rs")?;
+        let mut second = SymbolGraph::new();
+        add_fn(&mut second, "second", "src/second.rs")?;
+
+        let error = match SymbolGraph::merge([first, second]) {
+            Ok(_) => return Err("overlapping language graphs were merged".into()),
+            Err(error) => error,
+        };
+        assert_eq!(
+            error,
+            GraphError::OverlappingLanguageGraph {
+                language: Language::Rust
+            }
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn audit_rejects_a_call_resolution_staled_during_private_construction()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut graph = SymbolGraph::new();
+        let caller = add_fn(&mut graph, "caller", "src/caller.rs")?;
+        add_fn(&mut graph, "target", "src/first.rs")?;
+        graph.add_call_site(call_site_input(
+            caller,
+            CallForm::Function,
+            CallTargetKind::Function,
+            "target",
+            None,
+            None,
+            "src/caller.rs",
+        )?)?;
+
+        // Language adapters add every declaration before call sites. Simulate
+        // a broken private builder that violates that ordering; publication's
+        // consistency audit must reject its formerly unique resolution.
+        add_fn(&mut graph, "other::target", "src/second.rs")?;
+        assert_eq!(
+            graph.validate_consistency(),
+            Err(ConsistencyError::CallSiteResolutionMismatch { index: 0 })
+        );
         Ok(())
     }
 

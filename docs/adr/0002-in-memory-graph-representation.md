@@ -24,6 +24,9 @@ representation must support the atomic publication model of ADR-001.
   bodies, and file summaries retain Git provenance/precision;
 - `HashMap<EntityId, Vec<Edge>>` in both directions for `callers` /
   `context` adjacency.
+- a compact call-site arena plus caller/lookup indexes for ambiguous and
+  unresolved syntax calls; only uniquely resolved syntax calls become graph
+  edges (ADR-010).
 
 Name resolution is a deliberate linear scan over the arena (exact for
 `resolve_name`, case-insensitive substring for `symbol_search`): a name
@@ -31,8 +34,9 @@ index would be cloned on every update while v0.1 repositories are small.
 Add one only when measurements justify it.
 
 Mutation happens only while building privately (`add_file` / `add_symbol` /
-`add_edge` with validation: files are unique, key path must equal location
-file, endpoints must exist); after publication the graph is immutable behind
+`add_edge` / `add_call_site` with validation: files are unique, key path must
+equal location file, endpoints must exist, and call-site resolutions match the
+revision's callable catalog); after publication the graph is immutable behind
 an `Arc`. Capturing text and syntax facts together is required so a query
 cannot search filesystem bytes from a different revision than its symbol
 results.

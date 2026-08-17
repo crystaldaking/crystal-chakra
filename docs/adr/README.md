@@ -21,7 +21,7 @@ Date: YYYY-MM-DD
 ## Validation / follow-up
 ```
 
-Accepted v0.1 decisions:
+Accepted decisions:
 
 - ADR-001: workspace revision publication model
 - ADR-002: in-memory graph representation
@@ -32,5 +32,6 @@ Accepted v0.1 decisions:
 - ADR-007: agent queries and Git diff scope
 - ADR-008: PHP syntax support and multi-language composition
 - ADR-009: Git-aware repository and worktree identity
+- ADR-010: lazy syntax call-site resolution
 
 Do not pre-create empty ADRs merely to satisfy a list.

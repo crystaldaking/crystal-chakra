@@ -10,14 +10,13 @@ use std::time::{Duration, Instant};
 use chakra_domain::location::{RepoRelativePath, SourceRange};
 use chakra_domain::provenance::{Precision, Provenance};
 use chakra_domain::symbol::{EdgeKind, EntityId, SymbolKind};
-use chakra_engine::{ConsistencyError, GraphError, SymbolGraph};
+use chakra_engine::{CallSiteInput, ConsistencyError, GraphError, SymbolGraph};
 use thiserror::Error;
 use tracing::{info, info_span};
 
 use crate::discovery::{DiscoveryError, discover_rust_files, resolve_repository_root};
 use crate::parser::{ParsedFile, RustParser, SymbolDraft};
 
-const MAX_CANDIDATES_PER_CALL_SITE: usize = 64;
 const MAX_SOURCE_FILE_BYTES: usize = 8 * 1024 * 1024;
 const MAX_REPOSITORY_SOURCE_BYTES: usize = 256 * 1024 * 1024;
 
@@ -27,10 +26,14 @@ pub struct IndexMetrics {
     pub discovered_files: u64,
     pub parsed_files: u64,
     pub syntax_error_files: u64,
-    /// Call sites whose same-name candidate set exceeded the safety bound.
+    /// Legacy eager-resolution truncation counter. Lazy candidates are now
+    /// bounded at query time, so new indexes report zero here.
     pub truncated_call_sites: u64,
     pub symbols: u64,
     pub edges: u64,
+    pub call_sites: u64,
+    pub ambiguous_call_sites: u64,
+    pub unresolved_call_sites: u64,
     pub elapsed: Duration,
 }
 
@@ -105,7 +108,6 @@ struct SymbolAddress {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum DependencyKey {
     Exact(String, SymbolKind),
-    CallableName(String),
 }
 
 #[derive(Debug, Clone)]
@@ -122,20 +124,17 @@ struct RelationshipEdge {
 struct RelationshipContribution {
     dependencies: HashSet<DependencyKey>,
     edges: Vec<RelationshipEdge>,
-    truncated_call_sites: u64,
 }
 
 #[derive(Debug)]
 struct SymbolCatalog<'a> {
     files: &'a BTreeMap<RepoRelativePath, Arc<ParsedFile>>,
     exact: HashMap<(String, SymbolKind), Vec<SymbolAddress>>,
-    callable: HashMap<String, Vec<SymbolAddress>>,
 }
 
 impl<'a> SymbolCatalog<'a> {
     fn new(files: &'a BTreeMap<RepoRelativePath, Arc<ParsedFile>>) -> Self {
         let mut exact: HashMap<(String, SymbolKind), Vec<SymbolAddress>> = HashMap::new();
-        let mut callable: HashMap<String, Vec<SymbolAddress>> = HashMap::new();
         for (path, file) in files {
             for (index, symbol) in file.symbols.iter().enumerate() {
                 let address = SymbolAddress {
@@ -146,25 +145,12 @@ impl<'a> SymbolCatalog<'a> {
                     .entry((symbol.key.qualified_name.clone(), symbol.key.kind))
                     .or_default()
                     .push(address.clone());
-                if is_callable(symbol.key.kind) {
-                    callable
-                        .entry(symbol_name(symbol).to_owned())
-                        .or_default()
-                        .push(address);
-                }
             }
         }
         for addresses in exact.values_mut() {
             addresses.sort();
         }
-        for addresses in callable.values_mut() {
-            addresses.sort();
-        }
-        Self {
-            files,
-            exact,
-            callable,
-        }
+        Self { files, exact }
     }
 
     fn symbol(&self, address: &SymbolAddress) -> Option<&SymbolDraft> {
@@ -173,34 +159,6 @@ impl<'a> SymbolCatalog<'a> {
 
     fn unique_exact(&self, qualified_name: &str, kind: SymbolKind) -> Option<SymbolAddress> {
         unique(self.exact.get(&(qualified_name.to_owned(), kind)))
-    }
-
-    fn call_candidates(&self, name: &str, qualifier: Option<&str>) -> (Vec<SymbolAddress>, bool) {
-        let mut candidates = self.callable.get(name).cloned().unwrap_or_default();
-        if let Some(qualifier) = qualifier {
-            let qualified: Vec<_> = candidates
-                .iter()
-                .filter(|address| {
-                    self.symbol(address).is_some_and(|symbol| {
-                        symbol.key.container.as_deref() == Some(qualifier)
-                            || symbol.key.qualified_name.rsplit_once("::").is_some_and(
-                                |(container, _)| {
-                                    container == qualifier
-                                        || container.rsplit("::").next() == Some(qualifier)
-                                },
-                            )
-                    })
-                })
-                .cloned()
-                .collect();
-            if !qualified.is_empty() {
-                candidates = qualified;
-            }
-        }
-        candidates.sort();
-        let truncated = candidates.len() > MAX_CANDIDATES_PER_CALL_SITE;
-        candidates.truncate(MAX_CANDIDATES_PER_CALL_SITE);
-        (candidates, truncated)
     }
 }
 
@@ -362,10 +320,7 @@ impl RustSyntaxIndex {
     }
 
     fn truncated_call_sites(&self) -> u64 {
-        self.relationships
-            .values()
-            .map(|contribution| contribution.truncated_call_sites)
-            .sum()
+        0
     }
 
     fn materialize_graph(&self) -> Result<SymbolGraph, RustIndexError> {
@@ -402,6 +357,27 @@ impl RustSyntaxIndex {
                     edge.precision,
                     edge.location.clone(),
                 )?;
+            }
+        }
+        for (path, file) in &self.files {
+            for call_site in &file.calls {
+                graph.add_call_site(CallSiteInput {
+                    caller: address_id(
+                        &ids,
+                        &SymbolAddress {
+                            path: path.clone(),
+                            index: call_site.caller,
+                        },
+                    )?,
+                    form: call_site.form,
+                    target_kind: call_site.target_kind,
+                    name: call_site.name.clone(),
+                    qualifier: call_site.qualifier.clone(),
+                    receiver_hint: call_site.receiver_hint.clone(),
+                    location: call_site.location.clone(),
+                    provenance: Provenance::TreeSitter,
+                    precision: Precision::Syntax,
+                })?;
             }
         }
         graph.set_truncated_call_sites(self.truncated_call_sites());
@@ -448,13 +424,6 @@ fn symbol_name(symbol: &SymbolDraft) -> &str {
         .unwrap_or(&symbol.key.qualified_name)
 }
 
-fn is_callable(kind: SymbolKind) -> bool {
-    matches!(
-        kind,
-        SymbolKind::Function | SymbolKind::Method | SymbolKind::Test
-    )
-}
-
 fn exported_dependencies(file: &ParsedFile) -> HashSet<DependencyKey> {
     let mut keys = HashSet::new();
     for symbol in &file.symbols {
@@ -462,9 +431,6 @@ fn exported_dependencies(file: &ParsedFile) -> HashSet<DependencyKey> {
             symbol.key.qualified_name.clone(),
             symbol.key.kind,
         ));
-        if is_callable(symbol.key.kind) {
-            keys.insert(DependencyKey::CallableName(symbol_name(symbol).to_owned()));
-        }
     }
     keys
 }
@@ -590,39 +556,6 @@ fn relationships_for_file(
         }
     }
 
-    for call in &file.calls {
-        contribution
-            .dependencies
-            .insert(DependencyKey::CallableName(call.name.clone()));
-        let (candidates, truncated) =
-            catalog.call_candidates(&call.name, call.qualifier.as_deref());
-        contribution.truncated_call_sites += u64::from(truncated);
-        let caller = address(call.caller);
-        let is_test = file
-            .symbols
-            .get(call.caller)
-            .is_some_and(|symbol| symbol.key.kind == SymbolKind::Test);
-        for target in candidates {
-            contribution.edges.push(RelationshipEdge {
-                kind: EdgeKind::Calls,
-                from: caller.clone(),
-                to: target.clone(),
-                provenance: Provenance::TreeSitter,
-                precision: Precision::Heuristic,
-                location: Some(call.location.clone()),
-            });
-            if is_test {
-                contribution.edges.push(RelationshipEdge {
-                    kind: EdgeKind::Tests,
-                    from: caller.clone(),
-                    to: target,
-                    provenance: Provenance::Heuristic,
-                    precision: Precision::Heuristic,
-                    location: Some(call.location.clone()),
-                });
-            }
-        }
-    }
     contribution
 }
 
@@ -685,6 +618,9 @@ pub fn index_repository(root: &Path) -> Result<IndexReport, RustIndexError> {
         truncated_call_sites: syntax_index.truncated_call_sites(),
         symbols: graph.symbol_count(),
         edges: graph.edge_count(),
+        call_sites: graph.call_site_count(),
+        ambiguous_call_sites: graph.ambiguous_call_site_count(),
+        unresolved_call_sites: graph.unresolved_call_site_count(),
         elapsed: started.elapsed(),
     };
     info!(
@@ -693,6 +629,9 @@ pub fn index_repository(root: &Path) -> Result<IndexReport, RustIndexError> {
         truncated_call_sites = metrics.truncated_call_sites,
         symbols = metrics.symbols,
         edges = metrics.edges,
+        call_sites = metrics.call_sites,
+        ambiguous_call_sites = metrics.ambiguous_call_sites,
+        unresolved_call_sites = metrics.unresolved_call_sites,
         elapsed_micros = metrics.elapsed.as_micros(),
         "Rust syntax index completed"
     );
@@ -720,6 +659,47 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+
+    #[test]
+    fn duplicate_call_fanout_is_stored_linearly() -> Result<(), Box<dyn Error>> {
+        const TARGETS: usize = 256;
+        const CALLS: usize = 256;
+
+        let mut source = String::new();
+        for index in 0..TARGETS {
+            source.push_str(&format!("mod target_{index} {{ pub fn target() {{}} }}\n"));
+        }
+        for index in 0..CALLS {
+            source.push_str(&format!("pub fn caller_{index}() {{ target(); }}\n"));
+        }
+        let mut sources = BTreeMap::new();
+        sources.insert(
+            RepoRelativePath::new("src/lib.rs")?,
+            Arc::<str>::from(source),
+        );
+
+        let started = Instant::now();
+        let (_, graph) = RustSyntaxIndex::from_sources(sources)?;
+        let elapsed = started.elapsed();
+        let call_edges = graph
+            .symbols()
+            .iter()
+            .flat_map(|symbol| graph.outgoing_edges(symbol.id))
+            .filter(|edge| edge.kind == EdgeKind::Calls)
+            .count();
+
+        assert_eq!(graph.call_site_count(), CALLS as u64);
+        assert_eq!(graph.ambiguous_call_site_count(), CALLS as u64);
+        assert_eq!(graph.unresolved_call_site_count(), 0);
+        assert_eq!(call_edges, 0, "ambiguous calls must not fan out into edges");
+        assert_eq!(graph.truncated_call_sites(), 0);
+        eprintln!(
+            "lazy_call_sites: targets={TARGETS}, calls={CALLS}, call_sites={}, call_edges={call_edges}, eager_edge_product={}, elapsed={elapsed:?}",
+            graph.call_site_count(),
+            TARGETS * CALLS,
+        );
+        Ok(())
+    }
 
     #[test]
     fn rejects_a_source_larger_than_the_file_budget() -> Result<(), Box<dyn Error>> {

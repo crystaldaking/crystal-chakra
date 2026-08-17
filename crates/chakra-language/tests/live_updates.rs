@@ -8,9 +8,11 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use chakra_domain::identity::WorkspaceIdentity;
-use chakra_domain::query::{QueryService, RepoMapRequest, SymbolSearchRequest};
+use chakra_domain::query::{
+    ContextRequest, QueryService, RepoMapRequest, SymbolRef, SymbolSearchRequest,
+};
 use chakra_domain::state::{Freshness, FreshnessRequirement, WorkspaceStatus};
-use chakra_domain::symbol::Language;
+use chakra_domain::symbol::{CallResolution, Language};
 use chakra_engine::WorkspaceEngine;
 use chakra_language::{LiveIndex, index_repository, start_live_index};
 use tempfile::TempDir;
@@ -125,6 +127,62 @@ fn immediate_fresh_read_is_atomic_and_reindexes_only_one_file() -> Result<(), Bo
         metrics.files_reparsed - baseline.files_reparsed,
         metrics.relationship_files_recomputed - baseline.relationship_files_recomputed,
     );
+    live.shutdown()?;
+    Ok(())
+}
+
+#[test]
+fn declaration_edit_re_resolves_call_sites_without_recomputing_callers()
+-> Result<(), Box<dyn Error>> {
+    let repository = repository()?;
+    write(repository.path(), "src/target_a.rs", "pub fn target() {}\n")?;
+    write(repository.path(), "src/target_b.rs", "pub fn target() {}\n")?;
+    write(
+        repository.path(),
+        "src/caller.rs",
+        "pub fn invoke() { target(); }\n",
+    )?;
+    let (engine, live) = start(&repository)?;
+
+    let initial = engine.context(ContextRequest {
+        symbol: Some(SymbolRef::ByName("caller::invoke".to_owned())),
+        freshness: FreshnessRequirement::RequireFresh,
+        ..ContextRequest::default()
+    })?;
+    assert!(initial.data.callees.is_empty());
+    assert_eq!(initial.data.syntax_call_candidates.len(), 2);
+    assert!(
+        initial.data.syntax_call_candidates.iter().all(|candidate| {
+            candidate.resolution == CallResolution::Ambiguous { candidates: 2 }
+        })
+    );
+    let baseline = live.metrics();
+
+    write(
+        repository.path(),
+        "src/target_b.rs",
+        "pub fn other_target() {}\n",
+    )?;
+    let updated = engine.context(ContextRequest {
+        symbol: Some(SymbolRef::ByName("caller::invoke".to_owned())),
+        freshness: FreshnessRequirement::RequireFresh,
+        ..ContextRequest::default()
+    })?;
+
+    assert!(updated.data.syntax_call_candidates.is_empty());
+    assert_eq!(updated.data.callees.len(), 1);
+    assert_eq!(
+        updated.data.callees[0].symbol.qualified_name,
+        "target_a::target"
+    );
+    let metrics = live.metrics();
+    assert_eq!(metrics.files_reparsed - baseline.files_reparsed, 1);
+    assert_eq!(
+        metrics.relationship_files_recomputed - baseline.relationship_files_recomputed,
+        1,
+        "a declaration edit must not recompute the unchanged caller contribution"
+    );
+    engine.snapshot().graph().validate_consistency()?;
     live.shutdown()?;
     Ok(())
 }

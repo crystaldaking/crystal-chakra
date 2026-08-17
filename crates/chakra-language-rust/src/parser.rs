@@ -4,7 +4,9 @@ use std::num::TryFromIntError;
 use std::sync::Arc;
 
 use chakra_domain::location::{RepoRelativePath, SourceRange, TextPosition};
-use chakra_domain::symbol::{Language, SymbolKey, SymbolKind};
+use chakra_domain::symbol::{
+    CallForm, CallTargetKind, Language, MAX_RECEIVER_HINT_CHARS, SymbolKey, SymbolKind,
+};
 use thiserror::Error;
 use tree_sitter::{Node, Parser, Point};
 
@@ -56,9 +58,21 @@ pub(crate) struct SymbolDraft {
 #[derive(Debug, Clone)]
 pub(crate) struct CallDraft {
     pub caller: usize,
+    pub form: CallForm,
+    pub target_kind: CallTargetKind,
     pub name: String,
     pub qualifier: Option<String>,
+    pub receiver_hint: Option<String>,
     pub location: SourceRange,
+}
+
+struct CallTarget<'tree> {
+    form: CallForm,
+    target_kind: CallTargetKind,
+    name: String,
+    qualifier: Option<String>,
+    receiver_hint: Option<String>,
+    location: Node<'tree>,
 }
 
 #[derive(Debug, Clone)]
@@ -302,7 +316,7 @@ impl Extraction<'_> {
         };
         let caller = self.add_symbol(context, &name, kind, node, self.signature(node))?;
         if let Some(body) = node.child_by_field_name("body") {
-            self.collect_calls(body, caller)?;
+            self.collect_calls(body, caller, context.container.as_deref())?;
             let mut prefix = context.prefix.clone();
             prefix.push(name.clone());
             self.visit(
@@ -478,7 +492,12 @@ impl Extraction<'_> {
         false
     }
 
-    fn collect_calls(&mut self, node: Node<'_>, caller: usize) -> Result<(), ParseError> {
+    fn collect_calls(
+        &mut self,
+        node: Node<'_>,
+        caller: usize,
+        current_container: Option<&str>,
+    ) -> Result<(), ParseError> {
         // Nested item bodies own their calls and are visited separately by
         // `visit_function`; walking through them here would attribute their
         // calls to the enclosing function.
@@ -487,18 +506,21 @@ impl Extraction<'_> {
         }
         if node.kind() == "call_expression"
             && let Some(function) = node.child_by_field_name("function")
-            && let Some((name, qualifier, location_node)) = self.call_target(function)
+            && let Some(target) = self.call_target(function, current_container)
         {
             self.calls.push(CallDraft {
                 caller,
-                name,
-                qualifier,
-                location: self.range(location_node)?,
+                form: target.form,
+                target_kind: target.target_kind,
+                name: target.name,
+                qualifier: target.qualifier,
+                receiver_hint: target.receiver_hint,
+                location: self.range(target.location)?,
             });
         }
         let mut cursor = node.walk();
         for child in node.named_children(&mut cursor) {
-            self.collect_calls(child, caller)?;
+            self.collect_calls(child, caller, current_container)?;
         }
         Ok(())
     }
@@ -506,32 +528,63 @@ impl Extraction<'_> {
     fn call_target<'tree>(
         &self,
         function: Node<'tree>,
-    ) -> Option<(String, Option<String>, Node<'tree>)> {
+        current_container: Option<&str>,
+    ) -> Option<CallTarget<'tree>> {
         match function.kind() {
-            "identifier" => Some((self.text(function)?.to_owned(), None, function)),
+            "identifier" => Some(CallTarget {
+                form: CallForm::Function,
+                target_kind: CallTargetKind::Function,
+                name: self.text(function)?.to_owned(),
+                qualifier: None,
+                receiver_hint: None,
+                location: function,
+            }),
             "scoped_identifier" | "scoped_type_identifier" => {
                 let name_node = function.child_by_field_name("name")?;
                 let path = function.child_by_field_name("path")?;
-                Some((
-                    self.text(name_node)?.to_owned(),
-                    self.text(path).and_then(last_identifier).map(str::to_owned),
-                    name_node,
-                ))
+                let receiver_hint = self.text(path).and_then(bounded_receiver_hint);
+                let qualifier = match receiver_hint.as_deref() {
+                    Some("Self") | Some("self") => current_container.map(str::to_owned),
+                    _ => receiver_hint.clone(),
+                };
+                let target_kind = if matches!(
+                    path.kind(),
+                    "type_identifier" | "generic_type" | "scoped_type_identifier"
+                ) || receiver_hint.as_deref().is_some_and(looks_like_type_name)
+                {
+                    CallTargetKind::Method
+                } else {
+                    CallTargetKind::Function
+                };
+                Some(CallTarget {
+                    form: CallForm::Scoped,
+                    target_kind,
+                    name: self.text(name_node)?.to_owned(),
+                    qualifier,
+                    receiver_hint,
+                    location: name_node,
+                })
             }
             "field_expression" => {
                 let name_node = function.child_by_field_name("field")?;
                 let value = function.child_by_field_name("value")?;
-                Some((
-                    self.text(name_node)?.to_owned(),
-                    self.text(value)
-                        .and_then(last_identifier)
-                        .map(str::to_owned),
-                    name_node,
-                ))
+                let receiver_hint = self.text(value).and_then(bounded_receiver_hint);
+                let qualifier = match receiver_hint.as_deref() {
+                    Some("self") => current_container.map(str::to_owned),
+                    _ => None,
+                };
+                Some(CallTarget {
+                    form: CallForm::Member,
+                    target_kind: CallTargetKind::Method,
+                    name: self.text(name_node)?.to_owned(),
+                    qualifier,
+                    receiver_hint,
+                    location: name_node,
+                })
             }
             "generic_function" => function
                 .child_by_field_name("function")
-                .and_then(|inner| self.call_target(inner)),
+                .and_then(|inner| self.call_target(inner, current_container)),
             _ => None,
         }
     }
@@ -556,6 +609,15 @@ fn last_identifier(raw: &str) -> Option<&str> {
     raw.trim_matches(|character: char| !character.is_alphanumeric() && character != '_')
         .split(|character: char| !character.is_alphanumeric() && character != '_')
         .rfind(|part| !part.is_empty())
+}
+
+fn bounded_receiver_hint(raw: &str) -> Option<String> {
+    let hint = last_identifier(raw)?;
+    (hint.chars().count() <= MAX_RECEIVER_HINT_CHARS).then(|| hint.to_owned())
+}
+
+fn looks_like_type_name(name: &str) -> bool {
+    name.chars().next().is_some_and(char::is_uppercase)
 }
 
 fn base_type_identifier(raw: &str) -> Option<&str> {
@@ -700,6 +762,22 @@ mod tests {
                 .count(),
             2
         );
+        let receiver_call = parsed
+            .calls
+            .iter()
+            .find(|call| call.form == CallForm::Member)
+            .ok_or("receiver call missing")?;
+        assert_eq!(receiver_call.target_kind, CallTargetKind::Method);
+        assert_eq!(receiver_call.receiver_hint.as_deref(), Some("provider"));
+        assert_eq!(receiver_call.qualifier, None);
+        let scoped_call = parsed
+            .calls
+            .iter()
+            .find(|call| call.form == CallForm::Scoped)
+            .ok_or("scoped call missing")?;
+        assert_eq!(scoped_call.target_kind, CallTargetKind::Method);
+        assert_eq!(scoped_call.receiver_hint.as_deref(), Some("Service"));
+        assert_eq!(scoped_call.qualifier.as_deref(), Some("Service"));
         assert!(!parsed.has_errors);
         Ok(())
     }

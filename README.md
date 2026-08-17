@@ -116,7 +116,14 @@ when a name is ambiguous. For current changes:
 ```
 
 with `diff_context` summarizes changed Rust/PHP files, current declarations in
-those files, and bounded related callers/tests.
+those files, and bounded related callers/tests/call candidates.
+
+`context`, `callers`, and `diff_context` keep uniquely resolved syntax calls in
+their ordinary relationship collections. Ambiguous or unresolved Tree-sitter
+evidence is returned separately as `syntax_call_candidates`,
+`syntax_candidates`, or `related_call_candidates`; Chakra does not connect an
+unknown receiver to every same-name method. `status` reports total, ambiguous,
+and unresolved call-site counts for the published revision.
 
 All seven MCP tools advertise read-only, non-destructive, idempotent,
 closed-world annotations. Current Codex clients can therefore use Chakra's

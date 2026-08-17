@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use chakra_domain::provenance::{Precision, Provenance};
-use chakra_domain::symbol::{EdgeKind, Language, SymbolKind};
+use chakra_domain::symbol::{CallResolution, EdgeKind, Language, SymbolKind};
 use chakra_language_php::index_repository;
 use tempfile::TempDir;
 
@@ -43,10 +43,13 @@ fn realistic_php_fixture_exposes_bounded_syntax_intelligence() -> Result<(), Box
 
     let report = index_repository(repository.path())?;
     eprintln!(
-        "php_fixture_index: files={}, symbols={}, edges={}, elapsed={:?}",
+        "php_fixture_index: files={}, symbols={}, edges={}, call_sites={}, ambiguous_call_sites={}, unresolved_call_sites={}, elapsed={:?}",
         report.metrics.parsed_files,
         report.metrics.symbols,
         report.metrics.edges,
+        report.metrics.call_sites,
+        report.metrics.ambiguous_call_sites,
+        report.metrics.unresolved_call_sites,
         report.metrics.elapsed
     );
     assert_eq!(report.metrics.parsed_files, 4);
@@ -76,9 +79,19 @@ fn realistic_php_fixture_exposes_bounded_syntax_intelligence() -> Result<(), Box
         .iter()
         .filter(|edge| edge.kind == EdgeKind::Calls)
         .collect();
-    assert!(!callers.is_empty());
-    assert!(callers.iter().all(|edge| {
-        edge.provenance == Provenance::TreeSitter && edge.precision == Precision::Heuristic
-    }));
+    assert!(callers.is_empty());
+    let unresolved_refunds = report
+        .graph
+        .symbols()
+        .iter()
+        .flat_map(|symbol| report.graph.call_sites_from(symbol.id))
+        .filter(|call_site| {
+            call_site.name == "refund"
+                && call_site.resolution == CallResolution::Unresolved
+                && call_site.provenance == Provenance::TreeSitter
+                && call_site.precision == Precision::Syntax
+        })
+        .count();
+    assert_eq!(unresolved_refunds, 3);
     Ok(())
 }
