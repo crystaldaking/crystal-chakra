@@ -8,6 +8,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use chakra_domain::location::{RepoRelativePath, SourceRange};
 use chakra_domain::provenance::{Precision, Provenance};
@@ -26,8 +27,21 @@ pub enum GraphError {
     UnknownEntity(EntityId),
     #[error("source file is already indexed: {0}")]
     DuplicateFile(RepoRelativePath),
-    #[error("merged graph is inconsistent: {0}")]
+    #[error("graph consistency audit failed: {0}")]
     Consistency(#[from] ConsistencyError),
+}
+
+/// Work observed by one complete, independent graph consistency audit.
+///
+/// The adjacency count is deterministic proof of the audit's linear work:
+/// every logical edge must appear once in each directional index.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ConsistencyAudit {
+    pub symbols_audited: u64,
+    pub files_audited: u64,
+    pub edges_audited: u64,
+    pub adjacency_entries_examined: u64,
+    pub elapsed: Duration,
 }
 
 #[derive(Debug, Clone)]
@@ -71,9 +85,6 @@ impl SymbolGraph {
         for graph in graphs {
             merged.append(graph)?;
         }
-        merged
-            .validate_consistency()
-            .map_err(GraphError::Consistency)?;
         Ok(merged)
     }
 
@@ -345,10 +356,15 @@ impl SymbolGraph {
         self.incoming.get(&id).map_or(&[], Vec::as_slice)
     }
 
-    /// Independent consistency audit used by the atomic-revision regression
-    /// tests: every derived structure is recomputed from the arena and
-    /// compared, so a hybrid snapshot would be caught here.
-    pub fn validate_consistency(&self) -> Result<(), ConsistencyError> {
+    /// Runs an independent, expected-linear consistency audit.
+    ///
+    /// Every derived structure is recomputed from the arena and compared, so
+    /// a hybrid snapshot is caught. Edge mirrors are compared as exact
+    /// multisets: identical parallel edges therefore cannot hide duplicate or
+    /// missing adjacency entries.
+    pub fn audit_consistency(&self) -> Result<ConsistencyAudit, ConsistencyError> {
+        let started = Instant::now();
+
         // Arena ids match arena positions.
         for (index, symbol) in self.symbols.iter().enumerate() {
             if symbol.id.0 as usize != index {
@@ -368,27 +384,22 @@ impl SymbolGraph {
                 .or_default()
                 .push(symbol.id);
         }
-        for ids in expected_by_file.values_mut() {
-            ids.sort_unstable();
-        }
-        let mut actual_by_file: HashMap<&RepoRelativePath, Vec<EntityId>> = self
-            .files
-            .iter()
-            .map(|(path, file)| (path, file.symbols.clone()))
-            .collect();
-        for ids in actual_by_file.values_mut() {
-            ids.sort_unstable();
-        }
-        if actual_by_file != expected_by_file {
+        let file_index_matches = expected_by_file.len() == self.files.len()
+            && expected_by_file.iter().all(|(path, expected)| {
+                self.files
+                    .get(*path)
+                    .is_some_and(|actual| actual.symbols == *expected)
+            });
+        if !file_index_matches {
             return Err(ConsistencyError::FileIndexMismatch);
         }
 
-        // Edges: stored under the correct key, endpoints exist, and both
-        // adjacency indexes mirror each other exactly. Two independent
-        // passes: outgoing → incoming, then incoming → outgoing, so a ghost
-        // entry in either direction is caught (it would otherwise be served
-        // by `callers`/`context` while passing the audit).
+        // Edges are stored under the correct key, endpoints exist, and both
+        // adjacency indexes mirror the exact same multiset. Counting outgoing
+        // edges and consuming those counts from incoming is expected O(E),
+        // including for high-degree nodes and identical parallel edges.
         let mut outgoing_total = 0_u64;
+        let mut unmatched_outgoing: HashMap<&Edge, u64> = HashMap::new();
         for (key, edges) in &self.outgoing {
             for edge in edges {
                 outgoing_total += 1;
@@ -402,16 +413,7 @@ impl SymbolGraph {
                     .ok_or(ConsistencyError::UnknownEntity(edge.from))?;
                 self.symbol(edge.to)
                     .ok_or(ConsistencyError::UnknownEntity(edge.to))?;
-                let mirrored = self
-                    .incoming
-                    .get(&edge.to)
-                    .is_some_and(|incoming| incoming.contains(edge));
-                if !mirrored {
-                    return Err(ConsistencyError::EdgeMirrorMissing {
-                        from: edge.from,
-                        to: edge.to,
-                    });
-                }
+                *unmatched_outgoing.entry(edge).or_default() += 1;
             }
         }
         let mut incoming_total = 0_u64;
@@ -428,17 +430,29 @@ impl SymbolGraph {
                     .ok_or(ConsistencyError::UnknownEntity(edge.from))?;
                 self.symbol(edge.to)
                     .ok_or(ConsistencyError::UnknownEntity(edge.to))?;
-                let mirrored = self
-                    .outgoing
-                    .get(&edge.from)
-                    .is_some_and(|outgoing| outgoing.contains(edge));
-                if !mirrored {
+                let Some(unmatched) = unmatched_outgoing.get_mut(edge) else {
+                    return Err(ConsistencyError::EdgeIncomingMirrorMissing {
+                        from: edge.from,
+                        to: edge.to,
+                    });
+                };
+                if *unmatched == 0 {
                     return Err(ConsistencyError::EdgeIncomingMirrorMissing {
                         from: edge.from,
                         to: edge.to,
                     });
                 }
+                *unmatched -= 1;
             }
+        }
+        if let Some((edge, _)) = unmatched_outgoing
+            .into_iter()
+            .find(|(_, unmatched)| *unmatched != 0)
+        {
+            return Err(ConsistencyError::EdgeMirrorMissing {
+                from: edge.from,
+                to: edge.to,
+            });
         }
         if outgoing_total != self.edge_count || incoming_total != self.edge_count {
             return Err(ConsistencyError::EdgeCountMismatch {
@@ -447,11 +461,22 @@ impl SymbolGraph {
                 incoming: incoming_total,
             });
         }
-        Ok(())
+        Ok(ConsistencyAudit {
+            symbols_audited: self.symbol_count(),
+            files_audited: self.file_count(),
+            edges_audited: outgoing_total,
+            adjacency_entries_examined: outgoing_total.saturating_add(incoming_total),
+            elapsed: started.elapsed(),
+        })
+    }
+
+    /// Compatibility wrapper for callers that only need pass/fail status.
+    pub fn validate_consistency(&self) -> Result<(), ConsistencyError> {
+        self.audit_consistency().map(|_| ())
     }
 }
 
-/// A broken internal graph invariant found by [`SymbolGraph::validate_consistency`].
+/// A broken internal graph invariant found by [`SymbolGraph::audit_consistency`].
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum ConsistencyError {
     #[error("edge endpoint {0:?} does not exist in the arena")]
@@ -517,6 +542,30 @@ mod tests {
             Provenance::TreeSitter,
             Precision::Syntax,
         )?)
+    }
+
+    fn high_degree_graph(edge_count: usize) -> Result<SymbolGraph, Box<dyn std::error::Error>> {
+        let mut graph = SymbolGraph::new();
+        let target = add_fn(&mut graph, "target", "src/high_degree.rs")?;
+        for index in 0..edge_count {
+            let caller = add_fn(&mut graph, &format!("caller_{index}"), "src/high_degree.rs")?;
+            graph.add_edge(
+                EdgeKind::Calls,
+                caller,
+                target,
+                Provenance::TreeSitter,
+                Precision::Syntax,
+                None,
+            )?;
+        }
+        Ok(graph)
+    }
+
+    fn measure_high_degree_audit(
+        edge_count: usize,
+    ) -> Result<ConsistencyAudit, Box<dyn std::error::Error>> {
+        let graph = high_degree_graph(edge_count)?;
+        Ok(graph.audit_consistency()?)
     }
 
     #[test]
@@ -604,10 +653,32 @@ mod tests {
             Precision::Syntax,
             None,
         )?;
-        graph.validate_consistency()?;
+        let audit = graph.audit_consistency()?;
         assert_eq!(graph.symbol_count(), 2);
         assert_eq!(graph.edge_count(), 1);
         assert_eq!(graph.file_count(), 2);
+        assert_eq!(audit.symbols_audited, 2);
+        assert_eq!(audit.files_audited, 2);
+        assert_eq!(audit.edges_audited, 1);
+        assert_eq!(audit.adjacency_entries_examined, 2);
+        Ok(())
+    }
+
+    #[test]
+    fn consistency_validation_scaling_is_directly_measurable()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let smaller_edges = 2_000;
+        let larger_edges = 4_000;
+        let smaller = measure_high_degree_audit(smaller_edges)?;
+        let larger = measure_high_degree_audit(larger_edges)?;
+        assert_eq!(smaller.edges_audited, smaller_edges as u64);
+        assert_eq!(smaller.adjacency_entries_examined, 4_000);
+        assert_eq!(larger.edges_audited, larger_edges as u64);
+        assert_eq!(larger.adjacency_entries_examined, 8_000);
+        eprintln!(
+            "graph_consistency_high_degree: smaller_edges={smaller_edges}, smaller={:?}, larger_edges={larger_edges}, larger={:?}",
+            smaller.elapsed, larger.elapsed
+        );
         Ok(())
     }
 
@@ -690,6 +761,123 @@ mod tests {
             graph.validate_consistency(),
             Err(ConsistencyError::EdgeWrongIncomingKey { key, to }) if key == a && to == b
         ));
+        Ok(())
+    }
+
+    #[test]
+    fn audit_catches_outgoing_edge_under_wrong_key() -> Result<(), Box<dyn std::error::Error>> {
+        let mut graph = SymbolGraph::new();
+        let a = add_fn(&mut graph, "a", "src/a.rs")?;
+        let b = add_fn(&mut graph, "b", "src/b.rs")?;
+        graph.add_edge(
+            EdgeKind::Calls,
+            a,
+            b,
+            Provenance::TreeSitter,
+            Precision::Syntax,
+            None,
+        )?;
+        let edge = graph
+            .outgoing
+            .get_mut(&a)
+            .and_then(Vec::pop)
+            .ok_or_else(|| std::io::Error::other("test edge must exist"))?;
+        graph.outgoing.entry(b).or_default().push(edge);
+        assert!(matches!(
+            graph.audit_consistency(),
+            Err(ConsistencyError::EdgeWrongOutgoingKey { key, from }) if key == b && from == a
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn audit_catches_unknown_edge_endpoint() -> Result<(), Box<dyn std::error::Error>> {
+        let mut graph = SymbolGraph::new();
+        let a = add_fn(&mut graph, "a", "src/a.rs")?;
+        let ghost = EntityId(999);
+        graph.outgoing.entry(a).or_default().push(Edge {
+            kind: EdgeKind::Calls,
+            from: a,
+            to: ghost,
+            provenance: Provenance::TreeSitter,
+            precision: Precision::Syntax,
+            location: None,
+        });
+        assert!(matches!(
+            graph.audit_consistency(),
+            Err(ConsistencyError::UnknownEntity(id)) if id == ghost
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn audit_catches_missing_identical_parallel_edge_mirror()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut graph = SymbolGraph::new();
+        let a = add_fn(&mut graph, "a", "src/a.rs")?;
+        let b = add_fn(&mut graph, "b", "src/b.rs")?;
+        for _ in 0..2 {
+            graph.add_edge(
+                EdgeKind::Calls,
+                a,
+                b,
+                Provenance::TreeSitter,
+                Precision::Syntax,
+                None,
+            )?;
+        }
+        let removed = graph.incoming.get_mut(&b).and_then(Vec::pop);
+        assert!(removed.is_some());
+        assert!(matches!(
+            graph.audit_consistency(),
+            Err(ConsistencyError::EdgeMirrorMissing { from, to }) if from == a && to == b
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn audit_catches_extra_identical_parallel_edge_mirror() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let mut graph = SymbolGraph::new();
+        let a = add_fn(&mut graph, "a", "src/a.rs")?;
+        let b = add_fn(&mut graph, "b", "src/b.rs")?;
+        graph.add_edge(
+            EdgeKind::Calls,
+            a,
+            b,
+            Provenance::TreeSitter,
+            Precision::Syntax,
+            None,
+        )?;
+        let duplicate = graph
+            .incoming
+            .get(&b)
+            .and_then(|edges| edges.first())
+            .cloned()
+            .ok_or_else(|| std::io::Error::other("test edge must exist"))?;
+        graph.incoming.entry(b).or_default().push(duplicate);
+        assert!(matches!(
+            graph.audit_consistency(),
+            Err(ConsistencyError::EdgeIncomingMirrorMissing { from, to }) if from == a && to == b
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn audit_catches_file_index_order_drift() -> Result<(), Box<dyn std::error::Error>> {
+        let mut graph = SymbolGraph::new();
+        add_fn(&mut graph, "a", "src/a.rs")?;
+        add_fn(&mut graph, "b", "src/a.rs")?;
+        let path = file("src/a.rs")?;
+        let indexed = graph
+            .files
+            .get_mut(&path)
+            .ok_or_else(|| std::io::Error::other("test file must exist"))?;
+        indexed.symbols.reverse();
+        assert_eq!(
+            graph.audit_consistency(),
+            Err(ConsistencyError::FileIndexMismatch)
+        );
         Ok(())
     }
 

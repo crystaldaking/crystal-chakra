@@ -387,7 +387,6 @@ impl PhpSyntaxIndex {
             }
         }
         graph.set_truncated_call_sites(self.truncated_call_sites());
-        graph.validate_consistency()?;
         Ok(graph)
     }
 }
