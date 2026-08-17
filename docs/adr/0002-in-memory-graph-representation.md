@@ -41,6 +41,17 @@ an `Arc`. Capturing text and syntax facts together is required so a query
 cannot search filesystem bytes from a different revision than its symbol
 results.
 
+Those construction methods maintain the graph invariants in production.
+Language materialization and graph composition therefore do not repeat a
+complete audit after each stage. An explicit `audit_consistency` diagnostic
+remains available to tests and diagnostic callers: it independently rebuilds
+the file, callable, and call-site indexes and compares the two adjacency
+indexes as exact edge multisets. The file-index comparison preserves its
+deterministic arena ordering. One outgoing-edge hash table both reserves the
+edge multiplicity required by resolved call sites and is consumed by the
+incoming mirror pass, so the complete audit remains expected-linear even for
+high-degree callers and identical parallel edges.
+
 ## Alternatives considered
 
 - `petgraph`: a generic graph library whose index types and algorithms we
@@ -68,6 +79,7 @@ results.
 
 - Graph invariants are unit-tested in `crates/chakra-engine/src/graph.rs`;
   end-to-end behavior over the Controller → Service → Provider scenario in
-  `crates/chakra-engine/tests/scenario.rs`.
+  `crates/chakra-engine/tests/scenario.rs`. Atomic-publication regressions run
+  the full independent audit against the revisions visible to readers.
 - Measure indexing/query latency under roadmap §18 before adding caching
   or alternative structures.

@@ -19,7 +19,7 @@ pub use engine::{
     BarrierAlreadyInstalled, DiffProviderAlreadyInstalled, FreshnessBarrier, FreshnessBarrierError,
     ProviderAlreadyInstalled, PublishError, UpdateBuilder, WorkspaceEngine, WorkspaceSnapshot,
 };
-pub use graph::{CallSiteInput, ConsistencyError, GraphError, SymbolGraph};
+pub use graph::{CallSiteInput, ConsistencyAudit, ConsistencyError, GraphError, SymbolGraph};
 pub use precise::{
     CallHierarchyDirections, PreciseProvider, PreciseQueryRequest, PreciseQueryResult,
     PreciseRelation, ProviderDocument, ProviderSymbol, ProviderWorkspace,

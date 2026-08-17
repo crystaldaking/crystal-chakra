@@ -136,7 +136,7 @@ pub enum EdgeKind {
 }
 
 /// A directed edge between two symbols of one revision.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct Edge {
     pub kind: EdgeKind,
     pub from: EntityId,
