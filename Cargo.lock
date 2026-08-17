@@ -177,6 +177,7 @@ version = "0.1.0"
 dependencies = [
  "chakra-domain",
  "chakra-engine",
+ "chakra-git",
  "chakra-language-php",
  "chakra-language-rust",
  "notify",

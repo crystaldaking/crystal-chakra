@@ -179,11 +179,18 @@ async fn status_tool_is_listed_and_callable() -> Result<(), Box<dyn Error + Send
     let structured = result
         .structured_content
         .ok_or("status must return structured content")?;
-    assert_eq!(structured["schema_version"], 1);
+    assert_eq!(
+        structured["schema_version"],
+        chakra_domain::envelope::SCHEMA_VERSION
+    );
     assert_eq!(structured["revision"], 7);
     assert_eq!(structured["freshness"], "fresh");
     assert_eq!(structured["status"], "ready");
     assert_eq!(structured["provider_state"], "not_configured");
+    assert_eq!(structured["indexing"]["budgets"]["max_files"], 100_000);
+    assert!(structured["indexing"]["coverage"].is_object());
+    assert!(structured["indexing"]["capabilities"].is_array());
+    assert!(structured["indexing"]["degradations"].is_array());
     assert_eq!(structured["data"]["counts"]["symbols"], 2);
 
     client.cancel().await?;

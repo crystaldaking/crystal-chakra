@@ -8,6 +8,6 @@ mod indexer;
 mod parser;
 
 pub use indexer::{
-    IndexMetrics, IndexReport, PhpIndexError, PhpSyntaxIndex, ReconcileMetrics, ReconcileReport,
-    index_repository, scan_repository_sources,
+    IndexMetrics, IndexReport, LanguageBuildMetrics, PhpIndexError, PhpSyntaxIndex,
+    ReconcileMetrics, ReconcileReport, SyntaxFactCounts, index_repository, scan_repository_sources,
 };

@@ -150,10 +150,24 @@ before dispatch removes queued work; an already-dispatched synchronous query
 finishes inside that bound. Timed-out rust-analyzer requests send
 `$/cancelRequest`, and all provider waits have fixed deadlines.
 
-Indexing admits at most 8 MiB per Rust or PHP source and 256 MiB of source text
-per language per repository. Git discovery/diff subprocesses have a 30-second deadline and
-bounded retained output. Exceeding one of these resource budgets fails
-explicitly; Chakra does not publish a partial index as fresh.
+Indexing defaults to 100,000 Git-discovered Rust/PHP files, 8 MiB per source,
+128 MiB total source, 500,000 symbols, 1,000,000 relationships, and 1,000,000
+compact call sites. Cold-start and phase-sampled resident-memory targets default
+to 120 seconds and 2 GiB. All limits are configurable with `chakra serve
+--help`, validated against hard safety ceilings, and reused by live updates.
+
+Count/byte limits are enforced before graph allocation. When one is reached,
+Chakra publishes an internally consistent fresh-but-`degraded` revision where
+possible: files, text search, and retained declarations remain queryable. Every
+query envelope reports exact indexing budgets, corpus coverage, capability
+completeness, affected capabilities, omission cause, phase measurements, and
+best-effort memory samples. Calls are never resolved against a truncated symbol
+catalog. Time/RSS targets are observable warnings rather than nondeterministic
+inputs to graph contents.
+
+Git discovery/diff subprocesses retain bounded output and have a 30-second
+deadline. Initial indexing also supports cooperative cancellation between file
+and phase units; MCP-wide in-flight cancellation is planned separately.
 
 ## Git diff scope
 
@@ -188,6 +202,8 @@ cargo test -p chakra-provider-rust-analyzer --test real_provider -- --ignored --
 
 The reproducible v0.1 measurement entry points and the latest recorded local
 run are in [docs/evaluation/v0.1-readiness.md](docs/evaluation/v0.1-readiness.md).
+The Zed/`psp-app` bounded-indexing results are in
+[docs/evaluation/v0.1.1-indexing-budgets.md](docs/evaluation/v0.1.1-indexing-budgets.md).
 Use [docs/evaluation/v0.1-template.md](docs/evaluation/v0.1-template.md) for
 real agent comparisons before expanding scope.
 

@@ -16,8 +16,10 @@ non-deferrable because retrofitting it would distort the engine.
 
 - `WorkspaceEngine` is the single owner of the published revision.
 - State lives in immutable `WorkspaceSnapshot` values (identity, revision,
-  status, freshness, provider state, symbol graph). Once published, a
-  snapshot never changes.
+  status, freshness, provider state, indexing coverage, symbol graph). Once
+  published, a snapshot never changes. Budgets, capability completeness,
+  degradation reasons, phase measurements, and memory samples therefore
+  cannot race ahead of or lag behind the graph they describe (ADR-011).
 - Freshness is a snapshot axis of its own, independent from the lifecycle
   status (SPEC §6): `Ready` does not imply `Fresh`, and a `Degraded`
   workspace may still hold a reconciled syntax snapshot. Only the publisher
@@ -62,6 +64,8 @@ non-deferrable because retrofitting it would distort the engine.
 - Metadata-only lifecycle/freshness updates do not clone the graph. Graph
   mutations still clone on first write, which keeps private construction
   simple without adding a persistent-collection dependency.
+- Query envelope schema v2 copies the pinned snapshot's `IndexingStatus`, so
+  every query distinguishes complete and deliberately degraded revisions.
 - A lost update race surfaces as a typed `Conflict`. The live reconciliation
   publisher retries from a fresh base with a fixed attempt bound rather than
   overwriting a newer revision.

@@ -2,6 +2,7 @@
 
 Status: accepted
 Date: 2026-08-16
+Last reviewed: 2026-08-18
 
 ## Context
 
@@ -39,6 +40,12 @@ binding compatible with Chakra's Tree-sitter runtime:
   `chakra-language-rust` and `chakra-language-php` remain independently
   testable parsing adapters. Graph composition rejects overlapping language
   domains so each adapter's revision-local call-site resolution remains valid.
+- Discover/read the shared Rust/PHP inventory once and split validated graph
+  budgets deterministically between non-empty adapters (ADR-011). The split is
+  stable after cold start except for one rebalance when a previously absent
+  language first appears. Each language remains independently parsed, but a
+  mixed workspace cannot consume the advertised global symbol/edge/call-site
+  budget twice.
 - Move supported-source discovery into `chakra-git`, so initial indexing,
   reconciliation, and `diff_context` share the same `.rs`/`.php`, ignore,
   regular-file, symlink, and Git-worktree policy.

@@ -16,8 +16,8 @@ use thiserror::Error;
 use tracing::{error, info, warn};
 
 use crate::indexer::{
-    ReconcileMetrics, ReconcileReport, WorkspaceIndexError, WorkspaceSources, WorkspaceSyntaxIndex,
-    scan_repository_sources,
+    ReconcileMetrics, ReconcileReport, WorkspaceIndexError, WorkspaceSourceScan,
+    WorkspaceSyntaxIndex,
 };
 
 const EVENT_QUEUE_CAPACITY: usize = 256;
@@ -603,16 +603,17 @@ fn reconcile(
         .map_or(0, |(requested, _)| requested);
     let result = (|| {
         for _ in 0..MAX_STABLE_SCAN_ATTEMPTS {
-            let (sources, event_epoch) = stable_scan(repository_root, metrics)?;
+            let (scan, event_epoch) = stable_scan(repository_root, syntax_index, metrics)?;
             let ReconcileReport {
                 graph,
                 metrics: reconcile_metrics,
                 next_index,
-            } = syntax_index.reconcile_sources(sources)?;
+                indexing,
+            } = syntax_index.reconcile_sources(scan)?;
             let watch_index = next_index.as_ref().unwrap_or(syntax_index);
             *watcher_degraded =
                 refresh_watches(watcher, repository_root, watch_index, watched, metrics)?;
-            let status = if *watcher_degraded {
+            let status = if *watcher_degraded || indexing.is_degraded() {
                 WorkspaceStatus::Degraded
             } else {
                 WorkspaceStatus::Ready
@@ -625,7 +626,7 @@ fn reconcile(
             if metrics.event_epoch.load(Ordering::Acquire) != event_epoch {
                 continue;
             }
-            let published = publish_fresh(engine, graph.as_ref(), status)
+            let published = publish_fresh(engine, graph.as_ref(), status, &indexing)
                 .map_err(WorkspaceIndexError::Update)?;
             if let Some(next_index) = next_index {
                 *syntax_index = next_index;
@@ -657,26 +658,27 @@ fn reconcile(
 
 fn stable_scan(
     repository_root: &Path,
+    syntax_index: &WorkspaceSyntaxIndex,
     metrics: &MetricsState,
-) -> Result<(WorkspaceSources, u64), WorkspaceIndexError> {
+) -> Result<(WorkspaceSourceScan, u64), WorkspaceIndexError> {
     let mut last_error = None;
     for _ in 0..MAX_STABLE_SCAN_ATTEMPTS {
         let epoch = metrics.event_epoch.load(Ordering::Acquire);
-        let first = match scan_repository_sources(repository_root) {
+        let first = match syntax_index.scan_repository(repository_root) {
             Ok(sources) => sources,
             Err(error) => {
                 last_error = Some(error);
                 continue;
             }
         };
-        let second = match scan_repository_sources(repository_root) {
+        let second = match syntax_index.scan_repository(repository_root) {
             Ok(sources) => sources,
             Err(error) => {
                 last_error = Some(error);
                 continue;
             }
         };
-        if first == second && epoch == metrics.event_epoch.load(Ordering::Acquire) {
+        if first.sources == second.sources && epoch == metrics.event_epoch.load(Ordering::Acquire) {
             return Ok((second, epoch));
         }
     }
@@ -767,9 +769,15 @@ fn publish_fresh(
     engine: &WorkspaceEngine,
     graph: Option<&SymbolGraph>,
     status: WorkspaceStatus,
+    indexing: &chakra_domain::indexing::IndexingStatus,
 ) -> Result<bool, String> {
+    let started = Instant::now();
     let current = engine.snapshot();
-    if graph.is_none() && current.freshness() == Freshness::Fresh && current.status() == status {
+    if graph.is_none()
+        && current.freshness() == Freshness::Fresh
+        && current.status() == status
+        && current.indexing() == indexing
+    {
         return Ok(false);
     }
     for _ in 0..MAX_PUBLISH_ATTEMPTS {
@@ -777,10 +785,20 @@ fn publish_fresh(
         if let Some(graph) = graph {
             update.replace_graph(graph.clone());
         }
+        update.set_indexing(indexing.clone());
         update.set_status(status);
         update.set_freshness(Freshness::Fresh);
         match engine.publish(update) {
-            Ok(_) => return Ok(true),
+            Ok(snapshot) => {
+                info!(
+                    revision = snapshot.revision().0,
+                    graph_changed = graph.is_some(),
+                    indexing_degraded = indexing.is_degraded(),
+                    elapsed_micros = started.elapsed().as_micros(),
+                    "live syntax revision publication completed"
+                );
+                return Ok(true);
+            }
             Err(error) => warn!(%error, "retrying conflicted live index publication"),
         }
     }

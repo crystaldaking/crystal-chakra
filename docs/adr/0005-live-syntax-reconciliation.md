@@ -61,6 +61,11 @@ over native filesystem mechanisms:
   Unchanged source text is compared exactly and is never reparsed. If an event
   advances the epoch after a stable scan, the private candidate is discarded
   and reconciliation retries instead of publishing it.
+- Reconciliation reuses the initial revision's validated indexing budgets and
+  one shared Rust/PHP Git inventory per scan (ADR-011). Budget coverage and
+  degradation are published atomically with changed graph contents. A
+  reconciled budget-limited graph is truthfully `Degraded` and `Fresh`; adding
+  an over-budget file may publish metadata without pretending it was indexed.
 - Cache parsed facts per file and resolved relationship contributions per
   relationship-owner file. An edit reparses only created or modified files.
   Relationship owners are recomputed only when they own a changed file or

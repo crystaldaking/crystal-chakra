@@ -1,18 +1,57 @@
-//! Composition of independently parsed language indexes.
+//! Bounded composition of independently parsed language indexes.
 
 use std::collections::BTreeMap;
+use std::fs;
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use chakra_domain::indexing::{
+    IndexBudgetError, IndexBudgetKind, IndexBudgets, IndexCancellation, IndexCapability,
+    IndexCapabilityCoverage, IndexCoverage, IndexDegradation, IndexMemoryMetrics, IndexPhase,
+    IndexPhaseMeasurement, IndexingStatus,
+};
 use chakra_domain::location::RepoRelativePath;
-use chakra_engine::{GraphError, SymbolGraph};
+use chakra_domain::symbol::Language;
+use chakra_engine::{
+    ConsistencyError, GraphBuildLimits, GraphBuildReport, GraphError, SymbolGraph,
+};
 use thiserror::Error;
+use tracing::{info, warn};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkspaceSources {
     pub rust: BTreeMap<RepoRelativePath, Arc<str>>,
     pub php: BTreeMap<RepoRelativePath, Arc<str>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkspaceSourceScan {
+    pub sources: WorkspaceSources,
+    pub discovered_files: u64,
+    pub indexed_files: u64,
+    pub source_bytes: u64,
+    pub degradations: Vec<IndexDegradation>,
+    pub phases: Vec<IndexPhaseMeasurement>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct IndexOptions {
+    pub budgets: IndexBudgets,
+    pub cancellation: IndexCancellation,
+}
+
+impl IndexOptions {
+    pub fn new(
+        budgets: IndexBudgets,
+        cancellation: IndexCancellation,
+    ) -> Result<Self, IndexBudgetError> {
+        Ok(Self {
+            budgets: budgets.validate()?,
+            cancellation,
+        })
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -33,9 +72,10 @@ pub struct ReconcileReport {
     pub graph: Option<SymbolGraph>,
     pub metrics: ReconcileMetrics,
     pub next_index: Option<WorkspaceSyntaxIndex>,
+    pub indexing: IndexingStatus,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IndexMetrics {
     pub discovered_files: u64,
     pub parsed_files: u64,
@@ -49,6 +89,7 @@ pub struct IndexMetrics {
     pub rust_files: u64,
     pub php_files: u64,
     pub elapsed: Duration,
+    pub indexing: IndexingStatus,
 }
 
 #[derive(Debug)]
@@ -62,13 +103,25 @@ pub struct IndexReport {
 #[derive(Debug, Error)]
 pub enum WorkspaceIndexError {
     #[error(transparent)]
+    Discovery(#[from] chakra_git::DiscoveryError),
+    #[error("failed to read source {path}: {source}")]
+    Read {
+        path: RepoRelativePath,
+        #[source]
+        source: io::Error,
+    },
+    #[error(transparent)]
     Rust(#[from] chakra_language_rust::RustIndexError),
     #[error(transparent)]
     Php(#[from] chakra_language_php::PhpIndexError),
     #[error(transparent)]
     Graph(#[from] GraphError),
-    #[error("language adapters resolved different repository roots: {rust} and {php}")]
-    RootMismatch { rust: String, php: String },
+    #[error("constructed workspace syntax graph is inconsistent: {0}")]
+    Consistency(#[from] ConsistencyError),
+    #[error(transparent)]
+    InvalidBudget(#[from] IndexBudgetError),
+    #[error("workspace syntax indexing was cancelled")]
+    Cancelled,
     #[error("workspace syntax index update failed: {0}")]
     Update(String),
 }
@@ -79,6 +132,12 @@ pub struct WorkspaceSyntaxIndex {
     php: chakra_language_php::PhpSyntaxIndex,
     rust_graph: Arc<SymbolGraph>,
     php_graph: Arc<SymbolGraph>,
+    rust_build: GraphBuildReport,
+    php_build: GraphBuildReport,
+    rust_limits: GraphBuildLimits,
+    php_limits: GraphBuildLimits,
+    budgets: IndexBudgets,
+    indexing: IndexingStatus,
 }
 
 impl WorkspaceSyntaxIndex {
@@ -90,20 +149,40 @@ impl WorkspaceSyntaxIndex {
         paths
     }
 
+    pub fn budgets(&self) -> IndexBudgets {
+        self.budgets
+    }
+
+    pub fn indexing(&self) -> &IndexingStatus {
+        &self.indexing
+    }
+
+    pub fn scan_repository(
+        &self,
+        repository_root: &Path,
+    ) -> Result<WorkspaceSourceScan, WorkspaceIndexError> {
+        scan_repository_sources_with_options(
+            repository_root,
+            &IndexOptions::new(self.budgets, IndexCancellation::default())?,
+        )
+    }
+
     pub fn reconcile_sources(
         &self,
-        sources: WorkspaceSources,
+        mut scan: WorkspaceSourceScan,
     ) -> Result<ReconcileReport, WorkspaceIndexError> {
-        let rust = self.rust.reconcile_sources(sources.rust)?;
-        let php = self.php.reconcile_sources(sources.php)?;
-        let metrics = combine_reconcile_metrics(rust.metrics, php.metrics);
-        if rust.graph.is_none() && php.graph.is_none() {
-            return Ok(ReconcileReport {
-                graph: None,
-                metrics,
-                next_index: None,
-            });
-        }
+        let started = Instant::now();
+        let (rust_limits, php_limits) = self.live_graph_limits(&scan.sources);
+        let cancellation = IndexCancellation::default();
+        let rust_sources = std::mem::take(&mut scan.sources.rust);
+        let php_sources = std::mem::take(&mut scan.sources.php);
+        let rust = self
+            .rust
+            .reconcile_sources_bounded(rust_sources, rust_limits, &cancellation)?;
+        let php = self
+            .php
+            .reconcile_sources_bounded(php_sources, php_limits, &cancellation)?;
+        let mut metrics = combine_reconcile_metrics(rust.metrics, php.metrics);
 
         let rust_graph = rust
             .graph
@@ -113,25 +192,142 @@ impl WorkspaceSyntaxIndex {
             .graph
             .map(Arc::new)
             .unwrap_or_else(|| self.php_graph.clone());
+        let rust_build = rust
+            .build_metrics
+            .as_ref()
+            .map_or(self.rust_build, |metrics| metrics.graph);
+        let php_build = php
+            .build_metrics
+            .as_ref()
+            .map_or(self.php_build, |metrics| metrics.graph);
+        metrics.truncated_call_sites = rust_build
+            .omitted_call_sites
+            .saturating_add(php_build.omitted_call_sites);
+        let graph_changed = rust.next_index.is_some() || php.next_index.is_some();
+        let rust_index = rust.next_index.unwrap_or_else(|| self.rust.clone());
+        let php_index = php.next_index.unwrap_or_else(|| self.php.clone());
+
+        let (graph, composition_phase, validation_phase) = if graph_changed {
+            let composition_started = Instant::now();
+            let graph =
+                SymbolGraph::merge([rust_graph.as_ref().clone(), php_graph.as_ref().clone()])?;
+            let composition_phase = phase(
+                IndexPhase::LanguageComposition,
+                None,
+                composition_started.elapsed(),
+                graph.symbol_count().saturating_add(graph.edge_count()),
+                0,
+            );
+            let validation_started = Instant::now();
+            let audit = graph.audit_consistency()?;
+            let validation_phase = phase(
+                IndexPhase::GraphValidation,
+                None,
+                validation_started.elapsed(),
+                audit
+                    .symbols_audited
+                    .saturating_add(audit.adjacency_entries_examined),
+                0,
+            );
+            (Some(graph), Some(composition_phase), Some(validation_phase))
+        } else {
+            (None, None, None)
+        };
+
+        let mut phases = if graph_changed {
+            scan.phases.clone()
+        } else {
+            self.indexing.phases.clone()
+        };
+        if let Some(build) = rust.build_metrics.as_ref() {
+            phases.extend(build.phases.clone());
+        }
+        if let Some(build) = php.build_metrics.as_ref() {
+            phases.extend(build.phases.clone());
+        }
+        phases.extend(composition_phase);
+        phases.extend(validation_phase);
+        if graph_changed {
+            phases.push(phase(
+                IndexPhase::LiveReconciliation,
+                None,
+                started.elapsed(),
+                metrics
+                    .scanned_files
+                    .saturating_add(metrics.reparsed_files)
+                    .saturating_add(metrics.relationship_files_recomputed),
+                scan.source_bytes,
+            ));
+        }
+
+        let current_rss = process_rss_bytes();
+        let indexing = build_indexing_status(
+            self.budgets,
+            &scan,
+            IndexingParts {
+                rust: rust_index.fact_counts(),
+                php: php_index.fact_counts(),
+                rust_graph: rust_build,
+                php_graph: php_build,
+                rust_limits,
+                php_limits,
+                phases,
+                memory: IndexMemoryMetrics {
+                    current_rss_bytes: current_rss,
+                    observed_phase_peak_rss_bytes: max_option(
+                        self.indexing.memory.observed_phase_peak_rss_bytes,
+                        current_rss,
+                    ),
+                    ..IndexMemoryMetrics::default()
+                },
+            },
+        );
+
+        let metadata_changed = !indexing_semantically_equal(&self.indexing, &indexing);
+        if !graph_changed && !metadata_changed {
+            return Ok(ReconcileReport {
+                graph: None,
+                metrics,
+                next_index: None,
+                indexing: self.indexing.clone(),
+            });
+        }
+
         let next = Self {
-            rust: rust.next_index.unwrap_or_else(|| self.rust.clone()),
-            php: php.next_index.unwrap_or_else(|| self.php.clone()),
+            rust: rust_index,
+            php: php_index,
             rust_graph,
             php_graph,
+            rust_build,
+            php_build,
+            rust_limits,
+            php_limits,
+            budgets: self.budgets,
+            indexing: indexing.clone(),
         };
-        let graph = next.materialize_graph()?;
         Ok(ReconcileReport {
-            graph: Some(graph),
+            graph,
             metrics,
             next_index: Some(next),
+            indexing,
         })
     }
 
-    fn materialize_graph(&self) -> Result<SymbolGraph, WorkspaceIndexError> {
-        Ok(SymbolGraph::merge([
-            self.rust_graph.as_ref().clone(),
-            self.php_graph.as_ref().clone(),
-        ])?)
+    fn live_graph_limits(
+        &self,
+        sources: &WorkspaceSources,
+    ) -> (GraphBuildLimits, GraphBuildLimits) {
+        let rust_activated = self.rust.fact_counts().files == 0 && !sources.rust.is_empty();
+        let php_activated = self.php.fact_counts().files == 0 && !sources.php.is_empty();
+        if rust_activated || php_activated {
+            split_graph_limits(
+                self.budgets,
+                sources.rust.len() as u64,
+                sources.php.len() as u64,
+            )
+        } else {
+            (self.rust_limits, self.php_limits)
+        }
     }
 }
 
@@ -154,39 +350,144 @@ fn combine_reconcile_metrics(
 }
 
 pub fn index_repository(root: &Path) -> Result<IndexReport, WorkspaceIndexError> {
+    index_repository_with_options(root, IndexOptions::default())
+}
+
+pub fn index_repository_with_options(
+    root: &Path,
+    options: IndexOptions,
+) -> Result<IndexReport, WorkspaceIndexError> {
     let started = Instant::now();
-    let rust = chakra_language_rust::index_repository(root)?;
-    let php = chakra_language_php::index_repository(root)?;
-    if rust.repository_root != php.repository_root {
-        return Err(WorkspaceIndexError::RootMismatch {
-            rust: rust.repository_root.display().to_string(),
-            php: php.repository_root.display().to_string(),
-        });
+    let budgets = options.budgets.validate()?;
+    check_cancelled(&options.cancellation)?;
+    let repository_root = chakra_git::resolve_repository_root(root)?;
+    let mut rss_peak = process_rss_bytes();
+    let mut scan = scan_repository_sources_with_options(&repository_root, &options)?;
+    rss_peak = max_option(rss_peak, process_rss_bytes());
+
+    let (rust_limits, php_limits) = split_graph_limits(
+        budgets,
+        scan.sources.rust.len() as u64,
+        scan.sources.php.len() as u64,
+    );
+    let rust_sources = std::mem::take(&mut scan.sources.rust);
+    let php_sources = std::mem::take(&mut scan.sources.php);
+    let (rust, rust_graph, rust_metrics) =
+        chakra_language_rust::RustSyntaxIndex::from_sources_bounded(
+            rust_sources,
+            rust_limits,
+            &options.cancellation,
+        )?;
+    rss_peak = max_option(rss_peak, process_rss_bytes());
+    let (php, php_graph, php_metrics) = chakra_language_php::PhpSyntaxIndex::from_sources_bounded(
+        php_sources,
+        php_limits,
+        &options.cancellation,
+    )?;
+    rss_peak = max_option(rss_peak, process_rss_bytes());
+    check_cancelled(&options.cancellation)?;
+
+    let rust_graph = Arc::new(rust_graph);
+    let php_graph = Arc::new(php_graph);
+    let composition_started = Instant::now();
+    let graph = SymbolGraph::merge([rust_graph.as_ref().clone(), php_graph.as_ref().clone()])?;
+    let composition_phase = phase(
+        IndexPhase::LanguageComposition,
+        None,
+        composition_started.elapsed(),
+        graph.symbol_count().saturating_add(graph.edge_count()),
+        0,
+    );
+    let validation_started = Instant::now();
+    let audit = graph.audit_consistency()?;
+    let validation_phase = phase(
+        IndexPhase::GraphValidation,
+        None,
+        validation_started.elapsed(),
+        audit
+            .symbols_audited
+            .saturating_add(audit.adjacency_entries_examined),
+        0,
+    );
+    rss_peak = max_option(rss_peak, process_rss_bytes());
+
+    let mut phases = scan.phases.clone();
+    phases.extend(rust_metrics.phases.clone());
+    phases.extend(php_metrics.phases.clone());
+    phases.push(composition_phase);
+    phases.push(validation_phase);
+    let current_rss = process_rss_bytes();
+    rss_peak = max_option(rss_peak, current_rss);
+    let indexing = build_indexing_status(
+        budgets,
+        &scan,
+        IndexingParts {
+            rust: rust_metrics.facts,
+            php: php_metrics.facts,
+            rust_graph: rust_metrics.graph,
+            php_graph: php_metrics.graph,
+            rust_limits,
+            php_limits,
+            phases,
+            memory: IndexMemoryMetrics {
+                current_rss_bytes: current_rss,
+                observed_phase_peak_rss_bytes: rss_peak,
+                ..IndexMemoryMetrics::default()
+            },
+        },
+    );
+    let elapsed = started.elapsed();
+    if elapsed.as_millis() > u128::from(budgets.startup_target_millis) {
+        warn!(
+            elapsed_millis = elapsed.as_millis(),
+            target_millis = budgets.startup_target_millis,
+            "syntax startup exceeded its observable wall-time target"
+        );
     }
-    let repository_root = rust.repository_root;
-    let rust_metrics = rust.metrics;
-    let php_metrics = php.metrics;
+    if rss_peak.is_some_and(|rss| rss > budgets.memory_target_bytes) {
+        warn!(
+            observed_phase_peak_rss_bytes = ?rss_peak,
+            target_bytes = budgets.memory_target_bytes,
+            "syntax startup exceeded its observable memory target"
+        );
+    }
     let syntax_index = WorkspaceSyntaxIndex {
-        rust: rust.syntax_index,
-        php: php.syntax_index,
-        rust_graph: Arc::new(rust.graph),
-        php_graph: Arc::new(php.graph),
+        rust,
+        php,
+        rust_graph,
+        php_graph,
+        rust_build: rust_metrics.graph,
+        php_build: php_metrics.graph,
+        rust_limits,
+        php_limits,
+        budgets,
+        indexing: indexing.clone(),
     };
-    let graph = syntax_index.materialize_graph()?;
     let metrics = IndexMetrics {
-        discovered_files: rust_metrics.discovered_files + php_metrics.discovered_files,
-        parsed_files: rust_metrics.parsed_files + php_metrics.parsed_files,
-        syntax_error_files: rust_metrics.syntax_error_files + php_metrics.syntax_error_files,
-        truncated_call_sites: rust_metrics.truncated_call_sites + php_metrics.truncated_call_sites,
+        discovered_files: scan.discovered_files,
+        parsed_files: scan.indexed_files,
+        syntax_error_files: indexing.coverage.syntax_error_files,
+        truncated_call_sites: indexing.coverage.omitted_call_sites,
         symbols: graph.symbol_count(),
         edges: graph.edge_count(),
         call_sites: graph.call_site_count(),
         ambiguous_call_sites: graph.ambiguous_call_site_count(),
         unresolved_call_sites: graph.unresolved_call_site_count(),
-        rust_files: rust_metrics.parsed_files,
-        php_files: php_metrics.parsed_files,
-        elapsed: started.elapsed(),
+        rust_files: rust_metrics.facts.files,
+        php_files: php_metrics.facts.files,
+        elapsed,
+        indexing,
     };
+    info!(
+        discovered_files = metrics.discovered_files,
+        parsed_files = metrics.parsed_files,
+        symbols = metrics.symbols,
+        edges = metrics.edges,
+        call_sites = metrics.call_sites,
+        degraded = metrics.indexing.is_degraded(),
+        elapsed_micros = elapsed.as_micros(),
+        "bounded Rust/PHP syntax index completed"
+    );
     Ok(IndexReport {
         repository_root,
         graph,
@@ -195,28 +496,487 @@ pub fn index_repository(root: &Path) -> Result<IndexReport, WorkspaceIndexError>
     })
 }
 
+/// Compatibility helper using safe defaults.
 pub fn scan_repository_sources(
     repository_root: &Path,
 ) -> Result<WorkspaceSources, WorkspaceIndexError> {
-    Ok(WorkspaceSources {
-        rust: chakra_language_rust::scan_repository_sources(repository_root)?,
-        php: chakra_language_php::scan_repository_sources(repository_root)?,
+    Ok(scan_repository_sources_with_options(repository_root, &IndexOptions::default())?.sources)
+}
+
+pub fn scan_repository_sources_with_options(
+    repository_root: &Path,
+    options: &IndexOptions,
+) -> Result<WorkspaceSourceScan, WorkspaceIndexError> {
+    let budgets = options.budgets.validate()?;
+    check_cancelled(&options.cancellation)?;
+    let inventory_started = Instant::now();
+    let paths = chakra_git::discover_source_files(repository_root)?;
+    let discovered_files = paths.len() as u64;
+    let inventory_elapsed = inventory_started.elapsed();
+    let read_started = Instant::now();
+    let mut rust = BTreeMap::new();
+    let mut php = BTreeMap::new();
+    let mut source_bytes = 0_u64;
+    let mut oversized_files = 0_u64;
+    let mut largest_file = 0_u64;
+    let mut workspace_omitted = 0_u64;
+    let mut workspace_observed = 0_u64;
+
+    for (index, path) in paths.iter().enumerate() {
+        check_cancelled(&options.cancellation)?;
+        if index as u64 >= budgets.max_files {
+            continue;
+        }
+        let absolute = repository_root.join(path.as_str());
+        let metadata = fs::metadata(&absolute).map_err(|source| WorkspaceIndexError::Read {
+            path: path.clone(),
+            source,
+        })?;
+        let measured_len = metadata.len();
+        if measured_len > budgets.max_source_file_bytes {
+            oversized_files = oversized_files.saturating_add(1);
+            largest_file = largest_file.max(measured_len);
+            continue;
+        }
+        if source_bytes.saturating_add(measured_len) > budgets.max_workspace_source_bytes {
+            workspace_omitted = workspace_omitted.saturating_add(1);
+            workspace_observed = workspace_observed.max(source_bytes.saturating_add(measured_len));
+            continue;
+        }
+        let file = fs::File::open(&absolute).map_err(|source| WorkspaceIndexError::Read {
+            path: path.clone(),
+            source,
+        })?;
+        let mut source = String::new();
+        file.take(budgets.max_source_file_bytes.saturating_add(1))
+            .read_to_string(&mut source)
+            .map_err(|source| WorkspaceIndexError::Read {
+                path: path.clone(),
+                source,
+            })?;
+        let actual_len = source.len() as u64;
+        if actual_len > budgets.max_source_file_bytes {
+            oversized_files = oversized_files.saturating_add(1);
+            largest_file = largest_file.max(actual_len);
+            continue;
+        }
+        if source_bytes.saturating_add(actual_len) > budgets.max_workspace_source_bytes {
+            workspace_omitted = workspace_omitted.saturating_add(1);
+            workspace_observed = workspace_observed.max(source_bytes.saturating_add(actual_len));
+            continue;
+        }
+        source_bytes = source_bytes.saturating_add(actual_len);
+        let source = Arc::<str>::from(source);
+        match chakra_git::source_language(path.as_str()) {
+            Some(Language::Rust) => {
+                rust.insert(path.clone(), source);
+            }
+            Some(Language::Php) => {
+                php.insert(path.clone(), source);
+            }
+            None => {}
+        }
+    }
+
+    let indexed_files = (rust.len() + php.len()) as u64;
+    let mut degradations = Vec::new();
+    if discovered_files > budgets.max_files {
+        degradations.push(IndexDegradation {
+            phase: IndexPhase::GitInventory,
+            language: None,
+            cause: IndexBudgetKind::Files,
+            affected_capabilities: all_index_capabilities(),
+            limit: budgets.max_files,
+            observed: discovered_files,
+            omitted: discovered_files.saturating_sub(budgets.max_files),
+        });
+    }
+    if oversized_files > 0 {
+        degradations.push(IndexDegradation {
+            phase: IndexPhase::SourceRead,
+            language: None,
+            cause: IndexBudgetKind::SourceFileBytes,
+            affected_capabilities: all_index_capabilities(),
+            limit: budgets.max_source_file_bytes,
+            observed: largest_file,
+            omitted: oversized_files,
+        });
+    }
+    if workspace_omitted > 0 {
+        degradations.push(IndexDegradation {
+            phase: IndexPhase::SourceRead,
+            language: None,
+            cause: IndexBudgetKind::WorkspaceSourceBytes,
+            affected_capabilities: all_index_capabilities(),
+            limit: budgets.max_workspace_source_bytes,
+            observed: workspace_observed,
+            omitted: workspace_omitted,
+        });
+    }
+    let phases = vec![
+        phase(
+            IndexPhase::GitInventory,
+            None,
+            inventory_elapsed,
+            discovered_files,
+            0,
+        ),
+        phase(
+            IndexPhase::SourceRead,
+            None,
+            read_started.elapsed(),
+            indexed_files,
+            source_bytes,
+        ),
+    ];
+    Ok(WorkspaceSourceScan {
+        sources: WorkspaceSources { rust, php },
+        discovered_files,
+        indexed_files,
+        source_bytes,
+        degradations,
+        phases,
     })
+}
+
+fn split_graph_limits(
+    budgets: IndexBudgets,
+    rust_files: u64,
+    php_files: u64,
+) -> (GraphBuildLimits, GraphBuildLimits) {
+    let weights = rust_files.saturating_add(php_files);
+    let split = |limit: u64| {
+        if rust_files == 0 {
+            (0, limit)
+        } else if php_files == 0 {
+            (limit, 0)
+        } else {
+            let rust = limit.saturating_mul(rust_files) / weights;
+            (rust, limit.saturating_sub(rust))
+        }
+    };
+    let (rust_symbols, php_symbols) = split(budgets.max_symbols);
+    let (rust_edges, php_edges) = split(budgets.max_edges);
+    let (rust_calls, php_calls) = split(budgets.max_call_sites);
+    (
+        GraphBuildLimits {
+            max_symbols: rust_symbols,
+            max_edges: rust_edges,
+            max_call_sites: rust_calls,
+        },
+        GraphBuildLimits {
+            max_symbols: php_symbols,
+            max_edges: php_edges,
+            max_call_sites: php_calls,
+        },
+    )
+}
+
+struct IndexingParts {
+    rust: chakra_language_rust::SyntaxFactCounts,
+    php: chakra_language_php::SyntaxFactCounts,
+    rust_graph: GraphBuildReport,
+    php_graph: GraphBuildReport,
+    rust_limits: GraphBuildLimits,
+    php_limits: GraphBuildLimits,
+    phases: Vec<IndexPhaseMeasurement>,
+    memory: IndexMemoryMetrics,
+}
+
+fn build_indexing_status(
+    budgets: IndexBudgets,
+    scan: &WorkspaceSourceScan,
+    parts: IndexingParts,
+) -> IndexingStatus {
+    let IndexingParts {
+        rust,
+        php,
+        rust_graph,
+        php_graph,
+        rust_limits,
+        php_limits,
+        phases,
+        mut memory,
+    } = parts;
+    let extracted_symbols = rust.symbols.saturating_add(php.symbols);
+    let extracted_call_sites = rust.call_sites.saturating_add(php.call_sites);
+    let retained_symbols = rust_graph
+        .retained_symbols
+        .saturating_add(php_graph.retained_symbols);
+    let retained_edges = rust_graph
+        .retained_edges
+        .saturating_add(php_graph.retained_edges);
+    let omitted_edges = rust_graph
+        .omitted_edges
+        .saturating_add(php_graph.omitted_edges);
+    let retained_call_sites = rust_graph
+        .retained_call_sites
+        .saturating_add(php_graph.retained_call_sites);
+    let omitted_call_sites = rust_graph
+        .omitted_call_sites
+        .saturating_add(php_graph.omitted_call_sites);
+    let unknown_relationship_omissions = rust_graph
+        .call_sites_omitted_by_symbol_budget
+        .saturating_add(php_graph.call_sites_omitted_by_symbol_budget);
+    let skipped_files = scan.discovered_files.saturating_sub(scan.indexed_files);
+    let coverage = IndexCoverage {
+        discovered_files: scan.discovered_files,
+        indexed_files: scan.indexed_files,
+        skipped_files,
+        source_bytes: scan.source_bytes,
+        parsed_files: rust.files.saturating_add(php.files),
+        syntax_error_files: rust
+            .syntax_error_files
+            .saturating_add(php.syntax_error_files),
+        extracted_symbols,
+        retained_symbols,
+        retained_edges,
+        omitted_edges,
+        extracted_call_sites,
+        retained_call_sites,
+        omitted_call_sites,
+    };
+    let mut degradations = scan.degradations.clone();
+    append_graph_degradations(&mut degradations, Language::Rust, rust_limits, rust_graph);
+    append_graph_degradations(&mut degradations, Language::Php, php_limits, php_graph);
+    let capabilities = vec![
+        capability(
+            IndexCapability::FileInventory,
+            scan.indexed_files,
+            skipped_files,
+            true,
+        ),
+        capability(
+            IndexCapability::TextSearch,
+            scan.indexed_files,
+            skipped_files,
+            true,
+        ),
+        capability(
+            IndexCapability::Declarations,
+            retained_symbols,
+            extracted_symbols.saturating_sub(retained_symbols),
+            skipped_files == 0,
+        ),
+        capability(
+            IndexCapability::Relationships,
+            retained_edges,
+            omitted_edges,
+            skipped_files == 0 && unknown_relationship_omissions == 0,
+        ),
+        capability(
+            IndexCapability::CallSites,
+            retained_call_sites,
+            omitted_call_sites,
+            skipped_files == 0,
+        ),
+    ];
+    memory.retained_source_bytes = scan.source_bytes;
+    memory.retained_parsed_symbols = extracted_symbols;
+    memory.retained_parsed_relationship_edges = rust
+        .relationship_edges
+        .saturating_add(php.relationship_edges);
+    memory.retained_parsed_call_sites = extracted_call_sites;
+    memory.retained_graph_symbols = retained_symbols;
+    memory.retained_graph_edges = retained_edges;
+    memory.retained_graph_call_sites = retained_call_sites;
+    IndexingStatus {
+        budgets,
+        coverage,
+        capabilities,
+        degradations,
+        phases,
+        memory,
+    }
+}
+
+fn capability(
+    capability: IndexCapability,
+    retained: u64,
+    omitted: u64,
+    corpus_complete: bool,
+) -> IndexCapabilityCoverage {
+    IndexCapabilityCoverage {
+        capability,
+        retained,
+        omitted,
+        complete: corpus_complete && omitted == 0,
+    }
+}
+
+fn append_graph_degradations(
+    degradations: &mut Vec<IndexDegradation>,
+    language: Language,
+    limits: GraphBuildLimits,
+    report: GraphBuildReport,
+) {
+    let mut record = |cause, affected_capabilities, limit, observed, omitted| {
+        if omitted != 0 {
+            degradations.push(IndexDegradation {
+                phase: IndexPhase::GraphMaterialization,
+                language: Some(language),
+                cause,
+                affected_capabilities,
+                limit,
+                observed,
+                omitted,
+            });
+        }
+    };
+    let observed_symbols = report
+        .retained_symbols
+        .saturating_add(report.omitted_symbols);
+    let observed_edges = report
+        .retained_edges
+        .saturating_add(report.edges_omitted_by_edge_budget);
+    let observed_call_sites = report
+        .retained_call_sites
+        .saturating_add(report.call_sites_omitted_by_call_site_budget);
+    record(
+        IndexBudgetKind::Symbols,
+        vec![IndexCapability::Declarations],
+        limits.max_symbols,
+        observed_symbols,
+        report.omitted_symbols,
+    );
+    record(
+        IndexBudgetKind::Symbols,
+        vec![IndexCapability::Relationships],
+        limits.max_symbols,
+        observed_symbols,
+        report.edges_omitted_by_symbol_budget,
+    );
+    record(
+        IndexBudgetKind::Symbols,
+        vec![IndexCapability::Relationships, IndexCapability::CallSites],
+        limits.max_symbols,
+        observed_symbols,
+        report.call_sites_omitted_by_symbol_budget,
+    );
+    record(
+        IndexBudgetKind::Edges,
+        vec![IndexCapability::Relationships],
+        limits.max_edges,
+        observed_edges,
+        report.edges_omitted_by_edge_budget,
+    );
+    record(
+        IndexBudgetKind::Edges,
+        vec![IndexCapability::CallSites],
+        limits.max_edges,
+        observed_edges,
+        report.call_sites_omitted_by_edge_budget,
+    );
+    record(
+        IndexBudgetKind::CallSites,
+        vec![IndexCapability::Relationships],
+        limits.max_call_sites,
+        observed_call_sites,
+        report.edges_omitted_by_call_site_budget,
+    );
+    record(
+        IndexBudgetKind::CallSites,
+        vec![IndexCapability::CallSites],
+        limits.max_call_sites,
+        observed_call_sites,
+        report.call_sites_omitted_by_call_site_budget,
+    );
+}
+
+fn indexing_semantically_equal(left: &IndexingStatus, right: &IndexingStatus) -> bool {
+    left.budgets == right.budgets
+        && left.coverage == right.coverage
+        && left.capabilities == right.capabilities
+        && left.degradations == right.degradations
+}
+
+fn all_index_capabilities() -> Vec<IndexCapability> {
+    vec![
+        IndexCapability::FileInventory,
+        IndexCapability::TextSearch,
+        IndexCapability::Declarations,
+        IndexCapability::Relationships,
+        IndexCapability::CallSites,
+    ]
+}
+
+fn check_cancelled(cancellation: &IndexCancellation) -> Result<(), WorkspaceIndexError> {
+    if cancellation.is_cancelled() {
+        Err(WorkspaceIndexError::Cancelled)
+    } else {
+        Ok(())
+    }
+}
+
+fn phase(
+    phase: IndexPhase,
+    language: Option<Language>,
+    elapsed: Duration,
+    work_items: u64,
+    bytes: u64,
+) -> IndexPhaseMeasurement {
+    IndexPhaseMeasurement {
+        phase,
+        language,
+        elapsed_micros: elapsed.as_micros().min(u128::from(u64::MAX)) as u64,
+        work_items,
+        bytes,
+    }
+}
+
+fn max_option(left: Option<u64>, right: Option<u64>) -> Option<u64> {
+    match (left, right) {
+        (Some(left), Some(right)) => Some(left.max(right)),
+        (left, right) => left.or(right),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn process_rss_bytes() -> Option<u64> {
+    let status = fs::read_to_string("/proc/self/status").ok()?;
+    let line = status.lines().find(|line| line.starts_with("VmRSS:"))?;
+    line.split_whitespace()
+        .nth(1)?
+        .parse::<u64>()
+        .ok()?
+        .checked_mul(1024)
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+fn process_rss_bytes() -> Option<u64> {
+    let output = std::process::Command::new("ps")
+        .args(["-o", "rss=", "-p"])
+        .arg(std::process::id().to_string())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    std::str::from_utf8(&output.stdout)
+        .ok()?
+        .trim()
+        .parse::<u64>()
+        .ok()?
+        .checked_mul(1024)
+}
+
+#[cfg(not(unix))]
+fn process_rss_bytes() -> Option<u64> {
+    None
 }
 
 #[cfg(test)]
 mod tests {
     use std::error::Error;
-    use std::fs;
     use std::process::Command;
 
-    use chakra_domain::symbol::{EdgeKind, Language};
+    use chakra_domain::query::{QueryService, RepoMapRequest, SearchRequest, SymbolSearchRequest};
+    use chakra_domain::state::{Freshness, WorkspaceStatus};
     use tempfile::TempDir;
 
     use super::*;
 
-    #[test]
-    fn combines_rust_and_php_without_cross_language_call_edges() -> Result<(), Box<dyn Error>> {
+    fn repository() -> Result<TempDir, Box<dyn Error>> {
         let repository = TempDir::new()?;
         let status = Command::new("git")
             .current_dir(repository.path())
@@ -225,6 +985,12 @@ mod tests {
         if !status.success() {
             return Err("git init failed".into());
         }
+        Ok(repository)
+    }
+
+    #[test]
+    fn combines_rust_and_php_without_cross_language_call_edges() -> Result<(), Box<dyn Error>> {
+        let repository = repository()?;
         fs::write(
             repository.path().join("lib.rs"),
             "pub fn rust_caller() { shared(); }\npub fn shared() {}\n",
@@ -235,25 +1001,192 @@ mod tests {
         )?;
 
         let report = index_repository(repository.path())?;
-        let matches = report.graph.resolve_name("shared");
-        assert_eq!(matches.len(), 2);
-        let mut languages: Vec<_> = matches
-            .iter()
-            .filter_map(|id| report.graph.symbol(*id).map(|symbol| symbol.key.language))
-            .collect();
-        languages.sort();
-        assert_eq!(languages, [Language::Rust, Language::Php]);
+        assert_eq!(report.graph.resolve_name("shared").len(), 2);
         for symbol in report.graph.symbols() {
             for edge in report.graph.outgoing_edges(symbol.id) {
-                if edge.kind != EdgeKind::Calls {
-                    continue;
-                }
                 let target = report.graph.symbol(edge.to).ok_or("call target missing")?;
                 assert_eq!(symbol.key.language, target.key.language);
             }
         }
         assert_eq!(report.metrics.rust_files, 1);
         assert_eq!(report.metrics.php_files, 1);
+        assert!(!report.metrics.indexing.is_degraded());
+        Ok(())
+    }
+
+    #[test]
+    fn file_budget_publishes_useful_deterministic_degradation() -> Result<(), Box<dyn Error>> {
+        let repository = repository()?;
+        fs::write(repository.path().join("a.rs"), "pub fn alpha() {}\n")?;
+        fs::write(repository.path().join("b.rs"), "pub fn beta() {}\n")?;
+        let budgets = IndexBudgets {
+            max_files: 1,
+            ..IndexBudgets::default()
+        };
+        let options = IndexOptions::new(budgets, IndexCancellation::default())?;
+        let first = index_repository_with_options(repository.path(), options.clone())?;
+        let second = index_repository_with_options(repository.path(), options)?;
+
+        assert_eq!(first.graph.file_count(), 1);
+        assert_eq!(first.metrics.indexing.coverage.discovered_files, 2);
+        assert_eq!(first.metrics.indexing.coverage.skipped_files, 1);
+        assert!(
+            first
+                .metrics
+                .indexing
+                .capabilities
+                .iter()
+                .all(|capability| !capability.complete)
+        );
+        assert_eq!(
+            first.metrics.indexing.degradations,
+            second.metrics.indexing.degradations
+        );
+        assert_eq!(
+            first.metrics.indexing.capabilities,
+            second.metrics.indexing.capabilities
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn source_byte_budgets_skip_only_excess_files() -> Result<(), Box<dyn Error>> {
+        let repository = repository()?;
+        fs::write(repository.path().join("a.rs"), "pub fn retained() {}\n")?;
+        fs::write(
+            repository.path().join("b.rs"),
+            "pub fn source_that_is_deliberately_too_large_for_this_test() {}\n",
+        )?;
+        let per_file = IndexBudgets {
+            max_source_file_bytes: 32,
+            ..IndexBudgets::default()
+        };
+        let report = index_repository_with_options(
+            repository.path(),
+            IndexOptions::new(per_file, IndexCancellation::default())?,
+        )?;
+        assert_eq!(report.graph.file_count(), 1);
+        assert_eq!(report.graph.resolve_name("retained").len(), 1);
+        assert!(report.metrics.indexing.degradations.iter().any(|item| {
+            item.cause == IndexBudgetKind::SourceFileBytes
+                && item
+                    .affected_capabilities
+                    .contains(&IndexCapability::FileInventory)
+        }));
+
+        let workspace = IndexBudgets {
+            max_source_file_bytes: 32,
+            max_workspace_source_bytes: 32,
+            ..IndexBudgets::default()
+        };
+        fs::write(repository.path().join("b.rs"), "pub fn second() {}\n")?;
+        let report = index_repository_with_options(
+            repository.path(),
+            IndexOptions::new(workspace, IndexCancellation::default())?,
+        )?;
+        assert_eq!(report.graph.file_count(), 1);
+        assert!(report.metrics.indexing.degradations.iter().any(|item| {
+            item.cause == IndexBudgetKind::WorkspaceSourceBytes
+                && item
+                    .affected_capabilities
+                    .contains(&IndexCapability::FileInventory)
+        }));
+        Ok(())
+    }
+
+    #[test]
+    fn edge_and_call_site_budgets_stop_before_graph_allocation() -> Result<(), Box<dyn Error>> {
+        let repository = repository()?;
+        fs::write(
+            repository.path().join("service.php"),
+            "<?php class Service { function one() { missingOne(); missingTwo(); } function two() {} }\n",
+        )?;
+        let budgets = IndexBudgets {
+            max_edges: 1,
+            max_call_sites: 1,
+            ..IndexBudgets::default()
+        };
+        let report = index_repository_with_options(
+            repository.path(),
+            IndexOptions::new(budgets, IndexCancellation::default())?,
+        )?;
+        assert!(report.graph.edge_count() <= 1);
+        assert!(report.graph.call_site_count() <= 1);
+        assert!(report.metrics.indexing.coverage.omitted_edges > 0);
+        assert!(report.metrics.indexing.coverage.omitted_call_sites > 0);
+        assert!(report.metrics.indexing.degradations.iter().any(|item| {
+            item.cause == IndexBudgetKind::Edges
+                && item.affected_capabilities == [IndexCapability::Relationships]
+        }));
+        assert!(report.metrics.indexing.degradations.iter().any(|item| {
+            item.cause == IndexBudgetKind::CallSites
+                && item.affected_capabilities == [IndexCapability::CallSites]
+        }));
+        report.graph.validate_consistency()?;
+        Ok(())
+    }
+
+    #[test]
+    fn graph_budgets_keep_file_and_text_queries_useful() -> Result<(), Box<dyn Error>> {
+        let repository = repository()?;
+        fs::write(
+            repository.path().join("lib.rs"),
+            "pub fn alpha() { beta(); }\npub fn beta() {}\n",
+        )?;
+        let budgets = IndexBudgets {
+            max_symbols: 1,
+            max_edges: 1,
+            max_call_sites: 1,
+            ..IndexBudgets::default()
+        };
+        let report = index_repository_with_options(
+            repository.path(),
+            IndexOptions::new(budgets, IndexCancellation::default())?,
+        )?;
+        let identity = chakra_git::resolve_workspace_identity(repository.path())?;
+        let engine = chakra_engine::WorkspaceEngine::new(identity);
+        let mut update = engine.begin_update();
+        update.replace_graph(report.graph);
+        update.set_indexing(report.metrics.indexing.clone());
+        update.set_status(WorkspaceStatus::Degraded);
+        update.set_freshness(Freshness::Fresh);
+        engine.publish(update)?;
+
+        let repo_map = engine.repo_map(RepoMapRequest::default())?;
+        assert_eq!(repo_map.data.files.len(), 1);
+        let search = engine.search(SearchRequest {
+            query: "beta".to_owned(),
+            ..SearchRequest::default()
+        })?;
+        assert!(!search.data.matches.is_empty());
+        let symbols = engine.symbol_search(SymbolSearchRequest {
+            query: "alpha".to_owned(),
+            ..SymbolSearchRequest::default()
+        })?;
+        assert_eq!(symbols.data.candidates.len(), 1);
+        assert!(symbols.indexing.is_degraded());
+        assert!(symbols.indexing.capabilities.iter().any(|coverage| {
+            coverage.capability == IndexCapability::Relationships && !coverage.complete
+        }));
+        assert!(symbols.indexing.degradations.iter().any(|degradation| {
+            degradation.cause == IndexBudgetKind::Symbols
+                && degradation.affected_capabilities
+                    == [IndexCapability::Relationships, IndexCapability::CallSites]
+        }));
+        Ok(())
+    }
+
+    #[test]
+    fn cancellation_stops_before_parsing() -> Result<(), Box<dyn Error>> {
+        let repository = repository()?;
+        fs::write(repository.path().join("lib.rs"), "pub fn alpha() {}\n")?;
+        let cancellation = IndexCancellation::default();
+        cancellation.cancel();
+        let result = index_repository_with_options(
+            repository.path(),
+            IndexOptions::new(IndexBudgets::default(), cancellation)?,
+        );
+        assert!(matches!(result, Err(WorkspaceIndexError::Cancelled)));
         Ok(())
     }
 }

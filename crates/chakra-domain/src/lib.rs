@@ -7,6 +7,7 @@
 
 pub mod envelope;
 pub mod identity;
+pub mod indexing;
 pub mod location;
 pub mod provenance;
 pub mod query;

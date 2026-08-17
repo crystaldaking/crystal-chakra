@@ -10,6 +10,7 @@ use std::sync::{Arc, OnceLock};
 
 use arc_swap::ArcSwap;
 use chakra_domain::identity::WorkspaceIdentity;
+use chakra_domain::indexing::IndexingStatus;
 use chakra_domain::revision::Revision;
 use chakra_domain::state::{Freshness, ProviderState, WorkspaceStatus};
 use thiserror::Error;
@@ -28,6 +29,7 @@ pub struct WorkspaceSnapshot {
     /// reconciliation against the filesystem may claim `Fresh` (SPEC §6).
     freshness: Freshness,
     provider_state: ProviderState,
+    indexing: Arc<IndexingStatus>,
     graph: Arc<SymbolGraph>,
 }
 
@@ -50,6 +52,10 @@ impl WorkspaceSnapshot {
 
     pub fn provider_state(&self) -> ProviderState {
         self.provider_state
+    }
+
+    pub fn indexing(&self) -> &IndexingStatus {
+        self.indexing.as_ref()
     }
 
     pub fn graph(&self) -> &SymbolGraph {
@@ -115,6 +121,7 @@ pub struct UpdateBuilder {
     status: WorkspaceStatus,
     freshness: Freshness,
     provider_state: ProviderState,
+    indexing: Arc<IndexingStatus>,
     graph: Arc<SymbolGraph>,
 }
 
@@ -164,6 +171,11 @@ impl UpdateBuilder {
     pub fn set_provider_state(&mut self, provider_state: ProviderState) {
         self.provider_state = provider_state;
     }
+
+    /// Attaches indexing coverage to the same atomic revision as its graph.
+    pub fn set_indexing(&mut self, indexing: IndexingStatus) {
+        self.indexing = Arc::new(indexing);
+    }
 }
 
 /// Owns and atomically publishes workspace revisions.
@@ -189,6 +201,7 @@ impl WorkspaceEngine {
             status: WorkspaceStatus::Initializing,
             freshness: Freshness::Stale,
             provider_state: ProviderState::NotConfigured,
+            indexing: Arc::new(IndexingStatus::default()),
             graph: Arc::new(SymbolGraph::new()),
         };
         Self {
@@ -271,6 +284,7 @@ impl WorkspaceEngine {
             status: base.status,
             freshness: base.freshness,
             provider_state: base.provider_state,
+            indexing: base.indexing.clone(),
             graph: base.graph.clone(),
         }
     }
@@ -293,6 +307,7 @@ impl WorkspaceEngine {
             status: update.status,
             freshness: update.freshness,
             provider_state: update.provider_state,
+            indexing: update.indexing,
             graph: update.graph,
         });
         // Compare-and-publish: only swap if the slot still holds the
@@ -422,6 +437,27 @@ mod tests {
         assert_eq!(before.revision(), Revision::INITIAL);
         assert_eq!(before.graph().symbol_count(), 0);
         assert_eq!(engine.snapshot().revision(), Revision(1));
+        Ok(())
+    }
+
+    #[test]
+    fn indexing_coverage_is_published_atomically_with_its_graph()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let engine = engine()?;
+        let before = engine.snapshot();
+        let mut indexing = IndexingStatus::default();
+        indexing.coverage.discovered_files = 3;
+        indexing.coverage.indexed_files = 2;
+        indexing.coverage.skipped_files = 1;
+
+        let mut update = engine.begin_update();
+        update.replace_graph(SymbolGraph::new());
+        update.set_indexing(indexing.clone());
+        let after = engine.publish(update)?;
+
+        assert_eq!(before.indexing(), &IndexingStatus::default());
+        assert_eq!(after.indexing(), &indexing);
+        assert_eq!(engine.snapshot().indexing(), &indexing);
         Ok(())
     }
 }

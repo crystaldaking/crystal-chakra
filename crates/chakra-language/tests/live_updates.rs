@@ -8,13 +8,16 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use chakra_domain::identity::WorkspaceIdentity;
+use chakra_domain::indexing::{IndexBudgetKind, IndexBudgets, IndexCancellation, IndexPhase};
 use chakra_domain::query::{
     ContextRequest, QueryService, RepoMapRequest, SymbolRef, SymbolSearchRequest,
 };
 use chakra_domain::state::{Freshness, FreshnessRequirement, WorkspaceStatus};
 use chakra_domain::symbol::{CallResolution, Language};
 use chakra_engine::WorkspaceEngine;
-use chakra_language::{LiveIndex, index_repository, start_live_index};
+use chakra_language::{
+    IndexOptions, LiveIndex, index_repository, index_repository_with_options, start_live_index,
+};
 use tempfile::TempDir;
 
 fn write(root: &Path, path: &str, source: &str) -> Result<(), Box<dyn Error>> {
@@ -51,11 +54,83 @@ fn start(repository: &TempDir) -> Result<(Arc<WorkspaceEngine>, LiveIndex), Box<
     let engine = Arc::new(WorkspaceEngine::new(identity));
     let mut update = engine.begin_update();
     update.replace_graph(report.graph);
+    update.set_indexing(report.metrics.indexing);
     update.set_status(WorkspaceStatus::Indexing);
     update.set_freshness(Freshness::Stale);
     engine.publish(update)?;
     let live = start_live_index(report.repository_root, report.syntax_index, engine.clone())?;
     Ok((engine, live))
+}
+
+#[test]
+fn degraded_budget_metadata_survives_incremental_live_updates() -> Result<(), Box<dyn Error>> {
+    let repository = repository()?;
+    let budgets = IndexBudgets {
+        max_files: 2,
+        ..IndexBudgets::default()
+    };
+    let report = index_repository_with_options(
+        repository.path(),
+        IndexOptions::new(budgets, IndexCancellation::default())?,
+    )?;
+    let identity = WorkspaceIdentity::for_primary_worktree(&report.repository_root)?;
+    let engine = Arc::new(WorkspaceEngine::new(identity));
+    let mut update = engine.begin_update();
+    update.replace_graph(report.graph);
+    update.set_indexing(report.metrics.indexing);
+    update.set_status(WorkspaceStatus::Indexing);
+    update.set_freshness(Freshness::Stale);
+    engine.publish(update)?;
+    let live = start_live_index(report.repository_root, report.syntax_index, engine.clone())?;
+
+    let initial = engine.snapshot();
+    assert_eq!(initial.status(), WorkspaceStatus::Degraded);
+    assert_eq!(initial.indexing().coverage.discovered_files, 3);
+    assert_eq!(initial.indexing().coverage.indexed_files, 2);
+    assert!(
+        initial
+            .indexing()
+            .degradations
+            .iter()
+            .any(|item| { item.cause == IndexBudgetKind::Files && item.omitted == 1 })
+    );
+    let baseline = live.metrics();
+
+    write(
+        repository.path(),
+        "src/one.rs",
+        "pub fn alpha_after_budgeted_edit() {}\n",
+    )?;
+    assert_eq!(
+        symbols(&engine, "alpha_after_budgeted_edit")?,
+        ["one::alpha_after_budgeted_edit"]
+    );
+    let updated = engine.snapshot();
+    assert_eq!(updated.status(), WorkspaceStatus::Degraded);
+    assert_eq!(updated.indexing().coverage.discovered_files, 3);
+    assert_eq!(updated.indexing().coverage.indexed_files, 2);
+    for required in [
+        IndexPhase::ParseExtraction,
+        IndexPhase::SymbolCatalog,
+        IndexPhase::Relationships,
+        IndexPhase::GraphMaterialization,
+        IndexPhase::LanguageComposition,
+        IndexPhase::GraphValidation,
+        IndexPhase::LiveReconciliation,
+    ] {
+        assert!(
+            updated
+                .indexing()
+                .phases
+                .iter()
+                .any(|measurement| measurement.phase == required),
+            "missing live phase measurement: {required:?}"
+        );
+    }
+    assert_eq!(live.metrics().files_reparsed - baseline.files_reparsed, 1);
+    updated.graph().validate_consistency()?;
+    live.shutdown()?;
+    Ok(())
 }
 
 fn symbols(
@@ -348,6 +423,42 @@ fn php_edit_is_immediately_fresh_and_does_not_reparse_rust() -> Result<(), Box<d
     assert_eq!(
         metrics.relationship_files_recomputed - baseline.relationship_files_recomputed,
         1
+    );
+    engine.snapshot().graph().validate_consistency()?;
+    live.shutdown()?;
+    Ok(())
+}
+
+#[test]
+fn first_file_of_a_live_language_receives_budget_without_reparsing_other_files()
+-> Result<(), Box<dyn Error>> {
+    let repository = repository()?;
+    let (engine, live) = start(&repository)?;
+    let baseline = live.metrics();
+
+    write(
+        repository.path(),
+        "src/PaymentService.php",
+        "<?php namespace App; class PaymentService { public function refund(): void {} }\n",
+    )?;
+    let response = engine.symbol_search(SymbolSearchRequest {
+        query: "refund".to_owned(),
+        limit: None,
+        freshness: FreshnessRequirement::RequireFresh,
+    })?;
+
+    assert_eq!(response.data.candidates.len(), 1);
+    assert_eq!(response.data.candidates[0].language, Language::Php);
+    assert_eq!(
+        response.data.candidates[0].qualified_name,
+        "App::PaymentService::refund"
+    );
+    assert_eq!(symbols(&engine, "one::alpha")?, ["one::alpha"]);
+    assert!(!engine.snapshot().indexing().is_degraded());
+    assert_eq!(
+        live.metrics().files_reparsed - baseline.files_reparsed,
+        1,
+        "activating PHP may rebalance cached graphs but must parse only the new file"
     );
     engine.snapshot().graph().validate_consistency()?;
     live.shutdown()?;

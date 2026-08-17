@@ -421,6 +421,7 @@ fn envelope<T>(
         truncated,
         data,
     )
+    .with_indexing(snapshot.indexing().clone())
 }
 
 fn bounded_match_line(line: &str, match_start: usize, match_end: usize) -> (String, bool) {

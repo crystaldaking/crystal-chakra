@@ -7,10 +7,14 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use chakra_domain::indexing::{IndexCancellation, IndexPhase, IndexPhaseMeasurement};
 use chakra_domain::location::{RepoRelativePath, SourceRange};
 use chakra_domain::provenance::{Precision, Provenance};
-use chakra_domain::symbol::{EdgeKind, EntityId, SymbolKind};
-use chakra_engine::{CallSiteInput, ConsistencyError, GraphError, SymbolGraph};
+use chakra_domain::symbol::{EdgeKind, Language, SymbolKind};
+use chakra_engine::{
+    BoundedGraphBuilder, CallSiteInput, ConsistencyError, GraphBuildLimits, GraphBuildReport,
+    GraphError, SymbolGraph,
+};
 use thiserror::Error;
 use tracing::{info, info_span};
 
@@ -58,6 +62,25 @@ pub struct ReconcileReport {
     pub graph: Option<SymbolGraph>,
     pub metrics: ReconcileMetrics,
     pub next_index: Option<RustSyntaxIndex>,
+    pub build_metrics: Option<LanguageBuildMetrics>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SyntaxFactCounts {
+    pub files: u64,
+    pub source_bytes: u64,
+    pub syntax_error_files: u64,
+    pub symbols: u64,
+    pub relationship_edges: u64,
+    pub omitted_relationship_edges: u64,
+    pub call_sites: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LanguageBuildMetrics {
+    pub facts: SyntaxFactCounts,
+    pub graph: GraphBuildReport,
+    pub phases: Vec<IndexPhaseMeasurement>,
 }
 
 /// Complete private initial index, ready for atomic publication by the
@@ -97,6 +120,8 @@ pub enum RustIndexError {
     Graph(#[from] GraphError),
     #[error("constructed syntax graph is inconsistent: {0}")]
     Consistency(#[from] ConsistencyError),
+    #[error("Rust syntax indexing was cancelled")]
+    Cancelled,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -124,6 +149,17 @@ struct RelationshipEdge {
 struct RelationshipContribution {
     dependencies: HashSet<DependencyKey>,
     edges: Vec<RelationshipEdge>,
+    omitted_edges: u64,
+}
+
+impl RelationshipContribution {
+    fn push_edge(&mut self, edge: RelationshipEdge, limit: u64) {
+        if self.edges.len() as u64 >= limit {
+            self.omitted_edges = self.omitted_edges.saturating_add(1);
+        } else {
+            self.edges.push(edge);
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -166,38 +202,100 @@ impl<'a> SymbolCatalog<'a> {
 ///
 /// Entity ids are intentionally absent here: they are revision-scoped and
 /// assigned only while a complete immutable graph is materialized.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct RustSyntaxIndex {
     files: BTreeMap<RepoRelativePath, Arc<ParsedFile>>,
     relationships: BTreeMap<RepoRelativePath, Arc<RelationshipContribution>>,
+    graph_limits: GraphBuildLimits,
+}
+
+impl Default for RustSyntaxIndex {
+    fn default() -> Self {
+        Self {
+            files: BTreeMap::new(),
+            relationships: BTreeMap::new(),
+            graph_limits: GraphBuildLimits::UNLIMITED,
+        }
+    }
 }
 
 impl RustSyntaxIndex {
     pub fn from_sources(
         sources: BTreeMap<RepoRelativePath, Arc<str>>,
     ) -> Result<(Self, SymbolGraph), RustIndexError> {
+        let cancellation = IndexCancellation::default();
+        let (index, graph, _) =
+            Self::from_sources_bounded(sources, GraphBuildLimits::UNLIMITED, &cancellation)?;
+        Ok((index, graph))
+    }
+
+    pub fn from_sources_bounded(
+        sources: BTreeMap<RepoRelativePath, Arc<str>>,
+        graph_limits: GraphBuildLimits,
+        cancellation: &IndexCancellation,
+    ) -> Result<(Self, SymbolGraph, LanguageBuildMetrics), RustIndexError> {
+        check_cancelled(cancellation)?;
         let mut parser = RustParser::new().map_err(parse_error)?;
         let mut files = BTreeMap::new();
+        let parse_started = Instant::now();
         for (path, source) in sources {
+            check_cancelled(cancellation)?;
             let parsed = parser.parse(path.clone(), source).map_err(parse_error)?;
             files.insert(path, Arc::new(parsed));
         }
+        let parse_elapsed = parse_started.elapsed();
+        check_cancelled(cancellation)?;
+        let catalog_started = Instant::now();
         let catalog = SymbolCatalog::new(&files);
-        let relationships = files
-            .iter()
-            .map(|(path, file)| {
-                (
-                    path.clone(),
-                    Arc::new(relationships_for_file(path, file, &catalog)),
-                )
-            })
-            .collect();
+        let catalog_elapsed = catalog_started.elapsed();
+        let relationships_started = Instant::now();
+        let relationships =
+            build_all_relationships(&files, &catalog, graph_limits.max_edges, cancellation)?;
+        let relationships_elapsed = relationships_started.elapsed();
         let index = Self {
             files,
             relationships,
+            graph_limits,
         };
-        let graph = index.materialize_graph()?;
-        Ok((index, graph))
+        let facts = index.fact_counts();
+        let materialize_started = Instant::now();
+        let (graph, graph_report) = index.materialize_graph_bounded(cancellation)?;
+        let materialize_elapsed = materialize_started.elapsed();
+        let phases = vec![
+            phase(
+                IndexPhase::ParseExtraction,
+                parse_elapsed,
+                facts.files,
+                facts.source_bytes,
+            ),
+            phase(IndexPhase::SymbolCatalog, catalog_elapsed, facts.symbols, 0),
+            phase(
+                IndexPhase::Relationships,
+                relationships_elapsed,
+                facts
+                    .relationship_edges
+                    .saturating_add(facts.omitted_relationship_edges),
+                0,
+            ),
+            phase(
+                IndexPhase::GraphMaterialization,
+                materialize_elapsed,
+                graph_report
+                    .retained_symbols
+                    .saturating_add(graph_report.retained_edges)
+                    .saturating_add(graph_report.retained_call_sites),
+                0,
+            ),
+        ];
+        Ok((
+            index,
+            graph,
+            LanguageBuildMetrics {
+                facts,
+                graph: graph_report,
+                phases,
+            },
+        ))
     }
 
     pub fn paths(&self) -> Vec<RepoRelativePath> {
@@ -211,6 +309,17 @@ impl RustSyntaxIndex {
         &self,
         sources: BTreeMap<RepoRelativePath, Arc<str>>,
     ) -> Result<ReconcileReport, RustIndexError> {
+        self.reconcile_sources_bounded(sources, self.graph_limits, &IndexCancellation::default())
+    }
+
+    pub fn reconcile_sources_bounded(
+        &self,
+        sources: BTreeMap<RepoRelativePath, Arc<str>>,
+        graph_limits: GraphBuildLimits,
+        cancellation: &IndexCancellation,
+    ) -> Result<ReconcileReport, RustIndexError> {
+        check_cancelled(cancellation)?;
+        let limits_changed = graph_limits != self.graph_limits;
         let mut metrics = ReconcileMetrics {
             scanned_files: sources.len() as u64,
             ..ReconcileMetrics::default()
@@ -237,13 +346,14 @@ impl RustSyntaxIndex {
                 changed_paths.insert(path.clone());
             }
         }
-        if changed_paths.is_empty() {
+        if changed_paths.is_empty() && !limits_changed {
             metrics.syntax_error_files = self.syntax_error_files();
             metrics.truncated_call_sites = self.truncated_call_sites();
             return Ok(ReconcileReport {
                 graph: None,
                 metrics,
                 next_index: None,
+                build_metrics: None,
             });
         }
 
@@ -254,8 +364,10 @@ impl RustSyntaxIndex {
                 changed_dependencies.extend(exported_dependencies(previous));
             }
         }
+        let parse_started = Instant::now();
         let mut parser = RustParser::new().map_err(parse_error)?;
         for path in &changed_paths {
+            check_cancelled(cancellation)?;
             match sources.get(path) {
                 Some(source) => {
                     let parsed = parser
@@ -270,6 +382,8 @@ impl RustSyntaxIndex {
                 }
             }
         }
+        let parse_elapsed = parse_started.elapsed();
+        check_cancelled(cancellation)?;
 
         let mut affected_owners = changed_paths.clone();
         affected_owners.extend(
@@ -284,34 +398,103 @@ impl RustSyntaxIndex {
                 .map(|(path, _)| path.clone()),
         );
 
+        let catalog_started = Instant::now();
         let catalog = SymbolCatalog::new(&next_files);
-        let mut next_relationships = self.relationships.clone();
-        for path in &affected_owners {
-            match next_files.get(path) {
-                Some(file) => {
-                    next_relationships.insert(
-                        path.clone(),
-                        Arc::new(relationships_for_file(path, file, &catalog)),
-                    );
-                    metrics.relationship_files_recomputed += 1;
-                }
-                None => {
-                    next_relationships.remove(path);
+        let catalog_elapsed = catalog_started.elapsed();
+        check_cancelled(cancellation)?;
+        let relationships_started = Instant::now();
+        let mut next_relationships = if limits_changed || self.omitted_relationship_edges() > 0 {
+            metrics.relationship_files_recomputed = next_files.len() as u64;
+            build_all_relationships(&next_files, &catalog, graph_limits.max_edges, cancellation)?
+        } else {
+            let mut relationships = self.relationships.clone();
+            for path in &affected_owners {
+                match next_files.get(path) {
+                    Some(file) => {
+                        relationships.insert(
+                            path.clone(),
+                            Arc::new(relationships_for_file(
+                                path,
+                                file,
+                                &catalog,
+                                graph_limits.max_edges,
+                            )),
+                        );
+                        metrics.relationship_files_recomputed += 1;
+                    }
+                    None => {
+                        relationships.remove(path);
+                    }
                 }
             }
+            relationships
+        };
+        let retained_edges: u64 = next_relationships
+            .values()
+            .map(|contribution| contribution.edges.len() as u64)
+            .sum();
+        let omitted_edges: u64 = next_relationships
+            .values()
+            .map(|contribution| contribution.omitted_edges)
+            .sum();
+        if retained_edges > graph_limits.max_edges || omitted_edges > 0 {
+            next_relationships = build_all_relationships(
+                &next_files,
+                &catalog,
+                graph_limits.max_edges,
+                cancellation,
+            )?;
+            metrics.relationship_files_recomputed = next_files.len() as u64;
         }
+        let relationships_elapsed = relationships_started.elapsed();
 
         let next = Self {
             files: next_files,
             relationships: next_relationships,
+            graph_limits,
         };
-        let graph = next.materialize_graph()?;
+        let materialize_started = Instant::now();
+        let (graph, graph_report) = next.materialize_graph_bounded(cancellation)?;
+        let facts = next.fact_counts();
+        let build_metrics = LanguageBuildMetrics {
+            facts,
+            graph: graph_report,
+            phases: vec![
+                phase(
+                    IndexPhase::ParseExtraction,
+                    parse_elapsed,
+                    metrics.reparsed_files,
+                    changed_paths
+                        .iter()
+                        .filter_map(|path| next.files.get(path))
+                        .map(|file| file.source.len() as u64)
+                        .sum(),
+                ),
+                phase(IndexPhase::SymbolCatalog, catalog_elapsed, facts.symbols, 0),
+                phase(
+                    IndexPhase::Relationships,
+                    relationships_elapsed,
+                    metrics.relationship_files_recomputed,
+                    0,
+                ),
+                phase(
+                    IndexPhase::GraphMaterialization,
+                    materialize_started.elapsed(),
+                    graph_report
+                        .retained_symbols
+                        .saturating_add(graph_report.retained_edges)
+                        .saturating_add(graph_report.retained_call_sites),
+                    0,
+                ),
+            ],
+        };
         metrics.syntax_error_files = next.syntax_error_files();
         metrics.truncated_call_sites = next.truncated_call_sites();
         Ok(ReconcileReport {
             graph: Some(graph),
             metrics,
             next_index: Some(next),
+            build_metrics: Some(build_metrics),
         })
     }
 
@@ -323,10 +506,49 @@ impl RustSyntaxIndex {
         0
     }
 
-    fn materialize_graph(&self) -> Result<SymbolGraph, RustIndexError> {
-        let mut graph = SymbolGraph::new();
+    fn omitted_relationship_edges(&self) -> u64 {
+        self.relationships
+            .values()
+            .map(|contribution| contribution.omitted_edges)
+            .sum()
+    }
+
+    pub fn fact_counts(&self) -> SyntaxFactCounts {
+        SyntaxFactCounts {
+            files: self.files.len() as u64,
+            source_bytes: self
+                .files
+                .values()
+                .map(|file| file.source.len() as u64)
+                .sum(),
+            syntax_error_files: self.syntax_error_files(),
+            symbols: self
+                .files
+                .values()
+                .map(|file| file.symbols.len() as u64)
+                .sum(),
+            relationship_edges: self
+                .relationships
+                .values()
+                .map(|relationships| relationships.edges.len() as u64)
+                .sum(),
+            omitted_relationship_edges: self.omitted_relationship_edges(),
+            call_sites: self
+                .files
+                .values()
+                .map(|file| file.calls.len() as u64)
+                .sum(),
+        }
+    }
+
+    fn materialize_graph_bounded(
+        &self,
+        cancellation: &IndexCancellation,
+    ) -> Result<(SymbolGraph, GraphBuildReport), RustIndexError> {
+        let mut graph = BoundedGraphBuilder::new(self.graph_limits);
         let mut ids = BTreeMap::new();
         for (path, file) in &self.files {
+            check_cancelled(cancellation)?;
             graph.add_file(path.clone(), file.source.clone())?;
             for (index, symbol) in file.symbols.iter().enumerate() {
                 let id = graph.add_symbol(
@@ -336,23 +558,29 @@ impl RustSyntaxIndex {
                     Provenance::TreeSitter,
                     Precision::Syntax,
                 )?;
-                ids.insert(
-                    SymbolAddress {
-                        path: path.clone(),
-                        index,
-                    },
-                    id,
-                );
+                if let Some(id) = id {
+                    ids.insert(
+                        SymbolAddress {
+                            path: path.clone(),
+                            index,
+                        },
+                        id,
+                    );
+                }
             }
         }
         for contribution in self.relationships.values() {
+            check_cancelled(cancellation)?;
+            graph.omit_edges_for_edge_budget(contribution.omitted_edges);
             for edge in &contribution.edges {
-                let from = address_id(&ids, &edge.from)?;
-                let to = address_id(&ids, &edge.to)?;
+                let (Some(from), Some(to)) = (ids.get(&edge.from), ids.get(&edge.to)) else {
+                    graph.omit_edges_for_symbol_budget(1);
+                    continue;
+                };
                 graph.add_edge(
                     edge.kind,
-                    from,
-                    to,
+                    *from,
+                    *to,
                     edge.provenance,
                     edge.precision,
                     edge.location.clone(),
@@ -360,15 +588,21 @@ impl RustSyntaxIndex {
             }
         }
         for (path, file) in &self.files {
+            check_cancelled(cancellation)?;
+            if graph.omitted_symbols() > 0 {
+                graph.omit_call_sites_for_symbol_budget(file.calls.len() as u64);
+                continue;
+            }
             for call_site in &file.calls {
+                let Some(caller) = ids.get(&SymbolAddress {
+                    path: path.clone(),
+                    index: call_site.caller,
+                }) else {
+                    graph.omit_call_sites_for_symbol_budget(1);
+                    continue;
+                };
                 graph.add_call_site(CallSiteInput {
-                    caller: address_id(
-                        &ids,
-                        &SymbolAddress {
-                            path: path.clone(),
-                            index: call_site.caller,
-                        },
-                    )?,
+                    caller: *caller,
                     form: call_site.form,
                     target_kind: call_site.target_kind,
                     name: call_site.name.clone(),
@@ -380,21 +614,51 @@ impl RustSyntaxIndex {
                 })?;
             }
         }
-        graph.set_truncated_call_sites(self.truncated_call_sites());
-        Ok(graph)
+        let (mut graph, report) = graph.finish();
+        graph.set_truncated_call_sites(report.omitted_call_sites);
+        Ok((graph, report))
     }
 }
 
-fn address_id(
-    ids: &BTreeMap<SymbolAddress, EntityId>,
-    address: &SymbolAddress,
-) -> Result<EntityId, RustIndexError> {
-    ids.get(address).copied().ok_or_else(|| {
-        RustIndexError::Update(format!(
-            "relationship references missing symbol {}#{}",
-            address.path, address.index
-        ))
-    })
+fn check_cancelled(cancellation: &IndexCancellation) -> Result<(), RustIndexError> {
+    if cancellation.is_cancelled() {
+        Err(RustIndexError::Cancelled)
+    } else {
+        Ok(())
+    }
+}
+
+fn phase(
+    phase: IndexPhase,
+    elapsed: Duration,
+    work_items: u64,
+    bytes: u64,
+) -> IndexPhaseMeasurement {
+    IndexPhaseMeasurement {
+        phase,
+        language: Some(Language::Rust),
+        elapsed_micros: elapsed.as_micros().min(u128::from(u64::MAX)) as u64,
+        work_items,
+        bytes,
+    }
+}
+
+fn build_all_relationships(
+    files: &BTreeMap<RepoRelativePath, Arc<ParsedFile>>,
+    catalog: &SymbolCatalog<'_>,
+    limit: u64,
+    cancellation: &IndexCancellation,
+) -> Result<BTreeMap<RepoRelativePath, Arc<RelationshipContribution>>, RustIndexError> {
+    let mut relationships = BTreeMap::new();
+    let mut retained = 0_u64;
+    for (path, file) in files {
+        check_cancelled(cancellation)?;
+        let remaining = limit.saturating_sub(retained);
+        let contribution = relationships_for_file(path, file, catalog, remaining);
+        retained = retained.saturating_add(contribution.edges.len() as u64);
+        relationships.insert(path.clone(), Arc::new(contribution));
+    }
+    Ok(relationships)
 }
 
 fn parse_error(error: impl std::fmt::Display) -> RustIndexError {
@@ -438,6 +702,7 @@ fn relationships_for_file(
     path: &RepoRelativePath,
     file: &ParsedFile,
     catalog: &SymbolCatalog<'_>,
+    edge_limit: u64,
 ) -> RelationshipContribution {
     let mut contribution = RelationshipContribution::default();
     let address = |index| SymbolAddress {
@@ -465,22 +730,25 @@ fn relationships_for_file(
         let child = address(index);
         if parent != child {
             let physical = symbol.parent.is_none();
-            contribution.edges.push(RelationshipEdge {
-                kind: EdgeKind::Contains,
-                from: parent,
-                to: child,
-                provenance: if physical {
-                    Provenance::Heuristic
-                } else {
-                    Provenance::TreeSitter
+            contribution.push_edge(
+                RelationshipEdge {
+                    kind: EdgeKind::Contains,
+                    from: parent,
+                    to: child,
+                    provenance: if physical {
+                        Provenance::Heuristic
+                    } else {
+                        Provenance::TreeSitter
+                    },
+                    precision: if physical {
+                        Precision::Heuristic
+                    } else {
+                        Precision::Syntax
+                    },
+                    location: None,
                 },
-                precision: if physical {
-                    Precision::Heuristic
-                } else {
-                    Precision::Syntax
-                },
-                location: None,
-            });
+                edge_limit,
+            );
         }
     }
 
@@ -497,14 +765,17 @@ fn relationships_for_file(
             }
         }
         if let Some(target) = target.clone() {
-            contribution.edges.push(RelationshipEdge {
-                kind: EdgeKind::Contains,
-                from: target,
-                to: address(implementation.symbol),
-                provenance: Provenance::TreeSitter,
-                precision: Precision::Heuristic,
-                location: None,
-            });
+            contribution.push_edge(
+                RelationshipEdge {
+                    kind: EdgeKind::Contains,
+                    from: target,
+                    to: address(implementation.symbol),
+                    provenance: Provenance::TreeSitter,
+                    precision: Precision::Heuristic,
+                    location: None,
+                },
+                edge_limit,
+            );
         }
 
         let Some(trait_lookup) = implementation.trait_lookup.as_ref() else {
@@ -518,14 +789,17 @@ fn relationships_for_file(
             continue;
         };
         if let Some(target) = target {
-            contribution.edges.push(RelationshipEdge {
-                kind: EdgeKind::Implements,
-                from: target,
-                to: trait_address.clone(),
-                provenance: Provenance::TreeSitter,
-                precision: Precision::Heuristic,
-                location: None,
-            });
+            contribution.push_edge(
+                RelationshipEdge {
+                    kind: EdgeKind::Implements,
+                    from: target,
+                    to: trait_address.clone(),
+                    provenance: Provenance::TreeSitter,
+                    precision: Precision::Heuristic,
+                    location: None,
+                },
+                edge_limit,
+            );
         }
         let Some(trait_symbol) = catalog.symbol(&trait_address) else {
             continue;
@@ -543,14 +817,17 @@ fn relationships_for_file(
             ));
             if let Some(trait_method) = catalog.unique_exact(&trait_method_name, SymbolKind::Method)
             {
-                contribution.edges.push(RelationshipEdge {
-                    kind: EdgeKind::Implements,
-                    from: address(method_index),
-                    to: trait_method,
-                    provenance: Provenance::TreeSitter,
-                    precision: Precision::Heuristic,
-                    location: None,
-                });
+                contribution.push_edge(
+                    RelationshipEdge {
+                        kind: EdgeKind::Implements,
+                        from: address(method_index),
+                        to: trait_method,
+                        provenance: Provenance::TreeSitter,
+                        precision: Precision::Heuristic,
+                        location: None,
+                    },
+                    edge_limit,
+                );
             }
         }
     }
@@ -697,6 +974,46 @@ mod tests {
             graph.call_site_count(),
             TARGETS * CALLS,
         );
+        Ok(())
+    }
+
+    #[test]
+    fn truncated_catalog_never_turns_ambiguity_into_a_unique_call() -> Result<(), Box<dyn Error>> {
+        let mut sources = BTreeMap::new();
+        sources.insert(
+            RepoRelativePath::new("src/a_caller.rs")?,
+            Arc::<str>::from("pub fn invoke() { target(); }\n"),
+        );
+        sources.insert(
+            RepoRelativePath::new("src/b_target.rs")?,
+            Arc::<str>::from("pub fn target() {}\n"),
+        );
+        sources.insert(
+            RepoRelativePath::new("src/c_target.rs")?,
+            Arc::<str>::from("pub fn target() {}\n"),
+        );
+        let cancellation = IndexCancellation::default();
+        let (_, graph, metrics) = RustSyntaxIndex::from_sources_bounded(
+            sources,
+            GraphBuildLimits {
+                max_symbols: 2,
+                max_edges: 10,
+                max_call_sites: 10,
+            },
+            &cancellation,
+        )?;
+
+        assert_eq!(metrics.graph.omitted_symbols, 1);
+        assert_eq!(metrics.graph.call_sites_omitted_by_symbol_budget, 1);
+        assert_eq!(graph.call_site_count(), 0);
+        let call_edges = graph
+            .symbols()
+            .iter()
+            .flat_map(|symbol| graph.outgoing_edges(symbol.id))
+            .filter(|edge| edge.kind == EdgeKind::Calls)
+            .count();
+        assert_eq!(call_edges, 0);
+        graph.validate_consistency()?;
         Ok(())
     }
 

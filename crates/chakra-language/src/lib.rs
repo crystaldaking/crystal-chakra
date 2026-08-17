@@ -8,7 +8,9 @@ mod indexer;
 mod live;
 
 pub use indexer::{
-    IndexMetrics, IndexReport, ReconcileMetrics, ReconcileReport, WorkspaceIndexError,
-    WorkspaceSources, WorkspaceSyntaxIndex, index_repository, scan_repository_sources,
+    IndexMetrics, IndexOptions, IndexReport, ReconcileMetrics, ReconcileReport,
+    WorkspaceIndexError, WorkspaceSourceScan, WorkspaceSources, WorkspaceSyntaxIndex,
+    index_repository, index_repository_with_options, scan_repository_sources,
+    scan_repository_sources_with_options,
 };
 pub use live::{LiveIndex, LiveIndexError, LiveIndexMetrics, start_live_index};

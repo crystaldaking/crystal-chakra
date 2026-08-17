@@ -2,6 +2,7 @@
 
 Status: accepted
 Date: 2026-08-15
+Last reviewed: 2026-08-18
 
 ## Context
 
@@ -27,6 +28,11 @@ representation must support the atomic publication model of ADR-001.
 - a compact call-site arena plus caller/lookup indexes for ambiguous and
   unresolved syntax calls; only uniquely resolved syntax calls become graph
   edges (ADR-010).
+
+Private language materialization uses `BoundedGraphBuilder` (ADR-011). It
+checks symbol, edge, and call-site quotas before allocation and reports exact
+retained/omitted work. A truncated symbol catalog never resolves call sites,
+because removing one declaration could otherwise manufacture false uniqueness.
 
 Name resolution is a deliberate linear scan over the arena (exact for
 `resolve_name`, case-insensitive substring for `symbol_search`): a name

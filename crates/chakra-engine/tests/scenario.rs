@@ -73,7 +73,10 @@ impl PreciseProvider for FixedProvider {
 fn status_reports_scenario_counts() -> Result<(), Box<dyn Error>> {
     let (engine, _) = scenario_engine()?;
     let envelope = engine.status(StatusRequest)?;
-    assert_eq!(envelope.schema_version, 1);
+    assert_eq!(
+        envelope.schema_version,
+        chakra_domain::envelope::SCHEMA_VERSION
+    );
     assert_eq!(envelope.revision, Revision(1));
     assert_eq!(envelope.freshness, Freshness::Fresh);
     assert_eq!(envelope.status, WorkspaceStatus::Ready);

@@ -60,6 +60,177 @@ pub struct CallSiteInput {
     pub precision: Precision,
 }
 
+/// Allocation limits applied while a private language graph is materialized.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GraphBuildLimits {
+    pub max_symbols: u64,
+    pub max_edges: u64,
+    pub max_call_sites: u64,
+}
+
+impl GraphBuildLimits {
+    pub const UNLIMITED: Self = Self {
+        max_symbols: u64::MAX,
+        max_edges: u64::MAX,
+        max_call_sites: u64::MAX,
+    };
+}
+
+/// Exact retained/omitted work from bounded graph construction.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct GraphBuildReport {
+    pub retained_symbols: u64,
+    pub omitted_symbols: u64,
+    pub retained_edges: u64,
+    pub omitted_edges: u64,
+    pub edges_omitted_by_symbol_budget: u64,
+    pub edges_omitted_by_edge_budget: u64,
+    pub edges_omitted_by_call_site_budget: u64,
+    pub retained_call_sites: u64,
+    pub omitted_call_sites: u64,
+    pub call_sites_omitted_by_symbol_budget: u64,
+    pub call_sites_omitted_by_edge_budget: u64,
+    pub call_sites_omitted_by_call_site_budget: u64,
+}
+
+/// Deterministic facade that refuses allocations before a graph budget is
+/// exceeded. Files are always retained because source admission is bounded
+/// before parsing and file/text queries are the degraded baseline.
+#[derive(Debug)]
+pub struct BoundedGraphBuilder {
+    graph: SymbolGraph,
+    limits: GraphBuildLimits,
+    report: GraphBuildReport,
+}
+
+impl BoundedGraphBuilder {
+    pub fn new(limits: GraphBuildLimits) -> Self {
+        Self {
+            graph: SymbolGraph::new(),
+            limits,
+            report: GraphBuildReport::default(),
+        }
+    }
+
+    pub fn add_file(
+        &mut self,
+        path: RepoRelativePath,
+        source: impl Into<Arc<str>>,
+    ) -> Result<(), GraphError> {
+        self.graph.add_file(path, source)
+    }
+
+    pub fn add_symbol(
+        &mut self,
+        key: SymbolKey,
+        location: SourceRange,
+        signature: Option<String>,
+        provenance: Provenance,
+        precision: Precision,
+    ) -> Result<Option<EntityId>, GraphError> {
+        if self.graph.symbol_count() >= self.limits.max_symbols {
+            self.report.omitted_symbols = self.report.omitted_symbols.saturating_add(1);
+            return Ok(None);
+        }
+        self.graph
+            .add_symbol(key, location, signature, provenance, precision)
+            .map(Some)
+    }
+
+    pub fn add_edge(
+        &mut self,
+        kind: EdgeKind,
+        from: EntityId,
+        to: EntityId,
+        provenance: Provenance,
+        precision: Precision,
+        location: Option<SourceRange>,
+    ) -> Result<bool, GraphError> {
+        if self.graph.edge_count() >= self.limits.max_edges {
+            self.omit_edges_for_edge_budget(1);
+            return Ok(false);
+        }
+        self.graph
+            .add_edge(kind, from, to, provenance, precision, location)?;
+        Ok(true)
+    }
+
+    pub fn add_call_site(&mut self, input: CallSiteInput) -> Result<bool, GraphError> {
+        let required_edges = self.graph.call_site_edge_cost(&input)?;
+        if self.graph.call_site_count() >= self.limits.max_call_sites {
+            self.omit_call_sites_for_call_site_budget(1);
+            self.omit_edges_for_call_site_budget(required_edges);
+            return Ok(false);
+        }
+        if self.graph.edge_count().saturating_add(required_edges) > self.limits.max_edges {
+            self.omit_call_sites_for_edge_budget(1);
+            self.omit_edges_for_edge_budget(required_edges);
+            return Ok(false);
+        }
+        self.graph.add_call_site(input)?;
+        Ok(true)
+    }
+
+    pub fn omit_edges_for_symbol_budget(&mut self, count: u64) {
+        self.report.omitted_edges = self.report.omitted_edges.saturating_add(count);
+        self.report.edges_omitted_by_symbol_budget = self
+            .report
+            .edges_omitted_by_symbol_budget
+            .saturating_add(count);
+    }
+
+    pub fn omit_edges_for_edge_budget(&mut self, count: u64) {
+        self.report.omitted_edges = self.report.omitted_edges.saturating_add(count);
+        self.report.edges_omitted_by_edge_budget = self
+            .report
+            .edges_omitted_by_edge_budget
+            .saturating_add(count);
+    }
+
+    fn omit_edges_for_call_site_budget(&mut self, count: u64) {
+        self.report.omitted_edges = self.report.omitted_edges.saturating_add(count);
+        self.report.edges_omitted_by_call_site_budget = self
+            .report
+            .edges_omitted_by_call_site_budget
+            .saturating_add(count);
+    }
+
+    pub fn omit_call_sites_for_symbol_budget(&mut self, count: u64) {
+        self.report.omitted_call_sites = self.report.omitted_call_sites.saturating_add(count);
+        self.report.call_sites_omitted_by_symbol_budget = self
+            .report
+            .call_sites_omitted_by_symbol_budget
+            .saturating_add(count);
+    }
+
+    fn omit_call_sites_for_edge_budget(&mut self, count: u64) {
+        self.report.omitted_call_sites = self.report.omitted_call_sites.saturating_add(count);
+        self.report.call_sites_omitted_by_edge_budget = self
+            .report
+            .call_sites_omitted_by_edge_budget
+            .saturating_add(count);
+    }
+
+    fn omit_call_sites_for_call_site_budget(&mut self, count: u64) {
+        self.report.omitted_call_sites = self.report.omitted_call_sites.saturating_add(count);
+        self.report.call_sites_omitted_by_call_site_budget = self
+            .report
+            .call_sites_omitted_by_call_site_budget
+            .saturating_add(count);
+    }
+
+    pub fn omitted_symbols(&self) -> u64 {
+        self.report.omitted_symbols
+    }
+
+    pub fn finish(mut self) -> (SymbolGraph, GraphBuildReport) {
+        self.report.retained_symbols = self.graph.symbol_count();
+        self.report.retained_edges = self.graph.edge_count();
+        self.report.retained_call_sites = self.graph.call_site_count();
+        (self.graph, self.report)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct CallLookupKey {
     language: Language,
@@ -394,6 +565,25 @@ impl SymbolGraph {
             precision: input.precision,
         })?;
         Ok(resolution)
+    }
+
+    fn call_site_edge_cost(&self, input: &CallSiteInput) -> Result<u64, GraphError> {
+        self.validate_call_site_input(input)?;
+        let caller = self
+            .symbol(input.caller)
+            .ok_or(GraphError::UnknownEntity(input.caller))?;
+        let resolution = self.resolve_call(
+            caller.key.language,
+            input.form,
+            input.target_kind,
+            &input.name,
+            input.qualifier.as_deref(),
+        );
+        Ok(match resolution {
+            CallResolution::Resolved { .. } if caller.key.kind == SymbolKind::Test => 2,
+            CallResolution::Resolved { .. } => 1,
+            CallResolution::Ambiguous { .. } | CallResolution::Unresolved => 0,
+        })
     }
 
     /// Records legacy eager call-candidate incompleteness.
@@ -1378,6 +1568,56 @@ mod tests {
                 .count(),
             1
         );
+        graph.validate_consistency()?;
+        Ok(())
+    }
+
+    #[test]
+    fn call_site_budget_reports_the_resolved_edges_it_prevents()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut builder = BoundedGraphBuilder::new(GraphBuildLimits {
+            max_symbols: 2,
+            max_edges: 2,
+            max_call_sites: 1,
+        });
+        let path = file("src/caller.rs")?;
+        let caller = builder
+            .add_symbol(
+                key("caller", path.clone()),
+                range(path.clone())?,
+                None,
+                Provenance::TreeSitter,
+                Precision::Syntax,
+            )?
+            .ok_or("caller must fit")?;
+        builder
+            .add_symbol(
+                key("target", path),
+                range(file("src/caller.rs")?)?,
+                None,
+                Provenance::TreeSitter,
+                Precision::Syntax,
+            )?
+            .ok_or("target must fit")?;
+        let input = call_site_input(
+            caller,
+            CallForm::Function,
+            CallTargetKind::Function,
+            "target",
+            None,
+            None,
+            "src/caller.rs",
+        )?;
+
+        assert!(builder.add_call_site(input.clone())?);
+        assert!(!builder.add_call_site(input)?);
+        let (graph, report) = builder.finish();
+
+        assert_eq!(graph.call_site_count(), 1);
+        assert_eq!(graph.edge_count(), 1);
+        assert_eq!(report.omitted_call_sites, 1);
+        assert_eq!(report.omitted_edges, 1);
+        assert_eq!(report.edges_omitted_by_call_site_budget, 1);
         graph.validate_consistency()?;
         Ok(())
     }

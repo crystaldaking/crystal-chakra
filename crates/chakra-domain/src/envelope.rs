@@ -6,11 +6,12 @@
 use serde::{Deserialize, Serialize};
 
 use crate::identity::WorkspaceId;
+use crate::indexing::IndexingStatus;
 use crate::revision::Revision;
 use crate::state::{Freshness, ProviderState, WorkspaceStatus};
 
 /// Current envelope schema version.
-pub const SCHEMA_VERSION: u32 = 1;
+pub const SCHEMA_VERSION: u32 = 2;
 
 /// Metadata wrapper around every query response.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -23,6 +24,9 @@ pub struct QueryEnvelope<T> {
     pub status: WorkspaceStatus,
     /// State of the precise provider relative to `revision` (SPEC §6).
     pub provider_state: ProviderState,
+    /// Coverage and degradation of the syntax revision observed by this
+    /// query. This is revision metadata, not a live mutable counter.
+    pub indexing: IndexingStatus,
     /// True when a budget cut the result short (SPEC §29).
     pub truncated: bool,
     pub data: T,
@@ -45,9 +49,15 @@ impl<T> QueryEnvelope<T> {
             freshness,
             status,
             provider_state,
+            indexing: IndexingStatus::default(),
             truncated,
             data,
         }
+    }
+
+    pub fn with_indexing(mut self, indexing: IndexingStatus) -> Self {
+        self.indexing = indexing;
+        self
     }
 }
 
@@ -73,11 +83,12 @@ mod tests {
     fn envelope_json_matches_spec_shape() -> Result<(), Box<dyn std::error::Error>> {
         let envelope = sample_envelope()?;
         let json = serde_json::to_value(&envelope)?;
-        assert_eq!(json["schema_version"], 1);
+        assert_eq!(json["schema_version"], 2);
         assert_eq!(json["revision"], 42);
         assert_eq!(json["freshness"], "fresh");
         assert_eq!(json["status"], "ready");
         assert_eq!(json["provider_state"], "catching_up");
+        assert!(json["indexing"].is_object());
         assert_eq!(json["truncated"], false);
         let workspace_id = json["workspace_id"].as_str().unwrap_or("");
         assert!(workspace_id.starts_with("standalone-path:"));
