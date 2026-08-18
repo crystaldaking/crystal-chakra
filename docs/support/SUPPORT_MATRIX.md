@@ -9,7 +9,7 @@ Target list reviewed: 2026-08 (GitHub Octoverse 2025 top languages plus pre-exis
 
 | Language | Tier | Advertised | Grammar | Precise provider |
 |----------|------|-----------|---------|------------------|
-| php | in-progress | no | tree-sitter-php 0.24.2 | none (deferred) |
+| php | first-class | yes | tree-sitter-php 0.24.2 | none (deferred) |
 | rust | first-class | yes | tree-sitter-rust 0.24 | rust-analyzer (integrated) |
 
 ## Capability detail
@@ -22,16 +22,16 @@ Target list reviewed: 2026-08 (GitHub Octoverse 2025 top languages plus pre-exis
 | BUDGET-01 | pass | query work budgets (ADR-0025) |
 | CANCEL-01 | pass | cooperative cancellation (ADR-0025) |
 | CONFORM-01 | pass | chakra-conformance harness |
-| CORPUS-01 | missing | Public corpus evaluation lands with #25. |
+| CORPUS-01 | pass | pinned public corpus evaluation (ADR-0029) |
 | DEGRADE-01 | pass | bounded degradation (ADR-0011) |
 | DISC-01 | pass | chakra-git discovery |
 | DISC-02 | pass | composer-aware scopes |
 | DISC-03 | pass | language-neutral source roles (ADR-0019) |
-| DOCS-01 | missing | Per-language install/runtime documentation pending. |
+| DOCS-01 | pass | per-language documentation |
 | FRESH-01 | pass | atomic revision publication (ADR-0001) |
 | FRESH-02 | pass | live freshness barrier (ADR-0005) |
-| PRECISE-01 | pass | recorded deferral |
-| PRECISE-02 | missing | No precise provider integrated; #32 requires a trustworthy precise layer or equivalent before first-class status. |
+| PRECISE-01 | pass | recorded deferral with shipped equivalent |
+| PRECISE-02 | equivalent | ChakraResolver strict-tier promotion (ADR-0030) |
 | PRECISE-03 | not-applicable | No provider integrated. |
 | PRECISE-04 | not-applicable | No provider integrated. |
 | PRECISE-05 | not-applicable | No provider integrated. |

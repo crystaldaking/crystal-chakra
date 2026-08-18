@@ -320,6 +320,10 @@ impl PreciseQueryResult {
 
 /// Optional precise-provider adapter installed for one active workspace.
 pub trait PreciseProvider: std::fmt::Debug + Send + Sync {
+    /// Stable operator-facing adapter name reported by `status` and by
+    /// provider query info.
+    fn name(&self) -> &'static str;
+
     /// Whether this adapter can enrich symbols in `language`.
     fn supports(&self, language: Language) -> bool;
 

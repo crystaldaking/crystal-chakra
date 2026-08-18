@@ -1605,7 +1605,7 @@ fn provider_query_info(
         }
     };
     Some(ProviderQueryInfo {
-        name: "rust-analyzer".to_owned(),
+        name: provider.name().to_owned(),
         state,
         fallback_used: state != ProviderState::Ready,
         fallback_reason,
@@ -2177,27 +2177,37 @@ impl QueryService for WorkspaceEngine {
             call_sites_with_truncated_candidates: snapshot.graph().truncated_call_sites(),
         };
         let provider = self.precise_provider();
-        let providers = vec![ProviderInfo {
-            name: "rust-analyzer".to_owned(),
-            languages: vec![chakra_domain::symbol::Language::Rust],
-            capabilities: vec![
-                ProviderCapability::IncomingCalls,
-                ProviderCapability::OutgoingCalls,
-                ProviderCapability::SynchronizationState,
-                ProviderCapability::ProgressReporting,
-                ProviderCapability::RevisionDeltaSynchronization,
-                ProviderCapability::CacheMetrics,
-            ],
-            state: provider_state,
-            last_error: provider.and_then(|provider| provider.last_error()),
-            progress: provider.and_then(|provider| provider.progress()),
-            metrics: provider.and_then(|provider| provider.metrics()),
-            query_wait_budget_millis: provider.and_then(|provider| {
-                provider
+        // Report a provider entry only when an adapter is actually installed,
+        // with its real name and supported languages; an unconfigured engine
+        // reports an empty provider list instead of a fabricated entry.
+        let providers: Vec<ProviderInfo> = provider
+            .map(|provider| ProviderInfo {
+                name: provider.name().to_owned(),
+                languages: [
+                    chakra_domain::symbol::Language::Rust,
+                    chakra_domain::symbol::Language::Php,
+                ]
+                .into_iter()
+                .filter(|language| provider.supports(*language))
+                .collect(),
+                capabilities: vec![
+                    ProviderCapability::IncomingCalls,
+                    ProviderCapability::OutgoingCalls,
+                    ProviderCapability::SynchronizationState,
+                    ProviderCapability::ProgressReporting,
+                    ProviderCapability::RevisionDeltaSynchronization,
+                    ProviderCapability::CacheMetrics,
+                ],
+                state: provider_state,
+                last_error: provider.last_error(),
+                progress: provider.progress(),
+                metrics: provider.metrics(),
+                query_wait_budget_millis: provider
                     .query_wait_budget()
-                    .map(|budget| u64::try_from(budget.as_millis()).unwrap_or(u64::MAX))
-            }),
-        }];
+                    .map(|budget| u64::try_from(budget.as_millis()).unwrap_or(u64::MAX)),
+            })
+            .into_iter()
+            .collect();
         let providers = bounded_section(
             providers,
             MAX_QUERY_LIMIT as usize,

@@ -246,6 +246,11 @@ pub struct IndexCoverage {
     pub discovered_files: u64,
     pub indexed_files: u64,
     pub skipped_files: u64,
+    /// Source or metadata files skipped because they could not be read or
+    /// decoded (for example non-UTF-8 contents or a file that vanished
+    /// between inventory and read). Skipping never aborts the index.
+    #[serde(default)]
+    pub unreadable_files: u64,
     pub source_bytes: u64,
     pub parsed_files: u64,
     pub syntax_error_files: u64,

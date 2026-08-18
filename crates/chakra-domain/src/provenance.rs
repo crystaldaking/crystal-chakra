@@ -28,7 +28,8 @@ pub enum Precision {
     Heuristic,
     /// Derived from syntax (Tree-sitter); no type checking.
     Syntax,
-    /// Confirmed by a precise provider such as rust-analyzer.
+    /// Confirmed by a precise provider such as rust-analyzer, or by a
+    /// Chakra-owned resolver whose evidence rule is precise-tier (ADR-0030).
     Precise,
 }
 
@@ -38,6 +39,9 @@ pub enum Precision {
 pub enum Provenance {
     /// rust-analyzer (live precise provider).
     RustAnalyzer,
+    /// Chakra-owned static resolver producing precise-tier facts from an
+    /// explicit, deterministic evidence rule (ADR-0030).
+    ChakraResolver,
     /// Tree-sitter syntax analysis.
     TreeSitter,
     /// Git metadata or diff state.
@@ -65,6 +69,14 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&Provenance::RustAnalyzer)?,
             "\"rust_analyzer\""
+        );
+        assert_eq!(
+            serde_json::to_string(&Provenance::ChakraResolver)?,
+            "\"chakra_resolver\""
+        );
+        assert_eq!(
+            serde_json::from_str::<Provenance>("\"chakra_resolver\"")?,
+            Provenance::ChakraResolver
         );
         Ok(())
     }

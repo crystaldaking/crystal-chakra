@@ -4,10 +4,10 @@
 //! server. It starts in a crashed (degraded) state; `recover` flips it to
 //! ready with caller-supplied precise relations.
 //!
-//! Note on provenance: the domain model's only precise-provider provenance
-//! variant is `Provenance::RustAnalyzer`. The double borrows it for any
-//! language because the scenarios assert degradation/recovery *behavior*
-//! (precision upgrade and explicit fallback), not the provider's identity.
+//! Note on provenance: the double labels its precise facts
+//! `Provenance::ChakraResolver` because the scenarios assert
+//! degradation/recovery *behavior* (precision upgrade and explicit
+//! fallback), not the identity of a real language server.
 
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
@@ -49,6 +49,10 @@ impl FlakyProvider {
 }
 
 impl PreciseProvider for FlakyProvider {
+    fn name(&self) -> &'static str {
+        "flaky-provider"
+    }
+
     fn supports(&self, _language: Language) -> bool {
         true
     }

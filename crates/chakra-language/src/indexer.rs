@@ -41,6 +41,11 @@ pub struct WorkspaceSourceScan {
     pub discovered_files: u64,
     pub indexed_files: u64,
     pub source_bytes: u64,
+    /// Files skipped because they could not be read or decoded as UTF-8
+    /// (including files that vanished between inventory and read).
+    pub unreadable_files: u64,
+    /// Repository-relative paths of the skipped unreadable files.
+    pub unreadable_paths: Vec<RepoRelativePath>,
     pub degradations: Vec<IndexDegradation>,
     pub phases: Vec<IndexPhaseMeasurement>,
 }
@@ -812,6 +817,8 @@ fn scan_discovered_sources_with_inventory_phase(
     let mut largest_file = 0_u64;
     let mut workspace_omitted = 0_u64;
     let mut workspace_observed = 0_u64;
+    let mut unreadable_files = 0_u64;
+    let mut unreadable_paths = Vec::new();
 
     for (index, path) in inventory.sources.iter().enumerate() {
         check_cancelled(&options.cancellation)?;
@@ -819,10 +826,21 @@ fn scan_discovered_sources_with_inventory_phase(
             continue;
         }
         let absolute = repository_root.join(path.as_str());
-        let metadata = fs::metadata(&absolute).map_err(|source| WorkspaceIndexError::Read {
-            path: path.clone(),
-            source,
-        })?;
+        // A file may vanish or become unreadable between inventory and read;
+        // skip it instead of aborting the whole scan.
+        let metadata = match fs::metadata(&absolute) {
+            Ok(metadata) => metadata,
+            Err(source) => {
+                let error = WorkspaceIndexError::Read {
+                    path: path.clone(),
+                    source,
+                };
+                warn!(error = %error, "skipping source file that cannot be inspected");
+                unreadable_files = unreadable_files.saturating_add(1);
+                unreadable_paths.push(path.clone());
+                continue;
+            }
+        };
         loader.observe(path, &metadata);
         let measured_len = metadata.len();
         if measured_len > budgets.max_source_file_bytes {
@@ -835,7 +853,16 @@ fn scan_discovered_sources_with_inventory_phase(
             workspace_observed = workspace_observed.max(source_bytes.saturating_add(measured_len));
             continue;
         }
-        let source = loader.load(&absolute, path, &metadata, budgets.max_source_file_bytes)?;
+        let source = match loader.load(&absolute, path, &metadata, budgets.max_source_file_bytes) {
+            Ok(source) => source,
+            Err(error @ WorkspaceIndexError::Read { .. }) => {
+                warn!(error = %error, "skipping source file that cannot be read");
+                unreadable_files = unreadable_files.saturating_add(1);
+                unreadable_paths.push(path.clone());
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
         let actual_len = source.len() as u64;
         if actual_len > budgets.max_source_file_bytes {
             oversized_files = oversized_files.saturating_add(1);
@@ -864,10 +891,19 @@ fn scan_discovered_sources_with_inventory_phase(
             .check()
             .map_err(|_| WorkspaceIndexError::Cancelled)?;
         let absolute = repository_root.join(path.as_str());
-        let metadata = fs::metadata(&absolute).map_err(|source| WorkspaceIndexError::Read {
-            path: path.clone(),
-            source,
-        })?;
+        let metadata = match fs::metadata(&absolute) {
+            Ok(metadata) => metadata,
+            Err(source) => {
+                let error = WorkspaceIndexError::Read {
+                    path: path.clone(),
+                    source,
+                };
+                warn!(error = %error, "skipping metadata input that cannot be inspected");
+                unreadable_files = unreadable_files.saturating_add(1);
+                unreadable_paths.push(path.clone());
+                continue;
+            }
+        };
         loader.observe_metadata(path, &metadata);
     }
 
@@ -952,6 +988,8 @@ fn scan_discovered_sources_with_inventory_phase(
         discovered_files,
         indexed_files,
         source_bytes,
+        unreadable_files,
+        unreadable_paths,
         degradations,
         phases,
     })
@@ -1043,6 +1081,7 @@ fn build_indexing_status(
         discovered_files: scan.discovered_files,
         indexed_files: scan.indexed_files,
         skipped_files,
+        unreadable_files: scan.unreadable_files,
         source_bytes: scan.source_bytes,
         parsed_files: rust.files.saturating_add(php.files),
         syntax_error_files: rust
@@ -1656,6 +1695,165 @@ mod tests {
             IndexOptions::new(IndexBudgets::default(), cancellation)?,
         );
         assert!(matches!(result, Err(WorkspaceIndexError::Cancelled)));
+        Ok(())
+    }
+
+    #[test]
+    fn non_utf8_sources_are_skipped_without_aborting_the_index() -> Result<(), Box<dyn Error>> {
+        let repository = repository()?;
+        fs::write(
+            repository.path().join("lib.rs"),
+            "pub fn retained_rust() {}\n",
+        )?;
+        fs::write(
+            repository.path().join("service.php"),
+            "<?php function retained_php(): void {}\n",
+        )?;
+        // Latin-1 bytes that are not valid UTF-8.
+        fs::write(
+            repository.path().join("legacy.php"),
+            b"<?php // caf\xe9\r\nfunction lost_php(): void {}\n",
+        )?;
+        fs::write(
+            repository.path().join("legacy.rs"),
+            b"// caf\xe9\r\npub fn lost_rust() {}\n",
+        )?;
+
+        let report = index_repository(repository.path())?;
+        assert_eq!(report.metrics.indexing.coverage.discovered_files, 4);
+        assert_eq!(report.metrics.indexing.coverage.indexed_files, 2);
+        assert_eq!(report.metrics.indexing.coverage.skipped_files, 2);
+        assert_eq!(report.metrics.indexing.coverage.unreadable_files, 2);
+        assert_eq!(report.graph.resolve_name("retained_rust").len(), 1);
+        assert_eq!(report.graph.resolve_name("retained_php").len(), 1);
+        assert!(report.graph.resolve_name("lost_rust").is_empty());
+        assert!(report.graph.resolve_name("lost_php").is_empty());
+        report.graph.validate_consistency()?;
+
+        let scan = report.syntax_index.scan_repository(repository.path())?;
+        assert_eq!(scan.unreadable_files, 2);
+        assert_eq!(
+            scan.unreadable_paths,
+            vec![
+                RepoRelativePath::new("legacy.php")?,
+                RepoRelativePath::new("legacy.rs")?,
+            ]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn sources_vanishing_between_inventory_and_read_are_skipped() -> Result<(), Box<dyn Error>> {
+        let repository = repository()?;
+        fs::write(repository.path().join("lib.rs"), "pub fn retained() {}\n")?;
+        let inventory = chakra_git::WorkspaceInventory {
+            sources: vec![
+                RepoRelativePath::new("lib.rs")?,
+                RepoRelativePath::new("vanished.rs")?,
+            ],
+            metadata_inputs: vec![RepoRelativePath::new("missing/Cargo.toml")?],
+        };
+        let operation = OperationContext::from_cancellation(IndexCancellation::default());
+        let scan = scan_discovered_sources_with_options(
+            repository.path(),
+            &IndexOptions::default(),
+            &inventory,
+            Duration::ZERO,
+            &mut FilesystemSourceLoader,
+            &operation,
+        )?;
+        assert_eq!(scan.discovered_files, 2);
+        assert_eq!(scan.indexed_files, 1);
+        assert_eq!(scan.unreadable_files, 2);
+        assert_eq!(
+            scan.unreadable_paths,
+            vec![
+                RepoRelativePath::new("vanished.rs")?,
+                RepoRelativePath::new("missing/Cargo.toml")?,
+            ]
+        );
+        assert_eq!(scan.sources.rust.len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn per_file_read_failures_skip_but_other_loader_errors_abort() -> Result<(), Box<dyn Error>> {
+        struct FlakyLoader {
+            failing: RepoRelativePath,
+            error: fn(&RepoRelativePath) -> WorkspaceIndexError,
+        }
+
+        impl WorkspaceSourceLoader for FlakyLoader {
+            fn observe(&mut self, _path: &RepoRelativePath, _metadata: &fs::Metadata) {}
+
+            fn observe_metadata(&mut self, _path: &RepoRelativePath, _metadata: &fs::Metadata) {}
+
+            fn load(
+                &mut self,
+                absolute: &Path,
+                path: &RepoRelativePath,
+                metadata: &fs::Metadata,
+                max_bytes: u64,
+            ) -> Result<Arc<str>, WorkspaceIndexError> {
+                if *path == self.failing {
+                    return Err((self.error)(path));
+                }
+                FilesystemSourceLoader.load(absolute, path, metadata, max_bytes)
+            }
+        }
+
+        let repository = repository()?;
+        fs::write(repository.path().join("lib.rs"), "pub fn retained() {}\n")?;
+        fs::write(repository.path().join("broken.rs"), "pub fn lost() {}\n")?;
+        let inventory = chakra_git::WorkspaceInventory {
+            sources: vec![
+                RepoRelativePath::new("broken.rs")?,
+                RepoRelativePath::new("lib.rs")?,
+            ],
+            metadata_inputs: Vec::new(),
+        };
+
+        let mut read_failure = FlakyLoader {
+            failing: RepoRelativePath::new("broken.rs")?,
+            error: |path| WorkspaceIndexError::Read {
+                path: path.clone(),
+                source: io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "stream did not contain valid UTF-8",
+                ),
+            },
+        };
+        let operation = OperationContext::from_cancellation(IndexCancellation::default());
+        let scan = scan_discovered_sources_with_options(
+            repository.path(),
+            &IndexOptions::default(),
+            &inventory,
+            Duration::ZERO,
+            &mut read_failure,
+            &operation,
+        )?;
+        assert_eq!(scan.indexed_files, 1);
+        assert_eq!(scan.unreadable_files, 1);
+        assert_eq!(
+            scan.unreadable_paths,
+            vec![RepoRelativePath::new("broken.rs")?]
+        );
+
+        let mut update_failure = FlakyLoader {
+            failing: RepoRelativePath::new("broken.rs")?,
+            error: |path| {
+                WorkspaceIndexError::Update(format!("source `{path}` changed while reading"))
+            },
+        };
+        let result = scan_discovered_sources_with_options(
+            repository.path(),
+            &IndexOptions::default(),
+            &inventory,
+            Duration::ZERO,
+            &mut update_failure,
+            &operation,
+        );
+        assert!(matches!(result, Err(WorkspaceIndexError::Update(_))));
         Ok(())
     }
 }

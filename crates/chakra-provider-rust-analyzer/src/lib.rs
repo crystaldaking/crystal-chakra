@@ -217,6 +217,10 @@ impl RustAnalyzerProvider {
 }
 
 impl PreciseProvider for RustAnalyzerProvider {
+    fn name(&self) -> &'static str {
+        "rust-analyzer"
+    }
+
     fn supports(&self, language: chakra_domain::symbol::Language) -> bool {
         language == chakra_domain::symbol::Language::Rust
     }

@@ -146,9 +146,11 @@ inferred a receiver from an explicit parameter/property type, local
 construction, `app(Foo::class)`/`resolve(Foo::class)`, or scoped type. Repeated
 calls and tests are aggregated by caller and relationship target: one entry
 carries the total `occurrence_count`, up to three representative ranges, and a
-bounded representative call-site evidence set. The relation remains heuristic
-and the evidence remains `tree_sitter`/`syntax`; dynamic or ambiguous receivers
-never become claimed test relationships.
+bounded representative call-site evidence set. Receiver-resolved relations
+whose evidence is explicit, single-candidate, and inheritance-unambiguous are
+published as `precise` with `chakra_resolver` provenance (ADR-0030); all other
+resolved relations remain heuristic, and dynamic or ambiguous receivers never
+become claimed test relationships.
 For feature-branch review, use
 an explicit direct base or merge-base scope:
 

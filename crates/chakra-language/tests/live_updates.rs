@@ -639,6 +639,42 @@ fn atomic_save_and_temporary_syntax_error_publish_complete_revisions() -> Result
 }
 
 #[test]
+fn non_utf8_edit_degrades_to_skipped_file_without_wedging_the_worker() -> Result<(), Box<dyn Error>>
+{
+    let repository = repository()?;
+    let (engine, live) = start(&repository)?;
+    assert_eq!(symbols(&engine, "one::alpha")?, ["one::alpha"]);
+
+    // Latin-1 bytes that are not valid UTF-8: the file must be skipped and
+    // counted instead of wedging the reconciliation worker.
+    fs::write(
+        repository.path().join("src/one.rs"),
+        b"// caf\xe9\r\npub fn alpha_lost() {}\n",
+    )?;
+    assert_eq!(symbols(&engine, "two::beta")?, ["two::beta"]);
+    let degraded = engine.snapshot();
+    degraded.graph().validate_consistency()?;
+    assert_eq!(degraded.indexing().coverage.unreadable_files, 1);
+    assert!(degraded.graph().resolve_name("one::alpha").is_empty());
+    assert!(degraded.graph().resolve_name("alpha_lost").is_empty());
+
+    write(
+        repository.path(),
+        "src/one.rs",
+        "pub fn alpha_recovered() {}\n",
+    )?;
+    assert_eq!(
+        symbols(&engine, "alpha_recovered")?,
+        ["one::alpha_recovered"]
+    );
+    let recovered = engine.snapshot();
+    assert_eq!(recovered.indexing().coverage.unreadable_files, 0);
+    assert!(recovered.revision() > degraded.revision());
+    live.shutdown()?;
+    Ok(())
+}
+
+#[test]
 fn php_edit_is_immediately_fresh_and_does_not_reparse_rust() -> Result<(), Box<dyn Error>> {
     let repository = repository()?;
     write(

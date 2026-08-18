@@ -1010,12 +1010,14 @@ impl SymbolGraph {
             input.qualifier.as_deref(),
         );
         if let CallResolution::Resolved { target } = resolution {
+            let (calls_provenance, calls_precision) =
+                call_relation_tier(input.provenance, input.precision);
             self.add_edge_raw(Edge {
                 kind: EdgeKind::Calls,
                 from: input.caller,
                 to: target,
-                provenance: input.provenance,
-                precision: Precision::Heuristic,
+                provenance: calls_provenance,
+                precision: calls_precision,
                 location: Some(input.location.clone()),
             })?;
             if self
@@ -1028,12 +1030,14 @@ impl SymbolGraph {
                     )
                 })
             {
+                let (tests_provenance, tests_precision) =
+                    test_relation_tier(input.provenance, input.precision);
                 self.add_edge_raw(Edge {
                     kind: EdgeKind::Tests,
                     from: input.caller,
                     to: target,
-                    provenance: Provenance::Heuristic,
-                    precision: Precision::Heuristic,
+                    provenance: tests_provenance,
+                    precision: tests_precision,
                     location: Some(input.location.clone()),
                 })?;
             }
@@ -1663,12 +1667,14 @@ impl SymbolGraph {
                     continue;
                 };
                 if let CallResolution::Resolved { target } = call_site.resolution {
+                    let (calls_provenance, calls_precision) =
+                        call_relation_tier(call_site.provenance, call_site.precision);
                     self.remove_edge_raw(&Edge {
                         kind: EdgeKind::Calls,
                         from: call_site.caller,
                         to: target,
-                        provenance: call_site.provenance,
-                        precision: Precision::Heuristic,
+                        provenance: calls_provenance,
+                        precision: calls_precision,
                         location: Some(call_site.location.clone()),
                     })?;
                     if self
@@ -1676,12 +1682,14 @@ impl SymbolGraph {
                         .is_some_and(|symbol| symbol.key.kind == SymbolKind::Test)
                         && removed_test_relations.insert((call_site.caller, target))
                     {
+                        let (tests_provenance, tests_precision) =
+                            test_relation_tier(call_site.provenance, call_site.precision);
                         self.remove_edge_raw(&Edge {
                             kind: EdgeKind::Tests,
                             from: call_site.caller,
                             to: target,
-                            provenance: Provenance::Heuristic,
-                            precision: Precision::Heuristic,
+                            provenance: tests_provenance,
+                            precision: tests_precision,
                             location: Some(call_site.location.clone()),
                         })?;
                     }
@@ -2127,12 +2135,14 @@ impl SymbolGraph {
                 CallResolution::Resolved { target } => {
                     self.symbol(target)
                         .ok_or(ConsistencyError::UnknownEntity(target))?;
+                    let (calls_provenance, calls_precision) =
+                        call_relation_tier(call_site.provenance, call_site.precision);
                     let expected_call = Edge {
                         kind: EdgeKind::Calls,
                         from: call_site.caller,
                         to: target,
-                        provenance: call_site.provenance,
-                        precision: Precision::Heuristic,
+                        provenance: calls_provenance,
+                        precision: calls_precision,
                         location: Some(call_site.location.clone()),
                     };
                     let Some((_, available_calls)) = edge_counts.get_mut(&expected_call) else {
@@ -2149,12 +2159,14 @@ impl SymbolGraph {
                     if caller.key.kind == SymbolKind::Test
                         && expected_test_relations.insert((call_site.caller, target))
                     {
+                        let (tests_provenance, tests_precision) =
+                            test_relation_tier(call_site.provenance, call_site.precision);
                         let expected_test = Edge {
                             kind: EdgeKind::Tests,
                             from: call_site.caller,
                             to: target,
-                            provenance: Provenance::Heuristic,
-                            precision: Precision::Heuristic,
+                            provenance: tests_provenance,
+                            precision: tests_precision,
                             location: Some(call_site.location.clone()),
                         };
                         let Some((_, available_tests)) = edge_counts.get_mut(&expected_test) else {
@@ -2444,10 +2456,40 @@ fn diagnostic_cmp(left: &SyntaxDiagnostic, right: &SyntaxDiagnostic) -> Ordering
 fn provenance_rank(provenance: Provenance) -> u8 {
     match provenance {
         Provenance::RustAnalyzer => 0,
+        Provenance::ChakraResolver => 0,
         Provenance::TreeSitter => 1,
         Provenance::Git => 2,
         Provenance::TextSearch => 3,
         Provenance::Heuristic => 4,
+    }
+}
+
+/// `(provenance, precision)` of the `CALLS` relation materialized from one
+/// resolved syntax call site.
+///
+/// Resolved syntax calls stay heuristic by default (ADR-010, ADR-015) while
+/// keeping the call site's provenance. A language indexer promotes a single
+/// call site to the precise tier only through an explicit strict-tier
+/// evidence rule (ADR-0030); the relation then carries the call site's own
+/// provenance so the promotion stays attributable. Precision is never
+/// upgraded silently (PROV-01).
+fn call_relation_tier(provenance: Provenance, precision: Precision) -> (Provenance, Precision) {
+    if precision == Precision::Precise {
+        (provenance, Precision::Precise)
+    } else {
+        (provenance, Precision::Heuristic)
+    }
+}
+
+/// `(provenance, precision)` of the deduplicated `TESTS` relation
+/// materialized from one resolved syntax call site. Unlike `CALLS`, the
+/// default tier records the relation itself as heuristic; a strict-tier
+/// call site (ADR-0030) promotes it exactly like [`call_relation_tier`].
+fn test_relation_tier(provenance: Provenance, precision: Precision) -> (Provenance, Precision) {
+    if precision == Precision::Precise {
+        (provenance, Precision::Precise)
+    } else {
+        (Provenance::Heuristic, Precision::Heuristic)
     }
 }
 
