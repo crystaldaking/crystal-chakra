@@ -1,7 +1,7 @@
 {
   "language": "php",
-  "advertised": false,
-  "tier": "in-progress",
+  "advertised": true,
+  "tier": "first-class",
   "grammar": {
     "name": "tree-sitter-php",
     "version": "0.24.2",
@@ -24,8 +24,8 @@
     "SYNTAX-06": {"status": "pass", "mechanism": "tree-sitter + PHPUnit conventions", "evidence": ["crates/chakra-language-php/tests/fixture_index.rs"]},
     "SYNTAX-07": {"status": "pass", "mechanism": "tree-sitter diagnostics (ADR-0022)", "evidence": ["crates/chakra-language-php/tests/fixture_index.rs"]},
     "SYNTAX-08": {"status": "pass", "mechanism": "receiver-aware syntax call resolution (ADR-0015)", "evidence": ["crates/chakra-language-php/tests/fixture_index.rs"]},
-    "PRECISE-01": {"status": "pass", "mechanism": "recorded deferral", "evidence": ["docs/adr/0018-php-precise-provider-evaluation.md", "docs/evaluation/php-provider-v0.1.1.md"]},
-    "PRECISE-02": {"status": "missing", "note": "No precise provider integrated; #32 requires a trustworthy precise layer or equivalent before first-class status."},
+    "PRECISE-01": {"status": "pass", "mechanism": "recorded deferral with shipped equivalent", "evidence": ["docs/adr/0018-php-precise-provider-evaluation.md", "docs/adr/0030-php-precise-equivalent-resolver.md", "docs/evaluation/php-provider-v0.1.1.md"]},
+    "PRECISE-02": {"status": "equivalent", "mechanism": "ChakraResolver strict-tier promotion (ADR-0030)", "evidence": ["crates/chakra-language-php/src/indexer.rs", "crates/chakra-language-php/tests/fixture_index.rs", "docs/adr/0030-php-precise-equivalent-resolver.md"]},
     "PRECISE-03": {"status": "not-applicable", "note": "No provider integrated."},
     "PRECISE-04": {"status": "not-applicable", "note": "No provider integrated."},
     "PRECISE-05": {"status": "not-applicable", "note": "No provider integrated."},
@@ -41,9 +41,9 @@
     "DEGRADE-01": {"status": "pass", "mechanism": "bounded degradation (ADR-0011)", "evidence": ["crates/chakra-engine/tests/query_work_budgets.rs"]},
     "CONFORM-01": {"status": "pass", "mechanism": "chakra-conformance harness", "evidence": ["docs/support/conformance/php.json"]},
     "CORPUS-01": {"status": "pass", "mechanism": "pinned public corpus evaluation (ADR-0029)", "evidence": ["docs/support/corpus/results/php-laravel__framework.json", "docs/support/corpus/results/php-symfony__symfony.json"]},
-    "DOCS-01": {"status": "missing", "note": "Per-language install/runtime documentation pending."}
+    "DOCS-01": {"status": "pass", "mechanism": "per-language documentation", "evidence": ["docs/languages/php.md"]}
   },
   "conformance_results": "docs/support/conformance/php.json",
   "corpus_results": "docs/support/corpus/results/php-laravel__framework.json",
-  "docs": null
+  "docs": "docs/languages/php.md"
 }

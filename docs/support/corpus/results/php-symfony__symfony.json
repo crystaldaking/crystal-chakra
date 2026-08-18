@@ -18,11 +18,11 @@
       "phases": [
         {
           "name": "GitInventory",
-          "wall_micros": 190505
+          "wall_micros": 216998
         },
         {
           "name": "SourceRead",
-          "wall_micros": 1075303
+          "wall_micros": 1067607
         },
         {
           "name": "ParseExtraction/Rust",
@@ -38,35 +38,35 @@
         },
         {
           "name": "GraphMaterialization/Rust",
-          "wall_micros": 5
+          "wall_micros": 2
         },
         {
           "name": "ParseExtraction/Php",
-          "wall_micros": 1873718
+          "wall_micros": 1724628
         },
         {
           "name": "SymbolCatalog/Php",
-          "wall_micros": 48382
+          "wall_micros": 42423
         },
         {
           "name": "Relationships/Php",
-          "wall_micros": 12053
+          "wall_micros": 11586
         },
         {
           "name": "GraphMaterialization/Php",
-          "wall_micros": 1615225
+          "wall_micros": 1228191
         },
         {
           "name": "LanguageComposition",
-          "wall_micros": 3
+          "wall_micros": 4
         },
         {
           "name": "GraphValidation",
-          "wall_micros": 933963
+          "wall_micros": 870427
         },
         {
           "name": "total",
-          "wall_micros": 5805218
+          "wall_micros": 5219164
         }
       ],
       "measurements": {
@@ -77,25 +77,25 @@
         "discovered_files": 11116,
         "edges": 245502,
         "parsed_files": 11114,
-        "peak_rss_bytes": 1113899008,
+        "peak_rss_bytes": 1290256384,
         "php_files": 11114,
         "rust_files": 0,
         "source_bytes": 90694860,
         "symbols": 121822,
         "syntax_error_files": 11,
         "unresolved_call_sites": 167373,
-        "wall_micros": 5805218
+        "wall_micros": 5219164
       },
       "budget_verdicts": [
         {
           "budget": "cold_index_peak_rss_bytes",
-          "observed": 1113899008,
+          "observed": 1290256384,
           "limit": 4294967296,
           "status": "pass"
         },
         {
           "budget": "cold_index_wall_micros",
-          "observed": 5805218,
+          "observed": 5219164,
           "limit": 120000000,
           "status": "pass"
         }
@@ -108,19 +108,19 @@
       "phases": [
         {
           "name": "fresh_barrier",
-          "wall_micros": 213405
+          "wall_micros": 212256
         }
       ],
       "measurements": {
         "files_inspected": 22232,
         "git_subprocesses": 2,
         "no_op_reconciliations": 1,
-        "wall_micros": 213405
+        "wall_micros": 212256
       },
       "budget_verdicts": [
         {
           "budget": "warm_noop_wall_micros",
-          "observed": 213406,
+          "observed": 212260,
           "limit": 30000000,
           "status": "pass"
         }
@@ -133,11 +133,11 @@
       "phases": [
         {
           "name": "reindex",
-          "wall_micros": 5958811
+          "wall_micros": 5057034
         }
       ],
       "measurements": {
-        "fingerprint": "a926c72085831d51",
+        "fingerprint": "0c2924939d705e3f",
         "rerun_edges": 245502,
         "rerun_symbols": 121822
       },
@@ -150,13 +150,13 @@
       "phases": [
         {
           "name": "edit_and_barrier",
-          "wall_micros": 637006
+          "wall_micros": 600722
         }
       ],
       "measurements": {
         "files_reparsed": 1,
         "full_reconciliations": 0,
-        "wall_micros": 637006
+        "wall_micros": 600722
       },
       "budget_verdicts": []
     },
@@ -167,13 +167,13 @@
       "phases": [
         {
           "name": "replace_and_barrier",
-          "wall_micros": 798774
+          "wall_micros": 803694
         }
       ],
       "measurements": {
         "files_reparsed": 1,
         "full_reconciliations": 0,
-        "wall_micros": 798774
+        "wall_micros": 803694
       },
       "budget_verdicts": []
     },
@@ -184,13 +184,13 @@
       "phases": [
         {
           "name": "rename_delete_and_barrier",
-          "wall_micros": 2632596
+          "wall_micros": 2407573
         }
       ],
       "measurements": {
         "created_files": 1,
         "deleted_files": 2,
-        "wall_micros": 2632597
+        "wall_micros": 2407573
       },
       "budget_verdicts": []
     },
@@ -201,7 +201,7 @@
       "phases": [
         {
           "name": "break_and_barrier",
-          "wall_micros": 558458
+          "wall_micros": 556578
         }
       ],
       "measurements": {
@@ -216,11 +216,11 @@
       "phases": [
         {
           "name": "clean_diff",
-          "wall_micros": 4748813
+          "wall_micros": 4432428
         },
         {
           "name": "dirty_diff",
-          "wall_micros": 808125
+          "wall_micros": 591475
         }
       ],
       "measurements": {
@@ -241,7 +241,7 @@
             "previous_path": null
           }
         ],
-        "clean_diff_wall_micros": 679128
+        "clean_diff_wall_micros": 619337
       },
       "budget_verdicts": []
     },
@@ -252,15 +252,15 @@
       "phases": [
         {
           "name": "symbol_search",
-          "wall_micros": 209
+          "wall_micros": 215
         },
         {
           "name": "callers",
-          "wall_micros": 2013
+          "wall_micros": 2066
         },
         {
           "name": "context",
-          "wall_micros": 441
+          "wall_micros": 423
         }
       ],
       "measurements": {
@@ -292,7 +292,7 @@
       "phases": [
         {
           "name": "cancelled_cold_index",
-          "wall_micros": 12
+          "wall_micros": 4
         },
         {
           "name": "cancelled_query",
@@ -300,7 +300,7 @@
         }
       ],
       "measurements": {
-        "cancelled_index_wall_micros": 13
+        "cancelled_index_wall_micros": 5
       },
       "budget_verdicts": []
     },

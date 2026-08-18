@@ -351,12 +351,11 @@ async fn indexed_fixture_is_queryable_through_structured_mcp_tools()
         .await?
         .structured_content
         .ok_or("indexed status must return structured content")?;
-    assert_eq!(status["data"]["providers"][0]["name"], "rust-analyzer");
-    assert_eq!(status["data"]["providers"][0]["languages"][0], "rust");
-    assert!(
-        status["data"]["providers"][0]["capabilities"]
-            .as_array()
-            .is_some_and(|items| items.iter().any(|item| item == "incoming_calls"))
+    // No precise provider is installed on this engine, so status must report
+    // an empty provider list rather than a fabricated entry.
+    assert_eq!(
+        status["data"]["providers"].as_array().map(Vec::len),
+        Some(0)
     );
 
     let repo_map_args = serde_json::from_value(serde_json::json!({ "limit": 20 }))?;
@@ -904,7 +903,10 @@ final class PaymentServiceTest {
         .iter()
         .find(|caller| caller["symbol"]["qualified_name"] == "App::Api::PaymentController::refund")
         .ok_or("PHP controller caller missing")?;
-    assert_eq!(controller_caller["precision"], "heuristic");
+    // Strict-tier receiver evidence (typed promoted property) is promoted to
+    // the precise tier under Chakra's own resolver provenance (ADR-0030).
+    assert_eq!(controller_caller["provenance"], "chakra_resolver");
+    assert_eq!(controller_caller["precision"], "precise");
     assert_eq!(
         controller_caller["representative_call_sites"][0]["receiver_type"],
         "App::Service::PaymentService"
@@ -913,8 +915,6 @@ final class PaymentServiceTest {
         controller_caller["representative_call_sites"][0]["receiver_type_source"],
         "promoted_property"
     );
-    assert_eq!(controller_caller["provenance"], "tree_sitter");
-    assert_eq!(controller_caller["precision"], "heuristic");
     let php_tests = context["data"]["tests"]
         .as_array()
         .ok_or("PHP tests missing")?;
@@ -923,7 +923,8 @@ final class PaymentServiceTest {
         php_tests[0]["symbol"]["qualified_name"],
         "App::Tests::PaymentServiceTest::testRefundTwice"
     );
-    assert_eq!(php_tests[0]["precision"], "heuristic");
+    assert_eq!(php_tests[0]["provenance"], "chakra_resolver");
+    assert_eq!(php_tests[0]["precision"], "precise");
     assert_eq!(
         php_tests[0]["representative_call_sites"][0]["receiver_type"],
         "App::Service::PaymentService"

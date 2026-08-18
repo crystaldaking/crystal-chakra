@@ -93,6 +93,10 @@ impl FreshnessBarrier for FailAfterProviderBarrier {
 }
 
 impl PreciseProvider for CountingRustProvider {
+    fn name(&self) -> &'static str {
+        "counting-rust-provider"
+    }
+
     fn supports(&self, language: Language) -> bool {
         language == Language::Rust
     }
@@ -112,6 +116,10 @@ impl PreciseProvider for CountingRustProvider {
 }
 
 impl PreciseProvider for FixedProvider {
+    fn name(&self) -> &'static str {
+        "fixed-provider"
+    }
+
     fn supports(&self, language: chakra_domain::symbol::Language) -> bool {
         language == chakra_domain::symbol::Language::Rust
     }
@@ -138,6 +146,10 @@ impl PreciseProvider for FixedProvider {
 }
 
 impl PreciseProvider for RevisionAdvancingProvider {
+    fn name(&self) -> &'static str {
+        "revision-advancing-provider"
+    }
+
     fn supports(&self, language: Language) -> bool {
         language == Language::Rust
     }
@@ -205,22 +217,31 @@ fn status_reports_scenario_counts() -> Result<(), Box<dyn Error>> {
     assert_eq!(envelope.data.counts.files, 3);
     assert_eq!(envelope.data.syntax_diagnostics.total_diagnostics, 0);
     assert!(!envelope.data.syntax_diagnostics.truncated);
+    assert!(envelope.data.providers.is_empty());
+    Ok(())
+}
+
+#[test]
+fn status_reports_an_installed_provider_with_its_name_and_languages() -> Result<(), Box<dyn Error>>
+{
+    let (engine, _) = scenario_engine()?;
+    engine.install_precise_provider(Arc::new(FixedProvider {
+        result: PreciseQueryResult::unavailable(Revision(1), ProviderState::Ready),
+        last_error: None,
+    }))?;
+    let envelope = engine.status(StatusRequest)?;
     assert_eq!(envelope.data.providers.len(), 1);
-    assert_eq!(envelope.data.providers[0].name, "rust-analyzer");
+    let provider = &envelope.data.providers[0];
+    assert_eq!(provider.name, "fixed-provider");
     assert_eq!(
-        envelope.data.providers[0].languages,
+        provider.languages,
         vec![chakra_domain::symbol::Language::Rust]
     );
-    assert_eq!(
-        envelope.data.providers[0].capabilities,
-        vec![
-            chakra_domain::query::ProviderCapability::IncomingCalls,
-            chakra_domain::query::ProviderCapability::OutgoingCalls,
-            chakra_domain::query::ProviderCapability::SynchronizationState,
-            chakra_domain::query::ProviderCapability::ProgressReporting,
-            chakra_domain::query::ProviderCapability::RevisionDeltaSynchronization,
-            chakra_domain::query::ProviderCapability::CacheMetrics,
-        ]
+    assert_eq!(provider.state, ProviderState::Ready);
+    assert!(
+        provider
+            .capabilities
+            .contains(&chakra_domain::query::ProviderCapability::IncomingCalls)
     );
     Ok(())
 }

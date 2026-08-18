@@ -54,6 +54,10 @@ type GateResult<T> = Result<T, Box<dyn Error + Send + Sync>>;
 struct DegradedRustProvider;
 
 impl PreciseProvider for DegradedRustProvider {
+    fn name(&self) -> &'static str {
+        "degraded-rust-provider"
+    }
+
     fn supports(&self, language: Language) -> bool {
         language == Language::Rust
     }

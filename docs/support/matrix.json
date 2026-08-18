@@ -19,8 +19,8 @@
   "languages": [
     {
       "language": "php",
-      "advertised": false,
-      "tier": "in-progress",
+      "advertised": true,
+      "tier": "first-class",
       "grammar": {
         "name": "tree-sitter-php",
         "version": "0.24.2",
@@ -113,15 +113,21 @@
         },
         "PRECISE-01": {
           "status": "pass",
-          "mechanism": "recorded deferral",
+          "mechanism": "recorded deferral with shipped equivalent",
           "evidence": [
             "docs/adr/0018-php-precise-provider-evaluation.md",
+            "docs/adr/0030-php-precise-equivalent-resolver.md",
             "docs/evaluation/php-provider-v0.1.1.md"
           ]
         },
         "PRECISE-02": {
-          "status": "missing",
-          "note": "No precise provider integrated; #32 requires a trustworthy precise layer or equivalent before first-class status."
+          "status": "equivalent",
+          "mechanism": "ChakraResolver strict-tier promotion (ADR-0030)",
+          "evidence": [
+            "crates/chakra-language-php/src/indexer.rs",
+            "crates/chakra-language-php/tests/fixture_index.rs",
+            "docs/adr/0030-php-precise-equivalent-resolver.md"
+          ]
         },
         "PRECISE-03": {
           "status": "not-applicable",
@@ -221,13 +227,16 @@
           ]
         },
         "DOCS-01": {
-          "status": "missing",
-          "note": "Per-language install/runtime documentation pending."
+          "status": "pass",
+          "mechanism": "per-language documentation",
+          "evidence": [
+            "docs/languages/php.md"
+          ]
         }
       },
       "conformance_results": "docs/support/conformance/php.json",
       "corpus_results": "docs/support/corpus/results/php-laravel__framework.json",
-      "docs": null
+      "docs": "docs/languages/php.md"
     },
     {
       "language": "rust",

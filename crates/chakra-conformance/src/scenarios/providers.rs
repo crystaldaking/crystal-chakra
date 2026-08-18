@@ -22,20 +22,12 @@ pub(super) fn provider_absent_degradation(manifest: &Manifest) -> Check<Vec<Stri
         let expectations = &manifest.expectations;
         let status = fixture.engine.status(StatusRequest)?;
         ensure(
-            !status.data.providers.is_empty()
-                && status
-                    .data
-                    .providers
-                    .iter()
-                    .all(|provider| provider.state == ProviderState::NotConfigured),
+            status.data.providers.is_empty()
+                && status.provider_state == ProviderState::NotConfigured,
             format!(
-                "expected all providers not_configured, found {:?}",
-                status
-                    .data
-                    .providers
-                    .iter()
-                    .map(|provider| provider.state)
-                    .collect::<Vec<_>>()
+                "expected no reported providers and not_configured state, found {:?} providers ({:?})",
+                status.data.providers.len(),
+                status.provider_state,
             ),
         )?;
 
@@ -118,14 +110,14 @@ pub(super) fn provider_crash_recovery(manifest: &Manifest) -> Check<Vec<String>>
             "syntax callers must be retained (not upgraded) while the provider is degraded",
         )?;
 
-        // The double borrows the only precise-provider provenance variant the
-        // domain model has; see crates/chakra-conformance/src/provider.rs.
+        // The double labels its precise facts with the Chakra-owned precise
+        // provenance; see crates/chakra-conformance/src/provider.rs.
         provider.recover(vec![PreciseRelation {
             name: expectations.caller_simple.clone(),
             declaration: caller_location.clone(),
             occurrence_count: 1,
             call_sites: vec![caller_location],
-            provenance: Provenance::RustAnalyzer,
+            provenance: Provenance::ChakraResolver,
         }]);
         let recovered = fixture.engine.callers(CallersRequest {
             symbol: Some(SymbolRef::ByName(expectations.callee.clone())),
@@ -147,7 +139,7 @@ pub(super) fn provider_crash_recovery(manifest: &Manifest) -> Check<Vec<String>>
             recovered.data.callers.iter().any(|caller| {
                 caller.symbol.qualified_name == expectations.caller
                     && caller.precision == Precision::Precise
-                    && caller.provenance == Provenance::RustAnalyzer
+                    && caller.provenance == Provenance::ChakraResolver
             }),
             "recovered provider did not contribute precise caller facts",
         )?;

@@ -6,7 +6,9 @@ use std::process::Command;
 use chakra_domain::diagnostic::{KnownSyntaxGrammarGap, SyntaxDiagnosticCause};
 use chakra_domain::identity::WorkspaceIdentity;
 use chakra_domain::provenance::{Precision, Provenance};
-use chakra_domain::query::{QueryService, SymbolSearchRequest};
+use chakra_domain::query::{
+    CallersRequest, ContextRequest, QueryService, SymbolRef, SymbolSearchRequest,
+};
 use chakra_domain::state::{Freshness, WorkspaceStatus};
 use chakra_domain::symbol::{CallResolution, EdgeKind, Language, ReceiverTypeSource, SymbolKind};
 use chakra_engine::WorkspaceEngine;
@@ -96,7 +98,8 @@ fn realistic_php_fixture_exposes_bounded_syntax_intelligence() -> Result<(), Box
         .filter(|edge| edge.kind == EdgeKind::Calls)
         .collect();
     assert_eq!(callers.len(), 1);
-    assert_eq!(callers[0].precision, Precision::Heuristic);
+    assert_eq!(callers[0].provenance, Provenance::ChakraResolver);
+    assert_eq!(callers[0].precision, Precision::Precise);
     let controller_call = report
         .graph
         .symbols()
@@ -153,6 +156,40 @@ fn realistic_php_fixture_exposes_bounded_syntax_intelligence() -> Result<(), Box
             .iter()
             .any(|candidate| candidate.kind == SymbolKind::Import)
     );
+
+    // Strict-tier promotion (ADR-0030) must survive the query layer with its
+    // provenance intact; the dynamic test-file call stays out of `callers`.
+    let callers = engine.callers(CallersRequest {
+        symbol: Some(SymbolRef::ByName(
+            "ChakraFixture::Service::PaymentService::refund".to_owned(),
+        )),
+        ..CallersRequest::default()
+    })?;
+    assert_eq!(callers.data.callers.len(), 1);
+    let caller = &callers.data.callers[0];
+    assert_eq!(
+        caller.symbol.qualified_name,
+        "ChakraFixture::Api::PaymentController::refund"
+    );
+    assert_eq!(caller.provenance, Provenance::ChakraResolver);
+    assert_eq!(caller.precision, Precision::Precise);
+
+    let context = engine.context(ContextRequest {
+        symbol: Some(SymbolRef::ByName(
+            "ChakraFixture::Api::PaymentController::refund".to_owned(),
+        )),
+        ..ContextRequest::default()
+    })?;
+    let callee = context
+        .data
+        .callees
+        .iter()
+        .find(|callee| {
+            callee.symbol.qualified_name == "ChakraFixture::Service::PaymentService::refund"
+        })
+        .ok_or("promoted callee missing from context")?;
+    assert_eq!(callee.provenance, Provenance::ChakraResolver);
+    assert_eq!(callee.precision, Precision::Precise);
     Ok(())
 }
 
