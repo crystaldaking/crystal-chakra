@@ -5,6 +5,8 @@ version tags prefixed with `v`.
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-08-18
+
 ### Added
 
 - Receiver-aware PHP method resolution with bounded typed evidence, inheritance
@@ -77,6 +79,9 @@ version tags prefixed with `v`.
 - Fresh revisions now pin source files and Cargo/Composer classification inputs
   in one shared Git inventory and identity proof; metadata subprocesses obey
   the owning operation's cancellation and deadline.
+- Editor-style atomic saves remain targeted across watcher backends: temporary
+  non-source paths no longer force a full source-body reread, while the shared
+  inventory and identity proof still determines the latest state.
 - Precise Rust relationships require a post-provider worktree freshness proof,
   so a concurrently edited disk-backed caller cannot be attributed to an older
   syntax revision; `allow_stale` keeps provider-free syntax latency.
@@ -108,5 +113,6 @@ version tags prefixed with `v`.
 - All development after this release follows the Gitflow policy in
   `CONTRIBUTING.md` and `AGENTS.md`.
 
-[Unreleased]: https://github.com/crystaldaking/crystal-chakra/compare/v0.1.0...develop
+[Unreleased]: https://github.com/crystaldaking/crystal-chakra/compare/v0.1.1...develop
+[0.1.1]: https://github.com/crystaldaking/crystal-chakra/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/crystaldaking/crystal-chakra/releases/tag/v0.1.0

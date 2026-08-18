@@ -142,7 +142,7 @@ checksum = "f079e83a288787bcd14a6aea84cee5c87a67c5a3e660c30f557a3d24761b3527"
 
 [[package]]
 name = "chakra-cli"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "chakra-domain",
  "chakra-engine",
@@ -158,7 +158,7 @@ dependencies = [
 
 [[package]]
 name = "chakra-domain"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "schemars",
  "serde",
@@ -168,7 +168,7 @@ dependencies = [
 
 [[package]]
 name = "chakra-engine"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "arc-swap",
  "chakra-domain",
@@ -182,7 +182,7 @@ dependencies = [
 
 [[package]]
 name = "chakra-git"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "chakra-domain",
  "chakra-engine",
@@ -193,7 +193,7 @@ dependencies = [
 
 [[package]]
 name = "chakra-language"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "chakra-domain",
  "chakra-engine",
@@ -209,7 +209,7 @@ dependencies = [
 
 [[package]]
 name = "chakra-language-php"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "chakra-domain",
  "chakra-engine",
@@ -225,7 +225,7 @@ dependencies = [
 
 [[package]]
 name = "chakra-language-rust"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "chakra-domain",
  "chakra-engine",
@@ -240,7 +240,7 @@ dependencies = [
 
 [[package]]
 name = "chakra-mcp"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "chakra-domain",
  "chakra-engine",
@@ -259,7 +259,7 @@ dependencies = [
 
 [[package]]
 name = "chakra-provider-rust-analyzer"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "chakra-domain",
  "chakra-engine",
