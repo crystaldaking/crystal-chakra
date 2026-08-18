@@ -1,7 +1,7 @@
 {
   "language": "rust",
-  "advertised": false,
-  "tier": "in-progress",
+  "advertised": true,
+  "tier": "first-class",
   "grammar": {
     "name": "tree-sitter-rust",
     "version": "0.24",
@@ -40,10 +40,10 @@
     "CANCEL-01": {"status": "pass", "mechanism": "cooperative cancellation (ADR-0012)", "evidence": ["crates/chakra-engine/tests/query_work_budgets.rs"]},
     "DEGRADE-01": {"status": "pass", "mechanism": "bounded degradation (ADR-0011)", "evidence": ["crates/chakra-engine/tests/query_work_budgets.rs"]},
     "CONFORM-01": {"status": "pass", "mechanism": "chakra-conformance harness", "evidence": ["docs/support/conformance/rust.json"]},
-    "CORPUS-01": {"status": "missing", "note": "Public corpus evaluation lands with #25."},
-    "DOCS-01": {"status": "missing", "note": "Per-language install/runtime documentation pending."}
+    "CORPUS-01": {"status": "pass", "mechanism": "pinned public corpus evaluation (ADR-0029)", "evidence": ["docs/support/corpus/results/rust-tokio-rs__tokio.json", "docs/support/corpus/results/rust-BurntSushi__ripgrep.json"]},
+    "DOCS-01": {"status": "pass", "mechanism": "per-language documentation", "evidence": ["docs/languages/rust.md"]}
   },
   "conformance_results": "docs/support/conformance/rust.json",
-  "corpus_results": null,
-  "docs": null
+  "corpus_results": "docs/support/corpus/results/rust-tokio-rs__tokio.json",
+  "docs": "docs/languages/rust.md"
 }
