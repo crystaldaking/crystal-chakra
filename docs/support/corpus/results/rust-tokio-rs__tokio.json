@@ -1,0 +1,316 @@
+{
+  "schema_version": 1,
+  "language": "rust",
+  "repository": "tokio-rs/tokio",
+  "sha": "625954f365727668cb02d04172b34f1149637728",
+  "status": "evaluated",
+  "skip_reason": "",
+  "provider_phase": "not-configured",
+  "scenario_count": 11,
+  "passed": 11,
+  "failed": 0,
+  "skipped": 0,
+  "scenarios": [
+    {
+      "id": "cold-index",
+      "status": "pass",
+      "details": "full index from scratch; coverage counts recorded",
+      "phases": [
+        {
+          "name": "GitInventory",
+          "wall_micros": 13233
+        },
+        {
+          "name": "SourceRead",
+          "wall_micros": 191886
+        },
+        {
+          "name": "ParseExtraction/Rust",
+          "wall_micros": 102922
+        },
+        {
+          "name": "SymbolCatalog/Rust",
+          "wall_micros": 3205
+        },
+        {
+          "name": "Relationships/Rust",
+          "wall_micros": 2364
+        },
+        {
+          "name": "GraphMaterialization/Rust",
+          "wall_micros": 90481
+        },
+        {
+          "name": "ParseExtraction/Php",
+          "wall_micros": 0
+        },
+        {
+          "name": "SymbolCatalog/Php",
+          "wall_micros": 9
+        },
+        {
+          "name": "Relationships/Php",
+          "wall_micros": 0
+        },
+        {
+          "name": "GraphMaterialization/Php",
+          "wall_micros": 2
+        },
+        {
+          "name": "LanguageComposition",
+          "wall_micros": 2
+        },
+        {
+          "name": "GraphValidation",
+          "wall_micros": 55572
+        },
+        {
+          "name": "total",
+          "wall_micros": 488021
+        }
+      ],
+      "measurements": {
+        "ambiguous_call_sites": 1881,
+        "call_sites": 33500,
+        "degradations": 0,
+        "degraded": false,
+        "discovered_files": 793,
+        "edges": 19117,
+        "parsed_files": 793,
+        "peak_rss_bytes": 130039808,
+        "php_files": 0,
+        "rust_files": 793,
+        "source_bytes": 5685721,
+        "symbols": 16888,
+        "syntax_error_files": 0,
+        "unresolved_call_sites": 26656,
+        "wall_micros": 488021
+      },
+      "budget_verdicts": [
+        {
+          "budget": "cold_index_peak_rss_bytes",
+          "observed": 130039808,
+          "limit": 2147483648,
+          "status": "pass"
+        },
+        {
+          "budget": "cold_index_wall_micros",
+          "observed": 488021,
+          "limit": 60000000,
+          "status": "pass"
+        }
+      ]
+    },
+    {
+      "id": "warm-noop",
+      "status": "pass",
+      "details": "unchanged checkout: no reindex work behind the freshness barrier",
+      "phases": [
+        {
+          "name": "fresh_barrier",
+          "wall_micros": 89831
+        }
+      ],
+      "measurements": {
+        "files_inspected": 1586,
+        "git_subprocesses": 2,
+        "no_op_reconciliations": 1,
+        "wall_micros": 89831
+      },
+      "budget_verdicts": [
+        {
+          "budget": "warm_noop_wall_micros",
+          "observed": 89832,
+          "limit": 10000000,
+          "status": "pass"
+        }
+      ]
+    },
+    {
+      "id": "fingerprint",
+      "status": "pass",
+      "details": "two cold indexes produce identical fingerprints and counts",
+      "phases": [
+        {
+          "name": "reindex",
+          "wall_micros": 357484
+        }
+      ],
+      "measurements": {
+        "fingerprint": "1c7b6f738e280e2a",
+        "rerun_edges": 19117,
+        "rerun_symbols": 16888
+      },
+      "budget_verdicts": []
+    },
+    {
+      "id": "one-file-edit",
+      "status": "pass",
+      "details": "one-file edit: targeted reconcile, fresh query sees the change",
+      "phases": [
+        {
+          "name": "edit_and_barrier",
+          "wall_micros": 252708
+        }
+      ],
+      "measurements": {
+        "files_reparsed": 1,
+        "full_reconciliations": 0,
+        "wall_micros": 252709
+      },
+      "budget_verdicts": []
+    },
+    {
+      "id": "atomic-replace",
+      "status": "pass",
+      "details": "write-temp-then-rename: targeted reconcile, fresh query sees the change",
+      "phases": [
+        {
+          "name": "replace_and_barrier",
+          "wall_micros": 349094
+        }
+      ],
+      "measurements": {
+        "files_reparsed": 1,
+        "full_reconciliations": 0,
+        "wall_micros": 349094
+      },
+      "budget_verdicts": []
+    },
+    {
+      "id": "rename-delete",
+      "status": "pass",
+      "details": "rename + delete: inventory correct after the freshness barrier",
+      "phases": [
+        {
+          "name": "rename_delete_and_barrier",
+          "wall_micros": 384426
+        }
+      ],
+      "measurements": {
+        "created_files": 1,
+        "deleted_files": 2,
+        "wall_micros": 384426
+      },
+      "budget_verdicts": []
+    },
+    {
+      "id": "syntax-error",
+      "status": "pass",
+      "details": "last-good revision: `run_one` stays queryable; temporary syntax error: attributed diagnostics; restore returns to baseline on a newer revision",
+      "phases": [
+        {
+          "name": "break_and_barrier",
+          "wall_micros": 221315
+        }
+      ],
+      "measurements": {
+        "baseline_total_diagnostics": 0
+      },
+      "budget_verdicts": []
+    },
+    {
+      "id": "diff-context",
+      "status": "pass",
+      "details": "clean tree: empty diff; after edits: correct changed-file attribution",
+      "phases": [
+        {
+          "name": "clean_diff",
+          "wall_micros": 1207645
+        },
+        {
+          "name": "dirty_diff",
+          "wall_micros": 276671
+        }
+      ],
+      "measurements": {
+        "changed_files": [
+          {
+            "change": "Deleted",
+            "path": "benches/copy.rs",
+            "previous_path": null
+          },
+          {
+            "change": "Deleted",
+            "path": "benches/fs.rs",
+            "previous_path": null
+          },
+          {
+            "change": "Added",
+            "path": "benches/fs__chakra_moved.rs",
+            "previous_path": null
+          }
+        ],
+        "clean_diff_wall_micros": 220759
+      },
+      "budget_verdicts": []
+    },
+    {
+      "id": "queries",
+      "status": "pass",
+      "details": "high-degree targets chosen from the index; bounded responses with explicit truncation",
+      "phases": [
+        {
+          "name": "symbol_search",
+          "wall_micros": 127
+        },
+        {
+          "name": "callers",
+          "wall_micros": 142
+        },
+        {
+          "name": "context",
+          "wall_micros": 220
+        }
+      ],
+      "measurements": {
+        "callers_returned": 5,
+        "target": "tokio::src::fs::mocks::pool::run_one",
+        "target_incoming_calls": 45,
+        "target_precision": "TreeSitter/Syntax",
+        "targets": [
+          {
+            "incoming_calls": 45,
+            "qualified_name": "tokio::src::fs::mocks::pool::run_one"
+          },
+          {
+            "incoming_calls": 21,
+            "qualified_name": "tokio::tests::fs_uring_file_read::create_temp_file"
+          },
+          {
+            "incoming_calls": 21,
+            "qualified_name": "tokio::tests::io_async_fd::socketpair"
+          }
+        ]
+      },
+      "budget_verdicts": []
+    },
+    {
+      "id": "cancellation",
+      "status": "pass",
+      "details": "cancelled index and query stop promptly; no partial publication",
+      "phases": [
+        {
+          "name": "cancelled_cold_index",
+          "wall_micros": 2
+        },
+        {
+          "name": "cancelled_query",
+          "wall_micros": 2
+        }
+      ],
+      "measurements": {
+        "cancelled_index_wall_micros": 2
+      },
+      "budget_verdicts": []
+    },
+    {
+      "id": "cache-restore",
+      "status": "pass",
+      "details": "checkout restored to the pinned SHA with a clean worktree",
+      "phases": [],
+      "measurements": {},
+      "budget_verdicts": []
+    }
+  ]
+}

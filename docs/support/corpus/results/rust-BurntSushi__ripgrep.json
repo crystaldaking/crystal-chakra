@@ -1,0 +1,316 @@
+{
+  "schema_version": 1,
+  "language": "rust",
+  "repository": "BurntSushi/ripgrep",
+  "sha": "3fce3b5bb0236da2df6d99672afb8a719642eca7",
+  "status": "evaluated",
+  "skip_reason": "",
+  "provider_phase": "not-configured",
+  "scenario_count": 11,
+  "passed": 11,
+  "failed": 0,
+  "skipped": 0,
+  "scenarios": [
+    {
+      "id": "cold-index",
+      "status": "pass",
+      "details": "full index from scratch; coverage counts recorded",
+      "phases": [
+        {
+          "name": "GitInventory",
+          "wall_micros": 6770
+        },
+        {
+          "name": "SourceRead",
+          "wall_micros": 55932
+        },
+        {
+          "name": "ParseExtraction/Rust",
+          "wall_micros": 39085
+        },
+        {
+          "name": "SymbolCatalog/Rust",
+          "wall_micros": 710
+        },
+        {
+          "name": "Relationships/Rust",
+          "wall_micros": 514
+        },
+        {
+          "name": "GraphMaterialization/Rust",
+          "wall_micros": 34206
+        },
+        {
+          "name": "ParseExtraction/Php",
+          "wall_micros": 0
+        },
+        {
+          "name": "SymbolCatalog/Php",
+          "wall_micros": 1
+        },
+        {
+          "name": "Relationships/Php",
+          "wall_micros": 0
+        },
+        {
+          "name": "GraphMaterialization/Php",
+          "wall_micros": 2
+        },
+        {
+          "name": "LanguageComposition",
+          "wall_micros": 4
+        },
+        {
+          "name": "GraphValidation",
+          "wall_micros": 16986
+        },
+        {
+          "name": "total",
+          "wall_micros": 177469
+        }
+      ],
+      "measurements": {
+        "ambiguous_call_sites": 613,
+        "call_sites": 13511,
+        "degradations": 0,
+        "degraded": false,
+        "discovered_files": 110,
+        "edges": 8576,
+        "parsed_files": 110,
+        "peak_rss_bytes": 221429760,
+        "php_files": 0,
+        "rust_files": 110,
+        "source_bytes": 1902104,
+        "symbols": 5195,
+        "syntax_error_files": 0,
+        "unresolved_call_sites": 10307,
+        "wall_micros": 177469
+      },
+      "budget_verdicts": [
+        {
+          "budget": "cold_index_peak_rss_bytes",
+          "observed": 221429760,
+          "limit": 2147483648,
+          "status": "pass"
+        },
+        {
+          "budget": "cold_index_wall_micros",
+          "observed": 177469,
+          "limit": 60000000,
+          "status": "pass"
+        }
+      ]
+    },
+    {
+      "id": "warm-noop",
+      "status": "pass",
+      "details": "unchanged checkout: no reindex work behind the freshness barrier",
+      "phases": [
+        {
+          "name": "fresh_barrier",
+          "wall_micros": 62952
+        }
+      ],
+      "measurements": {
+        "files_inspected": 220,
+        "git_subprocesses": 2,
+        "no_op_reconciliations": 1,
+        "wall_micros": 62952
+      },
+      "budget_verdicts": [
+        {
+          "budget": "warm_noop_wall_micros",
+          "observed": 62954,
+          "limit": 10000000,
+          "status": "pass"
+        }
+      ]
+    },
+    {
+      "id": "fingerprint",
+      "status": "pass",
+      "details": "two cold indexes produce identical fingerprints and counts",
+      "phases": [
+        {
+          "name": "reindex",
+          "wall_micros": 166283
+        }
+      ],
+      "measurements": {
+        "fingerprint": "024bf0180250d75e",
+        "rerun_edges": 8576,
+        "rerun_symbols": 5195
+      },
+      "budget_verdicts": []
+    },
+    {
+      "id": "one-file-edit",
+      "status": "pass",
+      "details": "one-file edit: targeted reconcile, fresh query sees the change",
+      "phases": [
+        {
+          "name": "edit_and_barrier",
+          "wall_micros": 141868
+        }
+      ],
+      "measurements": {
+        "files_reparsed": 1,
+        "full_reconciliations": 0,
+        "wall_micros": 141868
+      },
+      "budget_verdicts": []
+    },
+    {
+      "id": "atomic-replace",
+      "status": "pass",
+      "details": "write-temp-then-rename: targeted reconcile, fresh query sees the change",
+      "phases": [
+        {
+          "name": "replace_and_barrier",
+          "wall_micros": 204173
+        }
+      ],
+      "measurements": {
+        "files_reparsed": 1,
+        "full_reconciliations": 0,
+        "wall_micros": 204174
+      },
+      "budget_verdicts": []
+    },
+    {
+      "id": "rename-delete",
+      "status": "pass",
+      "details": "rename + delete: inventory correct after the freshness barrier",
+      "phases": [
+        {
+          "name": "rename_delete_and_barrier",
+          "wall_micros": 170822
+        }
+      ],
+      "measurements": {
+        "created_files": 1,
+        "deleted_files": 2,
+        "wall_micros": 170822
+      },
+      "budget_verdicts": []
+    },
+    {
+      "id": "syntax-error",
+      "status": "pass",
+      "details": "last-good revision: `one_matcher` stays queryable; temporary syntax error: attributed diagnostics; restore returns to baseline on a newer revision",
+      "phases": [
+        {
+          "name": "break_and_barrier",
+          "wall_micros": 130541
+        }
+      ],
+      "measurements": {
+        "baseline_total_diagnostics": 0
+      },
+      "budget_verdicts": []
+    },
+    {
+      "id": "diff-context",
+      "status": "pass",
+      "details": "clean tree: empty diff; after edits: correct changed-file attribution",
+      "phases": [
+        {
+          "name": "clean_diff",
+          "wall_micros": 707422
+        },
+        {
+          "name": "dirty_diff",
+          "wall_micros": 192117
+        }
+      ],
+      "measurements": {
+        "changed_files": [
+          {
+            "change": "Deleted",
+            "path": "build.rs",
+            "previous_path": null
+          },
+          {
+            "change": "Deleted",
+            "path": "crates/cli/src/decompress.rs",
+            "previous_path": null
+          },
+          {
+            "change": "Added",
+            "path": "crates/cli/src/decompress__chakra_moved.rs",
+            "previous_path": null
+          }
+        ],
+        "clean_diff_wall_micros": 189987
+      },
+      "budget_verdicts": []
+    },
+    {
+      "id": "queries",
+      "status": "pass",
+      "details": "high-degree targets chosen from the index; bounded responses with explicit truncation",
+      "phases": [
+        {
+          "name": "symbol_search",
+          "wall_micros": 107
+        },
+        {
+          "name": "callers",
+          "wall_micros": 67
+        },
+        {
+          "name": "context",
+          "wall_micros": 90
+        }
+      ],
+      "measurements": {
+        "callers_returned": 5,
+        "target": "crates::ignore::src::incremental::tests::one_matcher",
+        "target_incoming_calls": 38,
+        "target_precision": "TreeSitter/Syntax",
+        "targets": [
+          {
+            "incoming_calls": 38,
+            "qualified_name": "crates::ignore::src::incremental::tests::one_matcher"
+          },
+          {
+            "incoming_calls": 34,
+            "qualified_name": "crates::ignore::src::walk::tests::assert_paths"
+          },
+          {
+            "incoming_calls": 21,
+            "qualified_name": "crates::globset::src::glob::Parser::push_token"
+          }
+        ]
+      },
+      "budget_verdicts": []
+    },
+    {
+      "id": "cancellation",
+      "status": "pass",
+      "details": "cancelled index and query stop promptly; no partial publication",
+      "phases": [
+        {
+          "name": "cancelled_cold_index",
+          "wall_micros": 1
+        },
+        {
+          "name": "cancelled_query",
+          "wall_micros": 0
+        }
+      ],
+      "measurements": {
+        "cancelled_index_wall_micros": 1
+      },
+      "budget_verdicts": []
+    },
+    {
+      "id": "cache-restore",
+      "status": "pass",
+      "details": "checkout restored to the pinned SHA with a clean worktree",
+      "phases": [],
+      "measurements": {},
+      "budget_verdicts": []
+    }
+  ]
+}

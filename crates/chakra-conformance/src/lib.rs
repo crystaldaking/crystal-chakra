@@ -39,6 +39,7 @@
 //! - Emission is deterministic: fixed field order, scenario catalog order, and
 //!   no timestamps, so re-running `emit` is byte-identical.
 
+pub mod corpus;
 mod fixture;
 mod manifest;
 mod provider;
