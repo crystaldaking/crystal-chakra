@@ -33,5 +33,6 @@ Accepted decisions:
 - ADR-008: PHP syntax support and multi-language composition
 - ADR-009: Git-aware repository and worktree identity
 - ADR-010: lazy syntax call-site resolution
+- ADR-011: bounded indexing and deterministic degradation
 
 Do not pre-create empty ADRs merely to satisfy a list.

@@ -28,8 +28,9 @@ pub const MAX_QUERY_LIMIT: u32 = 500;
 ///
 /// Preferred flow: `symbol_search` → pick a candidate → address it by id.
 /// `ById` carries the revision the id was taken from (the envelope revision
-/// of the response that returned it); an [`EntityId`] is an arena index and
-/// is meaningless once a newer revision is published, so resolution fails
+/// of the response that returned it); an [`EntityId`] is an opaque
+/// revision-local key and is meaningless once a newer revision is published,
+/// so resolution fails
 /// with [`QueryError::StaleSymbolRef`] on a mismatch instead of silently
 /// returning the wrong symbol. `ByName` resolves only when it is
 /// unambiguous; ambiguity is returned as [`QueryError::AmbiguousSymbol`],

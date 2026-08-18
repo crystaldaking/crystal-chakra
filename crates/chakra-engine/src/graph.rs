@@ -1,10 +1,9 @@
 //! In-memory symbol graph (ADR-0002).
 //!
-//! Representation: an arena of symbols (`Vec<Symbol>`, indexed by
-//! [`EntityId`]) plus derived indexes for name lookup, file membership, and
-//! adjacency. Chosen over a generic graph library because v0.1 traversals
-//! are one hop deep and the whole structure is cloned privately per update;
-//! see `docs/adr/0002-in-memory-graph-representation.md`.
+//! Representation: persistent ordered symbol/call arenas plus persistent file
+//! and adjacency indexes. Immutable revisions structurally share unchanged
+//! payloads; a workspace graph is a shallow view over disjoint language
+//! partitions. See `docs/adr/0002-in-memory-graph-representation.md`.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -16,7 +15,10 @@ use chakra_domain::symbol::{
     CallForm, CallResolution, CallSite, CallTargetKind, Edge, EdgeKind, EntityId, Language,
     MAX_RECEIVER_HINT_CHARS, Symbol, SymbolKey, SymbolKind,
 };
+use rpds::{HashTrieMapSync, RedBlackTreeMapSync};
 use thiserror::Error;
+
+const PHP_ENTITY_ID_BASE: u64 = 1_u64 << 63;
 
 /// Why a graph mutation was rejected.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -30,6 +32,8 @@ pub enum GraphError {
     UnknownEntity(EntityId),
     #[error("source file is already indexed: {0}")]
     DuplicateFile(RepoRelativePath),
+    #[error("source file is not indexed: {0}")]
+    UnknownFile(RepoRelativePath),
     #[error("call-site name must be non-empty")]
     EmptyCallSiteName,
     #[error("call-site receiver hint exceeds the {limit}-character budget")]
@@ -42,6 +46,16 @@ pub enum GraphError {
     },
     #[error("cannot merge more than one independently resolved {language:?} graph")]
     OverlappingLanguageGraph { language: Language },
+    #[error("cannot remove symbol {id:?} while revision-local relationships still reference it")]
+    EntityStillReferenced { id: EntityId },
+    #[error("owned graph edge is missing from a directional adjacency index")]
+    MissingOwnedEdge,
+    #[error("a composed workspace graph is immutable; update a language partition instead")]
+    CompositeMutation,
+    #[error("revision-local entity id range for {0:?} is exhausted")]
+    EntityIdSpaceExhausted(Language),
+    #[error("cannot preserve {id:?} while changing its symbol key")]
+    PreservedEntityKeyChanged { id: EntityId },
     #[error("graph consistency audit failed: {0}")]
     Consistency(#[from] ConsistencyError),
 }
@@ -152,6 +166,19 @@ impl BoundedGraphBuilder {
         }
         self.graph
             .add_edge(kind, from, to, provenance, precision, location)?;
+        Ok(true)
+    }
+
+    pub fn add_edge_owned_by(
+        &mut self,
+        owner: RepoRelativePath,
+        edge: Edge,
+    ) -> Result<bool, GraphError> {
+        if self.graph.edge_count() >= self.limits.max_edges {
+            self.omit_edges_for_edge_budget(1);
+            return Ok(false);
+        }
+        self.graph.add_edge_owned_by(owner, edge)?;
         Ok(true)
     }
 
@@ -268,22 +295,62 @@ struct IndexedFile {
 /// once published it is immutable behind an `Arc`.
 #[derive(Debug, Clone, Default)]
 pub struct SymbolGraph {
-    symbols: Vec<Symbol>,
+    /// Workspace composition is a shallow immutable list of disjoint
+    /// language partitions. Owned language graphs keep this `None`.
+    parts: Option<Arc<Vec<SymbolGraph>>>,
+    /// Persistent ordered arena. Values are independently shared so updating
+    /// a trie path never copies unchanged symbol payloads.
+    symbols: RedBlackTreeMapSync<EntityId, Arc<Symbol>>,
     /// File → captured source plus entities declared in it.
-    files: HashMap<RepoRelativePath, IndexedFile>,
-    outgoing: HashMap<EntityId, Vec<Edge>>,
-    incoming: HashMap<EntityId, Vec<Edge>>,
+    files: RedBlackTreeMapSync<RepoRelativePath, Arc<IndexedFile>>,
+    outgoing: HashTrieMapSync<EntityId, Arc<Vec<Edge>>>,
+    incoming: HashTrieMapSync<EntityId, Arc<Vec<Edge>>>,
+    /// Non-call syntax relationships grouped by the file contribution that
+    /// produced them. This is the delta boundary used by live reconciliation.
+    relationship_edges_by_owner: RedBlackTreeMapSync<RepoRelativePath, Arc<Vec<Edge>>>,
     edge_count: u64,
-    call_sites: Vec<CallSite>,
-    call_sites_by_caller: HashMap<EntityId, Vec<usize>>,
-    call_sites_by_lookup: HashMap<CallLookupKey, Vec<usize>>,
-    callables: HashMap<CallLookupKey, Vec<EntityId>>,
+    call_sites: RedBlackTreeMapSync<u64, Arc<CallSite>>,
+    call_sites_by_caller: HashTrieMapSync<EntityId, Arc<Vec<u64>>>,
+    call_sites_by_lookup: HashTrieMapSync<CallLookupKey, Arc<Vec<u64>>>,
+    callables: HashTrieMapSync<CallLookupKey, Arc<Vec<EntityId>>>,
     ambiguous_call_sites: u64,
     unresolved_call_sites: u64,
     /// Legacy eager-resolution truncation count. Lazy call candidates are
     /// retained compactly and bounded only when a query expands them, so
     /// current language indexes keep this at zero.
     truncated_call_sites: u64,
+    next_rust_entity_id: u64,
+    next_php_entity_id: u64,
+    next_call_site_id: u64,
+    rust_symbol_count: u64,
+    php_symbol_count: u64,
+    adjacency_entries_copied: u64,
+}
+
+/// Borrowed deterministic symbol view kept as a small compatibility facade
+/// while the underlying arena uses persistent tree nodes.
+#[derive(Debug, Clone, Copy)]
+pub struct Symbols<'a> {
+    graph: &'a SymbolGraph,
+}
+
+impl<'a> Symbols<'a> {
+    pub fn iter(&self) -> Box<dyn DoubleEndedIterator<Item = &'a Symbol> + 'a> {
+        self.graph.symbol_iterator()
+    }
+
+    pub fn first(&self) -> Option<&'a Symbol> {
+        self.graph.symbol_iterator().next()
+    }
+}
+
+impl<'a> IntoIterator for Symbols<'a> {
+    type Item = &'a Symbol;
+    type IntoIter = Box<dyn DoubleEndedIterator<Item = &'a Symbol> + 'a>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.graph.symbol_iterator()
+    }
 }
 
 impl SymbolGraph {
@@ -291,98 +358,68 @@ impl SymbolGraph {
         Self::default()
     }
 
+    fn ensure_owned(&self) -> Result<(), GraphError> {
+        if self.parts.is_some() {
+            Err(GraphError::CompositeMutation)
+        } else {
+            Ok(())
+        }
+    }
+
+    fn languages(&self) -> Vec<Language> {
+        if let Some(parts) = self.parts.as_ref() {
+            let mut languages = Vec::new();
+            for part in parts.iter() {
+                for language in part.languages() {
+                    if !languages.contains(&language) {
+                        languages.push(language);
+                    }
+                }
+            }
+            return languages;
+        }
+        let mut languages = Vec::with_capacity(2);
+        if self.rust_symbol_count != 0 {
+            languages.push(Language::Rust);
+        }
+        if self.php_symbol_count != 0 {
+            languages.push(Language::Php);
+        }
+        languages
+    }
+
+    fn symbol_iterator<'a>(&'a self) -> Box<dyn DoubleEndedIterator<Item = &'a Symbol> + 'a> {
+        if let Some(parts) = self.parts.as_ref() {
+            Box::new(parts.iter().flat_map(|part| part.symbol_iterator()))
+        } else {
+            Box::new(self.symbols.iter().map(|(_, symbol)| symbol.as_ref()))
+        }
+    }
+
     /// Combines independently built, disjoint language graphs into one
-    /// revision-local workspace graph, remapping arena ids while preserving
-    /// every fact's language, provenance, precision, and source range.
+    /// revision-local workspace view without copying or remapping unchanged
+    /// facts. Language-scoped entity-id ranges keep partition ids disjoint.
     /// Overlapping languages are rejected because each input has already
     /// resolved its call sites against its own callable catalog.
     pub fn merge(graphs: impl IntoIterator<Item = SymbolGraph>) -> Result<Self, GraphError> {
-        let mut merged = Self::new();
+        let mut parts = Vec::new();
         let mut languages = HashSet::new();
         for graph in graphs {
-            let graph_languages: HashSet<_> = graph
-                .symbols
-                .iter()
-                .map(|symbol| symbol.key.language)
-                .collect();
-            for language in graph_languages {
+            for language in graph.languages() {
                 if !languages.insert(language) {
                     return Err(GraphError::OverlappingLanguageGraph { language });
                 }
             }
-            merged.append(graph)?;
-        }
-        Ok(merged)
-    }
-
-    fn append(&mut self, graph: SymbolGraph) -> Result<(), GraphError> {
-        let mut ids = HashMap::with_capacity(graph.symbols.len());
-        for (path, file) in &graph.files {
-            if let Some(source) = &file.source {
-                self.add_file(path.clone(), source.clone())?;
+            if let Some(nested) = graph.parts.as_ref() {
+                parts.extend(nested.iter().cloned());
+            } else {
+                parts.push(graph);
             }
         }
-        for symbol in &graph.symbols {
-            let id = self.add_symbol(
-                symbol.key.clone(),
-                symbol.location.clone(),
-                symbol.signature.clone(),
-                symbol.provenance,
-                symbol.precision,
-            )?;
-            ids.insert(symbol.id, id);
-        }
-        for edges in graph.outgoing.values() {
-            for edge in edges {
-                let from = ids
-                    .get(&edge.from)
-                    .copied()
-                    .ok_or(GraphError::UnknownEntity(edge.from))?;
-                let to = ids
-                    .get(&edge.to)
-                    .copied()
-                    .ok_or(GraphError::UnknownEntity(edge.to))?;
-                self.add_edge(
-                    edge.kind,
-                    from,
-                    to,
-                    edge.provenance,
-                    edge.precision,
-                    edge.location.clone(),
-                )?;
-            }
-        }
-        for call_site in graph.call_sites {
-            let caller = ids
-                .get(&call_site.caller)
-                .copied()
-                .ok_or(GraphError::UnknownEntity(call_site.caller))?;
-            let resolution = match call_site.resolution {
-                CallResolution::Resolved { target } => CallResolution::Resolved {
-                    target: ids
-                        .get(&target)
-                        .copied()
-                        .ok_or(GraphError::UnknownEntity(target))?,
-                },
-                other => other,
-            };
-            self.insert_call_site(CallSite {
-                caller,
-                form: call_site.form,
-                target_kind: call_site.target_kind,
-                name: call_site.name,
-                qualifier: call_site.qualifier,
-                receiver_hint: call_site.receiver_hint,
-                location: call_site.location,
-                resolution,
-                provenance: call_site.provenance,
-                precision: call_site.precision,
-            })?;
-        }
-        self.truncated_call_sites = self
-            .truncated_call_sites
-            .saturating_add(graph.truncated_call_sites);
-        Ok(())
+        Ok(Self {
+            parts: Some(Arc::new(parts)),
+            ..Self::default()
+        })
     }
 
     /// Adds one discovered source file and the exact text parsed for this
@@ -393,23 +430,28 @@ impl SymbolGraph {
         path: RepoRelativePath,
         source: impl Into<Arc<str>>,
     ) -> Result<(), GraphError> {
-        match self.files.entry(path.clone()) {
-            std::collections::hash_map::Entry::Vacant(entry) => {
-                entry.insert(IndexedFile {
-                    symbols: Vec::new(),
-                    source: Some(source.into()),
-                    provenance: Provenance::Git,
-                    precision: Precision::Precise,
-                });
+        self.ensure_owned()?;
+        match self.files.get(&path) {
+            None => {
+                self.files.insert_mut(
+                    path,
+                    Arc::new(IndexedFile {
+                        symbols: Vec::new(),
+                        source: Some(source.into()),
+                        provenance: Provenance::Git,
+                        precision: Precision::Precise,
+                    }),
+                );
             }
-            std::collections::hash_map::Entry::Occupied(mut entry) => {
-                if entry.get().source.is_some() {
+            Some(existing) => {
+                if existing.source.is_some() {
                     return Err(GraphError::DuplicateFile(path));
                 }
-                let file = entry.get_mut();
+                let mut file = existing.as_ref().clone();
                 file.source = Some(source.into());
                 file.provenance = Provenance::Git;
                 file.precision = Precision::Precise;
+                self.files.insert_mut(path, Arc::new(file));
             }
         }
         Ok(())
@@ -424,13 +466,38 @@ impl SymbolGraph {
         provenance: Provenance,
         precision: Precision,
     ) -> Result<EntityId, GraphError> {
+        self.ensure_owned()?;
         if &key.path != location.file() {
             return Err(GraphError::KeyLocationMismatch {
                 key_path: key.path.as_str().to_owned(),
                 location_path: location.file().as_str().to_owned(),
             });
         }
-        let id = EntityId(self.symbols.len() as u64);
+        let id = match key.language {
+            Language::Rust => {
+                if self.next_rust_entity_id >= PHP_ENTITY_ID_BASE {
+                    return Err(GraphError::EntityIdSpaceExhausted(Language::Rust));
+                }
+                let id = EntityId(self.next_rust_entity_id);
+                self.next_rust_entity_id += 1;
+                id
+            }
+            Language::Php => {
+                let Some(raw) = PHP_ENTITY_ID_BASE.checked_add(self.next_php_entity_id) else {
+                    return Err(GraphError::EntityIdSpaceExhausted(Language::Php));
+                };
+                let id = EntityId(raw);
+                self.next_php_entity_id = self
+                    .next_php_entity_id
+                    .checked_add(1)
+                    .ok_or(GraphError::EntityIdSpaceExhausted(Language::Php))?;
+                id
+            }
+        };
+        match key.language {
+            Language::Rust => self.rust_symbol_count = self.rust_symbol_count.saturating_add(1),
+            Language::Php => self.php_symbol_count = self.php_symbol_count.saturating_add(1),
+        }
         let symbol = Symbol {
             id,
             key,
@@ -439,20 +506,28 @@ impl SymbolGraph {
             provenance,
             precision,
         };
-        self.files
-            .entry(symbol.location.file().clone())
-            .or_insert_with(|| IndexedFile {
+        let file_path = symbol.location.file().clone();
+        let mut file = self
+            .files
+            .get(&file_path)
+            .map(|file| file.as_ref().clone())
+            .unwrap_or_else(|| IndexedFile {
                 symbols: Vec::new(),
                 source: None,
                 provenance: symbol.provenance,
                 precision: symbol.precision,
-            })
-            .symbols
-            .push(id);
+            });
+        file.symbols.push(id);
+        self.files.insert_mut(file_path, Arc::new(file));
         for lookup in callable_lookup_keys(&symbol) {
-            self.callables.entry(lookup).or_default().push(id);
+            let mut ids = self
+                .callables
+                .get(&lookup)
+                .map_or_else(Vec::new, |ids| ids.as_ref().clone());
+            ids.push(id);
+            self.callables.insert_mut(lookup, Arc::new(ids));
         }
-        self.symbols.push(symbol);
+        self.symbols.insert_mut(id, Arc::new(symbol));
         Ok(id)
     }
 
@@ -466,56 +541,269 @@ impl SymbolGraph {
         precision: Precision,
         location: Option<SourceRange>,
     ) -> Result<(), GraphError> {
+        self.ensure_owned()?;
+        let owner = location
+            .as_ref()
+            .map(|range| range.file().clone())
+            .or_else(|| self.symbol(from).map(|symbol| symbol.key.path.clone()))
+            .ok_or(GraphError::UnknownEntity(from))?;
+        self.add_edge_owned_by(
+            owner,
+            Edge {
+                kind,
+                from,
+                to,
+                provenance,
+                precision,
+                location,
+            },
+        )
+    }
+
+    /// Adds one syntax relationship owned by a specific file contribution.
+    /// Ownership is private graph-maintenance metadata and never changes the
+    /// public edge/provenance contract.
+    pub fn add_edge_owned_by(
+        &mut self,
+        owner: RepoRelativePath,
+        edge: Edge,
+    ) -> Result<(), GraphError> {
+        self.ensure_owned()?;
+        self.add_edge_raw(edge.clone())?;
+        let mut owned = self
+            .relationship_edges_by_owner
+            .get(&owner)
+            .map_or_else(Vec::new, |edges| edges.as_ref().clone());
+        owned.push(edge);
+        self.relationship_edges_by_owner
+            .insert_mut(owner, Arc::new(owned));
+        Ok(())
+    }
+
+    fn add_edge_raw(&mut self, edge: Edge) -> Result<(), GraphError> {
+        let from = edge.from;
+        let to = edge.to;
         for id in [from, to] {
             if self.symbol(id).is_none() {
                 return Err(GraphError::UnknownEntity(id));
             }
         }
-        let edge = Edge {
-            kind,
-            from,
-            to,
-            provenance,
-            precision,
-            location,
-        };
-        self.outgoing.entry(from).or_default().push(edge.clone());
-        self.incoming.entry(to).or_default().push(edge);
+        let outgoing_copied = self.outgoing.get(&from).map_or(0, |edges| edges.len()) as u64;
+        let mut outgoing = self
+            .outgoing
+            .get(&from)
+            .map_or_else(Vec::new, |edges| edges.as_ref().clone());
+        outgoing.push(edge.clone());
+        self.outgoing.insert_mut(from, Arc::new(outgoing));
+        let incoming_copied = self.incoming.get(&to).map_or(0, |edges| edges.len()) as u64;
+        let mut incoming = self
+            .incoming
+            .get(&to)
+            .map_or_else(Vec::new, |edges| edges.as_ref().clone());
+        incoming.push(edge);
+        self.incoming.insert_mut(to, Arc::new(incoming));
+        self.adjacency_entries_copied = self
+            .adjacency_entries_copied
+            .saturating_add(outgoing_copied)
+            .saturating_add(incoming_copied);
         self.edge_count += 1;
         Ok(())
     }
 
-    pub fn symbol(&self, id: EntityId) -> Option<&Symbol> {
-        self.symbols.get(id.0 as usize)
+    /// Removes the exact non-call relationships contributed by `owner`.
+    pub fn remove_relationships_in_file(
+        &mut self,
+        owner: &RepoRelativePath,
+    ) -> Result<u64, GraphError> {
+        self.ensure_owned()?;
+        let Some(edges) = self.relationship_edges_by_owner.get(owner).cloned() else {
+            return Ok(0);
+        };
+        for edge in edges.iter() {
+            self.remove_edge_raw(edge)?;
+        }
+        self.relationship_edges_by_owner.remove_mut(owner);
+        Ok(edges.len() as u64)
     }
 
-    pub fn symbols(&self) -> &[Symbol] {
-        &self.symbols
+    fn remove_edge_raw(&mut self, edge: &Edge) -> Result<(), GraphError> {
+        let outgoing_copied = remove_adjacency_edge(&mut self.outgoing, edge.from, edge)?;
+        let incoming_copied = remove_adjacency_edge(&mut self.incoming, edge.to, edge)?;
+        self.adjacency_entries_copied = self
+            .adjacency_entries_copied
+            .saturating_add(outgoing_copied)
+            .saturating_add(incoming_copied);
+        self.edge_count = self.edge_count.saturating_sub(1);
+        Ok(())
+    }
+
+    /// Removes a file and its declarations after callers/relationships that
+    /// reference them have been removed from the same private update.
+    pub fn remove_file(&mut self, path: &RepoRelativePath) -> Result<bool, GraphError> {
+        self.ensure_owned()?;
+        let Some(file) = self.files.get(path).cloned() else {
+            return Ok(false);
+        };
+        for id in &file.symbols {
+            if !self.outgoing_edges(*id).is_empty()
+                || !self.incoming_edges(*id).is_empty()
+                || self.call_sites_by_caller.get(id).is_some()
+            {
+                return Err(GraphError::EntityStillReferenced { id: *id });
+            }
+        }
+        for id in &file.symbols {
+            let Some(symbol) = self.symbol(*id).cloned() else {
+                return Err(GraphError::UnknownEntity(*id));
+            };
+            for lookup in callable_lookup_keys(&symbol) {
+                let Some(existing) = self.callables.get(&lookup) else {
+                    continue;
+                };
+                let mut ids = existing.as_ref().clone();
+                ids.retain(|candidate| candidate != id);
+                if ids.is_empty() {
+                    self.callables.remove_mut(&lookup);
+                } else {
+                    self.callables.insert_mut(lookup, Arc::new(ids));
+                }
+            }
+            match symbol.key.language {
+                Language::Rust => self.rust_symbol_count = self.rust_symbol_count.saturating_sub(1),
+                Language::Php => self.php_symbol_count = self.php_symbol_count.saturating_sub(1),
+            }
+            self.symbols.remove_mut(id);
+        }
+        self.files.remove_mut(path);
+        Ok(true)
+    }
+
+    /// Replaces captured text while preserving the file's declaration ids.
+    pub fn replace_file_source(
+        &mut self,
+        path: &RepoRelativePath,
+        source: Arc<str>,
+    ) -> Result<(), GraphError> {
+        self.ensure_owned()?;
+        let Some(existing) = self.files.get(path) else {
+            return Err(GraphError::UnknownFile(path.clone()));
+        };
+        let mut file = existing.as_ref().clone();
+        file.source = Some(source);
+        file.provenance = Provenance::Git;
+        file.precision = Precision::Precise;
+        self.files.insert_mut(path.clone(), Arc::new(file));
+        Ok(())
+    }
+
+    /// Replaces revision-local symbol details while retaining an id only when
+    /// its language-aware key is unchanged.
+    pub fn replace_symbol_payload(
+        &mut self,
+        id: EntityId,
+        key: SymbolKey,
+        location: SourceRange,
+        signature: Option<String>,
+        provenance: Provenance,
+        precision: Precision,
+    ) -> Result<bool, GraphError> {
+        self.ensure_owned()?;
+        if key.path != *location.file() {
+            return Err(GraphError::KeyLocationMismatch {
+                key_path: key.path.as_str().to_owned(),
+                location_path: location.file().as_str().to_owned(),
+            });
+        }
+        let Some(existing) = self.symbols.get(&id) else {
+            return Err(GraphError::UnknownEntity(id));
+        };
+        if existing.key != key {
+            return Err(GraphError::PreservedEntityKeyChanged { id });
+        }
+        let replacement = Symbol {
+            id,
+            key,
+            location,
+            signature,
+            provenance,
+            precision,
+        };
+        if existing.as_ref() == &replacement {
+            return Ok(false);
+        }
+        self.symbols.insert_mut(id, Arc::new(replacement));
+        Ok(true)
+    }
+
+    pub fn symbol(&self, id: EntityId) -> Option<&Symbol> {
+        if let Some(parts) = self.parts.as_ref() {
+            return parts.iter().find_map(|part| part.symbol(id));
+        }
+        self.symbols.get(&id).map(Arc::as_ref)
+    }
+
+    pub fn symbols(&self) -> Symbols<'_> {
+        Symbols { graph: self }
     }
 
     pub fn symbol_count(&self) -> u64 {
-        self.symbols.len() as u64
+        if let Some(parts) = self.parts.as_ref() {
+            return parts.iter().map(SymbolGraph::symbol_count).sum();
+        }
+        self.symbols.size() as u64
     }
 
     pub fn edge_count(&self) -> u64 {
+        if let Some(parts) = self.parts.as_ref() {
+            return parts.iter().map(SymbolGraph::edge_count).sum();
+        }
         self.edge_count
     }
 
+    /// Cumulative adjacency `Edge` payload copies performed while replacing
+    /// persistent per-entity vectors. A revision reports the delta from its
+    /// base graph, not this lifetime total.
+    pub fn adjacency_entries_copied(&self) -> u64 {
+        if let Some(parts) = self.parts.as_ref() {
+            return parts
+                .iter()
+                .map(SymbolGraph::adjacency_entries_copied)
+                .sum();
+        }
+        self.adjacency_entries_copied
+    }
+
     pub fn call_site_count(&self) -> u64 {
-        self.call_sites.len() as u64
+        if let Some(parts) = self.parts.as_ref() {
+            return parts.iter().map(SymbolGraph::call_site_count).sum();
+        }
+        self.call_sites.size() as u64
     }
 
     pub fn ambiguous_call_site_count(&self) -> u64 {
+        if let Some(parts) = self.parts.as_ref() {
+            return parts
+                .iter()
+                .map(SymbolGraph::ambiguous_call_site_count)
+                .sum();
+        }
         self.ambiguous_call_sites
     }
 
     pub fn unresolved_call_site_count(&self) -> u64 {
+        if let Some(parts) = self.parts.as_ref() {
+            return parts
+                .iter()
+                .map(SymbolGraph::unresolved_call_site_count)
+                .sum();
+        }
         self.unresolved_call_sites
     }
 
     /// Adds one compact syntax call site and materializes graph edges only
     /// when its target resolves to exactly one declaration.
     pub fn add_call_site(&mut self, input: CallSiteInput) -> Result<CallResolution, GraphError> {
+        self.ensure_owned()?;
         self.validate_call_site_input(&input)?;
         let language = self
             .symbol(input.caller)
@@ -530,26 +818,26 @@ impl SymbolGraph {
             input.qualifier.as_deref(),
         );
         if let CallResolution::Resolved { target } = resolution {
-            self.add_edge(
-                EdgeKind::Calls,
-                input.caller,
-                target,
-                input.provenance,
-                Precision::Heuristic,
-                Some(input.location.clone()),
-            )?;
+            self.add_edge_raw(Edge {
+                kind: EdgeKind::Calls,
+                from: input.caller,
+                to: target,
+                provenance: input.provenance,
+                precision: Precision::Heuristic,
+                location: Some(input.location.clone()),
+            })?;
             if self
                 .symbol(input.caller)
                 .is_some_and(|symbol| symbol.key.kind == SymbolKind::Test)
             {
-                self.add_edge(
-                    EdgeKind::Tests,
-                    input.caller,
-                    target,
-                    Provenance::Heuristic,
-                    Precision::Heuristic,
-                    Some(input.location.clone()),
-                )?;
+                self.add_edge_raw(Edge {
+                    kind: EdgeKind::Tests,
+                    from: input.caller,
+                    to: target,
+                    provenance: Provenance::Heuristic,
+                    precision: Precision::Heuristic,
+                    location: Some(input.location.clone()),
+                })?;
             }
         }
         self.insert_call_site(CallSite {
@@ -587,21 +875,38 @@ impl SymbolGraph {
     }
 
     /// Records legacy eager call-candidate incompleteness.
-    pub fn set_truncated_call_sites(&mut self, truncated_call_sites: u64) {
+    pub fn set_truncated_call_sites(
+        &mut self,
+        truncated_call_sites: u64,
+    ) -> Result<(), GraphError> {
+        self.ensure_owned()?;
         self.truncated_call_sites = truncated_call_sites;
+        Ok(())
     }
 
     /// Legacy eager call sites cut while building this graph revision.
     pub fn truncated_call_sites(&self) -> u64 {
+        if let Some(parts) = self.parts.as_ref() {
+            return parts.iter().map(SymbolGraph::truncated_call_sites).sum();
+        }
         self.truncated_call_sites
     }
 
     pub fn file_count(&self) -> u64 {
-        self.files.len() as u64
+        if let Some(parts) = self.parts.as_ref() {
+            return parts.iter().map(SymbolGraph::file_count).sum();
+        }
+        self.files.size() as u64
     }
 
     /// Files with the number of symbols declared in each, sorted by path.
     pub fn file_summaries(&self) -> Vec<(RepoRelativePath, u64, Provenance, Precision)> {
+        if let Some(parts) = self.parts.as_ref() {
+            let mut summaries: Vec<_> =
+                parts.iter().flat_map(SymbolGraph::file_summaries).collect();
+            summaries.sort_by(|a, b| a.0.cmp(&b.0));
+            return summaries;
+        }
         let mut summaries: Vec<_> = self
             .files
             .iter()
@@ -620,11 +925,57 @@ impl SymbolGraph {
 
     /// Captured source for one file in this graph revision.
     pub fn file_source(&self, path: &RepoRelativePath) -> Option<&str> {
+        if let Some(parts) = self.parts.as_ref() {
+            return parts.iter().find_map(|part| part.file_source(path));
+        }
         self.files.get(path)?.source.as_deref()
+    }
+
+    /// Diagnostic proof that an unchanged file contribution is the exact
+    /// same immutable allocation in two published revisions.
+    pub fn shares_file_payload_with(&self, other: &SymbolGraph, path: &RepoRelativePath) -> bool {
+        let Some(left) = self.file_payload(path) else {
+            return false;
+        };
+        let Some(right) = other.file_payload(path) else {
+            return false;
+        };
+        Arc::ptr_eq(left, right)
+    }
+
+    /// Diagnostic proof that one revision-local symbol payload was reused
+    /// rather than cloned while assembling another revision.
+    pub fn shares_symbol_payload_with(&self, other: &SymbolGraph, id: EntityId) -> bool {
+        let Some(left) = self.symbol_payload(id) else {
+            return false;
+        };
+        let Some(right) = other.symbol_payload(id) else {
+            return false;
+        };
+        Arc::ptr_eq(left, right)
+    }
+
+    fn file_payload(&self, path: &RepoRelativePath) -> Option<&Arc<IndexedFile>> {
+        if let Some(parts) = self.parts.as_ref() {
+            return parts.iter().find_map(|part| part.file_payload(path));
+        }
+        self.files.get(path)
+    }
+
+    fn symbol_payload(&self, id: EntityId) -> Option<&Arc<Symbol>> {
+        if let Some(parts) = self.parts.as_ref() {
+            return parts.iter().find_map(|part| part.symbol_payload(id));
+        }
+        self.symbols.get(&id)
     }
 
     /// Captured source files sorted by repository-relative path.
     pub fn source_files(&self) -> Vec<(&RepoRelativePath, &str)> {
+        if let Some(parts) = self.parts.as_ref() {
+            let mut files: Vec<_> = parts.iter().flat_map(SymbolGraph::source_files).collect();
+            files.sort_by(|a, b| a.0.cmp(b.0));
+            return files;
+        }
         let mut files: Vec<_> = self
             .files
             .iter()
@@ -637,6 +988,14 @@ impl SymbolGraph {
     /// Cheap owned views of captured source for outward adapters. Cloning the
     /// `Arc<str>` never copies file contents.
     pub(crate) fn snapshot_documents(&self) -> Vec<(RepoRelativePath, Arc<str>)> {
+        if let Some(parts) = self.parts.as_ref() {
+            let mut files: Vec<_> = parts
+                .iter()
+                .flat_map(SymbolGraph::snapshot_documents)
+                .collect();
+            files.sort_by(|a, b| a.0.cmp(&b.0));
+            return files;
+        }
         let mut files: Vec<_> = self
             .files
             .iter()
@@ -653,13 +1012,22 @@ impl SymbolGraph {
     /// Symbols declared in one file, in deterministic arena order.
     pub fn symbols_in_file<'a>(
         &'a self,
-        path: &RepoRelativePath,
-    ) -> impl Iterator<Item = &'a Symbol> {
-        self.files
-            .get(path)
-            .into_iter()
-            .flat_map(|file| file.symbols.iter())
-            .filter_map(|id| self.symbol(*id))
+        path: &'a RepoRelativePath,
+    ) -> Box<dyn Iterator<Item = &'a Symbol> + 'a> {
+        if let Some(parts) = self.parts.as_ref() {
+            return Box::new(
+                parts
+                    .iter()
+                    .flat_map(move |part| part.symbols_in_file(path)),
+            );
+        }
+        Box::new(
+            self.files
+                .get(path)
+                .into_iter()
+                .flat_map(|file| file.symbols.iter())
+                .filter_map(|id| self.symbol(*id)),
+        )
     }
 
     /// Case-insensitive substring search over qualified names. Result
@@ -667,8 +1035,8 @@ impl SymbolGraph {
     /// match, so a broad query cannot allocate one view per graph symbol.
     pub fn search_names(&self, needle: &str, limit: usize) -> (Vec<EntityId>, bool) {
         let needle = needle.to_lowercase();
-        let mut matches = Vec::with_capacity(limit.min(self.symbols.len()));
-        for symbol in &self.symbols {
+        let mut matches = Vec::with_capacity(limit.min(self.symbol_count() as usize));
+        for symbol in self.symbols() {
             // The simple name is a suffix of the qualified name, so one
             // comparison covers both without a second lowercase allocation.
             if symbol.key.qualified_name.to_lowercase().contains(&needle) {
@@ -683,29 +1051,121 @@ impl SymbolGraph {
 
     /// Exact resolution by simple or qualified name (SPEC §24).
     pub fn resolve_name(&self, name: &str) -> Vec<EntityId> {
-        self.symbols
-            .iter()
+        self.symbols()
+            .into_iter()
             .filter(|symbol| symbol.name() == name || symbol.key.qualified_name == name)
             .map(|symbol| symbol.id)
             .collect()
     }
 
     pub fn outgoing_edges(&self, id: EntityId) -> &[Edge] {
-        self.outgoing.get(&id).map_or(&[], Vec::as_slice)
+        if let Some(parts) = self.parts.as_ref() {
+            return parts
+                .iter()
+                .find_map(|part| part.symbol(id).is_some().then(|| part.outgoing_edges(id)))
+                .unwrap_or(&[]);
+        }
+        self.outgoing.get(&id).map_or(&[], |edges| edges.as_slice())
     }
 
     pub fn incoming_edges(&self, id: EntityId) -> &[Edge] {
-        self.incoming.get(&id).map_or(&[], Vec::as_slice)
+        if let Some(parts) = self.parts.as_ref() {
+            return parts
+                .iter()
+                .find_map(|part| part.symbol(id).is_some().then(|| part.incoming_edges(id)))
+                .unwrap_or(&[]);
+        }
+        self.incoming.get(&id).map_or(&[], |edges| edges.as_slice())
     }
 
     /// Syntax call sites owned by one caller, in deterministic source-index
     /// insertion order.
-    pub fn call_sites_from(&self, caller: EntityId) -> impl Iterator<Item = &CallSite> + '_ {
-        self.call_sites_by_caller
-            .get(&caller)
-            .into_iter()
-            .flatten()
-            .filter_map(|index| self.call_sites.get(*index))
+    pub fn call_sites_from(&self, caller: EntityId) -> Box<dyn Iterator<Item = &CallSite> + '_> {
+        if let Some(parts) = self.parts.as_ref() {
+            return parts
+                .iter()
+                .find(|part| part.symbol(caller).is_some())
+                .map_or_else(
+                    || Box::new(std::iter::empty()) as Box<dyn Iterator<Item = &CallSite>>,
+                    |part| part.call_sites_from(caller),
+                );
+        }
+        Box::new(
+            self.call_sites_by_caller
+                .get(&caller)
+                .into_iter()
+                .flat_map(|indexes| indexes.iter())
+                .filter_map(|index| self.call_sites.get(index).map(Arc::as_ref)),
+        )
+    }
+
+    /// Removes compact call facts (and their derived `CALLS`/`TESTS` edges)
+    /// for callers declared in `path` without touching any other file.
+    pub fn remove_call_sites_in_file(
+        &mut self,
+        path: &RepoRelativePath,
+    ) -> Result<u64, GraphError> {
+        self.ensure_owned()?;
+        let Some(file) = self.files.get(path).cloned() else {
+            return Ok(0);
+        };
+        let mut removed = 0_u64;
+        for caller in &file.symbols {
+            let Some(indexes) = self.call_sites_by_caller.get(caller).cloned() else {
+                continue;
+            };
+            for index in indexes.iter() {
+                let Some(call_site) = self.call_sites.get(index).cloned() else {
+                    continue;
+                };
+                if let CallResolution::Resolved { target } = call_site.resolution {
+                    self.remove_edge_raw(&Edge {
+                        kind: EdgeKind::Calls,
+                        from: call_site.caller,
+                        to: target,
+                        provenance: call_site.provenance,
+                        precision: Precision::Heuristic,
+                        location: Some(call_site.location.clone()),
+                    })?;
+                    if self
+                        .symbol(call_site.caller)
+                        .is_some_and(|symbol| symbol.key.kind == SymbolKind::Test)
+                    {
+                        self.remove_edge_raw(&Edge {
+                            kind: EdgeKind::Tests,
+                            from: call_site.caller,
+                            to: target,
+                            provenance: Provenance::Heuristic,
+                            precision: Precision::Heuristic,
+                            location: Some(call_site.location.clone()),
+                        })?;
+                    }
+                }
+                match call_site.resolution {
+                    CallResolution::Ambiguous { .. } => {
+                        self.ambiguous_call_sites = self.ambiguous_call_sites.saturating_sub(1);
+                        if let Some(key) = call_site_lookup_key(
+                            self.symbol(call_site.caller)
+                                .map(|symbol| symbol.key.language),
+                            call_site.form,
+                            call_site.target_kind,
+                            &call_site.name,
+                            call_site.qualifier.as_deref(),
+                        ) {
+                            remove_index(&mut self.call_sites_by_lookup, &key, *index);
+                        }
+                    }
+                    CallResolution::Unresolved => {
+                        self.unresolved_call_sites = self.unresolved_call_sites.saturating_sub(1);
+                    }
+                    CallResolution::Resolved { .. } => {}
+                }
+                self.call_sites.remove_mut(index);
+                removed = removed.saturating_add(1);
+            }
+            self.call_sites_by_caller.remove_mut(caller);
+        }
+        Ok(removed)
     }
 
     /// Bounded candidate declarations for one ambiguous call site.
@@ -714,6 +1174,14 @@ impl SymbolGraph {
         call_site: &CallSite,
         limit: usize,
     ) -> (Vec<&'a Symbol>, bool) {
+        if let Some(parts) = self.parts.as_ref() {
+            return parts
+                .iter()
+                .find(|part| part.symbol(call_site.caller).is_some())
+                .map_or((Vec::new(), false), |part| {
+                    part.call_candidates(call_site, limit)
+                });
+        }
         if !matches!(call_site.resolution, CallResolution::Ambiguous { .. }) {
             return (Vec::new(), false);
         }
@@ -741,6 +1209,14 @@ impl SymbolGraph {
 
     /// Bounded ambiguous call sites for which `target` is one candidate.
     pub fn call_sites_for_target(&self, target: EntityId, limit: usize) -> (Vec<&CallSite>, bool) {
+        if let Some(parts) = self.parts.as_ref() {
+            return parts
+                .iter()
+                .find(|part| part.symbol(target).is_some())
+                .map_or((Vec::new(), false), |part| {
+                    part.call_sites_for_target(target, limit)
+                });
+        }
         let Some(symbol) = self.symbol(target) else {
             return (Vec::new(), false);
         };
@@ -749,7 +1225,7 @@ impl SymbolGraph {
             let Some(call_sites) = self.call_sites_by_lookup.get(&key) else {
                 continue;
             };
-            for index in call_sites {
+            for index in call_sites.iter() {
                 if !indexes.contains(index) {
                     indexes.push(*index);
                     if indexes.len() > limit {
@@ -763,7 +1239,7 @@ impl SymbolGraph {
         indexes.truncate(limit);
         let call_sites = indexes
             .into_iter()
-            .filter_map(|index| self.call_sites.get(index))
+            .filter_map(|index| self.call_sites.get(&index).map(Arc::as_ref))
             .collect();
         (call_sites, truncated)
     }
@@ -811,11 +1287,15 @@ impl SymbolGraph {
             self.symbol(target)
                 .ok_or(GraphError::UnknownEntity(target))?;
         }
-        let index = self.call_sites.len();
+        let index = self.next_call_site_id;
+        self.next_call_site_id = self.next_call_site_id.saturating_add(1);
+        let mut caller_sites = self
+            .call_sites_by_caller
+            .get(&call_site.caller)
+            .map_or_else(Vec::new, |indexes| indexes.as_ref().clone());
+        caller_sites.push(index);
         self.call_sites_by_caller
-            .entry(call_site.caller)
-            .or_default()
-            .push(index);
+            .insert_mut(call_site.caller, Arc::new(caller_sites));
         match call_site.resolution {
             CallResolution::Ambiguous { .. } => {
                 self.ambiguous_call_sites += 1;
@@ -827,16 +1307,19 @@ impl SymbolGraph {
                     &call_site.name,
                     call_site.qualifier.as_deref(),
                 ) {
+                    let mut lookup_sites = self
+                        .call_sites_by_lookup
+                        .get(&key)
+                        .map_or_else(Vec::new, |indexes| indexes.as_ref().clone());
+                    lookup_sites.push(index);
                     self.call_sites_by_lookup
-                        .entry(key)
-                        .or_default()
-                        .push(index);
+                        .insert_mut(key, Arc::new(lookup_sites));
                 }
             }
             CallResolution::Unresolved => self.unresolved_call_sites += 1,
             CallResolution::Resolved { .. } => {}
         }
-        self.call_sites.push(call_site);
+        self.call_sites.insert_mut(index, Arc::new(call_site));
         Ok(())
     }
 
@@ -852,7 +1335,12 @@ impl SymbolGraph {
         else {
             return CallResolution::Unresolved;
         };
-        match self.callables.get(&key).map(Vec::as_slice).unwrap_or(&[]) {
+        match self
+            .callables
+            .get(&key)
+            .map(|ids| ids.as_slice())
+            .unwrap_or(&[])
+        {
             [] => CallResolution::Unresolved,
             [target] => CallResolution::Resolved { target: *target },
             candidates => CallResolution::Ambiguous {
@@ -869,13 +1357,36 @@ impl SymbolGraph {
     /// missing adjacency entries.
     pub fn audit_consistency(&self) -> Result<ConsistencyAudit, ConsistencyError> {
         let started = Instant::now();
+        if let Some(parts) = self.parts.as_ref() {
+            let mut combined = ConsistencyAudit {
+                symbols_audited: 0,
+                files_audited: 0,
+                edges_audited: 0,
+                adjacency_entries_examined: 0,
+                elapsed: Duration::ZERO,
+            };
+            for part in parts.iter() {
+                let audit = part.audit_consistency()?;
+                combined.symbols_audited = combined
+                    .symbols_audited
+                    .saturating_add(audit.symbols_audited);
+                combined.files_audited = combined.files_audited.saturating_add(audit.files_audited);
+                combined.edges_audited = combined.edges_audited.saturating_add(audit.edges_audited);
+                combined.adjacency_entries_examined = combined
+                    .adjacency_entries_examined
+                    .saturating_add(audit.adjacency_entries_examined);
+            }
+            combined.elapsed = started.elapsed();
+            return Ok(combined);
+        }
 
-        // Arena ids match arena positions.
-        for (index, symbol) in self.symbols.iter().enumerate() {
-            if symbol.id.0 as usize != index {
-                return Err(ConsistencyError::IdPositionMismatch {
+        // Persistent arena keys and the revision-local ids in their payloads
+        // must agree. IDs are deliberately sparse after incremental edits.
+        for (id, symbol) in self.symbols.iter() {
+            if symbol.id != *id {
+                return Err(ConsistencyError::IdKeyMismatch {
                     id: symbol.id,
-                    index,
+                    key: *id,
                 });
             }
         }
@@ -883,13 +1394,13 @@ impl SymbolGraph {
         // The file index covers exactly the arena symbols.
         let mut expected_by_file: HashMap<&RepoRelativePath, Vec<EntityId>> =
             self.files.keys().map(|path| (path, Vec::new())).collect();
-        for symbol in &self.symbols {
+        for (_, symbol) in self.symbols.iter() {
             expected_by_file
                 .entry(symbol.location.file())
                 .or_default()
                 .push(symbol.id);
         }
-        let file_index_matches = expected_by_file.len() == self.files.len()
+        let file_index_matches = expected_by_file.len() == self.files.size()
             && expected_by_file.iter().all(|(path, expected)| {
                 self.files
                     .get(*path)
@@ -905,8 +1416,8 @@ impl SymbolGraph {
         // when one caller owns a high-degree adjacency list.
         let mut outgoing_total = 0_u64;
         let mut edge_counts: HashMap<&Edge, (u64, u64)> = HashMap::new();
-        for (key, edges) in &self.outgoing {
-            for edge in edges {
+        for (key, edges) in self.outgoing.iter() {
+            for edge in edges.iter() {
                 outgoing_total += 1;
                 if edge.from != *key {
                     return Err(ConsistencyError::EdgeWrongOutgoingKey {
@@ -929,24 +1440,31 @@ impl SymbolGraph {
         // revision. Ambiguous sites are indexed by lookup key without
         // materializing one edge per candidate.
         let mut expected_callables: HashMap<CallLookupKey, Vec<EntityId>> = HashMap::new();
-        for symbol in &self.symbols {
+        for (_, symbol) in self.symbols.iter() {
             for key in callable_lookup_keys(symbol) {
                 expected_callables.entry(key).or_default().push(symbol.id);
             }
         }
-        if expected_callables != self.callables {
+        let actual_callables: HashMap<_, _> = self
+            .callables
+            .iter()
+            .map(|(key, ids)| (key.clone(), ids.as_ref().clone()))
+            .collect();
+        if expected_callables != actual_callables {
             return Err(ConsistencyError::CallableIndexMismatch);
         }
-        let mut expected_by_caller: HashMap<EntityId, Vec<usize>> = HashMap::new();
-        let mut expected_by_lookup: HashMap<CallLookupKey, Vec<usize>> = HashMap::new();
+        let mut expected_by_caller: HashMap<EntityId, Vec<u64>> = HashMap::new();
+        let mut expected_by_lookup: HashMap<CallLookupKey, Vec<u64>> = HashMap::new();
         let mut ambiguous = 0_u64;
         let mut unresolved = 0_u64;
-        for (index, call_site) in self.call_sites.iter().enumerate() {
+        for (index, call_site) in self.call_sites.iter() {
             let caller = self
                 .symbol(call_site.caller)
                 .ok_or(ConsistencyError::UnknownEntity(call_site.caller))?;
             if caller.location.file() != call_site.location.file() {
-                return Err(ConsistencyError::CallSiteLocationMismatch { index });
+                return Err(ConsistencyError::CallSiteLocationMismatch {
+                    index: *index as usize,
+                });
             }
             let expected_resolution = self.resolve_call(
                 caller.key.language,
@@ -956,12 +1474,14 @@ impl SymbolGraph {
                 call_site.qualifier.as_deref(),
             );
             if expected_resolution != call_site.resolution {
-                return Err(ConsistencyError::CallSiteResolutionMismatch { index });
+                return Err(ConsistencyError::CallSiteResolutionMismatch {
+                    index: *index as usize,
+                });
             }
             expected_by_caller
                 .entry(call_site.caller)
                 .or_default()
-                .push(index);
+                .push(*index);
             match call_site.resolution {
                 CallResolution::Resolved { target } => {
                     self.symbol(target)
@@ -975,10 +1495,14 @@ impl SymbolGraph {
                         location: Some(call_site.location.clone()),
                     };
                     let Some((_, available_calls)) = edge_counts.get_mut(&expected_call) else {
-                        return Err(ConsistencyError::ResolvedCallEdgeMissing { index });
+                        return Err(ConsistencyError::ResolvedCallEdgeMissing {
+                            index: *index as usize,
+                        });
                     };
                     if *available_calls == 0 {
-                        return Err(ConsistencyError::ResolvedCallEdgeMissing { index });
+                        return Err(ConsistencyError::ResolvedCallEdgeMissing {
+                            index: *index as usize,
+                        });
                     }
                     *available_calls -= 1;
                     if caller.key.kind == SymbolKind::Test {
@@ -991,10 +1515,14 @@ impl SymbolGraph {
                             location: Some(call_site.location.clone()),
                         };
                         let Some((_, available_tests)) = edge_counts.get_mut(&expected_test) else {
-                            return Err(ConsistencyError::ResolvedTestEdgeMissing { index });
+                            return Err(ConsistencyError::ResolvedTestEdgeMissing {
+                                index: *index as usize,
+                            });
                         };
                         if *available_tests == 0 {
-                            return Err(ConsistencyError::ResolvedTestEdgeMissing { index });
+                            return Err(ConsistencyError::ResolvedTestEdgeMissing {
+                                index: *index as usize,
+                            });
                         }
                         *available_tests -= 1;
                     }
@@ -1008,15 +1536,25 @@ impl SymbolGraph {
                         &call_site.name,
                         call_site.qualifier.as_deref(),
                     )
-                    .ok_or(ConsistencyError::CallSiteResolutionMismatch { index })?;
-                    expected_by_lookup.entry(key).or_default().push(index);
+                    .ok_or(ConsistencyError::CallSiteResolutionMismatch {
+                        index: *index as usize,
+                    })?;
+                    expected_by_lookup.entry(key).or_default().push(*index);
                 }
                 CallResolution::Unresolved => unresolved += 1,
             }
         }
-        if expected_by_caller != self.call_sites_by_caller
-            || expected_by_lookup != self.call_sites_by_lookup
-        {
+        let actual_by_caller: HashMap<_, _> = self
+            .call_sites_by_caller
+            .iter()
+            .map(|(caller, indexes)| (*caller, indexes.as_ref().clone()))
+            .collect();
+        let actual_by_lookup: HashMap<_, _> = self
+            .call_sites_by_lookup
+            .iter()
+            .map(|(key, indexes)| (key.clone(), indexes.as_ref().clone()))
+            .collect();
+        if expected_by_caller != actual_by_caller || expected_by_lookup != actual_by_lookup {
             return Err(ConsistencyError::CallSiteIndexMismatch);
         }
         if ambiguous != self.ambiguous_call_sites || unresolved != self.unresolved_call_sites {
@@ -1028,13 +1566,28 @@ impl SymbolGraph {
             });
         }
 
+        let mut owned_edge_counts: HashMap<&Edge, u64> = HashMap::new();
+        for (_, edges) in self.relationship_edges_by_owner.iter() {
+            for edge in edges.iter() {
+                *owned_edge_counts.entry(edge).or_default() += 1;
+            }
+        }
+        if edge_counts.iter().any(|(edge, (_, unclaimed))| {
+            owned_edge_counts.get(edge).copied().unwrap_or(0) != *unclaimed
+        }) || owned_edge_counts
+            .iter()
+            .any(|(edge, count)| edge_counts.get(edge).map(|counts| counts.1) != Some(*count))
+        {
+            return Err(ConsistencyError::RelationshipOwnershipMismatch);
+        }
+
         // Edges are stored under the correct key, endpoints exist, and both
         // adjacency indexes mirror the exact same multiset. Counting outgoing
         // edges and consuming those counts from incoming is expected O(E),
         // including for high-degree nodes and identical parallel edges.
         let mut incoming_total = 0_u64;
-        for (key, edges) in &self.incoming {
-            for edge in edges {
+        for (key, edges) in self.incoming.iter() {
+            for edge in edges.iter() {
                 incoming_total += 1;
                 if edge.to != *key {
                     return Err(ConsistencyError::EdgeWrongIncomingKey {
@@ -1098,6 +1651,45 @@ fn call_target_kind(kind: SymbolKind) -> Option<CallTargetKind> {
         SymbolKind::Method => Some(CallTargetKind::Method),
         SymbolKind::Test => Some(CallTargetKind::Test),
         _ => None,
+    }
+}
+
+fn remove_adjacency_edge(
+    adjacency: &mut HashTrieMapSync<EntityId, Arc<Vec<Edge>>>,
+    key: EntityId,
+    edge: &Edge,
+) -> Result<u64, GraphError> {
+    let Some(existing) = adjacency.get(&key) else {
+        return Err(GraphError::MissingOwnedEdge);
+    };
+    let copied = existing.len() as u64;
+    let mut edges = existing.as_ref().clone();
+    let Some(index) = edges.iter().position(|candidate| candidate == edge) else {
+        return Err(GraphError::MissingOwnedEdge);
+    };
+    edges.remove(index);
+    if edges.is_empty() {
+        adjacency.remove_mut(&key);
+    } else {
+        adjacency.insert_mut(key, Arc::new(edges));
+    }
+    Ok(copied)
+}
+
+fn remove_index(
+    index: &mut HashTrieMapSync<CallLookupKey, Arc<Vec<u64>>>,
+    key: &CallLookupKey,
+    value: u64,
+) {
+    let Some(existing) = index.get(key) else {
+        return;
+    };
+    let mut values = existing.as_ref().clone();
+    values.retain(|candidate| *candidate != value);
+    if values.is_empty() {
+        index.remove_mut(key);
+    } else {
+        index.insert_mut(key.clone(), Arc::new(values));
     }
 }
 
@@ -1166,8 +1758,8 @@ fn call_site_lookup_key(
 pub enum ConsistencyError {
     #[error("edge endpoint {0:?} does not exist in the arena")]
     UnknownEntity(EntityId),
-    #[error("symbol id {id:?} sits at arena index {index}")]
-    IdPositionMismatch { id: EntityId, index: usize },
+    #[error("symbol payload id {id:?} is stored under persistent-map key {key:?}")]
+    IdKeyMismatch { id: EntityId, key: EntityId },
     #[error("edge stored under outgoing key {key:?} but its from is {from:?}")]
     EdgeWrongOutgoingKey { key: EntityId, from: EntityId },
     #[error("edge stored under incoming key {key:?} but its to is {to:?}")]
@@ -1207,6 +1799,8 @@ pub enum ConsistencyError {
         unresolved: u64,
         recorded_unresolved: u64,
     },
+    #[error("file-owned relationship contributions do not match non-call graph edges")]
+    RelationshipOwnershipMismatch,
 }
 
 #[cfg(test)]
@@ -1310,6 +1904,28 @@ mod tests {
             )?;
         }
         Ok(graph)
+    }
+
+    fn test_push_edge(
+        adjacency: &mut HashTrieMapSync<EntityId, Arc<Vec<Edge>>>,
+        key: EntityId,
+        edge: Edge,
+    ) {
+        let mut edges = adjacency
+            .get(&key)
+            .map_or_else(Vec::new, |edges| edges.as_ref().clone());
+        edges.push(edge);
+        adjacency.insert_mut(key, Arc::new(edges));
+    }
+
+    fn test_pop_edge(
+        adjacency: &mut HashTrieMapSync<EntityId, Arc<Vec<Edge>>>,
+        key: EntityId,
+    ) -> Option<Edge> {
+        let mut edges = adjacency.get(&key)?.as_ref().clone();
+        let edge = edges.pop()?;
+        adjacency.insert_mut(key, Arc::new(edges));
+        Some(edge)
     }
 
     fn measure_high_degree_audit(
@@ -1671,6 +2287,38 @@ mod tests {
     }
 
     #[test]
+    fn merge_shares_disjoint_language_payloads_without_remapping()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut rust = SymbolGraph::new();
+        let rust_id = add_fn(&mut rust, "rust_fn", "src/lib.rs")?;
+        let mut php = SymbolGraph::new();
+        let php_path = file("src/App.php")?;
+        let php_id = php.add_symbol(
+            SymbolKey {
+                language: Language::Php,
+                qualified_name: "App::phpFn".to_owned(),
+                container: Some("App".to_owned()),
+                kind: SymbolKind::Method,
+                path: php_path.clone(),
+            },
+            range(php_path)?,
+            None,
+            Provenance::TreeSitter,
+            Precision::Syntax,
+        )?;
+        assert!(php_id.0 >= PHP_ENTITY_ID_BASE);
+
+        let combined = SymbolGraph::merge([rust.clone(), php.clone()])?;
+        assert_eq!(combined.symbol_count(), 2);
+        assert_eq!(combined.symbol(rust_id).map(Symbol::name), Some("rust_fn"));
+        assert_eq!(combined.symbol(php_id).map(Symbol::name), Some("phpFn"));
+        assert!(combined.shares_symbol_payload_with(&rust, rust_id));
+        assert!(combined.shares_symbol_payload_with(&php, php_id));
+        combined.validate_consistency()?;
+        Ok(())
+    }
+
+    #[test]
     fn audit_rejects_a_call_resolution_staled_during_private_construction()
     -> Result<(), Box<dyn std::error::Error>> {
         let mut graph = SymbolGraph::new();
@@ -1716,8 +2364,8 @@ mod tests {
 
         // Keep the two adjacency indexes mutually consistent while removing
         // one of the two edges required by the two identical call sites.
-        assert!(graph.outgoing.get_mut(&caller).and_then(Vec::pop).is_some());
-        assert!(graph.incoming.get_mut(&target).and_then(Vec::pop).is_some());
+        assert!(test_pop_edge(&mut graph.outgoing, caller).is_some());
+        assert!(test_pop_edge(&mut graph.incoming, target).is_some());
         graph.edge_count -= 1;
 
         assert_eq!(
@@ -1766,14 +2414,18 @@ mod tests {
         )?;
         // An incoming edge no outgoing entry mirrors: `incoming_edges(a)`
         // (and therefore `callers`) would serve it, so the audit must not.
-        graph.incoming.entry(a).or_default().push(Edge {
-            kind: EdgeKind::Calls,
-            from: b,
-            to: a,
-            provenance: Provenance::TreeSitter,
-            precision: Precision::Syntax,
-            location: None,
-        });
+        test_push_edge(
+            &mut graph.incoming,
+            a,
+            Edge {
+                kind: EdgeKind::Calls,
+                from: b,
+                to: a,
+                provenance: Provenance::TreeSitter,
+                precision: Precision::Syntax,
+                location: None,
+            },
+        );
         assert!(matches!(
             graph.validate_consistency(),
             Err(ConsistencyError::EdgeIncomingMirrorMissing { from, to }) if from == b && to == a
@@ -1794,14 +2446,18 @@ mod tests {
             Precision::Syntax,
             None,
         )?;
-        graph.incoming.entry(a).or_default().push(Edge {
-            kind: EdgeKind::Calls,
-            from: a,
-            to: b,
-            provenance: Provenance::TreeSitter,
-            precision: Precision::Syntax,
-            location: None,
-        });
+        test_push_edge(
+            &mut graph.incoming,
+            a,
+            Edge {
+                kind: EdgeKind::Calls,
+                from: a,
+                to: b,
+                provenance: Provenance::TreeSitter,
+                precision: Precision::Syntax,
+                location: None,
+            },
+        );
         assert!(matches!(
             graph.validate_consistency(),
             Err(ConsistencyError::EdgeWrongIncomingKey { key, to }) if key == a && to == b
@@ -1822,12 +2478,9 @@ mod tests {
             Precision::Syntax,
             None,
         )?;
-        let edge = graph
-            .outgoing
-            .get_mut(&a)
-            .and_then(Vec::pop)
+        let edge = test_pop_edge(&mut graph.outgoing, a)
             .ok_or_else(|| std::io::Error::other("test edge must exist"))?;
-        graph.outgoing.entry(b).or_default().push(edge);
+        test_push_edge(&mut graph.outgoing, b, edge);
         assert!(matches!(
             graph.audit_consistency(),
             Err(ConsistencyError::EdgeWrongOutgoingKey { key, from }) if key == b && from == a
@@ -1840,14 +2493,18 @@ mod tests {
         let mut graph = SymbolGraph::new();
         let a = add_fn(&mut graph, "a", "src/a.rs")?;
         let ghost = EntityId(999);
-        graph.outgoing.entry(a).or_default().push(Edge {
-            kind: EdgeKind::Calls,
-            from: a,
-            to: ghost,
-            provenance: Provenance::TreeSitter,
-            precision: Precision::Syntax,
-            location: None,
-        });
+        test_push_edge(
+            &mut graph.outgoing,
+            a,
+            Edge {
+                kind: EdgeKind::Calls,
+                from: a,
+                to: ghost,
+                provenance: Provenance::TreeSitter,
+                precision: Precision::Syntax,
+                location: None,
+            },
+        );
         assert!(matches!(
             graph.audit_consistency(),
             Err(ConsistencyError::UnknownEntity(id)) if id == ghost
@@ -1871,7 +2528,7 @@ mod tests {
                 None,
             )?;
         }
-        let removed = graph.incoming.get_mut(&b).and_then(Vec::pop);
+        let removed = test_pop_edge(&mut graph.incoming, b);
         assert!(removed.is_some());
         assert!(matches!(
             graph.audit_consistency(),
@@ -1900,7 +2557,7 @@ mod tests {
             .and_then(|edges| edges.first())
             .cloned()
             .ok_or_else(|| std::io::Error::other("test edge must exist"))?;
-        graph.incoming.entry(b).or_default().push(duplicate);
+        test_push_edge(&mut graph.incoming, b, duplicate);
         assert!(matches!(
             graph.audit_consistency(),
             Err(ConsistencyError::EdgeIncomingMirrorMissing { from, to }) if from == a && to == b
@@ -1916,9 +2573,11 @@ mod tests {
         let path = file("src/a.rs")?;
         let indexed = graph
             .files
-            .get_mut(&path)
+            .get(&path)
             .ok_or_else(|| std::io::Error::other("test file must exist"))?;
+        let mut indexed = indexed.as_ref().clone();
         indexed.symbols.reverse();
+        graph.files.insert_mut(path, Arc::new(indexed));
         assert_eq!(
             graph.audit_consistency(),
             Err(ConsistencyError::FileIndexMismatch)

@@ -238,6 +238,35 @@ pub struct IndexMemoryMetrics {
     pub provider_cache_bytes: Option<u64>,
 }
 
+/// Exact graph-assembly work for the revision carrying this status.
+///
+/// `reused_*` payloads remain physically shared with the previous immutable
+/// revision. `copied_edges` counts retained adjacency entries copied while a
+/// touched per-entity vector is replaced; other `copied_*` fields count their
+/// corresponding payloads. Persistent-map path nodes and scalar index keys are
+/// intentionally not reported as domain facts. Initial/full builds report
+/// everything as rebuilt.
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
+)]
+pub struct IndexPublicationMetrics {
+    pub structurally_incremental: bool,
+    pub reused_files: u64,
+    pub rebuilt_files: u64,
+    pub reused_source_bytes: u64,
+    pub rebuilt_source_bytes: u64,
+    pub copied_source_bytes: u64,
+    pub reused_symbols: u64,
+    pub rebuilt_symbols: u64,
+    pub copied_symbols: u64,
+    pub reused_edges: u64,
+    pub rebuilt_edges: u64,
+    pub copied_edges: u64,
+    pub reused_call_sites: u64,
+    pub rebuilt_call_sites: u64,
+    pub copied_call_sites: u64,
+}
+
 /// Metadata atomically attached to one published syntax revision.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct IndexingStatus {
@@ -247,6 +276,7 @@ pub struct IndexingStatus {
     pub degradations: Vec<IndexDegradation>,
     pub phases: Vec<IndexPhaseMeasurement>,
     pub memory: IndexMemoryMetrics,
+    pub publication: IndexPublicationMetrics,
 }
 
 impl IndexingStatus {

@@ -11,7 +11,7 @@ use crate::revision::Revision;
 use crate::state::{Freshness, ProviderState, WorkspaceStatus};
 
 /// Current envelope schema version.
-pub const SCHEMA_VERSION: u32 = 2;
+pub const SCHEMA_VERSION: u32 = 3;
 
 /// Metadata wrapper around every query response.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -83,7 +83,7 @@ mod tests {
     fn envelope_json_matches_spec_shape() -> Result<(), Box<dyn std::error::Error>> {
         let envelope = sample_envelope()?;
         let json = serde_json::to_value(&envelope)?;
-        assert_eq!(json["schema_version"], 2);
+        assert_eq!(json["schema_version"], 3);
         assert_eq!(json["revision"], 42);
         assert_eq!(json["freshness"], "fresh");
         assert_eq!(json["status"], "ready");

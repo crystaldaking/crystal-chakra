@@ -12,6 +12,7 @@ publish = false
 chakra-domain = { path = "../chakra-domain", version = "0.1.0" }
 arc-swap.workspace = true
 regex.workspace = true
+rpds.workspace = true
 thiserror.workspace = true
 
 [lints]

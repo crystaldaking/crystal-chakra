@@ -63,8 +63,9 @@ pub enum SymbolKind {
 
 /// Strict identity within one specific graph revision (SPEC §10).
 ///
-/// Never stable across revisions; use [`SymbolKey`] for lookup and expect
-/// re-resolution after any update.
+/// Never a stable contract across revisions; structural sharing may preserve
+/// the numeric value for an unchanged payload, but callers must still bind it
+/// to the exact workspace revision and re-resolve after any update.
 #[derive(
     Debug,
     Clone,

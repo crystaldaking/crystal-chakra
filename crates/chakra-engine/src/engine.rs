@@ -131,7 +131,12 @@ impl UpdateBuilder {
         self.base_revision
     }
 
-    /// Mutable access for incremental edits relative to the base snapshot.
+    /// Mutable access for low-level edits to an owned graph.
+    ///
+    /// Composed workspace graphs are immutable partitions and reject direct
+    /// mutation. Live language reconciliation therefore builds or updates the
+    /// owned language partitions privately and installs a newly composed graph
+    /// with [`UpdateBuilder::replace_graph`].
     ///
     /// Mutating the graph changes the published relationship to the
     /// filesystem, so this revokes any inherited or previously claimed

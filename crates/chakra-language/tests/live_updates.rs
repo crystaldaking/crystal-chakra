@@ -9,8 +9,9 @@ use std::time::Instant;
 
 use chakra_domain::identity::WorkspaceIdentity;
 use chakra_domain::indexing::{IndexBudgetKind, IndexBudgets, IndexCancellation, IndexPhase};
+use chakra_domain::location::RepoRelativePath;
 use chakra_domain::query::{
-    ContextRequest, QueryService, RepoMapRequest, SymbolRef, SymbolSearchRequest,
+    ContextRequest, QueryError, QueryService, RepoMapRequest, SymbolRef, SymbolSearchRequest,
 };
 use chakra_domain::state::{Freshness, FreshnessRequirement, WorkspaceStatus};
 use chakra_domain::symbol::{CallResolution, Language};
@@ -115,7 +116,6 @@ fn degraded_budget_metadata_survives_incremental_live_updates() -> Result<(), Bo
         IndexPhase::Relationships,
         IndexPhase::GraphMaterialization,
         IndexPhase::LanguageComposition,
-        IndexPhase::GraphValidation,
         IndexPhase::LiveReconciliation,
     ] {
         assert!(
@@ -163,6 +163,14 @@ fn immediate_fresh_read_is_atomic_and_reindexes_only_one_file() -> Result<(), Bo
         "a fresh proof must not reparse unchanged content"
     );
     let old_snapshot = engine.snapshot();
+    let unchanged_path = RepoRelativePath::new("src/two.rs")?;
+    let changed_path = RepoRelativePath::new("src/one.rs")?;
+    let unchanged_symbol = old_snapshot
+        .graph()
+        .resolve_name("two::beta")
+        .into_iter()
+        .next()
+        .ok_or("fixture beta symbol must exist")?;
     let baseline = after_unchanged_query;
 
     write(
@@ -187,6 +195,39 @@ fn immediate_fresh_read_is_atomic_and_reindexes_only_one_file() -> Result<(), Bo
             .is_empty()
     );
     assert!(current.graph().resolve_name("one::alpha").is_empty());
+    assert!(
+        current
+            .graph()
+            .shares_file_payload_with(old_snapshot.graph(), &unchanged_path),
+        "unchanged file payload must be physically shared across revisions"
+    );
+    assert!(
+        current
+            .graph()
+            .shares_symbol_payload_with(old_snapshot.graph(), unchanged_symbol),
+        "unchanged symbol payload must be physically shared across revisions"
+    );
+    assert!(matches!(
+        engine.context(ContextRequest {
+            symbol: Some(SymbolRef::ById {
+                id: unchanged_symbol,
+                revision: old_snapshot.revision(),
+            }),
+            freshness: FreshnessRequirement::RequireFresh,
+            ..ContextRequest::default()
+        }),
+        Err(QueryError::StaleSymbolRef {
+            reference_revision,
+            current_revision,
+        }) if reference_revision == old_snapshot.revision()
+            && current_revision == current.revision()
+    ));
+    assert!(
+        !current
+            .graph()
+            .shares_file_payload_with(old_snapshot.graph(), &changed_path),
+        "changed file payload must be replaced"
+    );
     assert_eq!(
         metrics.files_reparsed - baseline.files_reparsed,
         1,
@@ -197,11 +238,112 @@ fn immediate_fresh_read_is_atomic_and_reindexes_only_one_file() -> Result<(), Bo
         1,
         "unrelated relationship owners must not be recomputed"
     );
+    let publication = current.indexing().publication;
+    assert!(publication.structurally_incremental);
+    assert_eq!(publication.rebuilt_files, 1);
+    assert_eq!(publication.reused_files, current.graph().file_count() - 1);
+    assert_eq!(publication.copied_source_bytes, 0);
+    assert_eq!(publication.copied_symbols, 0);
+    assert!(
+        publication.copied_edges < current.graph().edge_count().saturating_mul(2),
+        "a one-file edit must not copy both adjacency indexes in full"
+    );
+    assert_eq!(publication.copied_call_sites, 0);
+    assert_eq!(
+        metrics.graph_files_rebuilt - baseline.graph_files_rebuilt,
+        1
+    );
+    assert_eq!(
+        metrics.graph_symbols_copied - baseline.graph_symbols_copied,
+        0
+    );
+    assert_eq!(
+        metrics.graph_edges_copied - baseline.graph_edges_copied,
+        publication.copied_edges
+    );
     eprintln!(
         "live_single_file_reindex: elapsed={reindex_elapsed:?}, reparsed={}, relationship_files_recomputed={}",
         metrics.files_reparsed - baseline.files_reparsed,
         metrics.relationship_files_recomputed - baseline.relationship_files_recomputed,
     );
+    live.shutdown()?;
+    Ok(())
+}
+
+#[test]
+fn source_only_edit_reuses_every_graph_fact() -> Result<(), Box<dyn Error>> {
+    let repository = repository()?;
+    let (engine, live) = start(&repository)?;
+    let old = engine.snapshot();
+    let path = RepoRelativePath::new("src/one.rs")?;
+    let alpha = old
+        .graph()
+        .resolve_name("one::alpha")
+        .into_iter()
+        .next()
+        .ok_or("fixture alpha symbol must exist")?;
+    let baseline = live.metrics();
+
+    write(
+        repository.path(),
+        "src/one.rs",
+        "pub fn alpha() {}\n// source-only edit\n",
+    )?;
+    assert_eq!(symbols(&engine, "one::alpha")?, ["one::alpha"]);
+    let current = engine.snapshot();
+    let publication = current.indexing().publication;
+
+    assert!(publication.structurally_incremental);
+    assert_eq!(publication.rebuilt_files, 1);
+    assert_eq!(publication.rebuilt_symbols, 0);
+    assert_eq!(publication.rebuilt_edges, 0);
+    assert_eq!(publication.rebuilt_call_sites, 0);
+    assert_eq!(publication.copied_source_bytes, 0);
+    assert_eq!(publication.copied_symbols, 0);
+    assert_eq!(publication.copied_edges, 0);
+    assert_eq!(publication.copied_call_sites, 0);
+    assert_eq!(publication.reused_symbols, current.graph().symbol_count());
+    assert_eq!(publication.reused_edges, current.graph().edge_count());
+    assert_eq!(
+        publication.reused_call_sites,
+        current.graph().call_site_count()
+    );
+    let composition = current
+        .indexing()
+        .phases
+        .iter()
+        .find(|phase| phase.phase == IndexPhase::LanguageComposition)
+        .ok_or("live update must report shallow language composition")?;
+    assert_eq!(composition.work_items, 2);
+    let materialization = current
+        .indexing()
+        .phases
+        .iter()
+        .find(|phase| phase.phase == IndexPhase::GraphMaterialization)
+        .ok_or("live update must report graph materialization")?;
+    assert_eq!(materialization.work_items, 1);
+    assert!(
+        current
+            .indexing()
+            .phases
+            .iter()
+            .all(|phase| phase.phase != IndexPhase::GraphValidation),
+        "an ordinary live delta must not claim a full consistency audit"
+    );
+    assert!(
+        current
+            .graph()
+            .shares_symbol_payload_with(old.graph(), alpha)
+    );
+    assert!(!current.graph().shares_file_payload_with(old.graph(), &path));
+    let metrics = live.metrics();
+    assert_eq!(metrics.files_reparsed - baseline.files_reparsed, 1);
+    assert_eq!(
+        metrics.relationship_files_recomputed - baseline.relationship_files_recomputed,
+        0
+    );
+    current.graph().validate_consistency()?;
+    old.graph().validate_consistency()?;
     live.shutdown()?;
     Ok(())
 }

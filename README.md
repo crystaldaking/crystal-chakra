@@ -161,9 +161,13 @@ Chakra publishes an internally consistent fresh-but-`degraded` revision where
 possible: files, text search, and retained declarations remain queryable. Every
 query envelope reports exact indexing budgets, corpus coverage, capability
 completeness, affected capabilities, omission cause, phase measurements, and
-best-effort memory samples. Calls are never resolved against a truncated symbol
-catalog. Time/RSS targets are observable warnings rather than nondeterministic
-inputs to graph contents.
+best-effort memory samples. Schema v3 also reports graph-publication facts
+reused, rebuilt, or copied in the current revision. Ordinary edits use
+persistent file-owned graph deltas and shallow Rust/PHP composition, so old
+snapshot readers remain immutable without a second complete combined-graph
+copy. Calls are never resolved against a truncated symbol catalog. Time/RSS
+targets are observable warnings rather than nondeterministic inputs to graph
+contents.
 
 Git discovery/diff subprocesses retain bounded output and have a 30-second
 deadline. Initial indexing also supports cooperative cancellation between file

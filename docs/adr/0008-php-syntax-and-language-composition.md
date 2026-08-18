@@ -40,6 +40,9 @@ binding compatible with Chakra's Tree-sitter runtime:
   `chakra-language-rust` and `chakra-language-php` remain independently
   testable parsing adapters. Graph composition rejects overlapping language
   domains so each adapter's revision-local call-site resolution remains valid.
+  Rust and PHP use disjoint entity-id ranges and the workspace graph is a
+  shallow immutable partition view. Composition therefore neither copies nor
+  remaps the two complete language graphs.
 - Discover/read the shared Rust/PHP inventory once and split validated graph
   budgets deterministically between non-empty adapters (ADR-011). The split is
   stable after cold start except for one rebalance when a previously absent
@@ -86,9 +89,11 @@ binding compatible with Chakra's Tree-sitter runtime:
 - Production dependency added: official `tree-sitter-php` 0.24.2 (MIT). No
   PHP runtime, Composer dependency, external service, or PHP language server
   is required.
-- Complete private graph materialization combines both language graphs, but
-  unchanged files are not reparsed and unaffected relationship contributions
-  remain cached. Instrumentation proves a one-file PHP edit reparses one file.
+- Initial indexing builds complete private language partitions. Ordinary live
+  updates structurally share unchanged partition payloads and rebuild only the
+  affected PHP/Rust file contributions; the combined view is O(language
+  partitions), not O(symbols + edges). Instrumentation and pointer-identity
+  tests prove a one-file PHP edit does not copy the Rust partition.
 - PHP call, inheritance, and test relations are intentionally conservative and
   carry heuristic precision where Tree-sitter cannot resolve runtime types,
   aliases, traits, dynamic dispatch, magic methods, or framework metadata.

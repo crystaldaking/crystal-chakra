@@ -1,14 +1,18 @@
 //! Opt-in public large-workspace acceptance harness for indexing budgets.
 
 use std::error::Error;
+use std::fs;
 use std::path::PathBuf;
+use std::process::Command;
+use std::sync::Arc;
 use std::time::Instant;
 
 use chakra_domain::indexing::IndexPhase;
 use chakra_domain::query::{QueryService, RepoMapRequest, SymbolSearchRequest};
 use chakra_domain::state::{Freshness, WorkspaceStatus};
 use chakra_engine::WorkspaceEngine;
-use chakra_language::index_repository;
+use chakra_language::{index_repository, start_live_index};
+use tempfile::TempDir;
 
 #[test]
 #[ignore = "set CHAKRA_LARGE_REPOSITORY to an external Git worktree"]
@@ -98,5 +102,93 @@ fn large_repository_stays_within_published_budgets() -> Result<(), Box<dyn Error
         assert_eq!(symbols.data.candidates.len(), 1);
         assert_eq!(symbols.indexing.coverage, map.indexing.coverage);
     }
+    Ok(())
+}
+
+#[test]
+#[ignore = "set CHAKRA_LARGE_REPOSITORY to an external Git worktree"]
+fn large_repository_one_file_revision_is_structural() -> Result<(), Box<dyn Error>> {
+    let source = PathBuf::from(
+        std::env::var_os("CHAKRA_LARGE_REPOSITORY")
+            .ok_or("CHAKRA_LARGE_REPOSITORY must name an external Git worktree")?,
+    );
+    let temporary = TempDir::new()?;
+    let checkout = temporary.path().join("repository");
+    let clone = Command::new("git")
+        .args([
+            "-c",
+            "advice.detachedHead=false",
+            "clone",
+            "--quiet",
+            "--shared",
+        ])
+        .arg(&source)
+        .arg(&checkout)
+        .status()?;
+    if !clone.success() {
+        return Err("failed to create isolated benchmark clone".into());
+    }
+
+    let report = index_repository(&checkout)?;
+    let target = report
+        .syntax_index
+        .paths()
+        .into_iter()
+        .next()
+        .ok_or("large repository has no supported source file")?;
+    let target_path = checkout.join(target.as_str());
+    let original = fs::read_to_string(&target_path)?;
+    let identity = chakra_git::resolve_workspace_identity(&report.repository_root)?;
+    let engine = Arc::new(WorkspaceEngine::new(identity));
+    let mut update = engine.begin_update();
+    update.replace_graph(report.graph);
+    update.set_indexing(report.metrics.indexing);
+    update.set_status(WorkspaceStatus::Indexing);
+    update.set_freshness(Freshness::Stale);
+    engine.publish(update)?;
+    let live = start_live_index(report.repository_root, report.syntax_index, engine.clone())?;
+    let baseline = live.metrics();
+
+    fs::write(
+        &target_path,
+        format!("{original}\n// chakra structural-publication measurement\n"),
+    )?;
+    let started = Instant::now();
+    let response = engine.repo_map(RepoMapRequest::default())?;
+    let elapsed = started.elapsed();
+    let snapshot = engine.snapshot();
+    let publication = snapshot.indexing().publication;
+    let metrics = live.metrics();
+
+    assert_eq!(response.freshness, Freshness::Fresh);
+    assert!(publication.structurally_incremental);
+    assert_eq!(publication.rebuilt_files, 1);
+    assert_eq!(publication.copied_source_bytes, 0);
+    assert_eq!(publication.copied_symbols, 0);
+    assert_eq!(publication.copied_edges, 0);
+    assert_eq!(publication.copied_call_sites, 0);
+    assert_eq!(metrics.files_reparsed - baseline.files_reparsed, 1);
+    eprintln!(
+        "large_workspace_update: root={} target={} elapsed_us={} retained_files={} reused_files={} rebuilt_files={} retained_symbols={} reused_symbols={} rebuilt_symbols={} retained_edges={} reused_edges={} rebuilt_edges={} retained_call_sites={} reused_call_sites={} rebuilt_call_sites={} current_rss_bytes={:?} observed_phase_peak_rss_bytes={:?}",
+        source.display(),
+        target,
+        elapsed.as_micros(),
+        snapshot.graph().file_count(),
+        publication.reused_files,
+        publication.rebuilt_files,
+        snapshot.graph().symbol_count(),
+        publication.reused_symbols,
+        publication.rebuilt_symbols,
+        snapshot.graph().edge_count(),
+        publication.reused_edges,
+        publication.rebuilt_edges,
+        snapshot.graph().call_site_count(),
+        publication.reused_call_sites,
+        publication.rebuilt_call_sites,
+        snapshot.indexing().memory.current_rss_bytes,
+        snapshot.indexing().memory.observed_phase_peak_rss_bytes,
+    );
+
+    live.shutdown()?;
     Ok(())
 }

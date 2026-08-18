@@ -55,7 +55,7 @@ pathological files or repositories.
   Source/parsed/graph retained categories and best-effort current/phase-sampled
   RSS are also exposed. macOS RSS uses `ps`; Linux reads `/proc/self/status`.
 - Attach `IndexingStatus` to the immutable `WorkspaceSnapshot`. Query envelope
-  schema v2 carries that exact revision's budgets, coverage, capabilities,
+  schema v2 introduced that exact revision's budgets, coverage, capabilities,
   degradation reasons, phases, and memory observations for every query. A
   degraded but reconciled revision is `status: degraded`, `freshness: fresh`.
 - Reuse the same budgets during live reconciliation. Ordinary admitted-file
@@ -88,7 +88,7 @@ pathological files or repositories.
 - `chakra-language` now depends directly on the existing `chakra-git` crate so
   workspace discovery/read work is shared rather than duplicated by adapters.
   No third-party production dependency was added.
-- Query envelope schema advances from v1 to v2. The new `indexing` member is
+- Query envelope schema advanced from v1 to v2. The new `indexing` member is
   additive but intentionally versioned because clients can now reason about
   incomplete capabilities instead of inferring completeness from `truncated`.
 - Language graph quotas can leave unused capacity when one language has a much

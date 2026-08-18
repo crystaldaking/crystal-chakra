@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use chakra_domain::indexing::{
     IndexBudgetError, IndexBudgetKind, IndexBudgets, IndexCancellation, IndexCapability,
     IndexCapabilityCoverage, IndexCoverage, IndexDegradation, IndexMemoryMetrics, IndexPhase,
-    IndexPhaseMeasurement, IndexingStatus,
+    IndexPhaseMeasurement, IndexPublicationMetrics, IndexingStatus,
 };
 use chakra_domain::location::RepoRelativePath;
 use chakra_domain::symbol::Language;
@@ -65,6 +65,7 @@ pub struct ReconcileMetrics {
     pub relationship_files_recomputed: u64,
     pub syntax_error_files: u64,
     pub truncated_call_sites: u64,
+    pub publication: IndexPublicationMetrics,
 }
 
 #[derive(Debug)]
@@ -130,10 +131,6 @@ pub enum WorkspaceIndexError {
 pub struct WorkspaceSyntaxIndex {
     rust: chakra_language_rust::RustSyntaxIndex,
     php: chakra_language_php::PhpSyntaxIndex,
-    rust_graph: Arc<SymbolGraph>,
-    php_graph: Arc<SymbolGraph>,
-    rust_build: GraphBuildReport,
-    php_build: GraphBuildReport,
     rust_limits: GraphBuildLimits,
     php_limits: GraphBuildLimits,
     budgets: IndexBudgets,
@@ -184,22 +181,14 @@ impl WorkspaceSyntaxIndex {
             .reconcile_sources_bounded(php_sources, php_limits, &cancellation)?;
         let mut metrics = combine_reconcile_metrics(rust.metrics, php.metrics);
 
-        let rust_graph = rust
-            .graph
-            .map(Arc::new)
-            .unwrap_or_else(|| self.rust_graph.clone());
-        let php_graph = php
-            .graph
-            .map(Arc::new)
-            .unwrap_or_else(|| self.php_graph.clone());
         let rust_build = rust
             .build_metrics
             .as_ref()
-            .map_or(self.rust_build, |metrics| metrics.graph);
+            .map_or(self.rust.graph_report(), |metrics| metrics.graph);
         let php_build = php
             .build_metrics
             .as_ref()
-            .map_or(self.php_build, |metrics| metrics.graph);
+            .map_or(self.php.graph_report(), |metrics| metrics.graph);
         metrics.truncated_call_sites = rust_build
             .omitted_call_sites
             .saturating_add(php_build.omitted_call_sites);
@@ -207,31 +196,20 @@ impl WorkspaceSyntaxIndex {
         let rust_index = rust.next_index.unwrap_or_else(|| self.rust.clone());
         let php_index = php.next_index.unwrap_or_else(|| self.php.clone());
 
-        let (graph, composition_phase, validation_phase) = if graph_changed {
+        let (graph, composition_phase) = if graph_changed {
             let composition_started = Instant::now();
             let graph =
-                SymbolGraph::merge([rust_graph.as_ref().clone(), php_graph.as_ref().clone()])?;
+                SymbolGraph::merge([rust_index.graph().clone(), php_index.graph().clone()])?;
             let composition_phase = phase(
                 IndexPhase::LanguageComposition,
                 None,
                 composition_started.elapsed(),
-                graph.symbol_count().saturating_add(graph.edge_count()),
+                2,
                 0,
             );
-            let validation_started = Instant::now();
-            let audit = graph.audit_consistency()?;
-            let validation_phase = phase(
-                IndexPhase::GraphValidation,
-                None,
-                validation_started.elapsed(),
-                audit
-                    .symbols_audited
-                    .saturating_add(audit.adjacency_entries_examined),
-                0,
-            );
-            (Some(graph), Some(composition_phase), Some(validation_phase))
+            (Some(graph), Some(composition_phase))
         } else {
-            (None, None, None)
+            (None, None)
         };
 
         let mut phases = if graph_changed {
@@ -246,7 +224,6 @@ impl WorkspaceSyntaxIndex {
             phases.extend(build.phases.clone());
         }
         phases.extend(composition_phase);
-        phases.extend(validation_phase);
         if graph_changed {
             phases.push(phase(
                 IndexPhase::LiveReconciliation,
@@ -280,6 +257,7 @@ impl WorkspaceSyntaxIndex {
                     ),
                     ..IndexMemoryMetrics::default()
                 },
+                publication: metrics.publication,
             },
         );
 
@@ -296,10 +274,6 @@ impl WorkspaceSyntaxIndex {
         let next = Self {
             rust: rust_index,
             php: php_index,
-            rust_graph,
-            php_graph,
-            rust_build,
-            php_build,
             rust_limits,
             php_limits,
             budgets: self.budgets,
@@ -346,6 +320,38 @@ fn combine_reconcile_metrics(
             + php.relationship_files_recomputed,
         syntax_error_files: rust.syntax_error_files + php.syntax_error_files,
         truncated_call_sites: rust.truncated_call_sites + php.truncated_call_sites,
+        publication: combine_publication(rust.publication, php.publication),
+    }
+}
+
+fn combine_publication(
+    rust: IndexPublicationMetrics,
+    php: IndexPublicationMetrics,
+) -> IndexPublicationMetrics {
+    IndexPublicationMetrics {
+        structurally_incremental: rust.structurally_incremental && php.structurally_incremental,
+        reused_files: rust.reused_files.saturating_add(php.reused_files),
+        rebuilt_files: rust.rebuilt_files.saturating_add(php.rebuilt_files),
+        reused_source_bytes: rust
+            .reused_source_bytes
+            .saturating_add(php.reused_source_bytes),
+        rebuilt_source_bytes: rust
+            .rebuilt_source_bytes
+            .saturating_add(php.rebuilt_source_bytes),
+        copied_source_bytes: rust
+            .copied_source_bytes
+            .saturating_add(php.copied_source_bytes),
+        reused_symbols: rust.reused_symbols.saturating_add(php.reused_symbols),
+        rebuilt_symbols: rust.rebuilt_symbols.saturating_add(php.rebuilt_symbols),
+        copied_symbols: rust.copied_symbols.saturating_add(php.copied_symbols),
+        reused_edges: rust.reused_edges.saturating_add(php.reused_edges),
+        rebuilt_edges: rust.rebuilt_edges.saturating_add(php.rebuilt_edges),
+        copied_edges: rust.copied_edges.saturating_add(php.copied_edges),
+        reused_call_sites: rust.reused_call_sites.saturating_add(php.reused_call_sites),
+        rebuilt_call_sites: rust
+            .rebuilt_call_sites
+            .saturating_add(php.rebuilt_call_sites),
+        copied_call_sites: rust.copied_call_sites.saturating_add(php.copied_call_sites),
     }
 }
 
@@ -387,15 +393,13 @@ pub fn index_repository_with_options(
     rss_peak = max_option(rss_peak, process_rss_bytes());
     check_cancelled(&options.cancellation)?;
 
-    let rust_graph = Arc::new(rust_graph);
-    let php_graph = Arc::new(php_graph);
     let composition_started = Instant::now();
-    let graph = SymbolGraph::merge([rust_graph.as_ref().clone(), php_graph.as_ref().clone()])?;
+    let graph = SymbolGraph::merge([rust_graph, php_graph])?;
     let composition_phase = phase(
         IndexPhase::LanguageComposition,
         None,
         composition_started.elapsed(),
-        graph.symbol_count().saturating_add(graph.edge_count()),
+        2,
         0,
     );
     let validation_started = Instant::now();
@@ -434,6 +438,26 @@ pub fn index_repository_with_options(
                 observed_phase_peak_rss_bytes: rss_peak,
                 ..IndexMemoryMetrics::default()
             },
+            publication: IndexPublicationMetrics {
+                rebuilt_files: rust_metrics
+                    .facts
+                    .files
+                    .saturating_add(php_metrics.facts.files),
+                rebuilt_source_bytes: scan.source_bytes,
+                rebuilt_symbols: rust_metrics
+                    .graph
+                    .retained_symbols
+                    .saturating_add(php_metrics.graph.retained_symbols),
+                rebuilt_edges: rust_metrics
+                    .graph
+                    .retained_edges
+                    .saturating_add(php_metrics.graph.retained_edges),
+                rebuilt_call_sites: rust_metrics
+                    .graph
+                    .retained_call_sites
+                    .saturating_add(php_metrics.graph.retained_call_sites),
+                ..IndexPublicationMetrics::default()
+            },
         },
     );
     let elapsed = started.elapsed();
@@ -454,10 +478,6 @@ pub fn index_repository_with_options(
     let syntax_index = WorkspaceSyntaxIndex {
         rust,
         php,
-        rust_graph,
-        php_graph,
-        rust_build: rust_metrics.graph,
-        php_build: php_metrics.graph,
         rust_limits,
         php_limits,
         budgets,
@@ -681,6 +701,7 @@ struct IndexingParts {
     php_limits: GraphBuildLimits,
     phases: Vec<IndexPhaseMeasurement>,
     memory: IndexMemoryMetrics,
+    publication: IndexPublicationMetrics,
 }
 
 fn build_indexing_status(
@@ -697,6 +718,7 @@ fn build_indexing_status(
         php_limits,
         phases,
         mut memory,
+        publication,
     } = parts;
     let extracted_symbols = rust.symbols.saturating_add(php.symbols);
     let extracted_call_sites = rust.call_sites.saturating_add(php.call_sites);
@@ -787,6 +809,7 @@ fn build_indexing_status(
         degradations,
         phases,
         memory,
+        publication,
     }
 }
 

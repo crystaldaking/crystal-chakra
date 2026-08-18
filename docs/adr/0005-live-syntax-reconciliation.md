@@ -70,8 +70,12 @@ over native filesystem mechanisms:
   relationship-owner file. An edit reparses only created or modified files.
   Relationship owners are recomputed only when they own a changed file or
   depend on a declaration/callable key exported by one. Revision-scoped
-  `EntityId` values are assigned only while materializing a complete private
-  graph from cached facts and contributions.
+  `EntityId` values are assigned inside the private language partition. An
+  ordinary edit clones persistent roots, removes only affected relationship and
+  caller contributions, replaces changed-file declarations, and adds those
+  contributions back. Unchanged file/symbol/edge/call payloads remain shared
+  with the prior immutable revision. A budget rebalance or previously degraded
+  graph may deliberately take the observable full-build fallback.
 - Publish a changed graph with one engine compare-and-publish operation. A
   no-content-change reconciliation may update stale lifecycle metadata but
   does not invent a new graph revision when the current state is already
@@ -80,7 +84,9 @@ over native filesystem mechanisms:
   errors do not expose a partial graph or erase valid declarations elsewhere.
 - Instrument reconciliations, publications, scanned/unchanged/reparsed files,
   recomputed relationship owners, create/modify/delete counts, syntax-error
-  files, watcher events/errors/drops, and watched directories. Evidence for an
+  files, watcher events/errors/drops, watched directories, and graph
+  files/source bytes/symbols/edges/call sites reused, rebuilt, or copied.
+  Evidence for an
   incremental edit comes from actual reparsed-file and recomputed-owner counts;
   there is no constant-valued surrogate “full reindex” counter. The initial
   full index remains a distinct startup operation.
@@ -102,9 +108,9 @@ over native filesystem mechanisms:
   the query adapter already bounds concurrent blocking queries.
 - Rebuild all parsed files or all relationship contributions after every
   event: rejected because normal edits must not become repository-wide
-  reindexes. Complete graph materialization remains necessary for the current
-  revision-scoped arena, but it consumes cached per-file facts and cached
-  unaffected relationship contributions.
+  reindexes. Complete graph materialization was also removed from the ordinary
+  path: persistent file-owned deltas and shallow language composition publish
+  the next complete graph without visiting/copying all retained facts.
 - Ask callers to delay and retry: rejected because it is nondeterministic and
   makes read-your-writes correctness a client responsibility.
 
@@ -119,7 +125,8 @@ over native filesystem mechanisms:
 - A fresh barrier performs repository inventory and content reads, but only
   changed files incur Tree-sitter parsing and only affected owners incur
   relationship resolution. Benchmarks may later justify a more selective
-  reconciliation proof; v0.1 does not add a speculative persistent cache.
+  reconciliation proof. Persistent graph nodes solve publication copying; they
+  do not replace Git/worktree reconciliation and are not an on-disk cache.
 - Watcher degradation affects responsiveness, not correctness: a
   `RequireFresh` query still performs authoritative reconciliation. A failed
   reconciliation publishes stale/degraded metadata and returns a typed error.
@@ -138,6 +145,10 @@ over native filesystem mechanisms:
 - The hardening measurement records the fresh barrier and reparse counters for
   both one ordinary edit and a 32-replacement burst. The ordinary edit reparses
   one file and recomputes only the affected relationship owner set.
+- The same regression pins the old snapshot, verifies physical sharing of the
+  unchanged file and symbol, and checks publication metrics report one rebuilt
+  file, zero copied source/symbol/call payloads, and fewer copied adjacency
+  entries than a complete two-direction graph copy.
 - A unit regression proves the callback revokes freshness before publishing
   its epoch, and integration tests verify old snapshots remain immutable while
   the new revision is published atomically.

@@ -41,6 +41,20 @@ pub struct LiveIndexMetrics {
     pub modified_files: u64,
     pub deleted_files: u64,
     pub syntax_error_files: u64,
+    pub graph_files_reused: u64,
+    pub graph_files_rebuilt: u64,
+    pub graph_source_bytes_reused: u64,
+    pub graph_source_bytes_rebuilt: u64,
+    pub graph_source_bytes_copied: u64,
+    pub graph_symbols_reused: u64,
+    pub graph_symbols_rebuilt: u64,
+    pub graph_symbols_copied: u64,
+    pub graph_edges_reused: u64,
+    pub graph_edges_rebuilt: u64,
+    pub graph_edges_copied: u64,
+    pub graph_call_sites_reused: u64,
+    pub graph_call_sites_rebuilt: u64,
+    pub graph_call_sites_copied: u64,
     pub watcher_events: u64,
     pub dropped_watcher_events: u64,
     pub watcher_errors: u64,
@@ -60,6 +74,20 @@ struct MetricsState {
     modified_files: AtomicU64,
     deleted_files: AtomicU64,
     syntax_error_files: AtomicU64,
+    graph_files_reused: AtomicU64,
+    graph_files_rebuilt: AtomicU64,
+    graph_source_bytes_reused: AtomicU64,
+    graph_source_bytes_rebuilt: AtomicU64,
+    graph_source_bytes_copied: AtomicU64,
+    graph_symbols_reused: AtomicU64,
+    graph_symbols_rebuilt: AtomicU64,
+    graph_symbols_copied: AtomicU64,
+    graph_edges_reused: AtomicU64,
+    graph_edges_rebuilt: AtomicU64,
+    graph_edges_copied: AtomicU64,
+    graph_call_sites_reused: AtomicU64,
+    graph_call_sites_rebuilt: AtomicU64,
+    graph_call_sites_copied: AtomicU64,
     watcher_events: AtomicU64,
     dropped_watcher_events: AtomicU64,
     watcher_errors: AtomicU64,
@@ -82,6 +110,20 @@ impl MetricsState {
             modified_files: load(&self.modified_files),
             deleted_files: load(&self.deleted_files),
             syntax_error_files: load(&self.syntax_error_files),
+            graph_files_reused: load(&self.graph_files_reused),
+            graph_files_rebuilt: load(&self.graph_files_rebuilt),
+            graph_source_bytes_reused: load(&self.graph_source_bytes_reused),
+            graph_source_bytes_rebuilt: load(&self.graph_source_bytes_rebuilt),
+            graph_source_bytes_copied: load(&self.graph_source_bytes_copied),
+            graph_symbols_reused: load(&self.graph_symbols_reused),
+            graph_symbols_rebuilt: load(&self.graph_symbols_rebuilt),
+            graph_symbols_copied: load(&self.graph_symbols_copied),
+            graph_edges_reused: load(&self.graph_edges_reused),
+            graph_edges_rebuilt: load(&self.graph_edges_rebuilt),
+            graph_edges_copied: load(&self.graph_edges_copied),
+            graph_call_sites_reused: load(&self.graph_call_sites_reused),
+            graph_call_sites_rebuilt: load(&self.graph_call_sites_rebuilt),
+            graph_call_sites_copied: load(&self.graph_call_sites_copied),
             watcher_events: load(&self.watcher_events),
             dropped_watcher_events: load(&self.dropped_watcher_events),
             watcher_errors: load(&self.watcher_errors),
@@ -107,6 +149,35 @@ impl MetricsState {
             .fetch_add(metrics.deleted_files, Ordering::Relaxed);
         self.syntax_error_files
             .store(metrics.syntax_error_files, Ordering::Relaxed);
+        let publication = metrics.publication;
+        self.graph_files_reused
+            .fetch_add(publication.reused_files, Ordering::Relaxed);
+        self.graph_files_rebuilt
+            .fetch_add(publication.rebuilt_files, Ordering::Relaxed);
+        self.graph_source_bytes_reused
+            .fetch_add(publication.reused_source_bytes, Ordering::Relaxed);
+        self.graph_source_bytes_rebuilt
+            .fetch_add(publication.rebuilt_source_bytes, Ordering::Relaxed);
+        self.graph_source_bytes_copied
+            .fetch_add(publication.copied_source_bytes, Ordering::Relaxed);
+        self.graph_symbols_reused
+            .fetch_add(publication.reused_symbols, Ordering::Relaxed);
+        self.graph_symbols_rebuilt
+            .fetch_add(publication.rebuilt_symbols, Ordering::Relaxed);
+        self.graph_symbols_copied
+            .fetch_add(publication.copied_symbols, Ordering::Relaxed);
+        self.graph_edges_reused
+            .fetch_add(publication.reused_edges, Ordering::Relaxed);
+        self.graph_edges_rebuilt
+            .fetch_add(publication.rebuilt_edges, Ordering::Relaxed);
+        self.graph_edges_copied
+            .fetch_add(publication.copied_edges, Ordering::Relaxed);
+        self.graph_call_sites_reused
+            .fetch_add(publication.reused_call_sites, Ordering::Relaxed);
+        self.graph_call_sites_rebuilt
+            .fetch_add(publication.rebuilt_call_sites, Ordering::Relaxed);
+        self.graph_call_sites_copied
+            .fetch_add(publication.copied_call_sites, Ordering::Relaxed);
     }
 }
 
@@ -794,6 +865,15 @@ fn publish_fresh(
                     revision = snapshot.revision().0,
                     graph_changed = graph.is_some(),
                     indexing_degraded = indexing.is_degraded(),
+                    structurally_incremental = indexing.publication.structurally_incremental,
+                    graph_files_reused = indexing.publication.reused_files,
+                    graph_files_rebuilt = indexing.publication.rebuilt_files,
+                    graph_symbols_reused = indexing.publication.reused_symbols,
+                    graph_symbols_rebuilt = indexing.publication.rebuilt_symbols,
+                    graph_edges_reused = indexing.publication.reused_edges,
+                    graph_edges_rebuilt = indexing.publication.rebuilt_edges,
+                    graph_call_sites_reused = indexing.publication.reused_call_sites,
+                    graph_call_sites_rebuilt = indexing.publication.rebuilt_call_sites,
                     elapsed_micros = started.elapsed().as_micros(),
                     "live syntax revision publication completed"
                 );

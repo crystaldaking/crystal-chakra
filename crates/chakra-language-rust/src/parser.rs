@@ -37,7 +37,7 @@ pub(crate) enum ParseError {
     },
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ParsedFile {
     pub source: Arc<str>,
     pub module_path: Vec<String>,
@@ -47,7 +47,7 @@ pub(crate) struct ParsedFile {
     pub has_errors: bool,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SymbolDraft {
     pub key: SymbolKey,
     pub location: SourceRange,
@@ -55,7 +55,7 @@ pub(crate) struct SymbolDraft {
     pub parent: Option<usize>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CallDraft {
     pub caller: usize,
     pub form: CallForm,
@@ -75,7 +75,7 @@ struct CallTarget<'tree> {
     location: Node<'tree>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ImplDraft {
     pub symbol: usize,
     /// Exact syntactic container prefix at the impl site, including inline

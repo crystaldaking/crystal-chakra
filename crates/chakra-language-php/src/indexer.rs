@@ -7,10 +7,12 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use chakra_domain::indexing::{IndexCancellation, IndexPhase, IndexPhaseMeasurement};
+use chakra_domain::indexing::{
+    IndexCancellation, IndexPhase, IndexPhaseMeasurement, IndexPublicationMetrics,
+};
 use chakra_domain::location::{RepoRelativePath, SourceRange};
 use chakra_domain::provenance::{Precision, Provenance};
-use chakra_domain::symbol::{EdgeKind, Language, SymbolKind};
+use chakra_domain::symbol::{CallResolution, Edge, EdgeKind, Language, SymbolKind};
 use chakra_engine::{
     BoundedGraphBuilder, CallSiteInput, ConsistencyError, GraphBuildLimits, GraphBuildReport,
     GraphError, SymbolGraph,
@@ -50,6 +52,7 @@ pub struct ReconcileMetrics {
     pub relationship_files_recomputed: u64,
     pub syntax_error_files: u64,
     pub truncated_call_sites: u64,
+    pub publication: IndexPublicationMetrics,
 }
 
 #[derive(Debug)]
@@ -190,6 +193,8 @@ pub struct PhpSyntaxIndex {
     files: BTreeMap<RepoRelativePath, Arc<ParsedFile>>,
     relationships: BTreeMap<RepoRelativePath, Arc<RelationshipContribution>>,
     graph_limits: GraphBuildLimits,
+    graph: SymbolGraph,
+    graph_report: GraphBuildReport,
 }
 
 impl Default for PhpSyntaxIndex {
@@ -198,6 +203,8 @@ impl Default for PhpSyntaxIndex {
             files: BTreeMap::new(),
             relationships: BTreeMap::new(),
             graph_limits: GraphBuildLimits::UNLIMITED,
+            graph: SymbolGraph::new(),
+            graph_report: GraphBuildReport::default(),
         }
     }
 }
@@ -235,14 +242,18 @@ impl PhpSyntaxIndex {
         let relationships =
             build_all_relationships(&files, &catalog, graph_limits.max_edges, cancellation)?;
         let relationships_elapsed = relationships_started.elapsed();
-        let index = Self {
+        let mut index = Self {
             files,
             relationships,
             graph_limits,
+            graph: SymbolGraph::new(),
+            graph_report: GraphBuildReport::default(),
         };
         let facts = index.fact_counts();
         let materialize_started = Instant::now();
         let (graph, graph_report) = index.materialize_graph_bounded(cancellation)?;
+        index.graph = graph.clone();
+        index.graph_report = graph_report;
         let materialize_elapsed = materialize_started.elapsed();
         let phases = vec![
             phase(
@@ -283,6 +294,14 @@ impl PhpSyntaxIndex {
 
     pub fn paths(&self) -> Vec<RepoRelativePath> {
         self.files.keys().cloned().collect()
+    }
+
+    pub fn graph(&self) -> &SymbolGraph {
+        &self.graph
+    }
+
+    pub fn graph_report(&self) -> GraphBuildReport {
+        self.graph_report
     }
 
     pub fn reconcile_sources(
@@ -329,6 +348,7 @@ impl PhpSyntaxIndex {
         if changed_paths.is_empty() && !limits_changed {
             metrics.syntax_error_files = self.syntax_error_files();
             metrics.truncated_call_sites = self.truncated_call_sites();
+            metrics.publication = self.reuse_all_publication();
             return Ok(ReconcileReport {
                 graph: None,
                 metrics,
@@ -338,12 +358,6 @@ impl PhpSyntaxIndex {
         }
 
         let mut next_files = self.files.clone();
-        let mut changed_dependencies = HashSet::new();
-        for path in &changed_paths {
-            if let Some(previous) = self.files.get(path) {
-                changed_dependencies.extend(exported_dependencies(previous));
-            }
-        }
         let parse_started = Instant::now();
         let mut parser = PhpParser::new().map_err(parse_error)?;
         for path in &changed_paths {
@@ -353,7 +367,6 @@ impl PhpSyntaxIndex {
                     let parsed = parser
                         .parse(path.clone(), source.clone())
                         .map_err(parse_error)?;
-                    changed_dependencies.extend(exported_dependencies(&parsed));
                     next_files.insert(path.clone(), Arc::new(parsed));
                     metrics.reparsed_files += 1;
                 }
@@ -365,7 +378,35 @@ impl PhpSyntaxIndex {
         let parse_elapsed = parse_started.elapsed();
         check_cancelled(cancellation)?;
 
-        let mut affected_owners = changed_paths.clone();
+        let mut stable_symbol_paths = BTreeSet::new();
+        let mut unchanged_fact_paths = BTreeSet::new();
+        let mut changed_dependencies = HashSet::new();
+        let mut changed_callables = HashSet::new();
+        for path in &changed_paths {
+            match (self.files.get(path), next_files.get(path)) {
+                (Some(previous), Some(next)) if symbol_keys_equal(previous, next) => {
+                    stable_symbol_paths.insert(path.clone());
+                    if syntax_facts_equal(previous, next) {
+                        unchanged_fact_paths.insert(path.clone());
+                    }
+                }
+                (previous, next) => {
+                    if let Some(previous) = previous {
+                        changed_dependencies.extend(exported_dependencies(previous));
+                        changed_callables.extend(exported_callables(previous));
+                    }
+                    if let Some(next) = next {
+                        changed_dependencies.extend(exported_dependencies(next));
+                        changed_callables.extend(exported_callables(next));
+                    }
+                }
+            }
+        }
+
+        let mut affected_owners: BTreeSet<_> = changed_paths
+            .difference(&unchanged_fact_paths)
+            .cloned()
+            .collect();
         affected_owners.extend(
             self.relationships
                 .iter()
@@ -374,6 +415,21 @@ impl PhpSyntaxIndex {
                         .dependencies
                         .iter()
                         .any(|key| changed_dependencies.contains(key))
+                })
+                .map(|(path, _)| path.clone()),
+        );
+        let mut affected_call_owners: BTreeSet<_> = changed_paths
+            .difference(&unchanged_fact_paths)
+            .cloned()
+            .collect();
+        affected_call_owners.extend(
+            self.files
+                .iter()
+                .filter(|(_, file)| {
+                    file.calls.iter().any(|call| {
+                        changed_callables
+                            .contains(&callable_dependency(call.target_kind, &call.name))
+                    })
                 })
                 .map(|(path, _)| path.clone()),
         );
@@ -430,9 +486,49 @@ impl PhpSyntaxIndex {
             files: next_files,
             relationships: next_relationships,
             graph_limits,
+            graph: SymbolGraph::new(),
+            graph_report: GraphBuildReport::default(),
         };
         let materialize_started = Instant::now();
-        let (graph, graph_report) = next.materialize_graph_bounded(cancellation)?;
+        let next_facts = next.fact_counts();
+        let complete_previous = self.graph_report.omitted_symbols == 0
+            && self.graph_report.omitted_edges == 0
+            && self.graph_report.omitted_call_sites == 0;
+        let delta_fits = next_facts.symbols <= graph_limits.max_symbols
+            && next_facts.call_sites <= graph_limits.max_call_sites;
+        let delta_candidate = !limits_changed && complete_previous && delta_fits;
+        let delta = if delta_candidate {
+            next.materialize_graph_delta(
+                &self.graph,
+                &changed_paths,
+                &affected_owners,
+                &affected_call_owners,
+                &stable_symbol_paths,
+                cancellation,
+            )?
+        } else {
+            None
+        };
+        let structurally_incremental = delta.is_some();
+        let (graph, graph_report) = if let Some(delta) = delta {
+            delta
+        } else {
+            next.materialize_graph_bounded(cancellation)?
+        };
+        let mut next = next;
+        next.graph = graph.clone();
+        next.graph_report = graph_report;
+        metrics.publication = if structurally_incremental {
+            next.delta_publication(
+                self,
+                &changed_paths,
+                &affected_owners,
+                &affected_call_owners,
+                &stable_symbol_paths,
+            )
+        } else {
+            next.full_publication()
+        };
         let facts = next.fact_counts();
         let build_metrics = LanguageBuildMetrics {
             facts,
@@ -458,10 +554,22 @@ impl PhpSyntaxIndex {
                 phase(
                     IndexPhase::GraphMaterialization,
                     materialize_started.elapsed(),
-                    graph_report
-                        .retained_symbols
-                        .saturating_add(graph_report.retained_edges)
-                        .saturating_add(graph_report.retained_call_sites),
+                    if metrics.publication.structurally_incremental {
+                        metrics
+                            .publication
+                            .rebuilt_files
+                            .saturating_add(metrics.publication.rebuilt_symbols)
+                            .saturating_add(metrics.publication.rebuilt_edges)
+                            .saturating_add(metrics.publication.rebuilt_call_sites)
+                            .saturating_add(metrics.publication.copied_symbols)
+                            .saturating_add(metrics.publication.copied_edges)
+                            .saturating_add(metrics.publication.copied_call_sites)
+                    } else {
+                        graph_report
+                            .retained_symbols
+                            .saturating_add(graph_report.retained_edges)
+                            .saturating_add(graph_report.retained_call_sites)
+                    },
                     0,
                 ),
             ],
@@ -547,7 +655,7 @@ impl PhpSyntaxIndex {
                 }
             }
         }
-        for contribution in self.relationships.values() {
+        for (owner, contribution) in &self.relationships {
             check_cancelled(cancellation)?;
             graph.omit_edges_for_edge_budget(contribution.omitted_edges);
             for edge in &contribution.edges {
@@ -555,13 +663,16 @@ impl PhpSyntaxIndex {
                     graph.omit_edges_for_symbol_budget(1);
                     continue;
                 };
-                graph.add_edge(
-                    edge.kind,
-                    *from,
-                    *to,
-                    edge.provenance,
-                    edge.precision,
-                    edge.location.clone(),
+                graph.add_edge_owned_by(
+                    owner.clone(),
+                    Edge {
+                        kind: edge.kind,
+                        from: *from,
+                        to: *to,
+                        provenance: edge.provenance,
+                        precision: edge.precision,
+                        location: edge.location.clone(),
+                    },
                 )?;
             }
         }
@@ -593,8 +704,242 @@ impl PhpSyntaxIndex {
             }
         }
         let (mut graph, report) = graph.finish();
-        graph.set_truncated_call_sites(report.omitted_call_sites);
+        graph.set_truncated_call_sites(report.omitted_call_sites)?;
         Ok((graph, report))
+    }
+
+    fn materialize_graph_delta(
+        &self,
+        previous: &SymbolGraph,
+        changed_paths: &BTreeSet<RepoRelativePath>,
+        relationship_owners: &BTreeSet<RepoRelativePath>,
+        call_owners: &BTreeSet<RepoRelativePath>,
+        stable_symbol_paths: &BTreeSet<RepoRelativePath>,
+        cancellation: &IndexCancellation,
+    ) -> Result<Option<(SymbolGraph, GraphBuildReport)>, PhpIndexError> {
+        let mut graph = previous.clone();
+        for owner in relationship_owners {
+            check_cancelled(cancellation)?;
+            graph.remove_relationships_in_file(owner)?;
+        }
+        for owner in call_owners {
+            check_cancelled(cancellation)?;
+            graph.remove_call_sites_in_file(owner)?;
+        }
+        for path in changed_paths {
+            check_cancelled(cancellation)?;
+            if stable_symbol_paths.contains(path) {
+                let file = self
+                    .files
+                    .get(path)
+                    .ok_or_else(|| PhpIndexError::Update(format!("missing changed file {path}")))?;
+                let ids: Vec<_> = graph
+                    .symbols_in_file(path)
+                    .map(|symbol| symbol.id)
+                    .collect();
+                graph.replace_file_source(path, file.source.clone())?;
+                for (id, symbol) in ids.into_iter().zip(&file.symbols) {
+                    graph.replace_symbol_payload(
+                        id,
+                        symbol.key.clone(),
+                        symbol.location.clone(),
+                        symbol.signature.clone(),
+                        Provenance::TreeSitter,
+                        Precision::Syntax,
+                    )?;
+                }
+            } else {
+                graph.remove_file(path)?;
+            }
+        }
+        for path in changed_paths {
+            if stable_symbol_paths.contains(path) {
+                continue;
+            }
+            let Some(file) = self.files.get(path) else {
+                continue;
+            };
+            graph.add_file(path.clone(), file.source.clone())?;
+            for symbol in &file.symbols {
+                graph.add_symbol(
+                    symbol.key.clone(),
+                    symbol.location.clone(),
+                    symbol.signature.clone(),
+                    Provenance::TreeSitter,
+                    Precision::Syntax,
+                )?;
+            }
+        }
+        for owner in relationship_owners {
+            check_cancelled(cancellation)?;
+            let Some(contribution) = self.relationships.get(owner) else {
+                continue;
+            };
+            for edge in &contribution.edges {
+                let (Some(from), Some(to)) = (
+                    entity_for_address(&graph, &edge.from),
+                    entity_for_address(&graph, &edge.to),
+                ) else {
+                    continue;
+                };
+                graph.add_edge_owned_by(
+                    owner.clone(),
+                    Edge {
+                        kind: edge.kind,
+                        from,
+                        to,
+                        provenance: edge.provenance,
+                        precision: edge.precision,
+                        location: edge.location.clone(),
+                    },
+                )?;
+                if graph.edge_count() > self.graph_limits.max_edges {
+                    return Ok(None);
+                }
+            }
+        }
+        for path in call_owners {
+            check_cancelled(cancellation)?;
+            let Some(file) = self.files.get(path) else {
+                continue;
+            };
+            for call_site in &file.calls {
+                let Some(caller) = graph.symbols_in_file(path).nth(call_site.caller) else {
+                    continue;
+                };
+                graph.add_call_site(CallSiteInput {
+                    caller: caller.id,
+                    form: call_site.form,
+                    target_kind: call_site.target_kind,
+                    name: call_site.name.clone(),
+                    qualifier: call_site.qualifier.clone(),
+                    receiver_hint: call_site.receiver_hint.clone(),
+                    location: call_site.location.clone(),
+                    provenance: Provenance::TreeSitter,
+                    precision: Precision::Syntax,
+                })?;
+                if graph.edge_count() > self.graph_limits.max_edges {
+                    return Ok(None);
+                }
+            }
+        }
+        graph.set_truncated_call_sites(0)?;
+        let report = GraphBuildReport {
+            retained_symbols: graph.symbol_count(),
+            retained_edges: graph.edge_count(),
+            retained_call_sites: graph.call_site_count(),
+            ..GraphBuildReport::default()
+        };
+        Ok(Some((graph, report)))
+    }
+
+    fn reuse_all_publication(&self) -> IndexPublicationMetrics {
+        let facts = self.fact_counts();
+        IndexPublicationMetrics {
+            structurally_incremental: true,
+            reused_files: facts.files,
+            reused_source_bytes: facts.source_bytes,
+            reused_symbols: self.graph.symbol_count(),
+            reused_edges: self.graph.edge_count(),
+            reused_call_sites: self.graph.call_site_count(),
+            ..IndexPublicationMetrics::default()
+        }
+    }
+
+    fn full_publication(&self) -> IndexPublicationMetrics {
+        let facts = self.fact_counts();
+        IndexPublicationMetrics {
+            rebuilt_files: facts.files,
+            rebuilt_source_bytes: facts.source_bytes,
+            rebuilt_symbols: self.graph.symbol_count(),
+            rebuilt_edges: self.graph.edge_count(),
+            rebuilt_call_sites: self.graph.call_site_count(),
+            ..IndexPublicationMetrics::default()
+        }
+    }
+
+    fn delta_publication(
+        &self,
+        previous: &Self,
+        changed_paths: &BTreeSet<RepoRelativePath>,
+        relationship_owners: &BTreeSet<RepoRelativePath>,
+        call_owners: &BTreeSet<RepoRelativePath>,
+        stable_symbol_paths: &BTreeSet<RepoRelativePath>,
+    ) -> IndexPublicationMetrics {
+        let rebuilt_files = changed_paths
+            .iter()
+            .filter(|path| self.files.contains_key(*path))
+            .count() as u64;
+        let rebuilt_source_bytes = changed_paths
+            .iter()
+            .filter_map(|path| self.files.get(path))
+            .map(|file| file.source.len() as u64)
+            .sum();
+        let rebuilt_symbols = changed_paths
+            .iter()
+            .map(|path| {
+                let Some(next) = self.files.get(path) else {
+                    return 0;
+                };
+                if stable_symbol_paths.contains(path) {
+                    return previous.files.get(path).map_or(0, |previous| {
+                        previous
+                            .symbols
+                            .iter()
+                            .zip(&next.symbols)
+                            .filter(|(left, right)| left != right)
+                            .count() as u64
+                    });
+                }
+                next.symbols.len() as u64
+            })
+            .sum();
+        let rebuilt_relationship_edges: u64 = relationship_owners
+            .iter()
+            .filter_map(|path| self.relationships.get(path))
+            .map(|relationships| relationships.edges.len() as u64)
+            .sum();
+        let rebuilt_call_sites: u64 = call_owners
+            .iter()
+            .filter_map(|path| self.files.get(path))
+            .map(|file| file.calls.len() as u64)
+            .sum();
+        let rebuilt_call_edges: u64 = call_owners
+            .iter()
+            .flat_map(|path| self.graph.symbols_in_file(path))
+            .flat_map(|symbol| {
+                self.graph.call_sites_from(symbol.id).map(move |call_site| {
+                    if matches!(call_site.resolution, CallResolution::Resolved { .. }) {
+                        1 + u64::from(symbol.key.kind == SymbolKind::Test)
+                    } else {
+                        0
+                    }
+                })
+            })
+            .sum();
+        let rebuilt_edges = rebuilt_relationship_edges.saturating_add(rebuilt_call_edges);
+        let facts = self.fact_counts();
+        IndexPublicationMetrics {
+            structurally_incremental: true,
+            reused_files: facts.files.saturating_sub(rebuilt_files),
+            rebuilt_files,
+            reused_source_bytes: facts.source_bytes.saturating_sub(rebuilt_source_bytes),
+            rebuilt_source_bytes,
+            reused_symbols: self.graph.symbol_count().saturating_sub(rebuilt_symbols),
+            rebuilt_symbols,
+            reused_edges: self.graph.edge_count().saturating_sub(rebuilt_edges),
+            rebuilt_edges,
+            copied_edges: self
+                .graph
+                .adjacency_entries_copied()
+                .saturating_sub(previous.graph.adjacency_entries_copied()),
+            reused_call_sites: self
+                .graph
+                .call_site_count()
+                .saturating_sub(rebuilt_call_sites),
+            rebuilt_call_sites,
+            ..IndexPublicationMetrics::default()
+        }
     }
 }
 
@@ -652,6 +997,69 @@ fn exported_dependencies(file: &ParsedFile) -> HashSet<DependencyKey> {
         ));
     }
     keys
+}
+
+fn symbol_keys_equal(left: &ParsedFile, right: &ParsedFile) -> bool {
+    left.symbols.len() == right.symbols.len()
+        && left
+            .symbols
+            .iter()
+            .zip(&right.symbols)
+            .all(|(left, right)| left.key == right.key)
+}
+
+fn syntax_facts_equal(left: &ParsedFile, right: &ParsedFile) -> bool {
+    left.symbols == right.symbols
+        && left.calls == right.calls
+        && left.named_relations == right.named_relations
+        && left.has_errors == right.has_errors
+}
+
+fn exported_callables(file: &ParsedFile) -> HashSet<(u8, String)> {
+    file.symbols
+        .iter()
+        .filter_map(|symbol| {
+            callable_target_kind(symbol.key.kind).map(|kind| {
+                let name = symbol
+                    .key
+                    .qualified_name
+                    .rsplit("::")
+                    .next()
+                    .unwrap_or(&symbol.key.qualified_name);
+                callable_dependency(kind, name)
+            })
+        })
+        .collect()
+}
+
+fn callable_target_kind(kind: SymbolKind) -> Option<chakra_domain::symbol::CallTargetKind> {
+    use chakra_domain::symbol::CallTargetKind;
+    match kind {
+        SymbolKind::Function => Some(CallTargetKind::Function),
+        SymbolKind::Method => Some(CallTargetKind::Method),
+        SymbolKind::Test => Some(CallTargetKind::Test),
+        _ => None,
+    }
+}
+
+fn callable_dependency(kind: chakra_domain::symbol::CallTargetKind, name: &str) -> (u8, String) {
+    use chakra_domain::symbol::CallTargetKind;
+    let kind = match kind {
+        CallTargetKind::Function => 0,
+        CallTargetKind::Method => 1,
+        CallTargetKind::Test => 2,
+    };
+    (kind, name.to_owned())
+}
+
+fn entity_for_address(
+    graph: &SymbolGraph,
+    address: &SymbolAddress,
+) -> Option<chakra_domain::symbol::EntityId> {
+    graph
+        .symbols_in_file(&address.path)
+        .nth(address.index)
+        .map(|symbol| symbol.id)
 }
 
 fn relationships_for_file(
