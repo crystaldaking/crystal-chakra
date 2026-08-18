@@ -7,7 +7,14 @@ use std::ffi::OsString;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
+use std::time::Instant;
 
+use chakra_domain::indexing::{
+    DEFAULT_MAX_INDEX_CALL_SITES, DEFAULT_MAX_INDEX_EDGES, DEFAULT_MAX_INDEX_FILES,
+    DEFAULT_MAX_INDEX_SYMBOLS, DEFAULT_MAX_INDEX_WORKERS, DEFAULT_MAX_SOURCE_FILE_BYTES,
+    DEFAULT_MAX_WORKSPACE_SOURCE_BYTES, DEFAULT_MEMORY_TARGET_BYTES, DEFAULT_STARTUP_TARGET_MILLIS,
+    IndexBudgets, IndexCancellation,
+};
 use chakra_domain::state::{Freshness, WorkspaceStatus};
 use chakra_engine::WorkspaceEngine;
 use clap::{Args, CommandFactory, Parser, Subcommand};
@@ -39,6 +46,42 @@ struct ServeArgs {
     /// rust-analyzer executable to use for optional precise enrichment.
     #[arg(long, value_name = "PATH", default_value = "rust-analyzer")]
     rust_analyzer_path: OsString,
+
+    /// Maximum Git-discovered Rust/PHP files admitted to one revision.
+    #[arg(long, default_value_t = DEFAULT_MAX_INDEX_FILES)]
+    max_index_files: u64,
+
+    /// Maximum bytes retained from one Rust/PHP source file.
+    #[arg(long, default_value_t = DEFAULT_MAX_SOURCE_FILE_BYTES)]
+    max_source_file_bytes: u64,
+
+    /// Maximum total Rust/PHP source bytes retained by the syntax index.
+    #[arg(long, default_value_t = DEFAULT_MAX_WORKSPACE_SOURCE_BYTES)]
+    max_workspace_source_bytes: u64,
+
+    /// Maximum declarations retained in the published graph.
+    #[arg(long, default_value_t = DEFAULT_MAX_INDEX_SYMBOLS)]
+    max_index_symbols: u64,
+
+    /// Maximum relationships retained in the published graph.
+    #[arg(long, default_value_t = DEFAULT_MAX_INDEX_EDGES)]
+    max_index_edges: u64,
+
+    /// Maximum compact syntax call sites retained in the published graph.
+    #[arg(long, default_value_t = DEFAULT_MAX_INDEX_CALL_SITES)]
+    max_index_call_sites: u64,
+
+    /// Observable cold-start target in milliseconds; it never changes graph contents.
+    #[arg(long, default_value_t = DEFAULT_STARTUP_TARGET_MILLIS)]
+    startup_target_millis: u64,
+
+    /// Observable current/phase-sampled resident-memory target in bytes.
+    #[arg(long, default_value_t = DEFAULT_MEMORY_TARGET_BYTES)]
+    memory_target_bytes: u64,
+
+    /// Maximum syntax parser workers; effective use is CPU/memory/phase bounded.
+    #[arg(long, default_value_t = DEFAULT_MAX_INDEX_WORKERS)]
+    max_index_workers: u64,
 }
 
 #[tokio::main]
@@ -79,19 +122,49 @@ async fn serve(args: ServeArgs) -> ExitCode {
         repo,
         no_rust_analyzer,
         rust_analyzer_path,
+        max_index_files,
+        max_source_file_bytes,
+        max_workspace_source_bytes,
+        max_index_symbols,
+        max_index_edges,
+        max_index_call_sites,
+        startup_target_millis,
+        memory_target_bytes,
+        max_index_workers,
     } = args;
-    let report =
-        match tokio::task::spawn_blocking(move || chakra_language::index_repository(&repo)).await {
-            Ok(Ok(report)) => report,
-            Ok(Err(error)) => {
-                eprintln!("chakra: {error}");
-                return ExitCode::FAILURE;
-            }
-            Err(error) => {
-                eprintln!("chakra: syntax index task failed: {error}");
-                return ExitCode::FAILURE;
-            }
-        };
+    let budgets = IndexBudgets {
+        max_files: max_index_files,
+        max_source_file_bytes,
+        max_workspace_source_bytes,
+        max_symbols: max_index_symbols,
+        max_edges: max_index_edges,
+        max_call_sites: max_index_call_sites,
+        startup_target_millis,
+        memory_target_bytes,
+        max_workers: max_index_workers,
+    };
+    let options = match chakra_language::IndexOptions::new(budgets, IndexCancellation::default()) {
+        Ok(options) => options,
+        Err(error) => {
+            eprintln!("chakra: invalid index budget: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let report = match tokio::task::spawn_blocking(move || {
+        chakra_language::index_repository_with_options(&repo, options)
+    })
+    .await
+    {
+        Ok(Ok(report)) => report,
+        Ok(Err(error)) => {
+            eprintln!("chakra: {error}");
+            return ExitCode::FAILURE;
+        }
+        Err(error) => {
+            eprintln!("chakra: syntax index task failed: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
     let identity = match chakra_git::resolve_workspace_identity(&report.repository_root) {
         Ok(identity) => identity,
         Err(error) => {
@@ -108,25 +181,43 @@ async fn serve(args: ServeArgs) -> ExitCode {
     }
     let mut update = engine.begin_update();
     update.replace_graph(report.graph);
+    update.set_indexing(report.metrics.indexing.clone());
     update.set_status(WorkspaceStatus::Indexing);
     // The watcher is not active yet, so the initial scan cannot close the
     // startup race. The live owner reclaims freshness after it starts
     // watching and performs its mandatory reconciliation.
     update.set_freshness(Freshness::Stale);
+    let publication_started = Instant::now();
     if let Err(error) = engine.publish(update) {
         eprintln!("chakra: failed to publish initial syntax index: {error}");
         return ExitCode::FAILURE;
     }
+    tracing::info!(
+        elapsed_micros = publication_started.elapsed().as_micros(),
+        "initial syntax revision publication completed"
+    );
     let initial_metrics = report.metrics;
     let has_rust_sources = initial_metrics.rust_files > 0;
     tracing::info!(
         files = initial_metrics.parsed_files,
         rust_files = initial_metrics.rust_files,
         php_files = initial_metrics.php_files,
+        laravel_detected = initial_metrics.laravel_detected,
+        framework_symbols = initial_metrics.framework_symbols,
+        framework_edges = initial_metrics.framework_edges,
+        framework_truncated_files = initial_metrics.framework_truncated_files,
         syntax_error_files = initial_metrics.syntax_error_files,
         truncated_call_sites = initial_metrics.truncated_call_sites,
         symbols = initial_metrics.symbols,
         edges = initial_metrics.edges,
+        call_sites = initial_metrics.call_sites,
+        indexing_degraded = initial_metrics.indexing.is_degraded(),
+        source_bytes = initial_metrics.indexing.coverage.source_bytes,
+        configured_index_workers = initial_metrics.indexing.scheduling.configured_max_workers,
+        effective_index_workers = initial_metrics.indexing.scheduling.effective_worker_limit,
+        peak_active_index_workers = initial_metrics.indexing.scheduling.peak_active_workers,
+        current_rss_bytes = ?initial_metrics.indexing.memory.current_rss_bytes,
+        observed_phase_peak_rss_bytes = ?initial_metrics.indexing.memory.observed_phase_peak_rss_bytes,
         elapsed_micros = initial_metrics.elapsed.as_micros(),
         "initial Rust/PHP syntax revision published as stale pending live reconciliation"
     );
@@ -241,6 +332,9 @@ mod tests {
             }) if args.repo == Path::new("/tmp/example")
                 && !args.no_rust_analyzer
                 && args.rust_analyzer_path == "rust-analyzer"
+                && args.max_index_files == DEFAULT_MAX_INDEX_FILES
+                && args.max_index_symbols == DEFAULT_MAX_INDEX_SYMBOLS
+                && args.max_index_workers == DEFAULT_MAX_INDEX_WORKERS
         ));
     }
 
@@ -259,6 +353,17 @@ mod tests {
                 command: Some(Commands::Serve(ref args)),
             }) if args.no_rust_analyzer
                 && args.rust_analyzer_path == "/opt/bin/rust-analyzer"
+        ));
+    }
+
+    #[test]
+    fn serve_accepts_an_explicit_index_worker_limit() {
+        let cli = Cli::try_parse_from(["chakra", "serve", "--max-index-workers", "2"]);
+        assert!(matches!(
+            cli,
+            Ok(Cli {
+                command: Some(Commands::Serve(ref args)),
+            }) if args.max_index_workers == 2
         ));
     }
 

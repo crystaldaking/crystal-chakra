@@ -80,6 +80,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "archery"
+version = "1.2.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "33ca55ee147b1926dbea904f50fe4902494e97bc742205abbbf10c709e43815f"
+dependencies = [
+ "triomphe",
+]
+
+[[package]]
 name = "autocfg"
 version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -126,8 +135,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
 
 [[package]]
+name = "cfg_aliases"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f079e83a288787bcd14a6aea84cee5c87a67c5a3e660c30f557a3d24761b3527"
+
+[[package]]
 name = "chakra-cli"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "chakra-domain",
  "chakra-engine",
@@ -143,7 +158,7 @@ dependencies = [
 
 [[package]]
 name = "chakra-domain"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "schemars",
  "serde",
@@ -153,32 +168,39 @@ dependencies = [
 
 [[package]]
 name = "chakra-engine"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "arc-swap",
  "chakra-domain",
  "regex",
+ "rpds",
+ "serde",
+ "serde_json",
  "thiserror",
+ "tracing",
 ]
 
 [[package]]
 name = "chakra-git"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "chakra-domain",
  "chakra-engine",
+ "serde_json",
  "tempfile",
  "thiserror",
 ]
 
 [[package]]
 name = "chakra-language"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "chakra-domain",
  "chakra-engine",
+ "chakra-git",
  "chakra-language-php",
  "chakra-language-rust",
+ "nix",
  "notify",
  "tempfile",
  "thiserror",
@@ -187,11 +209,13 @@ dependencies = [
 
 [[package]]
 name = "chakra-language-php"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "chakra-domain",
  "chakra-engine",
  "chakra-git",
+ "nix",
+ "serde_json",
  "tempfile",
  "thiserror",
  "tracing",
@@ -201,11 +225,12 @@ dependencies = [
 
 [[package]]
 name = "chakra-language-rust"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "chakra-domain",
  "chakra-engine",
  "chakra-git",
+ "nix",
  "tempfile",
  "thiserror",
  "tracing",
@@ -215,29 +240,33 @@ dependencies = [
 
 [[package]]
 name = "chakra-mcp"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "chakra-domain",
  "chakra-engine",
  "chakra-git",
  "chakra-language",
  "rmcp",
+ "schemars",
  "serde",
  "serde_json",
  "tempfile",
  "thiserror",
  "tokio",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
 name = "chakra-provider-rust-analyzer"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "chakra-domain",
  "chakra-engine",
  "crossbeam-channel",
  "lsp-server",
  "lsp-types",
+ "nix",
  "serde",
  "serde_json",
  "tempfile",
@@ -833,6 +862,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "nix"
+version = "0.31.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cf20d2fde8ff38632c426f1165ed7436270b44f199fc55284c38276f9db47c3d"
+dependencies = [
+ "bitflags 2.13.1",
+ "cfg-if",
+ "cfg_aliases",
+ "libc",
+]
+
+[[package]]
 name = "notify"
 version = "8.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1022,6 +1063,16 @@ dependencies = [
  "quote",
  "serde_json",
  "syn 3.0.3",
+]
+
+[[package]]
+name = "rpds"
+version = "1.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e025feb26210bc196b908e72deb063b1b4000754304341cbc168a1e72c857ebc"
+dependencies = [
+ "archery",
+ "smallvec",
 ]
 
 [[package]]
@@ -1421,6 +1472,12 @@ dependencies = [
  "cc",
  "tree-sitter-language",
 ]
+
+[[package]]
+name = "triomphe"
+version = "0.1.16"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b40688ea6389c8171614b25491f71d4a27946e0c7ce2da1c6de27e25abf1a0ae"
 
 [[package]]
 name = "unicode-ident"

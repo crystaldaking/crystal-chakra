@@ -1,0 +1,129 @@
+{
+  "schema_version": 1,
+  "description": "Static call targets that a precise source provider may prove without executing PHP.",
+  "calls": [
+    {
+      "id": "promoted-property",
+      "caller": "App::Http::Controllers::ReportController::show",
+      "name": "generate",
+      "expected_target": "App::Services::ReportService::generate",
+      "file": "app/Http/Controllers/ReportController.php",
+      "needle": "$this->service->generate()",
+      "symbol": "generate",
+      "expected_definition_file": "app/Services/ReportService.php"
+    },
+    {
+      "id": "method-return-flow",
+      "caller": "App::Http::Controllers::ReportController::viaFactory",
+      "name": "generate",
+      "expected_target": "App::Services::ReportService::generate",
+      "file": "app/Http/Controllers/ReportController.php",
+      "needle": "$service->generate()",
+      "symbol": "generate",
+      "occurrence": 1,
+      "expected_definition_file": "app/Services/ReportService.php"
+    },
+    {
+      "id": "generic-container-flow",
+      "caller": "App::Http::Controllers::ReportController::viaContainer",
+      "name": "generate",
+      "expected_target": "App::Services::ReportService::generate",
+      "file": "app/Http/Controllers/ReportController.php",
+      "needle": "$service->generate()",
+      "symbol": "generate",
+      "occurrence": 2,
+      "expected_definition_file": "app/Services/ReportService.php"
+    },
+    {
+      "id": "docblock-property",
+      "caller": "App::Http::Controllers::ReportController::viaDocblock",
+      "name": "generate",
+      "expected_target": "App::Services::ReportService::generate",
+      "file": "app/Http/Controllers/ReportController.php",
+      "needle": "$this->documentedService->generate()",
+      "symbol": "generate",
+      "expected_definition_file": "app/Services/ReportService.php"
+    },
+    {
+      "id": "service-locator-interface",
+      "caller": "App::Http::Controllers::ReportController::viaInterface",
+      "name": "report",
+      "expected_target": "App::Contracts::Reporter::report",
+      "file": "app/Http/Controllers/ReportController.php",
+      "needle": "app(Reporter::class)->report('controller')",
+      "symbol": "report",
+      "expected_definition_file": "app/Contracts/Reporter.php"
+    },
+    {
+      "id": "job-promoted-property",
+      "caller": "App::Jobs::SyncReport::handle",
+      "name": "generate",
+      "expected_target": "App::Services::ReportService::generate",
+      "file": "app/Jobs/SyncReport.php",
+      "needle": "$this->service->generate()",
+      "symbol": "generate",
+      "expected_definition_file": "app/Services/ReportService.php"
+    },
+    {
+      "id": "trait-method",
+      "caller": "App::Jobs::SyncReport::handle",
+      "name": "audit",
+      "expected_target": "App::Traits::Audits::audit",
+      "file": "app/Jobs/SyncReport.php",
+      "needle": "$this->audit('synchronized')",
+      "symbol": "audit",
+      "expected_definition_file": "app/Traits/Audits.php"
+    },
+    {
+      "id": "test-local-new",
+      "caller": "Tests::Feature::ReportControllerTest::testShow",
+      "name": "show",
+      "expected_target": "App::Http::Controllers::ReportController::show",
+      "file": "tests/Feature/ReportControllerTest.php",
+      "needle": "$controller->show()",
+      "symbol": "show",
+      "expected_definition_file": "app/Http/Controllers/ReportController.php"
+    },
+    {
+      "id": "unknown-duplicate-handle",
+      "caller": "App::Support::runUnknownHandler",
+      "name": "handle",
+      "expected_target": null,
+      "file": "app/Support/functions.php",
+      "needle": "$handler->handle()",
+      "symbol": "handle",
+      "symbol_occurrence": 2,
+      "expected_definition_file": null
+    }
+  ],
+  "dynamic_calls": [
+    {
+      "id": "runtime-method-name",
+      "file": "app/Http/Controllers/ReportController.php",
+      "needle": "$this->service->{$method}()",
+      "reason": "The method name is a runtime string and has no single static target."
+    }
+  ],
+  "lsp_probes": {
+    "definition": {
+      "file": "app/Http/Controllers/ReportController.php",
+      "needle": "$this->service->generate()",
+      "symbol": "generate"
+    },
+    "references": {
+      "file": "app/Services/ReportService.php",
+      "needle": "class ReportService",
+      "symbol": "ReportService"
+    },
+    "call_hierarchy": {
+      "file": "app/Services/ReportService.php",
+      "needle": "function generate",
+      "symbol": "generate"
+    },
+    "synchronization": {
+      "file": "app/Http/Controllers/ReportController.php",
+      "old_needle": "$this->service->generate()",
+      "new_needle": "$this->service->missingAfterEdit()"
+    }
+  }
+}

@@ -1,7 +1,7 @@
 [package]
 name = "chakra-cli"
 description = "User-facing chakra CLI and binary entry point"
-version = "0.1.0"
+version = "0.1.1"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -13,12 +13,12 @@ name = "chakra"
 path = "src/main.rs"
 
 [dependencies]
-chakra-domain = { path = "../chakra-domain", version = "0.1.0" }
-chakra-engine = { path = "../chakra-engine", version = "0.1.0" }
-chakra-git = { path = "../chakra-git", version = "0.1.0" }
-chakra-language = { path = "../chakra-language", version = "0.1.0" }
-chakra-mcp = { path = "../chakra-mcp", version = "0.1.0" }
-chakra-provider-rust-analyzer = { path = "../chakra-provider-rust-analyzer", version = "0.1.0" }
+chakra-domain = { path = "../chakra-domain", version = "0.1.1" }
+chakra-engine = { path = "../chakra-engine", version = "0.1.1" }
+chakra-git = { path = "../chakra-git", version = "0.1.1" }
+chakra-language = { path = "../chakra-language", version = "0.1.1" }
+chakra-mcp = { path = "../chakra-mcp", version = "0.1.1" }
+chakra-provider-rust-analyzer = { path = "../chakra-provider-rust-analyzer", version = "0.1.1" }
 clap.workspace = true
 tokio.workspace = true
 tracing.workspace = true

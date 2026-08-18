@@ -11,6 +11,13 @@ use crossbeam_channel::{Receiver, RecvTimeoutError, SendTimeoutError, Sender, bo
 use lsp_server::Message;
 use thiserror::Error;
 
+#[cfg(unix)]
+use nix::sys::signal::{Signal, killpg};
+#[cfg(unix)]
+use nix::unistd::Pid;
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
+
 const INCOMING_MESSAGE_CAPACITY: usize = 64;
 const OUTGOING_MESSAGE_CAPACITY: usize = 8;
 const READER_SEND_POLL: Duration = Duration::from_millis(50);
@@ -63,13 +70,15 @@ pub(crate) struct Session {
 
 impl Session {
     pub(crate) fn spawn(executable: &OsStr, root: &Path) -> Result<Self, TransportError> {
-        let mut child = Command::new(executable)
+        let mut command = Command::new(executable);
+        command
             .current_dir(root)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(TransportError::Spawn)?;
+            .stderr(Stdio::piped());
+        #[cfg(unix)]
+        command.process_group(0);
+        let mut child = command.spawn().map_err(TransportError::Spawn)?;
         let Some(stdin) = child.stdin.take() else {
             terminate_unowned_child(&mut child);
             return Err(TransportError::MissingStdin);
@@ -248,18 +257,21 @@ impl Session {
         self.stopping.store(true, Ordering::Release);
         self.outgoing.take();
         let deadline = Instant::now() + PROCESS_EXIT_GRACE;
-        loop {
+        let exited_cooperatively = loop {
             match self.child.try_wait() {
-                Ok(Some(_)) => break,
+                Ok(Some(_)) => break true,
                 Ok(None) if Instant::now() < deadline => {
                     thread::sleep(Duration::from_millis(10));
                 }
                 Ok(None) | Err(_) => {
-                    let _ = self.child.kill();
-                    let _ = self.child.wait();
-                    break;
+                    break false;
                 }
             }
+        };
+        if !exited_cooperatively {
+            terminate_owned_process_tree(&mut self.child);
+        } else {
+            terminate_remaining_process_group(self.child.id());
         }
         if let Some(writer) = self.writer.take() {
             let _ = writer.join();
@@ -295,6 +307,49 @@ fn send_while_running(
 }
 
 fn terminate_unowned_child(child: &mut Child) {
+    terminate_owned_process_tree(child);
+}
+
+#[cfg(unix)]
+fn terminate_owned_process_tree(child: &mut Child) {
+    let Ok(process_id) = i32::try_from(child.id()) else {
+        let _ = child.kill();
+        let _ = child.wait();
+        return;
+    };
+    let group = Pid::from_raw(process_id);
+    let _ = killpg(group, Signal::SIGTERM);
+    let deadline = Instant::now() + Duration::from_millis(100);
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(5)),
+            Ok(None) | Err(_) => {
+                let _ = killpg(group, Signal::SIGKILL);
+                let _ = child.wait();
+                break;
+            }
+        }
+    }
+    terminate_remaining_process_group(child.id());
+}
+
+#[cfg(unix)]
+fn terminate_remaining_process_group(process_id: u32) {
+    let Ok(process_id) = i32::try_from(process_id) else {
+        return;
+    };
+    let group = Pid::from_raw(process_id);
+    let _ = killpg(group, Signal::SIGTERM);
+    thread::sleep(Duration::from_millis(10));
+    let _ = killpg(group, Signal::SIGKILL);
+}
+
+#[cfg(not(unix))]
+fn terminate_owned_process_tree(child: &mut Child) {
     let _ = child.kill();
     let _ = child.wait();
 }
+
+#[cfg(not(unix))]
+fn terminate_remaining_process_group(_process_id: u32) {}

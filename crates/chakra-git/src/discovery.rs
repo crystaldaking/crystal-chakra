@@ -5,10 +5,11 @@ use std::io::{self, Read};
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use chakra_domain::identity::{IdentityError, RepositoryId, WorkspaceIdentity};
 use chakra_domain::location::{RepoPathError, RepoRelativePath};
+use chakra_domain::operation::{OperationAbort, OperationContext};
 use chakra_domain::symbol::Language;
 use thiserror::Error;
 
@@ -17,6 +18,18 @@ const MAX_GIT_STDERR_BYTES: usize = 16 * 1024;
 const GIT_COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
 const CHILD_POLL_INTERVAL: Duration = Duration::from_millis(1);
 const MAX_REPOSITORY_ROOTS: usize = 64;
+
+/// Git-visible inputs that can affect one syntax revision.
+///
+/// Source files are parsed into the graph. Metadata inputs are not indexed as
+/// source, but Cargo/Composer classification can change query-visible package
+/// and source-role facts, so freshness reconciliation must pin them in the
+/// same pre/post inventory proof.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WorkspaceInventory {
+    pub sources: Vec<RepoRelativePath>,
+    pub metadata_inputs: Vec<RepoRelativePath>,
+}
 
 #[derive(Debug)]
 struct BoundedRead {
@@ -35,6 +48,8 @@ struct GitOutput {
 /// Failure to establish the Git worktree or enumerate its source files.
 #[derive(Debug, Error)]
 pub enum DiscoveryError {
+    #[error(transparent)]
+    Operation(#[from] OperationAbort),
     #[error("failed to execute Git command `{command}`: {source}")]
     Spawn {
         command: &'static str,
@@ -69,6 +84,8 @@ pub enum DiscoveryError {
     TooManyRootObjects,
     #[error("Git returned a non-UTF-8 administrative path")]
     NonUtf8AdministrativePath,
+    #[error("Git returned an empty administrative path")]
+    EmptyAdministrativePath,
     #[error("failed to canonicalize Git administrative path {path}: {source}")]
     CanonicalizeAdministrativePath {
         path: PathBuf,
@@ -111,7 +128,10 @@ fn capture_git(
     current_dir: &Path,
     command_name: &'static str,
     args: &[&OsStr],
+    operation: &OperationContext,
 ) -> Result<GitOutput, DiscoveryError> {
+    let operation = operation.bounded_by(GIT_COMMAND_TIMEOUT);
+    operation.check()?;
     let mut child = Command::new("git")
         .current_dir(current_dir)
         .stdin(Stdio::null())
@@ -164,20 +184,16 @@ fn capture_git(
             });
         }
     };
-    let deadline = Instant::now() + GIT_COMMAND_TIMEOUT;
     let status = loop {
+        if let Err(error) = operation.check() {
+            terminate_child(&mut child);
+            let _ = stdout_reader.join();
+            let _ = stderr_reader.join();
+            return Err(error.into());
+        }
         match child.try_wait() {
             Ok(Some(status)) => break status,
-            Ok(None) if Instant::now() < deadline => thread::sleep(CHILD_POLL_INTERVAL),
-            Ok(None) => {
-                terminate_child(&mut child);
-                let _ = stdout_reader.join();
-                let _ = stderr_reader.join();
-                return Err(DiscoveryError::Timeout {
-                    command: command_name,
-                    seconds: GIT_COMMAND_TIMEOUT.as_secs(),
-                });
-            }
+            Ok(None) => thread::sleep(CHILD_POLL_INTERVAL),
             Err(source) => {
                 terminate_child(&mut child);
                 let _ = stdout_reader.join();
@@ -223,8 +239,9 @@ fn git_output(
     current_dir: &Path,
     command_name: &'static str,
     args: &[&OsStr],
+    operation: &OperationContext,
 ) -> Result<GitOutput, DiscoveryError> {
-    let output = capture_git(current_dir, command_name, args)?;
+    let output = capture_git(current_dir, command_name, args, operation)?;
     if output.stdout_exceeded {
         return Err(DiscoveryError::OutputTooLarge {
             command: command_name,
@@ -246,6 +263,15 @@ fn git_output(
 /// This deliberately never assumes that Git administration lives at
 /// `<root>/.git`; linked worktrees commonly use a `.git` indirection file.
 pub fn resolve_repository_root(candidate: &Path) -> Result<PathBuf, DiscoveryError> {
+    let operation = OperationContext::unbounded();
+    resolve_repository_root_with_context(candidate, &operation)
+}
+
+/// Context-aware repository-root resolution for owned indexing/query work.
+pub fn resolve_repository_root_with_context(
+    candidate: &Path,
+    operation: &OperationContext,
+) -> Result<PathBuf, DiscoveryError> {
     let output = git_output(
         candidate,
         "rev-parse --show-toplevel",
@@ -254,6 +280,7 @@ pub fn resolve_repository_root(candidate: &Path) -> Result<PathBuf, DiscoveryErr
             OsStr::new("--path-format=absolute"),
             OsStr::new("--show-toplevel"),
         ],
+        operation,
     )?;
     let raw = std::str::from_utf8(&output.stdout).map_err(|_| DiscoveryError::NonUtf8Root)?;
     // `rev-parse` terminates this one path with a newline. Strip only line
@@ -273,6 +300,7 @@ pub fn resolve_repository_root(candidate: &Path) -> Result<PathBuf, DiscoveryErr
 /// identity of the Git-reported common administrative directory on supported
 /// platforms. No `.git` layout is assumed.
 pub fn resolve_repository_identity(candidate: &Path) -> Result<RepositoryId, DiscoveryError> {
+    let operation = OperationContext::unbounded();
     let root = resolve_repository_root(candidate)?;
     let roots = git_output(
         &root,
@@ -282,6 +310,7 @@ pub fn resolve_repository_identity(candidate: &Path) -> Result<RepositoryId, Dis
             OsStr::new("--max-parents=0"),
             OsStr::new("--all"),
         ],
+        &operation,
     )?;
     let mut object_ids = parse_root_object_ids(&roots.stdout)?;
     if !object_ids.is_empty() {
@@ -301,6 +330,7 @@ pub fn resolve_repository_identity(candidate: &Path) -> Result<RepositoryId, Dis
             OsStr::new("--path-format=absolute"),
             OsStr::new("--git-common-dir"),
         ],
+        &operation,
     )?;
     let common_dir = parse_single_path(&common_dir.stdout)?;
     let common_dir = std::fs::canonicalize(&common_dir).map_err(|source| {
@@ -318,6 +348,40 @@ pub fn resolve_workspace_identity(candidate: &Path) -> Result<WorkspaceIdentity,
     let root = resolve_repository_root(candidate)?;
     let repository = resolve_repository_identity(&root)?;
     Ok(WorkspaceIdentity::for_repository(&root, repository)?)
+}
+
+/// Resolves the worktree-specific and shared Git administrative directories
+/// through Git itself. Callers can use these paths to ignore Git's own
+/// filesystem churn without assuming that administration lives in `.git`.
+pub fn resolve_git_administrative_paths(candidate: &Path) -> Result<Vec<PathBuf>, DiscoveryError> {
+    let operation = OperationContext::unbounded();
+    let mut paths = Vec::new();
+    for (command, argument) in [
+        ("rev-parse --git-dir", "--git-dir"),
+        ("rev-parse --git-common-dir", "--git-common-dir"),
+    ] {
+        let output = git_output(
+            candidate,
+            command,
+            &[
+                OsStr::new("rev-parse"),
+                OsStr::new("--path-format=absolute"),
+                OsStr::new(argument),
+            ],
+            &operation,
+        )?;
+        let path = parse_single_path(&output.stdout)?;
+        let canonical = std::fs::canonicalize(&path).map_err(|source| {
+            DiscoveryError::CanonicalizeAdministrativePath {
+                path: path.clone(),
+                source,
+            }
+        })?;
+        paths.push(canonical);
+    }
+    paths.sort();
+    paths.dedup();
+    Ok(paths)
 }
 
 fn parse_root_object_ids(output: &[u8]) -> Result<Vec<String>, DiscoveryError> {
@@ -345,7 +409,11 @@ fn parse_root_object_ids(output: &[u8]) -> Result<Vec<String>, DiscoveryError> {
 fn parse_single_path(output: &[u8]) -> Result<PathBuf, DiscoveryError> {
     let raw = std::str::from_utf8(output).map_err(|_| DiscoveryError::NonUtf8AdministrativePath)?;
     let raw = raw.strip_suffix('\n').unwrap_or(raw);
-    Ok(PathBuf::from(raw.strip_suffix('\r').unwrap_or(raw)))
+    let raw = raw.strip_suffix('\r').unwrap_or(raw);
+    if raw.is_empty() {
+        return Err(DiscoveryError::EmptyAdministrativePath);
+    }
+    Ok(PathBuf::from(raw))
 }
 
 #[cfg(unix)]
@@ -400,13 +468,14 @@ fn unborn_repository_id(common_dir: &Path) -> Result<RepositoryId, DiscoveryErro
 }
 
 fn is_excluded(path: &Path) -> bool {
-    path.components().any(|component| {
-        matches!(component, Component::Normal(value) if value == OsStr::new(".git") || value == OsStr::new("target"))
-    })
+    path.components().any(
+        |component| matches!(component, Component::Normal(value) if value == OsStr::new("target")),
+    )
 }
 
-/// Recognizes a v0.1 source language without interpreting generated or Git
-/// administration paths as source.
+/// Recognizes a v0.1 source language without interpreting `target` build
+/// output as source. Git administration is resolved separately through Git
+/// and is never inferred from a literal worktree path.
 pub fn source_language(path: &str) -> Option<Language> {
     let path = Path::new(path);
     if is_excluded(path) {
@@ -433,13 +502,35 @@ pub fn discover_source_files(root: &Path) -> Result<Vec<RepoRelativePath>, Disco
     discover_files(root, None)
 }
 
-fn discover_files(
+/// Discovers supported sources when `root` is already the Git-resolved
+/// worktree root.
+///
+/// Live reconciliation retains that canonical root for its lifetime, so it
+/// can avoid a redundant `rev-parse` subprocess on every freshness check.
+/// Discovery still goes through Git and never assumes an administrative
+/// `.git` layout.
+pub fn discover_source_files_in_worktree(
     root: &Path,
-    language: Option<Language>,
 ) -> Result<Vec<RepoRelativePath>, DiscoveryError> {
-    let root = resolve_repository_root(root)?;
+    discover_source_files_in_worktree_with_context(root, &OperationContext::unbounded())
+}
+
+/// Context-aware worktree discovery used by freshness reconciliation.
+pub fn discover_source_files_in_worktree_with_context(
+    root: &Path,
+    operation: &OperationContext,
+) -> Result<Vec<RepoRelativePath>, DiscoveryError> {
+    Ok(discover_workspace_inventory_in_worktree_with_context(root, operation)?.sources)
+}
+
+/// Returns one Git inventory for every source and classification input used by
+/// a syntax revision. `root` must already be the Git-resolved worktree root.
+pub fn discover_workspace_inventory_in_worktree_with_context(
+    root: &Path,
+    operation: &OperationContext,
+) -> Result<WorkspaceInventory, DiscoveryError> {
     let output = git_output(
-        &root,
+        root,
         "ls-files --cached --others --exclude-standard",
         &[
             OsStr::new("ls-files"),
@@ -448,32 +539,52 @@ fn discover_files(
             OsStr::new("--exclude-standard"),
             OsStr::new("-z"),
         ],
+        operation,
     )?;
-
-    source_files_from_git_output(&root, &output.stdout, language)
+    workspace_inventory_from_git_output(root, &output.stdout, operation)
 }
 
-fn source_files_from_git_output(
+fn discover_files(
     root: &Path,
-    output: &[u8],
     language: Option<Language>,
 ) -> Result<Vec<RepoRelativePath>, DiscoveryError> {
-    let mut files = Vec::new();
+    let root = resolve_repository_root(root)?;
+    discover_files_in_root(&root, language, &OperationContext::unbounded())
+}
+
+fn discover_files_in_root(
+    root: &Path,
+    language: Option<Language>,
+    operation: &OperationContext,
+) -> Result<Vec<RepoRelativePath>, DiscoveryError> {
+    let inventory = discover_workspace_inventory_in_worktree_with_context(root, operation)?;
+    Ok(inventory
+        .sources
+        .into_iter()
+        .filter(|path| {
+            language.is_none_or(|expected| source_language(path.as_str()) == Some(expected))
+        })
+        .collect())
+}
+
+fn workspace_inventory_from_git_output(
+    root: &Path,
+    output: &[u8],
+    operation: &OperationContext,
+) -> Result<WorkspaceInventory, DiscoveryError> {
+    let mut inventory = WorkspaceInventory::default();
     for raw in output.split(|byte| *byte == 0) {
+        operation.check()?;
         if raw.is_empty() {
             continue;
         }
-        if !raw.ends_with(b".rs") && !raw.ends_with(b".php") {
+        let source = raw.ends_with(b".rs") || raw.ends_with(b".php");
+        let metadata_input = raw_is_metadata_input(raw);
+        if !source && !metadata_input {
             continue;
         }
         let raw = std::str::from_utf8(raw).map_err(|_| DiscoveryError::NonUtf8Path)?;
         let candidate = Path::new(raw);
-        let Some(found_language) = source_language(raw) else {
-            continue;
-        };
-        if language.is_some_and(|expected| expected != found_language) {
-            continue;
-        }
         // A tracked path may currently be deleted. Symlinks are skipped so
         // repository content cannot make the indexer read outside the root.
         let Ok(metadata) = std::fs::symlink_metadata(root.join(candidate)) else {
@@ -482,11 +593,37 @@ fn source_files_from_git_output(
         if !metadata.file_type().is_file() {
             continue;
         }
-        files.push(RepoRelativePath::new(raw)?);
+        let path = RepoRelativePath::new(raw)?;
+        if source_language(raw).is_some() {
+            inventory.sources.push(path);
+        } else if metadata_input {
+            inventory.metadata_inputs.push(path);
+        }
     }
-    files.sort();
-    files.dedup();
-    Ok(files)
+    inventory.sources.sort();
+    inventory.sources.dedup();
+    inventory.metadata_inputs.sort();
+    inventory.metadata_inputs.dedup();
+    Ok(inventory)
+}
+
+fn raw_is_metadata_input(raw: &[u8]) -> bool {
+    [
+        b"Cargo.toml".as_slice(),
+        b"Cargo.lock".as_slice(),
+        b"composer.json".as_slice(),
+        b".cargo/config".as_slice(),
+        b".cargo/config.toml".as_slice(),
+        b"rust-toolchain".as_slice(),
+        b"rust-toolchain.toml".as_slice(),
+    ]
+    .into_iter()
+    .any(|name| {
+        raw == name
+            || raw
+                .strip_suffix(name)
+                .is_some_and(|prefix| prefix.ends_with(b"/"))
+    })
 }
 
 #[cfg(test)]
@@ -597,6 +734,16 @@ mod tests {
         let files = discover_language_files(&worktree, Language::Rust)?;
         assert_eq!(files.len(), 1);
         assert_eq!(files[0].as_str(), "src/lib.rs");
+        assert_eq!(discover_source_files_in_worktree(&worktree)?, files);
+        let administrative = resolve_git_administrative_paths(&worktree)?;
+        assert!(!administrative.is_empty());
+        assert!(administrative.iter().all(|path| path.is_absolute()));
+        assert!(
+            administrative
+                .iter()
+                .all(|path| !path.starts_with(&worktree)),
+            "linked-worktree administration must be resolved through Git, not assumed below the worktree"
+        );
         Ok(())
     }
 
@@ -611,15 +758,60 @@ mod tests {
     }
 
     #[test]
+    fn rejects_an_empty_git_administrative_path() {
+        assert!(matches!(
+            parse_single_path(b"\n"),
+            Err(DiscoveryError::EmptyAdministrativePath)
+        ));
+    }
+
+    #[test]
     fn unrelated_non_utf8_file_does_not_break_rust_discovery() -> Result<(), Box<dyn Error>> {
         let repository = repository()?;
-        let files = source_files_from_git_output(
+        let inventory = workspace_inventory_from_git_output(
             repository.path(),
             b"src/lib.rs\0unrelated-\xff.bin\0",
-            Some(Language::Rust),
+            &OperationContext::unbounded(),
         )?;
-        assert_eq!(files.len(), 1);
-        assert_eq!(files[0].as_str(), "src/lib.rs");
+        assert_eq!(inventory.sources.len(), 1);
+        assert_eq!(inventory.sources[0].as_str(), "src/lib.rs");
+        Ok(())
+    }
+
+    #[test]
+    fn shared_inventory_retains_source_and_classification_inputs() -> Result<(), Box<dyn Error>> {
+        let repository = repository()?;
+        for (path, contents) in [
+            ("Cargo.toml", "[workspace]\n"),
+            ("Cargo.lock", "version = 4\n"),
+            ("composer.json", "{}\n"),
+        ] {
+            fs::write(repository.path().join(path), contents)?;
+        }
+        fs::create_dir_all(repository.path().join("target/generated"))?;
+        fs::write(
+            repository.path().join("target/generated/Cargo.toml"),
+            "[workspace]\n",
+        )?;
+        fs::create_dir_all(repository.path().join("ignored"))?;
+        fs::write(repository.path().join("ignored/composer.json"), "{}\n")?;
+        fs::write(
+            repository.path().join(".gitignore"),
+            "ignored.rs\ntarget/\nignored/\n",
+        )?;
+        let inventory = discover_workspace_inventory_in_worktree_with_context(
+            repository.path(),
+            &OperationContext::unbounded(),
+        )?;
+        assert_eq!(inventory.sources, [RepoRelativePath::new("src/lib.rs")?]);
+        assert_eq!(
+            inventory.metadata_inputs,
+            [
+                RepoRelativePath::new("Cargo.lock")?,
+                RepoRelativePath::new("Cargo.toml")?,
+                RepoRelativePath::new("composer.json")?,
+            ]
+        );
         Ok(())
     }
 
