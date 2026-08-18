@@ -49,5 +49,6 @@ Accepted decisions:
 - ADR-024: caller aggregation and byte-first response budgets
 - ADR-025: query execution work budgets
 - ADR-026: first-class language parity contract and generated support matrix
+- ADR-027: syntax grammar and precise provider selection for target languages
 
 Do not pre-create empty ADRs merely to satisfy a list.
