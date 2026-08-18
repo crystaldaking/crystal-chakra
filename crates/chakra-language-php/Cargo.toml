@@ -1,7 +1,7 @@
 [package]
 name = "chakra-language-php"
 description = "Git-aware Tree-sitter PHP syntax index adapter for Chakra"
-version = "0.1.0"
+version = "0.1.1"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -9,9 +9,9 @@ repository.workspace = true
 publish = false
 
 [dependencies]
-chakra-domain = { path = "../chakra-domain", version = "0.1.0" }
-chakra-engine = { path = "../chakra-engine", version = "0.1.0" }
-chakra-git = { path = "../chakra-git", version = "0.1.0" }
+chakra-domain = { path = "../chakra-domain", version = "0.1.1" }
+chakra-engine = { path = "../chakra-engine", version = "0.1.1" }
+chakra-git = { path = "../chakra-git", version = "0.1.1" }
 serde_json.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
