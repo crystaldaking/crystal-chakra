@@ -666,6 +666,21 @@ mod tests {
         let third = response?;
         assert_eq!(third.0.data, "started after cancellation");
 
+        // Acquiring the whole executor proves both cancelled blocking workers
+        // have observed cancellation and released their permits. The aborted
+        // Tokio wrappers finish before `spawn_blocking` workers, so inspecting
+        // the gauges immediately after joining the wrappers is racy.
+        let released = tokio::time::timeout(
+            Duration::from_secs(1),
+            server
+                .query_slots
+                .clone()
+                .acquire_many_owned(MAX_CONCURRENT_QUERIES as u32),
+        )
+        .await
+        .map_err(|_| "cancelled query workers did not release both permits")??;
+        drop(released);
+
         let metrics = server.query_metrics.snapshot();
         assert_eq!(metrics.queued, 0);
         assert_eq!(metrics.running, 0);
