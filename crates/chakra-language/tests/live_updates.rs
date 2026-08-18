@@ -1015,6 +1015,11 @@ fn cargo_manifest_change_refreshes_package_scope_without_reparsing() -> Result<(
         baseline_metrics.files_reparsed,
         "metadata-only refresh must not reparse stable Rust source"
     );
+    let metrics = live.metrics();
+    assert!(
+        metrics.metadata_files_inspected - baseline_metrics.metadata_files_inspected >= 4,
+        "Cargo.toml and Cargo.lock must participate in both sides of the stable identity proof"
+    );
     live.shutdown()?;
     Ok(())
 }
@@ -1075,6 +1080,11 @@ fn composer_manifest_change_refreshes_package_scope_without_reparsing() -> Resul
         live.metrics().files_reparsed,
         baseline_metrics.files_reparsed,
         "metadata-only refresh must not reparse stable PHP source"
+    );
+    let metrics = live.metrics();
+    assert!(
+        metrics.metadata_files_inspected - baseline_metrics.metadata_files_inspected >= 2,
+        "composer.json must participate in both sides of the stable identity proof"
     );
     live.shutdown()?;
     Ok(())

@@ -10,10 +10,13 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use chakra_domain::location::RepoRelativePath;
+use chakra_domain::operation::{OperationAbort, OperationContext};
 use chakra_domain::source::{SourceClassification, SourceMetadata, SourcePackage, SourceRole};
 use chakra_domain::symbol::Language;
 
-use crate::{DiscoveryError, discover_language_files, resolve_repository_root};
+use crate::{
+    DiscoveryError, discover_workspace_inventory_in_worktree_with_context, resolve_repository_root,
+};
 
 const COMMAND_OUTPUT_LIMIT: usize = 8 * 1024 * 1024;
 const COMMAND_STDERR_LIMIT: usize = 16 * 1024;
@@ -42,6 +45,24 @@ struct CommandOutput {
     success: bool,
     stdout: Vec<u8>,
     exceeded: bool,
+}
+
+#[derive(Debug)]
+enum MetadataCommandError {
+    Operation(OperationAbort),
+    Io,
+}
+
+impl From<OperationAbort> for MetadataCommandError {
+    fn from(value: OperationAbort) -> Self {
+        Self::Operation(value)
+    }
+}
+
+impl From<io::Error> for MetadataCommandError {
+    fn from(_value: io::Error) -> Self {
+        Self::Io
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -82,7 +103,9 @@ fn capture_command(
     program: &str,
     args: &[OsString],
     timeout: Duration,
-) -> io::Result<CommandOutput> {
+    operation: &OperationContext,
+) -> Result<CommandOutput, MetadataCommandError> {
+    operation.check()?;
     let mut child = Command::new(program)
         .current_dir(root)
         .env("LC_ALL", "C")
@@ -94,11 +117,11 @@ fn capture_command(
         .spawn()?;
     let Some(stdout) = child.stdout.take() else {
         terminate(&mut child);
-        return Err(io::Error::other("command stdout pipe is unavailable"));
+        return Err(io::Error::other("command stdout pipe is unavailable").into());
     };
     let Some(stderr) = child.stderr.take() else {
         terminate(&mut child);
-        return Err(io::Error::other("command stderr pipe is unavailable"));
+        return Err(io::Error::other("command stderr pipe is unavailable").into());
     };
     let stdout_reader = match thread::Builder::new()
         .name("chakra-source-metadata-stdout".to_owned())
@@ -107,7 +130,7 @@ fn capture_command(
         Ok(reader) => reader,
         Err(error) => {
             terminate(&mut child);
-            return Err(error);
+            return Err(error.into());
         }
     };
     let stderr_reader = match thread::Builder::new()
@@ -118,11 +141,17 @@ fn capture_command(
         Err(error) => {
             terminate(&mut child);
             let _ = stdout_reader.join();
-            return Err(error);
+            return Err(error.into());
         }
     };
     let deadline = Instant::now() + timeout;
     let status = loop {
+        if let Err(error) = operation.check() {
+            terminate(&mut child);
+            let _ = stdout_reader.join();
+            let _ = stderr_reader.join();
+            return Err(error.into());
+        }
         match child.try_wait() {
             Ok(Some(status)) => break status,
             Ok(None) if Instant::now() < deadline => thread::sleep(COMMAND_POLL_INTERVAL),
@@ -133,13 +162,14 @@ fn capture_command(
                 return Err(io::Error::new(
                     io::ErrorKind::TimedOut,
                     "source metadata command timed out",
-                ));
+                )
+                .into());
             }
             Err(error) => {
                 terminate(&mut child);
                 let _ = stdout_reader.join();
                 let _ = stderr_reader.join();
-                return Err(error);
+                return Err(error.into());
             }
         }
     };
@@ -187,28 +217,15 @@ fn package_root(root: &Path, manifest: &Path) -> Option<Option<RepoRelativePath>
     }
 }
 
-fn manifest_inventory(root: &Path, manifest_name: &str) -> Vec<RepoRelativePath> {
-    let args = [
-        OsString::from("ls-files"),
-        OsString::from("--cached"),
-        OsString::from("--others"),
-        OsString::from("--exclude-standard"),
-        OsString::from("-z"),
-    ];
-    let Ok(output) = capture_command(root, "git", &args, COMMAND_TIMEOUT) else {
-        return Vec::new();
-    };
-    if !output.success || output.exceeded {
-        return Vec::new();
-    }
+fn manifests_named(
+    metadata_inputs: &[RepoRelativePath],
+    manifest_name: &str,
+) -> Vec<RepoRelativePath> {
     let suffix = format!("/{manifest_name}");
-    let mut manifests: Vec<_> = output
-        .stdout
-        .split(|byte| *byte == 0)
-        .filter(|raw| *raw == manifest_name.as_bytes() || raw.ends_with(suffix.as_bytes()))
-        .filter_map(|raw| std::str::from_utf8(raw).ok())
-        .filter_map(|path| RepoRelativePath::new(path).ok())
-        .filter(|path| root.join(path.as_str()).is_file())
+    let mut manifests: Vec<_> = metadata_inputs
+        .iter()
+        .filter(|path| path.as_str() == manifest_name || path.as_str().ends_with(suffix.as_str()))
+        .cloned()
         .collect();
     manifests.sort_by(|a, b| {
         a.as_str()
@@ -290,13 +307,18 @@ fn parse_metadata(
     Some((parsed, manifests))
 }
 
-fn cargo_packages(root: &Path) -> Vec<CargoPackage> {
-    let manifests = manifest_inventory(root, "Cargo.toml");
+fn cargo_packages(
+    root: &Path,
+    metadata_inputs: &[RepoRelativePath],
+    operation: &OperationContext,
+) -> Result<Vec<CargoPackage>, OperationAbort> {
+    let manifests = manifests_named(metadata_inputs, "Cargo.toml");
     let mut covered = BTreeSet::new();
     let mut packages: BTreeMap<(Option<RepoRelativePath>, String), CargoPackage> = BTreeMap::new();
     let mut invocations = 0_usize;
     let deadline = Instant::now() + COMMAND_TIMEOUT;
     for manifest in manifests {
+        operation.check()?;
         if covered.contains(&manifest) || invocations == MAX_CARGO_METADATA_INVOCATIONS {
             continue;
         }
@@ -316,8 +338,10 @@ fn cargo_packages(root: &Path) -> Vec<CargoPackage> {
             OsString::from("--manifest-path"),
             manifest_path.into_os_string(),
         ];
-        let Ok(output) = capture_command(root, "cargo", &args, remaining) else {
-            continue;
+        let output = match capture_command(root, "cargo", &args, remaining, operation) {
+            Ok(output) => output,
+            Err(MetadataCommandError::Operation(error)) => return Err(error),
+            Err(MetadataCommandError::Io) => continue,
         };
         if !output.success || output.exceeded {
             continue;
@@ -333,7 +357,8 @@ fn cargo_packages(root: &Path) -> Vec<CargoPackage> {
             );
         }
     }
-    packages.into_values().collect()
+    operation.check()?;
+    Ok(packages.into_values().collect())
 }
 
 fn composer_source_root(
@@ -410,12 +435,17 @@ fn collect_composer_section(
     }
 }
 
-fn composer_packages(root: &Path) -> Vec<ComposerRoot> {
+fn composer_packages(
+    root: &Path,
+    metadata_inputs: &[RepoRelativePath],
+    operation: &OperationContext,
+) -> Result<Vec<ComposerRoot>, OperationAbort> {
     let mut packages = BTreeMap::new();
-    for manifest in manifest_inventory(root, "composer.json")
+    for manifest in manifests_named(metadata_inputs, "composer.json")
         .into_iter()
         .take(MAX_COMPOSER_MANIFESTS)
     {
+        operation.check()?;
         let manifest_path = root.join(manifest.as_str());
         let Ok(file) = fs::File::open(&manifest_path) else {
             continue;
@@ -461,7 +491,8 @@ fn composer_packages(root: &Path) -> Vec<ComposerRoot> {
             &mut packages,
         );
     }
-    packages.into_values().collect()
+    operation.check()?;
+    Ok(packages.into_values().collect())
 }
 
 fn is_inside(path: &RepoRelativePath, root: Option<&RepoRelativePath>) -> bool {
@@ -533,23 +564,60 @@ pub fn discover_classified_sources(
     language: Language,
 ) -> Result<Vec<ClassifiedSource>, DiscoveryError> {
     let root = resolve_repository_root(candidate)?;
-    let files = discover_language_files(&root, language)?;
+    let operation = OperationContext::unbounded();
+    let inventory = discover_workspace_inventory_in_worktree_with_context(&root, &operation)?;
+    classify_discovered_sources_with_context(
+        &root,
+        &inventory.sources,
+        &inventory.metadata_inputs,
+        language,
+        &operation,
+    )
+}
+
+/// Classifies a language from the already pinned shared Git inventory.
+///
+/// This avoids rediscovering Rust and PHP independently and lets live
+/// reconciliation bind metadata subprocesses to the owning query operation.
+pub fn classify_discovered_sources_with_context(
+    root: &Path,
+    sources: &[RepoRelativePath],
+    metadata_inputs: &[RepoRelativePath],
+    language: Language,
+    operation: &OperationContext,
+) -> Result<Vec<ClassifiedSource>, DiscoveryError> {
+    operation.check()?;
+    let files: Vec<_> = sources
+        .iter()
+        .filter(|path| crate::source_language(path.as_str()) == Some(language))
+        .cloned()
+        .collect();
     if files.is_empty() {
         return Ok(Vec::new());
     }
-    let cargo = (language == Language::Rust).then(|| cargo_packages(&root));
-    let composer = (language == Language::Php).then(|| composer_packages(&root));
-    Ok(files
-        .into_iter()
-        .map(|path| ClassifiedSource {
+    let cargo = if language == Language::Rust {
+        Some(cargo_packages(root, metadata_inputs, operation)?)
+    } else {
+        None
+    };
+    let composer = if language == Language::Php {
+        Some(composer_packages(root, metadata_inputs, operation)?)
+    } else {
+        None
+    };
+    let mut classified = Vec::with_capacity(files.len());
+    for path in files {
+        operation.check()?;
+        classified.push(ClassifiedSource {
             metadata: match language {
                 Language::Rust => classify_rust(&path, cargo.as_deref().unwrap_or_default()),
                 Language::Php => classify_php(&path, composer.as_deref().unwrap_or_default()),
             },
             path,
             language,
-        })
-        .collect())
+        });
+    }
+    Ok(classified)
 }
 
 #[cfg(test)]
@@ -830,6 +898,50 @@ mod tests {
             Some("unlocked")
         );
         assert!(!root.join("Cargo.lock").exists());
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cancellation_terminates_an_in_flight_metadata_command() -> Result<(), Box<dyn Error>> {
+        use std::time::Duration;
+
+        let repository = TempDir::new()?;
+        let marker = repository.path().join("metadata-command-started");
+        let operation = OperationContext::unbounded();
+        let worker_operation = operation.clone();
+        let worker_root = repository.path().to_path_buf();
+        let worker = thread::spawn(move || {
+            capture_command(
+                &worker_root,
+                "sh",
+                &[
+                    OsString::from("-c"),
+                    OsString::from("printf ready > metadata-command-started; exec sleep 30"),
+                ],
+                COMMAND_TIMEOUT,
+                &worker_operation,
+            )
+        });
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !marker.is_file() && Instant::now() < deadline {
+            thread::park_timeout(Duration::from_millis(1));
+        }
+        if !marker.is_file() {
+            operation.cancel();
+            let _ = worker.join();
+            return Err("metadata command did not start within the test bound".into());
+        }
+
+        operation.cancel();
+        let result = worker
+            .join()
+            .map_err(|_| "metadata command worker panicked")?;
+        assert!(matches!(
+            result,
+            Err(MetadataCommandError::Operation(OperationAbort::Cancelled))
+        ));
         Ok(())
     }
 }

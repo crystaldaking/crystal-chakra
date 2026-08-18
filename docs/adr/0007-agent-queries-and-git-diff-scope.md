@@ -94,7 +94,7 @@ committed changes relative to the selected base. For all three scopes:
 - Apply the request limit to every returned collection, cap it at the shared
   query maximum, and set the envelope `truncated` flag whenever any section,
   provider result, diff inventory, source snippet, or syntax call-candidate set
-  is cut. Under ADR-014, every cut is attached to its response section and
+  is cut. Under ADR-023, every cut is attached to its response section and
   typed cause; workspace-global call-site state never sets a query envelope's
   truncation flag. `diff_context`
   relationships are one hop from the returned changed-symbol slice, and each

@@ -57,6 +57,16 @@ impl OperationContext {
         }
     }
 
+    /// Builds an unbounded operation around an existing cancellation owner.
+    /// Indexing adapters use this compatibility bridge when their public
+    /// configuration predates end-to-end execution deadlines.
+    pub fn from_cancellation(cancellation: CancellationToken) -> Self {
+        Self {
+            cancellation,
+            deadline: None,
+        }
+    }
+
     /// A context with a deadline relative to now.
     pub fn with_timeout(timeout: Duration) -> Self {
         Self {

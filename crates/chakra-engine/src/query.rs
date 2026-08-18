@@ -1574,15 +1574,22 @@ fn provider_query_info(
     engine: &WorkspaceEngine,
     language: chakra_domain::symbol::Language,
     state: ProviderState,
+    freshness: FreshnessRequirement,
 ) -> Option<ProviderQueryInfo> {
     let provider = engine
         .precise_provider()
         .filter(|provider| provider.supports(language))?;
-    Some(ProviderQueryInfo {
-        name: "rust-analyzer".to_owned(),
-        state,
-        fallback_used: state != ProviderState::Ready,
-        fallback_reason: match state {
+    let fallback_reason = if freshness == FreshnessRequirement::AllowStale
+        && matches!(
+            state,
+            ProviderState::CatchingUp | ProviderState::Initializing
+        ) {
+        Some(
+            "allow_stale preserves low-latency syntax semantics and skips the post-provider freshness proof"
+                .to_owned(),
+        )
+    } else {
+        match state {
             ProviderState::Ready => None,
             ProviderState::CatchingUp | ProviderState::Initializing => Some(
                 "provider did not prove readiness for the pinned revision within the wait budget; syntax facts were retained"
@@ -1595,7 +1602,13 @@ fn provider_query_info(
             ProviderState::NotConfigured => Some(
                 "no precise provider is configured; syntax facts were retained".to_owned(),
             ),
-        },
+        }
+    };
+    Some(ProviderQueryInfo {
+        name: "rust-analyzer".to_owned(),
+        state,
+        fallback_used: state != ProviderState::Ready,
+        fallback_reason,
         last_error: provider.last_error(),
         progress: provider.progress(),
         wait_budget_millis: provider
@@ -1616,6 +1629,24 @@ fn precise_result_is_current(
     current.revision() == snapshot.revision()
         && current.freshness() == Freshness::Fresh
         && snapshot.freshness() == Freshness::Fresh
+}
+
+/// A live provider may read unopened documents from the materialized
+/// worktree. Reconcile once more after provider work before accepting precise
+/// facts, so an edit that was not yet published when the syntax snapshot was
+/// pinned cannot be attributed to that older revision.
+fn confirm_precise_result_current(
+    engine: &WorkspaceEngine,
+    snapshot: &WorkspaceSnapshot,
+    result_revision: Revision,
+    operation: &OperationContext,
+) -> Result<bool, QueryError> {
+    if engine.require_fresh_with_context(operation).is_err() {
+        operation.check()?;
+        return Ok(false);
+    }
+    operation.check()?;
+    Ok(precise_result_is_current(engine, snapshot, result_revision))
 }
 
 fn precise_related(graph: &SymbolGraph, relation: PreciseRelation) -> Option<RelatedSymbol> {
@@ -2602,9 +2633,15 @@ impl QueryService for WorkspaceEngine {
         )?;
         callees_work.add_to_stats(&mut work_stats);
         let mut provider_state = provider_state_for_language(self, &snapshot, symbol.key.language);
+        if request.freshness == FreshnessRequirement::AllowStale
+            && provider_state == ProviderState::Ready
+        {
+            provider_state = ProviderState::CatchingUp;
+        }
         let mut provider_incoming_truncated = false;
         let mut provider_outgoing_truncated = false;
-        if snapshot.freshness() == Freshness::Fresh
+        if request.freshness == FreshnessRequirement::RequireFresh
+            && snapshot.freshness() == Freshness::Fresh
             && let Some(provider) = self
                 .precise_provider()
                 .filter(|provider| provider.supports(symbol.key.language))
@@ -2630,8 +2667,12 @@ impl QueryService for WorkspaceEngine {
             work_stats.provider_wait_micros = work_stats.provider_wait_micros.saturating_add(
                 u64::try_from(provider_started.elapsed().as_micros()).unwrap_or(u64::MAX),
             );
-            provider_state = if precise_result_is_current(self, &snapshot, result.revision) {
+            provider_state = if result.state != ProviderState::Ready {
                 result.state
+            } else if result.revision != snapshot.revision() {
+                ProviderState::CatchingUp
+            } else if confirm_precise_result_current(self, &snapshot, result.revision, operation)? {
+                ProviderState::Ready
             } else {
                 ProviderState::CatchingUp
             };
@@ -2951,7 +2992,12 @@ impl QueryService for WorkspaceEngine {
             related_relations,
             syntax_call_candidates,
             related_files,
-            provider: provider_query_info(self, symbol.key.language, provider_state),
+            provider: provider_query_info(
+                self,
+                symbol.key.language,
+                provider_state,
+                request.freshness,
+            ),
         };
         Ok(envelope(
             QueryConstruction {
@@ -3008,13 +3054,19 @@ impl QueryService for WorkspaceEngine {
         )?;
         callers_work.add_to_stats(&mut work_stats);
         let mut provider_state = provider_state_for_language(self, &snapshot, target.key.language);
+        if request.freshness == FreshnessRequirement::AllowStale
+            && provider_state == ProviderState::Ready
+        {
+            provider_state = ProviderState::CatchingUp;
+        }
         let mut provider_truncated = false;
         let mut candidates_work = SectionWorkBudget::new(limit);
         let candidate_views =
             incoming_call_candidates(graph, target.id, operation, &mut candidates_work)?;
         candidates_work.add_to_stats(&mut work_stats);
         let mut syntax_candidates = candidate_views.items;
-        if snapshot.freshness() == Freshness::Fresh
+        if request.freshness == FreshnessRequirement::RequireFresh
+            && snapshot.freshness() == Freshness::Fresh
             && let Some(provider) = self
                 .precise_provider()
                 .filter(|provider| provider.supports(target.key.language))
@@ -3040,8 +3092,12 @@ impl QueryService for WorkspaceEngine {
             work_stats.provider_wait_micros = work_stats.provider_wait_micros.saturating_add(
                 u64::try_from(provider_started.elapsed().as_micros()).unwrap_or(u64::MAX),
             );
-            provider_state = if precise_result_is_current(self, &snapshot, result.revision) {
+            provider_state = if result.state != ProviderState::Ready {
                 result.state
+            } else if result.revision != snapshot.revision() {
+                ProviderState::CatchingUp
+            } else if confirm_precise_result_current(self, &snapshot, result.revision, operation)? {
+                ProviderState::Ready
             } else {
                 ProviderState::CatchingUp
             };
@@ -3111,7 +3167,12 @@ impl QueryService for WorkspaceEngine {
             target: symbol_view(graph, target),
             callers,
             syntax_candidates,
-            provider: provider_query_info(self, target.key.language, provider_state),
+            provider: provider_query_info(
+                self,
+                target.key.language,
+                provider_state,
+                request.freshness,
+            ),
         };
         Ok(envelope(
             QueryConstruction {

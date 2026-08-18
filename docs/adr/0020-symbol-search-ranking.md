@@ -36,7 +36,7 @@ those facts during indexing.
   response object per graph symbol.
 - Add bounded `include_languages`, `include_kinds`, `exclude_kinds` and
   case-sensitive segment-aware `namespace_prefix` request filters. Reuse the
-  language-neutral source filter from ADR-010 for package, path and source
+  language-neutral source filter from ADR-019 for package, path and source
   role. Empty include lists preserve all indexed candidates; include filters
   are applied first and exclude filters afterward.
 - Filtering occurs before ranking and the response limit. Imports and noisy
@@ -68,7 +68,7 @@ those facts during indexing.
   filter, while explicit filters remain available for precise agent workflows.
 - Search CPU is linear only in ADR-025's bounded examined-symbol prefix;
   retained memory is O(limit) and the limit remains capped at 500.
-- Source-role relevance depends on revision-scoped metadata from ADR-010; PHP
+- Source-role relevance depends on revision-scoped metadata from ADR-019; PHP
   and non-Cargo Rust use the same path-fallback roles without Cargo coupling.
 - Stable content produces stable ordering, but entity ids remain valid only in
   the response revision even when their numeric value happens to repeat.

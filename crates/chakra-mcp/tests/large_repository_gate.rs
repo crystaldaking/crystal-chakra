@@ -201,6 +201,8 @@ struct FreshnessSummary {
     require_fresh_max_micros: u64,
     files_inspected: u64,
     source_bytes_inspected: u64,
+    metadata_files_inspected: u64,
+    metadata_bytes_inspected: u64,
     git_subprocesses: u64,
     files_read: u64,
     source_bytes_read: u64,
@@ -633,6 +635,12 @@ async fn generated_multi_language_release_gate() -> GateResult<()> {
         source_bytes_inspected: no_op_after
             .source_bytes_inspected
             .saturating_sub(no_op_before.source_bytes_inspected),
+        metadata_files_inspected: no_op_after
+            .metadata_files_inspected
+            .saturating_sub(no_op_before.metadata_files_inspected),
+        metadata_bytes_inspected: no_op_after
+            .metadata_bytes_inspected
+            .saturating_sub(no_op_before.metadata_bytes_inspected),
         git_subprocesses: no_op_after
             .git_subprocesses
             .saturating_sub(no_op_before.git_subprocesses),

@@ -26,12 +26,15 @@ mod discovery;
 mod source_metadata;
 
 pub use discovery::{
-    DiscoveryError, discover_language_files, discover_source_files,
+    DiscoveryError, WorkspaceInventory, discover_language_files, discover_source_files,
     discover_source_files_in_worktree, discover_source_files_in_worktree_with_context,
-    resolve_git_administrative_paths, resolve_repository_identity, resolve_repository_root,
+    discover_workspace_inventory_in_worktree_with_context, resolve_git_administrative_paths,
+    resolve_repository_identity, resolve_repository_root, resolve_repository_root_with_context,
     resolve_workspace_identity, source_language,
 };
-pub use source_metadata::{ClassifiedSource, discover_classified_sources};
+pub use source_metadata::{
+    ClassifiedSource, classify_discovered_sources_with_context, discover_classified_sources,
+};
 
 const MAX_GIT_OUTPUT_BYTES: usize = 8 * 1024 * 1024;
 const MAX_WORKSPACE_CHANGES: usize = 10_000;

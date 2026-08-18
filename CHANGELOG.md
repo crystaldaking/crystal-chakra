@@ -74,6 +74,12 @@ version tags prefixed with `v`.
 - Rust/PHP parsing uses deterministic bounded parallel workers selected from
   configured, CPU and memory limits, with single-worker paths for small/live
   updates ([#21](https://github.com/crystaldaking/crystal-chakra/issues/21)).
+- Fresh revisions now pin source files and Cargo/Composer classification inputs
+  in one shared Git inventory and identity proof; metadata subprocesses obey
+  the owning operation's cancellation and deadline.
+- Precise Rust relationships require a post-provider worktree freshness proof,
+  so a concurrently edited disk-backed caller cannot be attributed to an older
+  syntax revision; `allow_stale` keeps provider-free syntax latency.
 
 ## [0.1.0] - 2026-08-16
 

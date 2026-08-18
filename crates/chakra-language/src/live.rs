@@ -103,6 +103,8 @@ pub struct LiveIndexMetrics {
     pub git_subprocesses: u64,
     pub files_inspected: u64,
     pub source_bytes_inspected: u64,
+    pub metadata_files_inspected: u64,
+    pub metadata_bytes_inspected: u64,
     pub files_read: u64,
     pub source_bytes_read: u64,
     pub no_op_reconciliations: u64,
@@ -153,6 +155,8 @@ struct MetricsState {
     git_subprocesses: AtomicU64,
     files_inspected: AtomicU64,
     source_bytes_inspected: AtomicU64,
+    metadata_files_inspected: AtomicU64,
+    metadata_bytes_inspected: AtomicU64,
     files_read: AtomicU64,
     source_bytes_read: AtomicU64,
     no_op_reconciliations: AtomicU64,
@@ -208,6 +212,8 @@ impl MetricsState {
             git_subprocesses: load(&self.git_subprocesses),
             files_inspected: load(&self.files_inspected),
             source_bytes_inspected: load(&self.source_bytes_inspected),
+            metadata_files_inspected: load(&self.metadata_files_inspected),
+            metadata_bytes_inspected: load(&self.metadata_bytes_inspected),
             files_read: load(&self.files_read),
             source_bytes_read: load(&self.source_bytes_read),
             no_op_reconciliations: load(&self.no_op_reconciliations),
@@ -579,7 +585,7 @@ struct CachedSource {
 #[derive(Debug, Clone, Default)]
 struct SourceSnapshotCache {
     initialized: bool,
-    inventory: Vec<chakra_domain::location::RepoRelativePath>,
+    inventory: chakra_git::WorkspaceInventory,
     entries: BTreeMap<chakra_domain::location::RepoRelativePath, CachedSource>,
 }
 
@@ -587,6 +593,7 @@ struct CachedSourceLoader<'a> {
     previous: &'a SourceSnapshotCache,
     next: BTreeMap<chakra_domain::location::RepoRelativePath, CachedSource>,
     observed: BTreeMap<chakra_domain::location::RepoRelativePath, FileIdentity>,
+    metadata_paths: BTreeSet<chakra_domain::location::RepoRelativePath>,
     force_full: bool,
     files_read: u64,
     metrics: &'a MetricsState,
@@ -604,6 +611,7 @@ impl<'a> CachedSourceLoader<'a> {
             previous,
             next: BTreeMap::new(),
             observed: BTreeMap::new(),
+            metadata_paths: BTreeSet::new(),
             force_full,
             files_read: 0,
             metrics,
@@ -628,6 +636,22 @@ impl WorkspaceSourceLoader for CachedSourceLoader<'_> {
         self.inspect(metadata);
         self.observed
             .insert(path.clone(), FileIdentity::from_metadata(metadata));
+    }
+
+    fn observe_metadata(
+        &mut self,
+        path: &chakra_domain::location::RepoRelativePath,
+        metadata: &fs::Metadata,
+    ) {
+        self.metrics
+            .metadata_files_inspected
+            .fetch_add(1, Ordering::Relaxed);
+        self.metrics
+            .metadata_bytes_inspected
+            .fetch_add(metadata.len(), Ordering::Relaxed);
+        self.observed
+            .insert(path.clone(), FileIdentity::from_metadata(metadata));
+        self.metadata_paths.insert(path.clone());
     }
 
     fn load(
@@ -1414,11 +1438,11 @@ fn stable_scan(
         let epoch = metrics.event_epoch.load(Ordering::Acquire);
         let inventory_started = Instant::now();
         metrics.git_subprocesses.fetch_add(1, Ordering::Relaxed);
-        let paths = match chakra_git::discover_source_files_in_worktree_with_context(
+        let inventory = match chakra_git::discover_workspace_inventory_in_worktree_with_context(
             repository_root,
             operation,
         ) {
-            Ok(paths) => paths,
+            Ok(inventory) => inventory,
             Err(error) => {
                 last_error = Some(WorkspaceIndexError::Discovery(error));
                 attempt_force_full = true;
@@ -1427,16 +1451,17 @@ fn stable_scan(
             }
         };
         let inventory_elapsed = inventory_started.elapsed();
-        let inventory_changed = !previous.initialized || previous.inventory != paths;
+        let inventory_changed = !previous.initialized || previous.inventory != inventory;
         let scan_options = IndexOptions::new(syntax_index.budgets(), operation.cancellation())?;
         let cache = retry_cache.as_ref().unwrap_or(previous);
         let mut loader = CachedSourceLoader::new(cache, attempt_force_full, metrics, operation);
         let scan_result = scan_discovered_sources_with_options(
             repository_root,
             &scan_options,
-            &paths,
+            &inventory,
             inventory_elapsed,
             &mut loader,
+            operation,
         );
         files_read = files_read.saturating_add(loader.files_read);
         let scan = match scan_result {
@@ -1453,21 +1478,22 @@ fn stable_scan(
             .map_or(0, |(requested, _)| requested);
 
         metrics.git_subprocesses.fetch_add(1, Ordering::Relaxed);
-        let verified_paths = match chakra_git::discover_source_files_in_worktree_with_context(
-            repository_root,
-            operation,
-        ) {
-            Ok(paths) => paths,
-            Err(error) => {
-                last_error = Some(WorkspaceIndexError::Discovery(error));
-                attempt_force_full = true;
-                full_performed = true;
-                continue;
-            }
-        };
-        if verified_paths != paths {
+        let verified_inventory =
+            match chakra_git::discover_workspace_inventory_in_worktree_with_context(
+                repository_root,
+                operation,
+            ) {
+                Ok(inventory) => inventory,
+                Err(error) => {
+                    last_error = Some(WorkspaceIndexError::Discovery(error));
+                    attempt_force_full = true;
+                    full_performed = true;
+                    continue;
+                }
+            };
+        if verified_inventory != inventory {
             last_error = Some(WorkspaceIndexError::Update(
-                "Git source inventory changed during freshness reconciliation".to_owned(),
+                "Git source/metadata inventory changed during freshness reconciliation".to_owned(),
             ));
             attempt_force_full = true;
             full_performed = true;
@@ -1482,10 +1508,19 @@ fn stable_scan(
             let absolute = repository_root.join(path.as_str());
             match fs::metadata(&absolute) {
                 Ok(metadata) => {
-                    metrics.files_inspected.fetch_add(1, Ordering::Relaxed);
-                    metrics
-                        .source_bytes_inspected
-                        .fetch_add(metadata.len(), Ordering::Relaxed);
+                    if loader.metadata_paths.contains(path) {
+                        metrics
+                            .metadata_files_inspected
+                            .fetch_add(1, Ordering::Relaxed);
+                        metrics
+                            .metadata_bytes_inspected
+                            .fetch_add(metadata.len(), Ordering::Relaxed);
+                    } else {
+                        metrics.files_inspected.fetch_add(1, Ordering::Relaxed);
+                        metrics
+                            .source_bytes_inspected
+                            .fetch_add(metadata.len(), Ordering::Relaxed);
+                    }
                     if FileIdentity::from_metadata(&metadata) != *expected {
                         identities_match = false;
                         break;
@@ -1523,7 +1558,7 @@ fn stable_scan(
                 drop(loader);
                 retry_cache = Some(SourceSnapshotCache {
                     initialized: true,
-                    inventory: paths,
+                    inventory,
                     entries,
                 });
                 attempt_force_full = false;
@@ -1543,7 +1578,7 @@ fn stable_scan(
             covered_generation,
             cache: SourceSnapshotCache {
                 initialized: true,
-                inventory: paths,
+                inventory,
                 entries: loader.next,
             },
             kind,

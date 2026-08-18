@@ -56,7 +56,8 @@ background work is quiescent:
 - Treat the atomically published syntax snapshot as canonical. ADR-013 replaces
   the original eager all-document `didOpen` strategy with an immutable
   snapshot-backed catalog, exact revision deltas, target-only `didOpen`, and a
-  final revision/freshness confirmation before precise facts are accepted.
+  post-provider authoritative freshness reconciliation plus final revision
+  confirmation before precise facts are accepted.
   Exact changes to opened documents use full-text `didChange`; unopened
   documents stay disk-backed and receive watched-file events. Removed open
   paths use `didClose`; rename remains delete plus create.
@@ -71,8 +72,12 @@ background work is quiescent:
   report `Degraded` with a bounded operator-visible reason.
 - Every precise result carries the exact workspace revision it enriches. The
   query layer accepts `RustAnalyzer`/`Precise` relations only when that revision
-  equals its pinned syntax snapshot and provider state is `Ready`; otherwise it
-  retains syntax candidates and reports the honest provider state. This
+  equals its pinned syntax snapshot, provider state is `Ready`, and a second
+  live freshness barrier proves that disk-backed unopened documents did not
+  advance during provider work; otherwise it retains syntax candidates and
+  reports the honest provider state. `AllowStale` queries do not pay for this
+  proof and therefore skip precise enrichment with `CatchingUp` syntax
+  fallback. This
   query-relative provider state does not mutate the immutable syntax snapshot.
   Publishing provider readiness as a new workspace revision would immediately
   invalidate a result keyed to the preceding revision.
@@ -130,7 +135,9 @@ background work is quiescent:
 
 - Engine contract tests prove that a current precise caller replaces the same
   syntax candidate, an older precise revision is discarded and reported as
-  `CatchingUp`, and provider degradation preserves useful syntax callers.
+  `CatchingUp`, a post-provider freshness advance rejects disk-backed future
+  facts, `AllowStale` does not wait for the provider, and provider degradation
+  preserves useful syntax callers.
 - Adapter unit tests cover UTF-16 conversion, repository-scoped file URIs, and
   deterministic missing-executable degradation without a global provider.
 - A hermetic stdio peer proves that a transport crash triggers exactly one

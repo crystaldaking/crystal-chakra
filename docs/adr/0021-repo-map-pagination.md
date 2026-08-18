@@ -33,8 +33,9 @@ publish a new graph revision.
   directory/language group and, when metadata exists, to a Cargo-package or
   Composer-PSR-4 group. Groups sort by descending file count and then stable
   kind/language/root/name tie-breakers. Continuation pages do not repeat them.
-- Discover Git-visible `composer.json` files inside `chakra-git`, read at most
-  64 manifests of at most 1 MiB each, and parse `autoload.psr-4` and
+- Retain Git-visible `composer.json` files in the shared source/classification
+  inventory inside `chakra-git`, read at most 64 manifests of at most 1 MiB
+  each, and parse `autoload.psr-4` and
   `autoload-dev.psr-4` without invoking Composer. The longest matching root
   supplies Composer package/root metadata; dev roots default to the test role,
   while more specific fixture/generated/vendor path roles remain visible.

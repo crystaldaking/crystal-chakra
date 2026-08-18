@@ -21,13 +21,13 @@ use chakra_domain::query::{
 };
 use chakra_domain::revision::Revision;
 use chakra_domain::source::{SourceClassification, SourceMetadata, SourcePackage, SourceRole};
-use chakra_domain::state::{Freshness, ProviderState, WorkspaceStatus};
+use chakra_domain::state::{Freshness, FreshnessRequirement, ProviderState, WorkspaceStatus};
 use chakra_domain::symbol::{
     CallForm, CallResolution, CallTargetKind, EdgeKind, Language, SymbolKey, SymbolKind,
 };
 use chakra_engine::{
-    CallSiteInput, PreciseProvider, PreciseQueryRequest, PreciseQueryResult, PreciseRelation,
-    SymbolGraph, WorkspaceEngine,
+    CallSiteInput, FreshnessBarrier, FreshnessBarrierError, PreciseProvider, PreciseQueryRequest,
+    PreciseQueryResult, PreciseRelation, SymbolGraph, WorkspaceEngine,
 };
 
 use common::{scenario_engine, scenario_graph};
@@ -47,6 +47,49 @@ struct CountingRustProvider {
 struct RevisionAdvancingProvider {
     engine: Weak<WorkspaceEngine>,
     result: PreciseQueryResult,
+}
+
+#[derive(Debug)]
+struct AdvanceAfterProviderBarrier {
+    engine: Weak<WorkspaceEngine>,
+    calls: AtomicUsize,
+}
+
+#[derive(Debug, Default)]
+struct FailAfterProviderBarrier {
+    calls: AtomicUsize,
+}
+
+impl FreshnessBarrier for AdvanceAfterProviderBarrier {
+    fn require_fresh_with_context(
+        &self,
+        _operation: &OperationContext,
+    ) -> Result<(), FreshnessBarrierError> {
+        if self.calls.fetch_add(1, Ordering::SeqCst) == 1 {
+            let engine = self
+                .engine
+                .upgrade()
+                .ok_or_else(|| FreshnessBarrierError::new("test engine was dropped"))?;
+            engine
+                .publish(engine.begin_update())
+                .map_err(|error| FreshnessBarrierError::new(error.to_string()))?;
+        }
+        Ok(())
+    }
+}
+
+impl FreshnessBarrier for FailAfterProviderBarrier {
+    fn require_fresh_with_context(
+        &self,
+        _operation: &OperationContext,
+    ) -> Result<(), FreshnessBarrierError> {
+        if self.calls.fetch_add(1, Ordering::SeqCst) == 1 {
+            return Err(FreshnessBarrierError::new(
+                "post-provider reconciliation failed",
+            ));
+        }
+        Ok(())
+    }
 }
 
 impl PreciseProvider for CountingRustProvider {
@@ -1617,6 +1660,128 @@ fn precise_result_is_discarded_if_workspace_advances_during_provider_query()
             .as_ref()
             .is_some_and(|provider| provider.fallback_used && provider.fallback_reason.is_some())
     );
+    Ok(())
+}
+
+#[test]
+fn precise_result_is_discarded_if_post_provider_freshness_advances() -> Result<(), Box<dyn Error>> {
+    let (engine, ids) = scenario_engine()?;
+    let engine = Arc::new(engine);
+    let revision = engine.snapshot().revision();
+    let caller = engine
+        .snapshot()
+        .graph()
+        .symbol(ids.service_refund)
+        .ok_or("service symbol missing")?
+        .clone();
+    engine.install_precise_provider(Arc::new(FixedProvider {
+        result: PreciseQueryResult {
+            revision,
+            state: ProviderState::Ready,
+            incoming: vec![PreciseRelation {
+                name: caller.name().to_owned(),
+                declaration: caller.location,
+                occurrence_count: 1,
+                call_sites: Vec::new(),
+                provenance: Provenance::RustAnalyzer,
+            }],
+            outgoing: Vec::new(),
+            incoming_truncated: false,
+            outgoing_truncated: false,
+        },
+        last_error: None,
+    }))?;
+    engine.install_freshness_barrier(Arc::new(AdvanceAfterProviderBarrier {
+        engine: Arc::downgrade(&engine),
+        calls: AtomicUsize::new(0),
+    }))?;
+
+    let envelope = engine.callers(CallersRequest {
+        symbol: Some(SymbolRef::ById {
+            id: ids.provider_refund,
+            revision,
+        }),
+        ..CallersRequest::default()
+    })?;
+    assert_eq!(engine.snapshot().revision(), revision.next());
+    assert_eq!(envelope.revision, revision);
+    assert_eq!(envelope.provider_state, ProviderState::CatchingUp);
+    assert_eq!(envelope.data.callers.len(), 1);
+    assert_eq!(envelope.data.callers[0].precision, Precision::Syntax);
+    Ok(())
+}
+
+#[test]
+fn post_provider_freshness_failure_keeps_syntax_fallback() -> Result<(), Box<dyn Error>> {
+    let (engine, ids) = scenario_engine()?;
+    let revision = engine.snapshot().revision();
+    let caller = engine
+        .snapshot()
+        .graph()
+        .symbol(ids.service_refund)
+        .ok_or("service symbol missing")?
+        .clone();
+    engine.install_precise_provider(Arc::new(FixedProvider {
+        result: PreciseQueryResult {
+            revision,
+            state: ProviderState::Ready,
+            incoming: vec![PreciseRelation {
+                name: caller.name().to_owned(),
+                declaration: caller.location,
+                occurrence_count: 1,
+                call_sites: Vec::new(),
+                provenance: Provenance::RustAnalyzer,
+            }],
+            outgoing: Vec::new(),
+            incoming_truncated: false,
+            outgoing_truncated: false,
+        },
+        last_error: None,
+    }))?;
+    engine.install_freshness_barrier(Arc::new(FailAfterProviderBarrier::default()))?;
+
+    let envelope = engine.callers(CallersRequest {
+        symbol: Some(SymbolRef::ById {
+            id: ids.provider_refund,
+            revision,
+        }),
+        ..CallersRequest::default()
+    })?;
+    assert_eq!(envelope.revision, revision);
+    assert_eq!(envelope.provider_state, ProviderState::CatchingUp);
+    assert_eq!(envelope.data.callers.len(), 1);
+    assert_eq!(envelope.data.callers[0].precision, Precision::Syntax);
+    Ok(())
+}
+
+#[test]
+fn allow_stale_uses_syntax_without_waiting_for_precise_provider() -> Result<(), Box<dyn Error>> {
+    let (engine, ids) = scenario_engine()?;
+    let calls = Arc::new(AtomicUsize::new(0));
+    engine.install_precise_provider(Arc::new(CountingRustProvider {
+        calls: calls.clone(),
+    }))?;
+
+    let envelope = engine.callers(CallersRequest {
+        symbol: Some(SymbolRef::ById {
+            id: ids.provider_refund,
+            revision: engine.snapshot().revision(),
+        }),
+        freshness: FreshnessRequirement::AllowStale,
+        ..CallersRequest::default()
+    })?;
+    assert_eq!(calls.load(Ordering::Relaxed), 0);
+    assert_eq!(envelope.provider_state, ProviderState::CatchingUp);
+    assert!(
+        envelope
+            .data
+            .provider
+            .as_ref()
+            .and_then(|provider| provider.fallback_reason.as_deref())
+            .is_some_and(|reason| reason.contains("allow_stale"))
+    );
+    assert_eq!(envelope.data.callers.len(), 1);
+    assert_eq!(envelope.data.callers[0].precision, Precision::Syntax);
     Ok(())
 }
 

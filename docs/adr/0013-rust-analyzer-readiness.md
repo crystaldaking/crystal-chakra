@@ -49,9 +49,13 @@ stable completion barriers:
 - Accept a precise result only when all of these hold: the syntax snapshot was
   fresh, provider health is OK and quiescent, a request after the current sync
   notifications completed the generation barrier, the result revision matches
-  the pinned revision, and the engine still publishes that same fresh revision
-  after the provider call. Otherwise retain syntax evidence and report
-  `catching_up`.
+  the pinned revision, a post-provider live freshness barrier reconciles the
+  materialized worktree, and the engine still publishes that same fresh
+  revision afterward. This second proof is required because an unopened caller
+  remains disk-backed and could otherwise expose an edit before the watcher
+  publishes a new syntax revision. Otherwise retain syntax evidence and report
+  `catching_up`. An `allow_stale` request skips precise enrichment rather than
+  silently turning its low-latency syntax read into a fresh barrier.
 - Measure each synchronization: workspace documents/bytes, open documents,
   created/changed/deleted counts, text messages/bytes, watched-file events,
   catalog entries examined, and source bodies compared. Retain cumulative text
@@ -93,9 +97,9 @@ stable completion barriers:
 - A changed revision still performs linear metadata traversal to construct its
   exact Rust document delta. It does not copy or compare every unchanged source
   body, and an identical workspace/cache hit bypasses synchronization.
-- Disk-backed non-target facts depend on Chakra's fresh-worktree proof plus the
-  provider barrier and final revision check. If any proof is lost, Chakra
-  returns syntax rather than precision.
+- Disk-backed non-target facts depend on Chakra's initial fresh-worktree proof,
+  provider barrier, post-provider fresh-worktree proof, and final revision
+  check. If any proof is lost, Chakra returns syntax rather than precision.
 - Status and high-level Rust queries explain provider fallback without leaking
   LSP types into domain/query contracts.
 - One Unix-only production dependency is added: `nix` 0.31.3 (MIT) with only
@@ -110,8 +114,9 @@ stable completion barriers:
 - Hermetic tests prove a 75 ms provider wait returns `catching_up` before a
   two-second request timeout, direct Cargo metadata progress remains labeled as
   provider-reported, and cache bytes never exceed their configured budget.
-- A query contract advances the engine revision during enrichment and proves
-  the returned same-number precise result is discarded.
+- Query contracts advance the engine revision during enrichment and from the
+  post-provider freshness barrier, proving both same-number precise results are
+  discarded. A separate regression proves `allow_stale` remains provider-free.
 - A Unix lifecycle peer leaves a descendant running; provider shutdown proves
   the entire owned process group is reaped.
 - The default suite remains independent of a global rust-analyzer. The ignored

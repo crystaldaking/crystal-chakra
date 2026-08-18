@@ -358,7 +358,7 @@ fn large_repository_warmed_noop_freshness_is_bounded() -> Result<(), Box<dyn Err
         0
     );
     eprintln!(
-        "large_workspace_noop_fresh: root={} runs={} min_us={} median_us={} max_us={} files_inspected={} bytes_inspected={} git_subprocesses={} files_read={} bytes_read={}",
+        "large_workspace_noop_fresh: root={} runs={} min_us={} median_us={} max_us={} files_inspected={} bytes_inspected={} metadata_files_inspected={} metadata_bytes_inspected={} git_subprocesses={} files_read={} bytes_read={}",
         repository.display(),
         RUNS,
         samples.first().map_or(0, |sample| sample.as_micros()),
@@ -366,6 +366,8 @@ fn large_repository_warmed_noop_freshness_is_bounded() -> Result<(), Box<dyn Err
         samples.last().map_or(0, |sample| sample.as_micros()),
         metrics.files_inspected - baseline.files_inspected,
         metrics.source_bytes_inspected - baseline.source_bytes_inspected,
+        metrics.metadata_files_inspected - baseline.metadata_files_inspected,
+        metrics.metadata_bytes_inspected - baseline.metadata_bytes_inspected,
         metrics.git_subprocesses - baseline.git_subprocesses,
         metrics.files_read - baseline.files_read,
         metrics.source_bytes_read - baseline.source_bytes_read,

@@ -47,7 +47,7 @@ full serialization CPU.
 
   These independent allocations prevent a noisy caller/source section from
   starving declarations, tests, related files, or envelope metadata. A byte
-  cut uses ADR-014's `response_byte_limit` cause and reports exact omitted
+  cut uses ADR-023's `response_byte_limit` cause and reports exact omitted
   encoded bytes when the candidate vector is already available.
 - Selected `context.symbol`, `callers.target`, workspace identity, and envelope
   metadata are required fixed overhead rather than optional sections. A final

@@ -22,8 +22,8 @@ must never remove a file or alter its repository-relative identity.
   coverage types to `chakra-domain`. Every indexed file has exactly one role:
   `production`, `test`, `example`, `bench`, `fixture`, `generated`, or
   `vendor`. Symbols expose the metadata of their declaring file.
-- Keep Cargo command/JSON handling inside `chakra-git`. It first asks Git for
-  the bounded manifest inventory, then invokes `cargo metadata --no-deps
+- Keep Cargo command/JSON handling inside `chakra-git`. It consumes the shared
+  Git source/classification inventory, then invokes `cargo metadata --no-deps
   --offline --locked` with fixed arguments for each uncovered workspace,
   capped at 64 invocations and a shared 30-second Cargo deadline. Output is
   bounded. Workspace members returned by one invocation are not invoked again.
@@ -35,7 +35,7 @@ must never remove a file or alter its repository-relative identity.
   update, or the command/inventory budget is exceeded, indexing continues with a
   deterministic language-neutral path classifier. Coverage counts on
   `status` and `repo_map` distinguish Cargo-classified files from fallback
-  files. No fallback fact is labeled as Cargo-derived. ADR-012 later extends
+  files. No fallback fact is labeled as Cargo-derived. ADR-021 later extends
   the same language-neutral model with explicit Composer classification.
 - Attach metadata to immutable graph files. A manifest-only classification
   change materializes and atomically publishes a new graph revision while
@@ -74,8 +74,9 @@ must never remove a file or alter its repository-relative identity.
   dependency of `chakra-git` for the Cargo adapter. No Cargo protocol types
   cross into domain, engine, language or MCP layers.
 - Cargo metadata work is bounded but can add reconciliation latency in large
-  workspaces. ADR-005 measures and reuses classification without weakening
-  manifest-change detection.
+  workspaces. ADR-005 pins manifest, lockfile, toolchain, and Cargo-config
+  inputs in the same pre/post inventory and identity proof as sources, while
+  retaining parsed source bodies across classification-only changes.
 - A non-Cargo Rust file and PHP files without a usable Composer mapping remain
   queryable with explicit fallback classification. Partial coverage is normal
   and machine-visible.
@@ -91,5 +92,5 @@ must never remove a file or alter its repository-relative identity.
   filters across Rust and PHP, coverage output and invalid bounded inputs.
 - Live reconciliation tests change package metadata and assert a newer fresh
   revision with zero stable-source reparses.
-- ADR-020 supplies relevance ranking tests. ADR-005 records measured metadata
-  reuse in freshness barriers.
+- ADR-020 supplies relevance ranking tests. ADR-005 records shared-inventory
+  and classification-only freshness behavior.

@@ -54,6 +54,10 @@ must remain inside their adapters.
   commands. A child uses the earlier of the 30-second Git bound and the caller
   deadline. Cancellation kills and waits for the child, then joins both bounded
   pipe readers before returning; no child or reader is detached.
+- Apply the same context to bounded `cargo metadata` classification. A caller
+  cancellation or deadline kills and waits for the owned Cargo child and joins
+  its bounded pipe readers; adapter-local metadata failures still degrade to
+  deterministic path classification.
 - Attach the context to each bounded rust-analyzer command. Queue and response
   waits poll cancellation; an in-flight LSP request sends `$/cancelRequest`.
   The provider process remains owned by the provider lifecycle and is reaped on
@@ -102,6 +106,8 @@ must remain inside their adapters.
   publication.
 - A fake owned Git process proves cancellation terminates and reaps the child
   promptly.
+- A fake metadata command proves cancellation terminates and reaps the child
+  promptly without waiting for the adapter-local 30-second bound.
 - A hermetic LSP peer proves caller cancellation interrupts an already-sent
   precise request and records `$/cancelRequest` without requiring a global
   rust-analyzer installation.

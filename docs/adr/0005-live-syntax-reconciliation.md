@@ -67,15 +67,18 @@ over native filesystem mechanisms:
   pending. A barrier arriving during an editor burst does not cut the bounded
   quiet window short, so write/metadata/rename sequences converge to one latest
   state without requiring a caller sleep.
-- Reconcile from one Git-aware tracked plus untracked non-ignored Rust/PHP
-  inventory and partition that inventory by language. A stable reconciliation
-  has two identical Git inventory checkpoints around one content snapshot,
-  unchanged watcher epoch, and identical pre/post filesystem identities for
-  every admitted source. It does not perform the former two complete body
-  scans. A bounded retry retains the already observed candidate cache, so a
-  delayed notification for state already captured does not reread that body.
-  The scan remains authoritative even when a notification has not reached user
-  space.
+- Reconcile from one Git-aware tracked plus untracked non-ignored inventory.
+  It contains admitted Rust/PHP sources and the Git-visible Cargo/Composer
+  manifests, lockfiles, toolchain files, and Cargo configuration that can
+  change query-visible classification. Partition its source set by language;
+  do not rediscover either language or its metadata separately. A stable
+  reconciliation has two identical shared-inventory checkpoints around one
+  content/classification snapshot, unchanged watcher epoch, and identical
+  pre/post filesystem identities for every admitted source and metadata input.
+  It does not perform the former two complete body scans. A bounded retry
+  retains the already observed candidate cache, so a delayed notification for
+  state already captured does not reread that body. The scan remains
+  authoritative even when a notification has not reached user space.
 - Cache source bodies by repository-relative path and a strong filesystem
   identity. On Unix that identity includes length, device, inode, mode, mtime,
   ctime, and their nanosecond components; mtime alone is never sufficient. A
@@ -93,9 +96,9 @@ over native filesystem mechanisms:
   when the indexed path set changes or watcher recovery requires
   reinstallation.
 - Reconciliation reuses the initial revision's validated indexing budgets and
-  one shared Rust/PHP Git inventory per scan (ADR-011). Budget coverage and
-  degradation are published atomically with changed graph contents. A
-  reconciled budget-limited graph is truthfully `Degraded` and `Fresh`; adding
+  one shared Rust/PHP/metadata Git inventory per scan (ADR-011). Budget
+  coverage and degradation are published atomically with changed graph
+  contents. A reconciled budget-limited graph is truthfully `Degraded` and `Fresh`; adding
   an over-budget file may publish metadata without pretending it was indexed.
 - Cache parsed facts per file and resolved relationship contributions per
   relationship-owner file. An edit reparses only created or modified files.
@@ -114,9 +117,9 @@ over native filesystem mechanisms:
   Tree-sitter error trees remain valid syntax revisions, so temporary syntax
   errors do not expose a partial graph or erase valid declarations elsewhere.
 - Instrument barrier requests/completed/coalesced generations, reconciliation
-  kind, Git subprocesses, filesystem identities and bytes inspected, source
-  bodies and bytes read, full/targeted/no-op reconciliations, watch-set
-  recomputations, publications, scanned/unchanged/reparsed files,
+  kind, Git subprocesses, source and metadata filesystem identities/bytes
+  inspected, source bodies and bytes read, full/targeted/no-op reconciliations,
+  watch-set recomputations, publications, scanned/unchanged/reparsed files,
   recomputed relationship owners, create/modify/delete counts, syntax-error
   files, watcher events/errors/drops, watched directories, and graph
   files/source bytes/symbols/edges/call sites reused, rebuilt, or copied.
@@ -156,10 +159,11 @@ over native filesystem mechanisms:
   its minimum, below Chakra's pinned Rust 1.97.1. Compile and transitive cost
   are accepted for a mature native watcher rather than reimplementing
   platform APIs.
-- A warmed no-op fresh barrier performs two Git inventory checkpoints and two
-  filesystem identity passes but reads zero source bodies. Both identity passes
-  are required to prove that no admitted file changed while the snapshot was
-  assembled; watcher silence cannot replace either proof. On the recorded
+- A warmed no-op fresh barrier performs two shared Git inventory checkpoints
+  and two filesystem identity passes but reads zero source bodies. Both
+  identity passes cover sources and classification inputs and are required to
+  prove that no query-visible fact changed while the snapshot was assembled;
+  watcher silence cannot replace either proof. On the recorded
   `psp-app` corpus this costs 23.9–26.2 ms in release mode versus the former
   91.7–98.8 ms (3.5–4.1× faster). The issue's preferred 5× target is not used as
   a reason to weaken read-your-writes: 27 ms is the explicitly measured accepted

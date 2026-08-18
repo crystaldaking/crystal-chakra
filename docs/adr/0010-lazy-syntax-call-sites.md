@@ -33,7 +33,7 @@ precise enrichment.
   graph revision:
   - exactly one syntax candidate creates one heuristic `CALLS` edge;
   - a resolved call owned by a test also creates a heuristic `TESTS` edge,
-    deduplicated per test/target pair as refined by ADR-012;
+    deduplicated per test/target pair as refined by ADR-016;
   - multiple candidates record `ambiguous { candidates }` without candidate
     edges;
   - no candidate records `unresolved`;

@@ -13,6 +13,7 @@ use chakra_domain::indexing::{
     IndexPhaseMeasurement, IndexPublicationMetrics, IndexSchedulingMetrics, IndexingStatus,
 };
 use chakra_domain::location::RepoRelativePath;
+use chakra_domain::operation::OperationContext;
 use chakra_domain::symbol::Language;
 use chakra_engine::{
     ConsistencyError, GraphBuildLimits, GraphBuildReport, GraphError, SymbolGraph,
@@ -510,7 +511,8 @@ pub fn index_repository_with_options(
     let budgets = options.budgets.validate()?;
     let worker_policy = WorkerPolicy::from_budgets(budgets);
     check_cancelled(&options.cancellation)?;
-    let repository_root = chakra_git::resolve_repository_root(root)?;
+    let operation = OperationContext::from_cancellation(options.cancellation.clone());
+    let repository_root = chakra_git::resolve_repository_root_with_context(root, &operation)?;
     let mut rss_peak = process_rss_bytes();
     let mut scan = scan_repository_sources_with_options(&repository_root, &options)?;
     rss_peak = max_option(rss_peak, process_rss_bytes());
@@ -697,27 +699,34 @@ pub fn scan_repository_sources_with_options(
     options: &IndexOptions,
 ) -> Result<WorkspaceSourceScan, WorkspaceIndexError> {
     check_cancelled(&options.cancellation)?;
+    let operation = OperationContext::from_cancellation(options.cancellation.clone());
     let inventory_started = PhaseTimer::start();
-    let paths = chakra_git::discover_source_files(repository_root)?;
+    let inventory = chakra_git::discover_workspace_inventory_in_worktree_with_context(
+        repository_root,
+        &operation,
+    )?;
     let inventory_phase = measured_phase(
         IndexPhase::GitInventory,
         None,
         inventory_started,
-        paths.len() as u64,
+        inventory.sources.len() as u64,
         0,
         PhaseConcurrency::SERIAL,
     );
     scan_discovered_sources_with_inventory_phase(
         repository_root,
         options,
-        &paths,
+        &inventory,
         inventory_phase,
         &mut FilesystemSourceLoader,
+        &operation,
     )
 }
 
 pub(crate) trait WorkspaceSourceLoader {
     fn observe(&mut self, path: &RepoRelativePath, metadata: &fs::Metadata);
+
+    fn observe_metadata(&mut self, path: &RepoRelativePath, metadata: &fs::Metadata);
 
     fn load(
         &mut self,
@@ -732,6 +741,8 @@ struct FilesystemSourceLoader;
 
 impl WorkspaceSourceLoader for FilesystemSourceLoader {
     fn observe(&mut self, _path: &RepoRelativePath, _metadata: &fs::Metadata) {}
+
+    fn observe_metadata(&mut self, _path: &RepoRelativePath, _metadata: &fs::Metadata) {}
 
     fn load(
         &mut self,
@@ -758,35 +769,41 @@ impl WorkspaceSourceLoader for FilesystemSourceLoader {
 pub(crate) fn scan_discovered_sources_with_options(
     repository_root: &Path,
     options: &IndexOptions,
-    paths: &[RepoRelativePath],
+    inventory: &chakra_git::WorkspaceInventory,
     inventory_elapsed: Duration,
     loader: &mut impl WorkspaceSourceLoader,
+    operation: &OperationContext,
 ) -> Result<WorkspaceSourceScan, WorkspaceIndexError> {
     scan_discovered_sources_with_inventory_phase(
         repository_root,
         options,
-        paths,
+        inventory,
         phase(
             IndexPhase::GitInventory,
             None,
             inventory_elapsed,
-            paths.len() as u64,
+            inventory.sources.len() as u64,
             0,
         ),
         loader,
+        operation,
     )
 }
 
 fn scan_discovered_sources_with_inventory_phase(
     repository_root: &Path,
     options: &IndexOptions,
-    paths: &[RepoRelativePath],
+    inventory: &chakra_git::WorkspaceInventory,
     inventory_phase: IndexPhaseMeasurement,
     loader: &mut impl WorkspaceSourceLoader,
+    operation: &OperationContext,
 ) -> Result<WorkspaceSourceScan, WorkspaceIndexError> {
     let budgets = options.budgets.validate()?;
     check_cancelled(&options.cancellation)?;
-    let discovered_files = paths.len() as u64;
+    operation
+        .check()
+        .map_err(|_| WorkspaceIndexError::Cancelled)?;
+    let discovered_files = inventory.sources.len() as u64;
     let read_started = PhaseTimer::start();
     let mut rust = BTreeMap::new();
     let mut php = BTreeMap::new();
@@ -796,7 +813,7 @@ fn scan_discovered_sources_with_inventory_phase(
     let mut workspace_omitted = 0_u64;
     let mut workspace_observed = 0_u64;
 
-    for (index, path) in paths.iter().enumerate() {
+    for (index, path) in inventory.sources.iter().enumerate() {
         check_cancelled(&options.cancellation)?;
         if index as u64 >= budgets.max_files {
             continue;
@@ -842,20 +859,44 @@ fn scan_discovered_sources_with_inventory_phase(
         }
     }
 
-    let rust_metadata = chakra_git::discover_classified_sources(repository_root, Language::Rust)?
-        .into_iter()
-        .filter(|source| rust.contains_key(&source.path))
-        .map(|source| (source.path, source.metadata))
-        .collect();
+    for path in &inventory.metadata_inputs {
+        operation
+            .check()
+            .map_err(|_| WorkspaceIndexError::Cancelled)?;
+        let absolute = repository_root.join(path.as_str());
+        let metadata = fs::metadata(&absolute).map_err(|source| WorkspaceIndexError::Read {
+            path: path.clone(),
+            source,
+        })?;
+        loader.observe_metadata(path, &metadata);
+    }
+
+    let rust_metadata = chakra_git::classify_discovered_sources_with_context(
+        repository_root,
+        &inventory.sources,
+        &inventory.metadata_inputs,
+        Language::Rust,
+        operation,
+    )?
+    .into_iter()
+    .filter(|source| rust.contains_key(&source.path))
+    .map(|source| (source.path, source.metadata))
+    .collect();
     let rust = chakra_language_rust::RustSources {
         files: rust,
         metadata: rust_metadata,
     };
-    let php_metadata = chakra_git::discover_classified_sources(repository_root, Language::Php)?
-        .into_iter()
-        .filter(|source| php.contains_key(&source.path))
-        .map(|source| (source.path, source.metadata))
-        .collect();
+    let php_metadata = chakra_git::classify_discovered_sources_with_context(
+        repository_root,
+        &inventory.sources,
+        &inventory.metadata_inputs,
+        Language::Php,
+        operation,
+    )?
+    .into_iter()
+    .filter(|source| php.contains_key(&source.path))
+    .map(|source| (source.path, source.metadata))
+    .collect();
     let php = chakra_language_php::PhpSources {
         files: php,
         metadata: php_metadata,

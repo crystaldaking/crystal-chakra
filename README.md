@@ -254,9 +254,12 @@ Provider startup no longer opens every Rust file. A precise query opens the
 selected target from its pinned snapshot; unchanged callers remain disk-backed.
 Later revisions send full text only for documents Chakra already opened and
 use watched-file events for other exact create/change/delete deltas. Provider
-quiescence, a post-sync request barrier, and a final workspace revision check
+quiescence, a post-sync request barrier, a post-provider fresh-worktree
+reconciliation, and a final workspace revision check
 must all hold before precise facts are accepted. A 1,929-file/55.3 MB contract
 test sends 19 bytes of target text on first use rather than the complete corpus.
+`allow_stale` keeps its low-latency syntax semantics and skips precise
+enrichment instead of running this second freshness proof implicitly.
 
 Collection limits default to 20 and are capped at 500. Every variable response
 section also has an independent compact-JSON byte budget (16–256 KiB), so a
