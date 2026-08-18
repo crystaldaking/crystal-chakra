@@ -2,6 +2,7 @@
 
 Status: accepted
 Date: 2026-08-16
+Last reviewed: 2026-08-18
 
 ## Context
 
@@ -37,7 +38,17 @@ binding compatible with Chakra's Tree-sitter runtime:
   Rust and PHP graphs, owns the single watcher/freshness barrier, prepares all
   changed language state privately, and publishes one combined graph revision.
   `chakra-language-rust` and `chakra-language-php` remain independently
-  testable parsing adapters.
+  testable parsing adapters. Graph composition rejects overlapping language
+  domains so each adapter's revision-local call-site resolution remains valid.
+  Rust and PHP use disjoint entity-id ranges and the workspace graph is a
+  shallow immutable partition view. Composition therefore neither copies nor
+  remaps the two complete language graphs.
+- Discover/read the shared Rust/PHP inventory once and split validated graph
+  budgets deterministically between non-empty adapters (ADR-011). The split is
+  stable after cold start except for one rebalance when a previously absent
+  language first appears. Each language remains independently parsed, but a
+  mixed workspace cannot consume the advertised global symbol/edge/call-site
+  budget twice.
 - Move supported-source discovery into `chakra-git`, so initial indexing,
   reconciliation, and `diff_context` share the same `.rs`/`.php`, ignore,
   regular-file, symlink, and Git-worktree policy.
@@ -52,6 +63,10 @@ binding compatible with Chakra's Tree-sitter runtime:
   same lifecycle, freshness, Git, query, MCP, bounds, provenance, and testing
   contracts. The optional Rust-only provider remains an advertised capability
   difference, not a hidden PHP precision claim.
+- Use the shared lazy call-site model from ADR-010. Unknown PHP receivers remain
+  unresolved syntax evidence; they are not connected to every same-name method.
+  ADR-015 subsequently adds bounded receiver/qualifier refinement without
+  changing graph ownership.
 
 ## Alternatives considered
 
@@ -74,12 +89,15 @@ binding compatible with Chakra's Tree-sitter runtime:
 - Production dependency added: official `tree-sitter-php` 0.24.2 (MIT). No
   PHP runtime, Composer dependency, external service, or PHP language server
   is required.
-- Complete private graph materialization combines both language graphs, but
-  unchanged files are not reparsed and unaffected relationship contributions
-  remain cached. Instrumentation proves a one-file PHP edit reparses one file.
+- Initial indexing builds complete private language partitions. Ordinary live
+  updates structurally share unchanged partition payloads and rebuild only the
+  affected PHP/Rust file contributions; the combined view is O(language
+  partitions), not O(symbols + edges). Instrumentation and pointer-identity
+  tests prove a one-file PHP edit does not copy the Rust partition.
 - PHP call, inheritance, and test relations are intentionally conservative and
-  carry heuristic precision where Tree-sitter cannot resolve runtime types,
-  aliases, traits, dynamic dispatch, magic methods, or framework metadata.
+  carry heuristic precision. ADR-015 resolves namespace aliases and a bounded
+  set of explicit receiver/inheritance forms, while runtime dispatch, magic
+  methods, docblock/generic types, and framework metadata remain unresolved.
 
 ## Validation / follow-up
 

@@ -28,19 +28,20 @@ fn current_rust_analyzer_returns_precise_incoming_call() -> Result<(), Box<dyn E
     fs::write(repository.path().join("src/lib.rs"), source.as_ref())?;
     let repository_root = fs::canonicalize(repository.path())?;
     let path = RepoRelativePath::new("src/lib.rs")?;
-    let workspace = ProviderWorkspace {
+    let workspace = ProviderWorkspace::from_documents(
         repository_root,
-        revision: Revision(1),
-        documents: vec![ProviderDocument {
+        Revision(1),
+        vec![ProviderDocument {
             path: path.clone(),
             source,
             language: chakra_domain::symbol::Language::Rust,
         }],
-    };
+    );
     let provider = RustAnalyzerProvider::start(
         workspace.clone(),
         RustAnalyzerConfig {
             barrier_timeout: Duration::from_secs(5),
+            query_wait_timeout: Duration::from_secs(15),
             ..RustAnalyzerConfig::default()
         },
     )?;
@@ -87,15 +88,15 @@ fn current_rust_analyzer_returns_precise_incoming_call() -> Result<(), Box<dyn E
     )?;
     let changed_started = Instant::now();
     let changed = provider.enrich(PreciseQueryRequest {
-        workspace: ProviderWorkspace {
-            repository_root: fs::canonicalize(repository.path())?,
-            revision: Revision(2),
-            documents: vec![ProviderDocument {
+        workspace: ProviderWorkspace::from_documents(
+            fs::canonicalize(repository.path())?,
+            Revision(2),
+            vec![ProviderDocument {
                 path: path.clone(),
                 source: changed_source,
                 language: chakra_domain::symbol::Language::Rust,
             }],
-        },
+        ),
         symbol: ProviderSymbol {
             name: "target".to_owned(),
             declaration: SourceRange::new(

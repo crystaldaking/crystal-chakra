@@ -3,8 +3,15 @@
 use std::num::TryFromIntError;
 use std::sync::Arc;
 
+use chakra_domain::diagnostic::{
+    KnownSyntaxGrammarGap, MAX_SYNTAX_DIAGNOSTICS_PER_FILE, SyntaxDiagnostic,
+    SyntaxDiagnosticCause, SyntaxDiagnosticKind,
+};
 use chakra_domain::location::{RepoRelativePath, SourceRange, TextPosition};
-use chakra_domain::symbol::{Language, SymbolKey, SymbolKind};
+use chakra_domain::provenance::{Precision, Provenance};
+use chakra_domain::symbol::{
+    CallForm, CallTargetKind, Language, MAX_RECEIVER_HINT_CHARS, SymbolKey, SymbolKind,
+};
 use thiserror::Error;
 use tree_sitter::{Node, Parser, Point};
 
@@ -35,7 +42,7 @@ pub(crate) enum ParseError {
     },
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ParsedFile {
     pub source: Arc<str>,
     pub module_path: Vec<String>,
@@ -43,9 +50,11 @@ pub(crate) struct ParsedFile {
     pub calls: Vec<CallDraft>,
     pub implementations: Vec<ImplDraft>,
     pub has_errors: bool,
+    pub diagnostics: Vec<SyntaxDiagnostic>,
+    pub diagnostic_count: u64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SymbolDraft {
     pub key: SymbolKey,
     pub location: SourceRange,
@@ -53,15 +62,27 @@ pub(crate) struct SymbolDraft {
     pub parent: Option<usize>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CallDraft {
     pub caller: usize,
+    pub form: CallForm,
+    pub target_kind: CallTargetKind,
     pub name: String,
     pub qualifier: Option<String>,
+    pub receiver_hint: Option<String>,
     pub location: SourceRange,
 }
 
-#[derive(Debug, Clone)]
+struct CallTarget<'tree> {
+    form: CallForm,
+    target_kind: CallTargetKind,
+    name: String,
+    qualifier: Option<String>,
+    receiver_hint: Option<String>,
+    location: Node<'tree>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ImplDraft {
     pub symbol: usize,
     /// Exact syntactic container prefix at the impl site, including inline
@@ -154,6 +175,83 @@ impl Extraction<'_> {
             path: self.path.clone(),
             message: error.to_string(),
         })
+    }
+
+    fn diagnostics(&self, root: Node<'_>) -> Result<(Vec<SyntaxDiagnostic>, u64), ParseError> {
+        if !root.has_error() {
+            return Ok((Vec::new(), 0));
+        }
+        let mut diagnostics = Vec::new();
+        let mut total = 0_u64;
+        let mut cursor = root.walk();
+        loop {
+            let node = cursor.node();
+            let kind = if node.is_error() {
+                Some(SyntaxDiagnosticKind::Error)
+            } else if node.is_missing() {
+                Some(SyntaxDiagnosticKind::Missing)
+            } else {
+                None
+            };
+            if let Some(kind) = kind {
+                total = total.saturating_add(1);
+                if diagnostics.len() < MAX_SYNTAX_DIAGNOSTICS_PER_FILE {
+                    diagnostics.push(SyntaxDiagnostic {
+                        language: Language::Rust,
+                        range: self.range(node)?,
+                        kind,
+                        provenance: Provenance::TreeSitter,
+                        precision: Precision::Syntax,
+                        cause: self.diagnostic_cause(node, kind),
+                        node_kind: node.kind().to_owned(),
+                    });
+                }
+            }
+            if cursor.goto_first_child() {
+                continue;
+            }
+            while !cursor.goto_next_sibling() {
+                if !cursor.goto_parent() {
+                    if total == 0 {
+                        total = 1;
+                        diagnostics.push(SyntaxDiagnostic {
+                            language: Language::Rust,
+                            range: self.range(root)?,
+                            kind: SyntaxDiagnosticKind::Error,
+                            provenance: Provenance::TreeSitter,
+                            precision: Precision::Syntax,
+                            cause: SyntaxDiagnosticCause::ParseRecovery,
+                            node_kind: "<unlocated-error>".to_owned(),
+                        });
+                    }
+                    return Ok((diagnostics, total));
+                }
+            }
+        }
+    }
+
+    fn diagnostic_cause(
+        &self,
+        node: Node<'_>,
+        kind: SyntaxDiagnosticKind,
+    ) -> SyntaxDiagnosticCause {
+        if kind == SyntaxDiagnosticKind::Error
+            && self.text(node) == Some("dyn")
+            && self
+                .source
+                .get(node.end_byte()..)
+                .is_some_and(is_lifetime_first_trait_object_tail)
+        {
+            SyntaxDiagnosticCause::KnownGrammarGap(
+                KnownSyntaxGrammarGap::RustLifetimeFirstTraitObject,
+            )
+        } else if has_attributed_pattern_context(node, self.source) {
+            SyntaxDiagnosticCause::KnownGrammarGap(
+                KnownSyntaxGrammarGap::RustAttributeOnPatternField,
+            )
+        } else {
+            SyntaxDiagnosticCause::ParseRecovery
+        }
     }
 
     fn qualified(prefix: &[String], name: &str) -> String {
@@ -302,7 +400,7 @@ impl Extraction<'_> {
         };
         let caller = self.add_symbol(context, &name, kind, node, self.signature(node))?;
         if let Some(body) = node.child_by_field_name("body") {
-            self.collect_calls(body, caller)?;
+            self.collect_calls(body, caller, context.container.as_deref())?;
             let mut prefix = context.prefix.clone();
             prefix.push(name.clone());
             self.visit(
@@ -478,7 +576,12 @@ impl Extraction<'_> {
         false
     }
 
-    fn collect_calls(&mut self, node: Node<'_>, caller: usize) -> Result<(), ParseError> {
+    fn collect_calls(
+        &mut self,
+        node: Node<'_>,
+        caller: usize,
+        current_container: Option<&str>,
+    ) -> Result<(), ParseError> {
         // Nested item bodies own their calls and are visited separately by
         // `visit_function`; walking through them here would attribute their
         // calls to the enclosing function.
@@ -487,18 +590,21 @@ impl Extraction<'_> {
         }
         if node.kind() == "call_expression"
             && let Some(function) = node.child_by_field_name("function")
-            && let Some((name, qualifier, location_node)) = self.call_target(function)
+            && let Some(target) = self.call_target(function, current_container)
         {
             self.calls.push(CallDraft {
                 caller,
-                name,
-                qualifier,
-                location: self.range(location_node)?,
+                form: target.form,
+                target_kind: target.target_kind,
+                name: target.name,
+                qualifier: target.qualifier,
+                receiver_hint: target.receiver_hint,
+                location: self.range(target.location)?,
             });
         }
         let mut cursor = node.walk();
         for child in node.named_children(&mut cursor) {
-            self.collect_calls(child, caller)?;
+            self.collect_calls(child, caller, current_container)?;
         }
         Ok(())
     }
@@ -506,35 +612,166 @@ impl Extraction<'_> {
     fn call_target<'tree>(
         &self,
         function: Node<'tree>,
-    ) -> Option<(String, Option<String>, Node<'tree>)> {
+        current_container: Option<&str>,
+    ) -> Option<CallTarget<'tree>> {
         match function.kind() {
-            "identifier" => Some((self.text(function)?.to_owned(), None, function)),
+            "identifier" => Some(CallTarget {
+                form: CallForm::Function,
+                target_kind: CallTargetKind::Function,
+                name: self.text(function)?.to_owned(),
+                qualifier: None,
+                receiver_hint: None,
+                location: function,
+            }),
             "scoped_identifier" | "scoped_type_identifier" => {
                 let name_node = function.child_by_field_name("name")?;
                 let path = function.child_by_field_name("path")?;
-                Some((
-                    self.text(name_node)?.to_owned(),
-                    self.text(path).and_then(last_identifier).map(str::to_owned),
-                    name_node,
-                ))
+                let receiver_hint = self.text(path).and_then(bounded_receiver_hint);
+                let qualifier = match receiver_hint.as_deref() {
+                    Some("Self") | Some("self") => current_container.map(str::to_owned),
+                    _ => receiver_hint.clone(),
+                };
+                let target_kind = if matches!(
+                    path.kind(),
+                    "type_identifier" | "generic_type" | "scoped_type_identifier"
+                ) || receiver_hint.as_deref().is_some_and(looks_like_type_name)
+                {
+                    CallTargetKind::Method
+                } else {
+                    CallTargetKind::Function
+                };
+                Some(CallTarget {
+                    form: CallForm::Scoped,
+                    target_kind,
+                    name: self.text(name_node)?.to_owned(),
+                    qualifier,
+                    receiver_hint,
+                    location: name_node,
+                })
             }
             "field_expression" => {
                 let name_node = function.child_by_field_name("field")?;
                 let value = function.child_by_field_name("value")?;
-                Some((
-                    self.text(name_node)?.to_owned(),
-                    self.text(value)
-                        .and_then(last_identifier)
-                        .map(str::to_owned),
-                    name_node,
-                ))
+                let receiver_hint = self.text(value).and_then(bounded_receiver_hint);
+                let qualifier = match receiver_hint.as_deref() {
+                    Some("self") => current_container.map(str::to_owned),
+                    _ => None,
+                };
+                Some(CallTarget {
+                    form: CallForm::Member,
+                    target_kind: CallTargetKind::Method,
+                    name: self.text(name_node)?.to_owned(),
+                    qualifier,
+                    receiver_hint,
+                    location: name_node,
+                })
             }
             "generic_function" => function
                 .child_by_field_name("function")
-                .and_then(|inner| self.call_target(inner)),
+                .and_then(|inner| self.call_target(inner, current_container)),
             _ => None,
         }
     }
+}
+
+fn is_lifetime_first_trait_object_tail(source: &str) -> bool {
+    let tail = source.trim_start();
+    let Some(lifetime) = tail.strip_prefix('\'') else {
+        return false;
+    };
+    let name_length = lifetime
+        .bytes()
+        .take_while(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
+        .count();
+    name_length > 0 && lifetime[name_length..].trim_start().starts_with('+')
+}
+
+fn has_attributed_pattern_context(mut node: Node<'_>, source: &str) -> bool {
+    let diagnostic_range = node.byte_range();
+    for _ in 0..7 {
+        if matches!(
+            node.kind(),
+            "struct_pattern" | "let_declaration" | "match_arm" | "match_block" | "block"
+        ) && source.get(node.byte_range()).is_some_and(|text| {
+            contains_attributed_pattern_field(
+                text,
+                diagnostic_range.start.saturating_sub(node.start_byte()),
+                diagnostic_range.end.saturating_sub(node.start_byte()),
+            )
+        }) {
+            return true;
+        }
+        let Some(parent) = node.parent() else {
+            return false;
+        };
+        node = parent;
+    }
+    false
+}
+
+fn contains_attributed_pattern_field(
+    source: &str,
+    diagnostic_start: usize,
+    diagnostic_end: usize,
+) -> bool {
+    for marker in ["#[cfg", "#[allow"] {
+        let mut search_start = 0_usize;
+        while let Some(relative) = source[search_start..].find(marker) {
+            let attribute_start = search_start.saturating_add(relative);
+            let attribute = &source[attribute_start..];
+            let Some(attribute_end) = attribute.find(']') else {
+                break;
+            };
+            let field = attribute[attribute_end.saturating_add(1)..].trim_start();
+            let field_length = field
+                .bytes()
+                .take_while(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
+                .count();
+            let field_terminator = field[field_length..].trim_start().bytes().next();
+            let before_attribute = source[..attribute_start].trim_end();
+            let pattern_open = before_attribute.rfind('{');
+            let pattern_head = pattern_open.map(|brace| before_attribute[..brace].trim_end());
+            let head_terminator = pattern_head.and_then(|head| head.chars().next_back());
+            let pattern_close = pattern_open.and_then(|open| matching_closing_brace(source, open));
+            let pattern_start = pattern_open.map(|open| {
+                source[..open]
+                    .rfind('\n')
+                    .map_or(0, |newline| newline.saturating_add(1))
+            });
+            if field_length > 0
+                && matches!(field_terminator, Some(b',' | b':' | b'@' | b'}'))
+                && head_terminator.is_some_and(|character| {
+                    character.is_alphanumeric() || matches!(character, '_' | '>')
+                })
+                && pattern_start
+                    .zip(pattern_close)
+                    .is_some_and(|(start, end)| {
+                        diagnostic_end >= start && diagnostic_start <= end.saturating_add(1)
+                    })
+            {
+                return true;
+            }
+            search_start = attribute_start.saturating_add(marker.len());
+        }
+    }
+    false
+}
+
+fn matching_closing_brace(source: &str, open: usize) -> Option<usize> {
+    let mut depth = 0_u32;
+    for (offset, byte) in source.as_bytes().get(open..)?.iter().enumerate() {
+        match byte {
+            b'{' => depth = depth.saturating_add(1),
+            b'}' => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    return Some(open.saturating_add(offset));
+                }
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 fn is_test_attribute(raw: &str) -> bool {
@@ -556,6 +793,15 @@ fn last_identifier(raw: &str) -> Option<&str> {
     raw.trim_matches(|character: char| !character.is_alphanumeric() && character != '_')
         .split(|character: char| !character.is_alphanumeric() && character != '_')
         .rfind(|part| !part.is_empty())
+}
+
+fn bounded_receiver_hint(raw: &str) -> Option<String> {
+    let hint = last_identifier(raw)?;
+    (hint.chars().count() <= MAX_RECEIVER_HINT_CHARS).then(|| hint.to_owned())
+}
+
+fn looks_like_type_name(name: &str) -> bool {
+    name.chars().next().is_some_and(char::is_uppercase)
 }
 
 fn base_type_identifier(raw: &str) -> Option<&str> {
@@ -623,6 +869,7 @@ impl RustParser {
             implementations: Vec::new(),
         };
         extraction.visit(root, &context)?;
+        let (diagnostics, diagnostic_count) = extraction.diagnostics(root)?;
         let Extraction {
             symbols,
             calls,
@@ -636,6 +883,8 @@ impl RustParser {
             calls,
             implementations,
             has_errors: root.has_error(),
+            diagnostics,
+            diagnostic_count,
         })
     }
 }
@@ -700,6 +949,22 @@ mod tests {
                 .count(),
             2
         );
+        let receiver_call = parsed
+            .calls
+            .iter()
+            .find(|call| call.form == CallForm::Member)
+            .ok_or("receiver call missing")?;
+        assert_eq!(receiver_call.target_kind, CallTargetKind::Method);
+        assert_eq!(receiver_call.receiver_hint.as_deref(), Some("provider"));
+        assert_eq!(receiver_call.qualifier, None);
+        let scoped_call = parsed
+            .calls
+            .iter()
+            .find(|call| call.form == CallForm::Scoped)
+            .ok_or("scoped call missing")?;
+        assert_eq!(scoped_call.target_kind, CallTargetKind::Method);
+        assert_eq!(scoped_call.receiver_hint.as_deref(), Some("Service"));
+        assert_eq!(scoped_call.qualifier.as_deref(), Some("Service"));
         assert!(!parsed.has_errors);
         Ok(())
     }
@@ -713,11 +978,83 @@ mod tests {
             "pub fn valid() {}\npub fn broken( {\n".to_owned(),
         )?;
         assert!(parsed.has_errors);
+        assert!(parsed.diagnostic_count > 0);
+        assert!(!parsed.diagnostics.is_empty());
+        assert!(parsed.diagnostics.iter().all(|diagnostic| {
+            diagnostic.language == Language::Rust
+                && diagnostic.range.file().as_str() == "src/lib.rs"
+                && diagnostic.cause == SyntaxDiagnosticCause::ParseRecovery
+        }));
         assert!(
             parsed
                 .symbols
                 .iter()
                 .any(|symbol| symbol.key.qualified_name == "valid")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn accepts_modern_rust_syntax_without_diagnostics() -> Result<(), Box<dyn std::error::Error>> {
+        let mut parser = RustParser::new()?;
+        let parsed = parser.parse(
+            RepoRelativePath::new("src/modern.rs")?,
+            r#"
+pub async fn captured<'a>(value: &'a str) -> impl Future<Output = &'a str> + use<'a> {
+    async move { value }
+}
+
+pub fn let_else(value: Option<u32>) -> u32 {
+    let Some(value) = value else { return 0 };
+    value
+}
+"#
+            .to_owned(),
+        )?;
+        assert!(!parsed.has_errors);
+        assert_eq!(parsed.diagnostic_count, 0);
+        assert!(parsed.diagnostics.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn classifies_confirmed_upstream_rust_grammar_gaps() -> Result<(), Box<dyn std::error::Error>> {
+        let mut parser = RustParser::new()?;
+        let lifetime_first = parser.parse(
+            RepoRelativePath::new("src/lifetime_first.rs")?,
+            "type Callback = Box<dyn 'static + Send + FnOnce()>;",
+        )?;
+        assert_eq!(lifetime_first.diagnostic_count, 1);
+        assert_eq!(
+            lifetime_first.diagnostics[0].cause,
+            SyntaxDiagnosticCause::KnownGrammarGap(
+                KnownSyntaxGrammarGap::RustLifetimeFirstTraitObject,
+            )
+        );
+
+        let attributed_pattern = parser.parse(
+            RepoRelativePath::new("src/attributed_pattern.rs")?,
+            r#"
+struct Options { icon: u32 }
+fn icon(options: Options) -> u32 {
+    let Options {
+        #[allow(unused_variables)]
+        icon,
+    } = options;
+    icon
+}
+"#,
+        )?;
+        assert!(attributed_pattern.diagnostic_count > 0);
+        assert!(
+            attributed_pattern.diagnostics.iter().all(|diagnostic| {
+                diagnostic.cause
+                    == SyntaxDiagnosticCause::KnownGrammarGap(
+                        KnownSyntaxGrammarGap::RustAttributeOnPatternField,
+                    )
+            }),
+            "{:#?}",
+            attributed_pattern.diagnostics
         );
         Ok(())
     }

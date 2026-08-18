@@ -39,3 +39,18 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: EmbarkStudios/cargo-deny-action@v2
+
+  large-repository-gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      # Build the shipped executable as well as the generated multi-language
+      # release gate so debug-only behavior cannot satisfy this job.
+      - uses: dtolnay/rust-toolchain@1.97.1
+      - run: cargo build --locked --release --workspace
+      - run: >-
+          cargo test --locked --release -p chakra-mcp
+          --test large_repository_gate
+          generated_multi_language_release_gate
+          -- --ignored --exact --nocapture

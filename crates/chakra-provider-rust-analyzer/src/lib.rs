@@ -15,16 +15,20 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
+use chakra_domain::operation::OperationContext;
+use chakra_domain::query::{ProviderMetrics, ProviderProgress};
 use chakra_domain::revision::Revision;
 use chakra_domain::state::ProviderState;
 use chakra_engine::{PreciseProvider, PreciseQueryRequest, PreciseQueryResult, ProviderWorkspace};
-use crossbeam_channel::{Sender, bounded};
+use crossbeam_channel::{SendTimeoutError, Sender, bounded};
 use thiserror::Error;
 
 use crate::worker::Worker;
 
 const DEFAULT_COMMAND_CAPACITY: usize = 8;
 const DEFAULT_CACHE_CAPACITY: usize = 128;
+const DEFAULT_CACHE_BYTES: usize = 8 * 1024 * 1024;
+const DEFAULT_QUERY_WAIT_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// Process and bounded-wait settings for the optional provider.
 #[derive(Debug, Clone)]
@@ -33,8 +37,10 @@ pub struct RustAnalyzerConfig {
     pub startup_timeout: Duration,
     pub request_timeout: Duration,
     pub barrier_timeout: Duration,
+    pub query_wait_timeout: Duration,
     pub command_capacity: usize,
     pub cache_capacity: usize,
+    pub cache_bytes: usize,
 }
 
 impl Default for RustAnalyzerConfig {
@@ -44,15 +50,17 @@ impl Default for RustAnalyzerConfig {
             startup_timeout: Duration::from_secs(15),
             request_timeout: Duration::from_secs(5),
             barrier_timeout: Duration::from_millis(750),
+            query_wait_timeout: DEFAULT_QUERY_WAIT_TIMEOUT,
             command_capacity: DEFAULT_COMMAND_CAPACITY,
             cache_capacity: DEFAULT_CACHE_CAPACITY,
+            cache_bytes: DEFAULT_CACHE_BYTES,
         }
     }
 }
 
 #[derive(Debug, Error)]
 pub enum StartError {
-    #[error("provider command and cache capacities must be non-zero")]
+    #[error("provider command, cache entry, and cache byte capacities must be non-zero")]
     InvalidCapacity,
     #[error("provider startup, request, and barrier timeouts must be non-zero")]
     InvalidTimeout,
@@ -74,6 +82,8 @@ struct SharedState {
     synced_revision: Option<Revision>,
     provider_epoch: u64,
     last_error: Option<String>,
+    progress: Option<ProviderProgress>,
+    metrics: ProviderMetrics,
 }
 
 impl Default for SharedState {
@@ -83,6 +93,8 @@ impl Default for SharedState {
             synced_revision: None,
             provider_epoch: 0,
             last_error: None,
+            progress: None,
+            metrics: ProviderMetrics::default(),
         }
     }
 }
@@ -90,6 +102,7 @@ impl Default for SharedState {
 enum Command {
     Enrich {
         request: Box<PreciseQueryRequest>,
+        operation: OperationContext,
         response: Sender<PreciseQueryResult>,
     },
 }
@@ -122,12 +135,13 @@ impl RustAnalyzerProvider {
         initial_workspace: ProviderWorkspace,
         config: RustAnalyzerConfig,
     ) -> Result<Arc<Self>, StartError> {
-        if config.command_capacity == 0 || config.cache_capacity == 0 {
+        if config.command_capacity == 0 || config.cache_capacity == 0 || config.cache_bytes == 0 {
             return Err(StartError::InvalidCapacity);
         }
         if config.startup_timeout.is_zero()
             || config.request_timeout.is_zero()
             || config.barrier_timeout.is_zero()
+            || config.query_wait_timeout.is_zero()
         {
             return Err(StartError::InvalidTimeout);
         }
@@ -165,6 +179,17 @@ impl RustAnalyzerProvider {
             .lock()
             .ok()
             .and_then(|state| state.last_error.clone())
+    }
+
+    pub fn progress(&self) -> Option<ProviderProgress> {
+        self.shared
+            .lock()
+            .ok()
+            .and_then(|state| state.progress.clone())
+    }
+
+    pub fn metrics(&self) -> Option<ProviderMetrics> {
+        self.shared.lock().ok().map(|state| state.metrics.clone())
     }
 
     /// Idempotent cooperative shutdown followed by joining the owned worker.
@@ -212,36 +237,66 @@ impl PreciseProvider for RustAnalyzerProvider {
         RustAnalyzerProvider::last_error(self)
     }
 
+    fn progress(&self) -> Option<ProviderProgress> {
+        RustAnalyzerProvider::progress(self)
+    }
+
+    fn metrics(&self) -> Option<ProviderMetrics> {
+        RustAnalyzerProvider::metrics(self)
+    }
+
+    fn query_wait_budget(&self) -> Option<Duration> {
+        Some(self.config.query_wait_timeout)
+    }
+
     fn enrich(&self, request: PreciseQueryRequest) -> PreciseQueryResult {
+        self.enrich_with_context(request, &OperationContext::unbounded())
+    }
+
+    fn enrich_with_context(
+        &self,
+        request: PreciseQueryRequest,
+        operation: &OperationContext,
+    ) -> PreciseQueryResult {
         let revision = request.workspace.revision;
         if self.stopped.load(Ordering::Acquire) {
             return PreciseQueryResult::unavailable(revision, ProviderState::Degraded);
         }
-        let (sender, receiver) = bounded(1);
-        if self
-            .commands
-            .send_timeout(
-                Command::Enrich {
-                    request: Box::new(request),
-                    response: sender,
-                },
-                self.config.barrier_timeout,
-            )
-            .is_err()
-        {
+        let provider_operation = operation.bounded_by(self.config.query_wait_timeout);
+        if provider_operation.check().is_err() {
             return PreciseQueryResult::unavailable(revision, ProviderState::CatchingUp);
         }
-        // Cover initial startup, a lazy start, one transport restart, both
-        // query attempts, and bounded cancellation/shutdown acknowledgements.
-        let wait = self
-            .config
-            .startup_timeout
-            .saturating_mul(3)
-            .saturating_add(self.config.request_timeout.saturating_mul(2))
-            .saturating_add(self.config.barrier_timeout.saturating_mul(4));
-        receiver.recv_timeout(wait).unwrap_or_else(|_| {
-            PreciseQueryResult::unavailable(revision, ProviderState::CatchingUp)
-        })
+        let (sender, receiver) = bounded(1);
+        let queue_operation = provider_operation.bounded_by(self.config.barrier_timeout);
+        let mut command = Command::Enrich {
+            request: Box::new(request),
+            operation: provider_operation.clone(),
+            response: sender,
+        };
+        loop {
+            let Ok(wait) = queue_operation.poll_timeout(Duration::from_millis(10)) else {
+                return PreciseQueryResult::unavailable(revision, ProviderState::CatchingUp);
+            };
+            match self.commands.send_timeout(command, wait) {
+                Ok(()) => break,
+                Err(SendTimeoutError::Timeout(returned)) => command = returned,
+                Err(SendTimeoutError::Disconnected(_)) => {
+                    return PreciseQueryResult::unavailable(revision, ProviderState::Degraded);
+                }
+            }
+        }
+        loop {
+            let Ok(poll) = provider_operation.poll_timeout(Duration::from_millis(10)) else {
+                return PreciseQueryResult::unavailable(revision, ProviderState::CatchingUp);
+            };
+            match receiver.recv_timeout(poll) {
+                Ok(result) => return result,
+                Err(crossbeam_channel::RecvTimeoutError::Timeout) => {}
+                Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
+                    return PreciseQueryResult::unavailable(revision, ProviderState::Degraded);
+                }
+            }
+        }
     }
 }
 
@@ -295,11 +350,7 @@ mod tests {
             shared.clone(),
             Arc::new(AtomicBool::new(false)),
             RustAnalyzerConfig::default(),
-            ProviderWorkspace {
-                repository_root: root.path().to_path_buf(),
-                revision: Revision(7),
-                documents: Vec::new(),
-            },
+            ProviderWorkspace::from_documents(root.path().to_path_buf(), Revision(7), Vec::new()),
         );
         worker.handle_notification(Notification {
             method: "experimental/serverStatus".to_owned(),
@@ -312,7 +363,7 @@ mod tests {
     }
 
     #[test]
-    fn quiescent_status_does_not_claim_unopened_documents_are_current()
+    fn quiescent_status_can_confirm_the_disk_backed_startup_snapshot()
     -> Result<(), Box<dyn std::error::Error>> {
         let root = tempfile::tempdir()?;
         let (_sender, commands) = bounded(1);
@@ -322,23 +373,23 @@ mod tests {
             shared.clone(),
             Arc::new(AtomicBool::new(false)),
             RustAnalyzerConfig::default(),
-            ProviderWorkspace {
-                repository_root: root.path().to_path_buf(),
-                revision: Revision(7),
-                documents: vec![ProviderDocument {
+            ProviderWorkspace::from_documents(
+                root.path().to_path_buf(),
+                Revision(7),
+                vec![ProviderDocument {
                     path: RepoRelativePath::new("src/lib.rs")?,
                     source: Arc::from("fn target() {}\n"),
                     language: chakra_domain::symbol::Language::Rust,
                 }],
-            },
+            ),
         );
         worker.handle_notification(Notification {
             method: "experimental/serverStatus".to_owned(),
             params: json!({ "health": "ok", "quiescent": true, "message": null }),
         });
         let state = shared.lock().map_err(|_| "shared state lock poisoned")?;
-        assert_eq!(state.state, ProviderState::CatchingUp);
-        assert_eq!(state.synced_revision, None);
+        assert_eq!(state.state, ProviderState::Ready);
+        assert_eq!(state.synced_revision, Some(Revision(7)));
         Ok(())
     }
 
@@ -346,15 +397,15 @@ mod tests {
     fn missing_executable_degrades_without_global_provider()
     -> Result<(), Box<dyn std::error::Error>> {
         let root = tempfile::tempdir()?;
-        let workspace = ProviderWorkspace {
-            repository_root: root.path().to_path_buf(),
-            revision: Revision(1),
-            documents: vec![ProviderDocument {
+        let workspace = ProviderWorkspace::from_documents(
+            root.path().to_path_buf(),
+            Revision(1),
+            vec![ProviderDocument {
                 path: RepoRelativePath::new("src/lib.rs")?,
                 source: Arc::from("fn target() {}\n"),
                 language: chakra_domain::symbol::Language::Rust,
             }],
-        };
+        );
         let provider = RustAnalyzerProvider::start(
             workspace.clone(),
             RustAnalyzerConfig {

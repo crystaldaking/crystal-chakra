@@ -12,15 +12,18 @@ mod precise;
 mod query;
 
 pub use diff::{
-    DiffDocument, DiffWorkspace, WorkspaceDiff, WorkspaceDiffError, WorkspaceDiffProvider,
-    WorkspaceFileChange,
+    DiffDocument, DiffInventoryTruncation, DiffWorkspace, WorkspaceDiff, WorkspaceDiffError,
+    WorkspaceDiffProvider, WorkspaceFileChange,
 };
 pub use engine::{
     BarrierAlreadyInstalled, DiffProviderAlreadyInstalled, FreshnessBarrier, FreshnessBarrierError,
     ProviderAlreadyInstalled, PublishError, UpdateBuilder, WorkspaceEngine, WorkspaceSnapshot,
 };
-pub use graph::{ConsistencyError, GraphError, SymbolGraph};
+pub use graph::{
+    BoundedGraphBuilder, CallSiteInput, ConsistencyAudit, ConsistencyError, GraphBuildLimits,
+    GraphBuildReport, GraphDiagnosticSummary, GraphError, GraphFileSummary, SymbolGraph,
+};
 pub use precise::{
     CallHierarchyDirections, PreciseProvider, PreciseQueryRequest, PreciseQueryResult,
-    PreciseRelation, ProviderDocument, ProviderSymbol, ProviderWorkspace,
+    PreciseRelation, ProviderDocument, ProviderSymbol, ProviderWorkspace, ProviderWorkspaceDelta,
 };

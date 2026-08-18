@@ -9,8 +9,11 @@ mod discovery;
 mod indexer;
 mod parser;
 
-pub use discovery::{DiscoveryError, discover_rust_files, resolve_repository_root};
+pub use discovery::{
+    DiscoveryError, discover_rust_files, discover_rust_sources, resolve_repository_root,
+};
 pub use indexer::{
-    IndexMetrics, IndexReport, ReconcileMetrics, ReconcileReport, RustIndexError, RustSyntaxIndex,
-    index_repository, scan_repository_sources,
+    IndexMetrics, IndexReport, LanguageBuildMetrics, ReconcileMetrics, ReconcileReport,
+    RustIndexError, RustSources, RustSyntaxIndex, SyntaxFactCounts, index_repository,
+    scan_repository_sources,
 };

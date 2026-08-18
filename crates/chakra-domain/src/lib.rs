@@ -5,11 +5,15 @@
 //! `serde`/`schemars` derives exist because the query envelope is defined as
 //! versioned JSON (SPEC §28); they carry no transport semantics.
 
+pub mod diagnostic;
 pub mod envelope;
 pub mod identity;
+pub mod indexing;
 pub mod location;
+pub mod operation;
 pub mod provenance;
 pub mod query;
 pub mod revision;
+pub mod source;
 pub mod state;
 pub mod symbol;

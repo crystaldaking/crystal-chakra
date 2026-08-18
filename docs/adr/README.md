@@ -21,7 +21,7 @@ Date: YYYY-MM-DD
 ## Validation / follow-up
 ```
 
-Accepted v0.1 decisions:
+Accepted decisions:
 
 - ADR-001: workspace revision publication model
 - ADR-002: in-memory graph representation
@@ -32,5 +32,21 @@ Accepted v0.1 decisions:
 - ADR-007: agent queries and Git diff scope
 - ADR-008: PHP syntax support and multi-language composition
 - ADR-009: Git-aware repository and worktree identity
+- ADR-010: lazy syntax call-site resolution
+- ADR-011: bounded indexing and deterministic degradation
+- ADR-012: cooperative query deadlines and cancellation
+- ADR-013: bounded rust-analyzer readiness and revision-delta synchronization
+- ADR-014: bounded resource-aware syntax parsing
+- ADR-015: receiver-aware PHP syntax call resolution
+- ADR-016: deduplicated test relationships
+- ADR-017: deterministic Laravel framework enrichment
+- ADR-018: precise PHP provider evaluation and deferral
+- ADR-019: Cargo-aware, language-neutral source roles
+- ADR-020: bounded deterministic symbol search ranking
+- ADR-021: revision-scoped repository-map pagination and structural overview
+- ADR-022: revision-scoped actionable syntax diagnostics
+- ADR-023: query truncation contract
+- ADR-024: caller aggregation and byte-first response budgets
+- ADR-025: query execution work budgets
 
 Do not pre-create empty ADRs merely to satisfy a list.

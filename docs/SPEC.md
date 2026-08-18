@@ -234,6 +234,14 @@ Representative typed edges:
 - `EXTENDS`
 - `TESTS`
 - `DEPENDS_ON`
+- `BINDS`
+- `RESOLVES`
+- `ROUTES_TO`
+- `DISPATCHES`
+- `LISTENS_TO`
+- `SCHEDULES`
+- `REGISTERS`
+- `AUTHORIZES_WITH`
 - `MODIFIED_BY`
 
 Avoid vague edges such as `RELATED_TO` unless their semantics are explicitly defined.
@@ -587,15 +595,23 @@ Conceptual fields:
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 7,
   "workspace_id": "...",
   "revision": 42,
   "freshness": "fresh",
   "status": "ready",
   "truncated": false,
+  "truncation": [],
   "data": {}
 }
 ```
+
+`truncated` is a summary convenience; every true value must be backed by at
+least one bounded, typed entry in `truncation` that identifies the affected
+response section, the budget cause, the configured limit, and the omitted
+amount when it is known without unbounded work. Workspace-wide ambiguity or
+indexing degradation is status data, not a reason to mark an unrelated query
+section incomplete.
 
 The exact schema is an implementation decision and should be tested as a contract.
 
@@ -609,6 +625,15 @@ Potentially large queries must support sensible limits such as:
 - source inclusion;
 - test inclusion;
 - history inclusion.
+
+Current high-level query collections additionally have independent serialized
+byte budgets. Repeated caller/test relations are aggregated by caller and
+relationship target with an exact occurrence count and bounded representative
+source evidence, so repeated sites do not consume unrelated result slots.
+Construction also has per-section examined-item, graph-traversal,
+intermediate-allocation, and wall-time budgets. A work-truncated section
+reports its cause explicitly; occurrence counts in that section describe the
+examined prefix rather than claiming repository-total completeness.
 
 Never return an unbounded graph dump through MCP.
 
@@ -688,6 +713,10 @@ All long-lived or potentially explosive resources need explicit bounds:
 - child language-provider processes;
 - caches;
 - concurrent expensive queries.
+
+Current high-level queries bound result items, serialized response bytes,
+examined candidates, visited edges/call sites, retained intermediate items,
+and section construction time as separate dimensions.
 
 Future multi-worktree language-provider orchestration must include explicit provider/memory limits.
 

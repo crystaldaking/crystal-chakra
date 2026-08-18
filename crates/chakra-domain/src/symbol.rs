@@ -12,6 +12,11 @@ use serde::{Deserialize, Serialize};
 use crate::location::SourceRange;
 use crate::provenance::{Precision, Provenance};
 
+/// Maximum number of Unicode scalar values retained for a syntactic receiver
+/// hint. Receiver expressions are evidence, not declarations, so keeping an
+/// arbitrarily large expression would add memory without improving identity.
+pub const MAX_RECEIVER_HINT_CHARS: usize = 128;
+
 /// Programming language of a symbol indexed by Chakra v0.1.
 #[derive(
     Debug,
@@ -54,12 +59,16 @@ pub enum SymbolKind {
     Import,
     /// A function identified as a test.
     Test,
+    /// A deterministic declaration contributed by a framework/configuration
+    /// adapter, such as a route or scheduled task registration.
+    Configuration,
 }
 
 /// Strict identity within one specific graph revision (SPEC §10).
 ///
-/// Never stable across revisions; use [`SymbolKey`] for lookup and expect
-/// re-resolution after any update.
+/// Never a stable contract across revisions; structural sharing may preserve
+/// the numeric value for an unchanged payload, but callers must still bind it
+/// to the exact workspace revision and re-resolve after any update.
 #[derive(
     Debug,
     Clone,
@@ -115,7 +124,19 @@ impl Symbol {
 
 /// Typed relation between symbols (SPEC §8). Deliberately excludes vague
 /// relations such as `RELATED_TO`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Serialize,
+    Deserialize,
+    schemars::JsonSchema,
+)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum EdgeKind {
     Contains,
@@ -127,11 +148,27 @@ pub enum EdgeKind {
     Extends,
     Tests,
     DependsOn,
+    /// A container abstraction is bound to a concrete implementation.
+    Binds,
+    /// A callable resolves a type through a dependency container helper.
+    Resolves,
+    /// A route registration targets a controller callable.
+    RoutesTo,
+    /// A callable dispatches a job whose handler is the target.
+    Dispatches,
+    /// A listener callable subscribes to an event type.
+    ListensTo,
+    /// A schedule registration targets a job or command handler.
+    Schedules,
+    /// A configuration callable registers a framework handler.
+    Registers,
+    /// A model/type is associated with an authorization policy.
+    AuthorizesWith,
     ModifiedBy,
 }
 
 /// A directed edge between two symbols of one revision.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct Edge {
     pub kind: EdgeKind,
     pub from: EntityId,
@@ -141,6 +178,84 @@ pub struct Edge {
     /// Source range of the relation itself when known (e.g. the call-site
     /// range for `Calls`).
     pub location: Option<SourceRange>,
+}
+
+/// Syntactic shape of a source call expression.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum CallForm {
+    Function,
+    Member,
+    NullsafeMember,
+    Scoped,
+}
+
+/// Declaration domain considered for a syntax call.
+///
+/// Keeping these domains separate prevents a same-name free function, method,
+/// or test declaration from becoming a candidate solely because its text
+/// matches the call token.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum CallTargetKind {
+    Function,
+    Method,
+    Test,
+}
+
+/// Syntax fact that justified an inferred receiver type for a call site.
+///
+/// This is evidence about source shape, not a claim about PHP runtime
+/// dispatch. The eventual `CALLS` edge therefore remains heuristic unless a
+/// precise language provider replaces it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ReceiverTypeSource {
+    This,
+    Parameter,
+    Property,
+    PromotedProperty,
+    LocalNew,
+    ServiceLocator,
+    ScopedType,
+    SelfType,
+    ParentType,
+}
+
+/// Revision-local resolution state of one compact syntax call site.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum CallResolution {
+    Resolved { target: EntityId },
+    Ambiguous { candidates: u64 },
+    Unresolved,
+}
+
+/// A call expression retained separately from materialized graph edges.
+///
+/// Ambiguous and unresolved calls remain queryable evidence without creating
+/// one graph edge per same-name declaration. Only `Resolved` call sites have
+/// a corresponding syntax `CALLS` edge.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct CallSite {
+    pub caller: EntityId,
+    pub form: CallForm,
+    pub target_kind: CallTargetKind,
+    pub name: String,
+    /// Normalized namespace/type path when syntax provides a usable target
+    /// qualifier.
+    pub qualifier: Option<String>,
+    /// Inferred source-level receiver type before inherited/trait method
+    /// lookup selects a declaration container.
+    pub receiver_type: Option<String>,
+    pub receiver_type_source: Option<ReceiverTypeSource>,
+    /// Bounded syntactic receiver token when available, even when Chakra
+    /// cannot infer its type.
+    pub receiver_hint: Option<String>,
+    pub location: SourceRange,
+    pub resolution: CallResolution,
+    pub provenance: Provenance,
+    pub precision: Precision,
 }
 
 #[cfg(test)]
