@@ -44,10 +44,14 @@ over native filesystem mechanisms:
 - Resolve the worktree-specific and common Git administrative directories at
   startup with Git's absolute `rev-parse --git-dir` and `--git-common-dir`
   results. Events wholly inside those directories are ignored without assuming
-  that administration is a `.git` directory below the worktree. Event paths
-  are retained only as a bounded 32-path hint set; an empty, out-of-worktree,
-  unsupported, invalid, or overflowing set is conservative uncertainty rather
-  than proof of what changed.
+  that administration is a `.git` directory below the worktree. Source event
+  paths are retained only as a bounded 32-path hint set; an empty,
+  out-of-worktree, invalid, or overflowing set is conservative uncertainty
+  rather than proof of what changed. An in-worktree non-source path still wakes
+  reconciliation but is not itself uncertainty: the two Git inventory
+  checkpoints prove source/metadata membership, so ordinary editor temporary
+  paths do not force a full body reread before their source rename target is
+  reconciled.
 - Own the watcher and syntax state in one named blocking worker thread. The
   worker has an explicit shutdown signal and join path. It coalesces event
   bursts with a 50 ms quiet window capped at 250 ms, which tolerates common

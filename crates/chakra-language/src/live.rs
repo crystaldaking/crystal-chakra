@@ -1188,7 +1188,12 @@ fn event_hints(repository_root: &Path, event: &Event) -> (Vec<RepoRelativePath>,
             continue;
         };
         if chakra_git::source_language(relative).is_none() {
-            uncertain = true;
+            // Editor atomic-save sequences commonly create, write and rename
+            // a temporary non-source path before the source destination is
+            // reported. The stable scan always proves the complete Git
+            // source/metadata inventory and every retained file identity, so
+            // an in-worktree non-source path is not evidence that source
+            // events were missed and does not require rereading every body.
             continue;
         }
         match RepoRelativePath::new(relative) {
@@ -1753,7 +1758,7 @@ fn mark_failed_reconciliation(engine: &WorkspaceEngine) {
 mod tests {
     use super::*;
     use chakra_domain::identity::WorkspaceIdentity;
-    use notify::event::{DataChange, ModifyKind};
+    use notify::event::{DataChange, ModifyKind, RenameMode};
 
     #[test]
     fn debounce_has_quiet_and_absolute_bounds_without_sleeping() {
@@ -1807,6 +1812,21 @@ mod tests {
         let administrative = root.join("linked-admin");
         let event = Event::new(EventKind::Any).add_path(administrative.join("index.lock"));
         assert!(!event_may_change_workspace(&event, &[administrative]));
+    }
+
+    #[test]
+    fn atomic_save_temp_paths_keep_the_source_hint_targeted()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = PathBuf::from("/worktree");
+        let event = Event::new(EventKind::Modify(ModifyKind::Name(RenameMode::Both)))
+            .add_path(root.join("src/item.rs.chakra-replacement"))
+            .add_path(root.join("src/item.rs"));
+
+        let (hints, uncertain) = event_hints(&root, &event);
+
+        assert_eq!(hints, [RepoRelativePath::new("src/item.rs")?]);
+        assert!(!uncertain);
+        Ok(())
     }
 
     #[test]

@@ -486,6 +486,11 @@ fn rapid_editor_replacements_converge_to_the_latest_source() -> Result<(), Box<d
         reparsed <= EDITS,
         "coalescing must not invent more parses than materialized edits"
     );
+    assert_eq!(
+        metrics.full_reconciliations - baseline.full_reconciliations,
+        0,
+        "editor replacement temp paths must not force full source rereads"
+    );
     engine.snapshot().graph().validate_consistency()?;
     eprintln!(
         "live_rapid_replacement: edits={EDITS}, fresh_barrier={fresh_elapsed:?}, reparsed={reparsed}, reconciliations={}, dropped_events={}",
