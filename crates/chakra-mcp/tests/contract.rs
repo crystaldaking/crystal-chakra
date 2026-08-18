@@ -10,6 +10,7 @@ use std::sync::Arc;
 
 use chakra_domain::envelope::QueryEnvelope;
 use chakra_domain::identity::WorkspaceIdentity;
+use chakra_domain::operation::OperationContext;
 use chakra_domain::query::{
     CallersRequest, ContextRequest, DiffContextRequest, IndexCounts, QueryError, QueryService,
     RepoMapRequest, SearchRequest, StatusData, StatusRequest, SymbolSearchRequest,
@@ -56,48 +57,55 @@ impl QueryService for StubService {
                     unresolved_call_sites: 0,
                 },
                 providers: vec![],
+                query_execution: None,
             },
         ))
     }
 
-    fn repo_map(
+    fn repo_map_with_context(
         &self,
         _request: RepoMapRequest,
+        _operation: &OperationContext,
     ) -> Result<QueryEnvelope<chakra_domain::query::RepoMapData>, QueryError> {
         Err(QueryError::Unsupported("repo_map"))
     }
 
-    fn search(
+    fn search_with_context(
         &self,
         _request: SearchRequest,
+        _operation: &OperationContext,
     ) -> Result<QueryEnvelope<chakra_domain::query::SearchData>, QueryError> {
         Err(QueryError::Unsupported("search"))
     }
 
-    fn symbol_search(
+    fn symbol_search_with_context(
         &self,
         _request: SymbolSearchRequest,
+        _operation: &OperationContext,
     ) -> Result<QueryEnvelope<chakra_domain::query::SymbolSearchData>, QueryError> {
         Err(QueryError::Unsupported("symbol_search"))
     }
 
-    fn context(
+    fn context_with_context(
         &self,
         _request: ContextRequest,
+        _operation: &OperationContext,
     ) -> Result<QueryEnvelope<chakra_domain::query::ContextData>, QueryError> {
         Err(QueryError::Unsupported("context"))
     }
 
-    fn callers(
+    fn callers_with_context(
         &self,
         _request: CallersRequest,
+        _operation: &OperationContext,
     ) -> Result<QueryEnvelope<chakra_domain::query::CallersData>, QueryError> {
         Err(QueryError::Unsupported("callers"))
     }
 
-    fn diff_context(
+    fn diff_context_with_context(
         &self,
         _request: DiffContextRequest,
+        _operation: &OperationContext,
     ) -> Result<QueryEnvelope<chakra_domain::query::DiffContextData>, QueryError> {
         Err(QueryError::Unsupported("diff_context"))
     }
@@ -192,6 +200,8 @@ async fn status_tool_is_listed_and_callable() -> Result<(), Box<dyn Error + Send
     assert!(structured["indexing"]["capabilities"].is_array());
     assert!(structured["indexing"]["degradations"].is_array());
     assert_eq!(structured["data"]["counts"]["symbols"], 2);
+    assert_eq!(structured["data"]["query_execution"]["queued"], 0);
+    assert_eq!(structured["data"]["query_execution"]["running"], 0);
 
     client.cancel().await?;
     let running = server_task

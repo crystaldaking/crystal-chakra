@@ -10,6 +10,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use chakra_domain::location::{RepoRelativePath, SourceRange};
+use chakra_domain::operation::{OperationAbort, OperationContext};
 use chakra_domain::provenance::{Precision, Provenance};
 use chakra_domain::symbol::{
     CallForm, CallResolution, CallSite, CallTargetKind, Edge, EdgeKind, EntityId, Language,
@@ -19,6 +20,7 @@ use rpds::{HashTrieMapSync, RedBlackTreeMapSync};
 use thiserror::Error;
 
 const PHP_ENTITY_ID_BASE: u64 = 1_u64 << 63;
+const CANCELLATION_POLL_ITEMS: usize = 256;
 
 /// Why a graph mutation was rejected.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -923,6 +925,36 @@ impl SymbolGraph {
         summaries
     }
 
+    pub fn file_summaries_with_context(
+        &self,
+        operation: &OperationContext,
+    ) -> Result<Vec<(RepoRelativePath, u64, Provenance, Precision)>, OperationAbort> {
+        if let Some(parts) = self.parts.as_ref() {
+            let mut summaries = Vec::new();
+            for part in parts.iter() {
+                operation.check()?;
+                summaries.extend(part.file_summaries_with_context(operation)?);
+            }
+            summaries.sort_by(|a, b| a.0.cmp(&b.0));
+            return Ok(summaries);
+        }
+        let mut summaries = Vec::with_capacity(self.files.size());
+        for (index, (path, file)) in self.files.iter().enumerate() {
+            if index % CANCELLATION_POLL_ITEMS == 0 {
+                operation.check()?;
+            }
+            summaries.push((
+                path.clone(),
+                file.symbols.len() as u64,
+                file.provenance,
+                file.precision,
+            ));
+        }
+        summaries.sort_by(|a, b| a.0.cmp(&b.0));
+        operation.check()?;
+        Ok(summaries)
+    }
+
     /// Captured source for one file in this graph revision.
     pub fn file_source(&self, path: &RepoRelativePath) -> Option<&str> {
         if let Some(parts) = self.parts.as_ref() {
@@ -985,6 +1017,33 @@ impl SymbolGraph {
         files
     }
 
+    pub fn source_files_with_context(
+        &self,
+        operation: &OperationContext,
+    ) -> Result<Vec<(&RepoRelativePath, &str)>, OperationAbort> {
+        if let Some(parts) = self.parts.as_ref() {
+            let mut files = Vec::new();
+            for part in parts.iter() {
+                operation.check()?;
+                files.extend(part.source_files_with_context(operation)?);
+            }
+            files.sort_by(|a, b| a.0.cmp(b.0));
+            return Ok(files);
+        }
+        let mut files = Vec::with_capacity(self.files.size());
+        for (index, (path, file)) in self.files.iter().enumerate() {
+            if index % CANCELLATION_POLL_ITEMS == 0 {
+                operation.check()?;
+            }
+            if let Some(source) = file.source.as_deref() {
+                files.push((path, source));
+            }
+        }
+        files.sort_by(|a, b| a.0.cmp(b.0));
+        operation.check()?;
+        Ok(files)
+    }
+
     /// Cheap owned views of captured source for outward adapters. Cloning the
     /// `Arc<str>` never copies file contents.
     pub(crate) fn snapshot_documents(&self) -> Vec<(RepoRelativePath, Arc<str>)> {
@@ -1007,6 +1066,33 @@ impl SymbolGraph {
             .collect();
         files.sort_by(|a, b| a.0.cmp(&b.0));
         files
+    }
+
+    pub(crate) fn snapshot_documents_with_context(
+        &self,
+        operation: &OperationContext,
+    ) -> Result<Vec<(RepoRelativePath, Arc<str>)>, OperationAbort> {
+        if let Some(parts) = self.parts.as_ref() {
+            let mut files = Vec::new();
+            for part in parts.iter() {
+                operation.check()?;
+                files.extend(part.snapshot_documents_with_context(operation)?);
+            }
+            files.sort_by(|a, b| a.0.cmp(&b.0));
+            return Ok(files);
+        }
+        let mut files = Vec::with_capacity(self.files.size());
+        for (index, (path, file)) in self.files.iter().enumerate() {
+            if index % CANCELLATION_POLL_ITEMS == 0 {
+                operation.check()?;
+            }
+            if let Some(source) = file.source.as_ref() {
+                files.push((path.clone(), source.clone()));
+            }
+        }
+        files.sort_by(|a, b| a.0.cmp(&b.0));
+        operation.check()?;
+        Ok(files)
     }
 
     /// Symbols declared in one file, in deterministic arena order.
@@ -1037,8 +1123,6 @@ impl SymbolGraph {
         let needle = needle.to_lowercase();
         let mut matches = Vec::with_capacity(limit.min(self.symbol_count() as usize));
         for symbol in self.symbols() {
-            // The simple name is a suffix of the qualified name, so one
-            // comparison covers both without a second lowercase allocation.
             if symbol.key.qualified_name.to_lowercase().contains(&needle) {
                 if matches.len() == limit {
                     return (matches, true);
@@ -1049,6 +1133,30 @@ impl SymbolGraph {
         (matches, false)
     }
 
+    pub fn search_names_with_context(
+        &self,
+        needle: &str,
+        limit: usize,
+        operation: &OperationContext,
+    ) -> Result<(Vec<EntityId>, bool), OperationAbort> {
+        let needle = needle.to_lowercase();
+        let mut matches = Vec::with_capacity(limit.min(self.symbol_count() as usize));
+        for (index, symbol) in self.symbols().into_iter().enumerate() {
+            if index % CANCELLATION_POLL_ITEMS == 0 {
+                operation.check()?;
+            }
+            // The simple name is a suffix of the qualified name, so one
+            // comparison covers both without a second lowercase allocation.
+            if symbol.key.qualified_name.to_lowercase().contains(&needle) {
+                if matches.len() == limit {
+                    return Ok((matches, true));
+                }
+                matches.push(symbol.id);
+            }
+        }
+        Ok((matches, false))
+    }
+
     /// Exact resolution by simple or qualified name (SPEC §24).
     pub fn resolve_name(&self, name: &str) -> Vec<EntityId> {
         self.symbols()
@@ -1056,6 +1164,23 @@ impl SymbolGraph {
             .filter(|symbol| symbol.name() == name || symbol.key.qualified_name == name)
             .map(|symbol| symbol.id)
             .collect()
+    }
+
+    pub fn resolve_name_with_context(
+        &self,
+        name: &str,
+        operation: &OperationContext,
+    ) -> Result<Vec<EntityId>, OperationAbort> {
+        let mut matches = Vec::new();
+        for (index, symbol) in self.symbols().into_iter().enumerate() {
+            if index % CANCELLATION_POLL_ITEMS == 0 {
+                operation.check()?;
+            }
+            if symbol.name() == name || symbol.key.qualified_name == name {
+                matches.push(symbol.id);
+            }
+        }
+        Ok(matches)
     }
 
     pub fn outgoing_edges(&self, id: EntityId) -> &[Edge] {

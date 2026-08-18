@@ -5,12 +5,10 @@
 //! types, so adapters can report bounded work without becoming part of the
 //! domain model.
 
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+pub use crate::operation::CancellationToken as IndexCancellation;
 use crate::symbol::Language;
 
 pub const DEFAULT_MAX_INDEX_FILES: u64 = 100_000;
@@ -121,20 +119,6 @@ pub enum IndexBudgetError {
     },
     #[error("max_source_file_bytes cannot exceed max_workspace_source_bytes")]
     FileExceedsWorkspace,
-}
-
-/// Cooperative cancellation owned by the caller of an indexing operation.
-#[derive(Debug, Clone, Default)]
-pub struct IndexCancellation(Arc<AtomicBool>);
-
-impl IndexCancellation {
-    pub fn cancel(&self) {
-        self.0.store(true, Ordering::Release);
-    }
-
-    pub fn is_cancelled(&self) -> bool {
-        self.0.load(Ordering::Acquire)
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, schemars::JsonSchema)]

@@ -5,10 +5,11 @@ use std::io::{self, Read};
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use chakra_domain::identity::{IdentityError, RepositoryId, WorkspaceIdentity};
 use chakra_domain::location::{RepoPathError, RepoRelativePath};
+use chakra_domain::operation::{OperationAbort, OperationContext};
 use chakra_domain::symbol::Language;
 use thiserror::Error;
 
@@ -35,6 +36,8 @@ struct GitOutput {
 /// Failure to establish the Git worktree or enumerate its source files.
 #[derive(Debug, Error)]
 pub enum DiscoveryError {
+    #[error(transparent)]
+    Operation(#[from] OperationAbort),
     #[error("failed to execute Git command `{command}`: {source}")]
     Spawn {
         command: &'static str,
@@ -113,7 +116,10 @@ fn capture_git(
     current_dir: &Path,
     command_name: &'static str,
     args: &[&OsStr],
+    operation: &OperationContext,
 ) -> Result<GitOutput, DiscoveryError> {
+    let operation = operation.bounded_by(GIT_COMMAND_TIMEOUT);
+    operation.check()?;
     let mut child = Command::new("git")
         .current_dir(current_dir)
         .stdin(Stdio::null())
@@ -166,20 +172,16 @@ fn capture_git(
             });
         }
     };
-    let deadline = Instant::now() + GIT_COMMAND_TIMEOUT;
     let status = loop {
+        if let Err(error) = operation.check() {
+            terminate_child(&mut child);
+            let _ = stdout_reader.join();
+            let _ = stderr_reader.join();
+            return Err(error.into());
+        }
         match child.try_wait() {
             Ok(Some(status)) => break status,
-            Ok(None) if Instant::now() < deadline => thread::sleep(CHILD_POLL_INTERVAL),
-            Ok(None) => {
-                terminate_child(&mut child);
-                let _ = stdout_reader.join();
-                let _ = stderr_reader.join();
-                return Err(DiscoveryError::Timeout {
-                    command: command_name,
-                    seconds: GIT_COMMAND_TIMEOUT.as_secs(),
-                });
-            }
+            Ok(None) => thread::sleep(CHILD_POLL_INTERVAL),
             Err(source) => {
                 terminate_child(&mut child);
                 let _ = stdout_reader.join();
@@ -225,8 +227,9 @@ fn git_output(
     current_dir: &Path,
     command_name: &'static str,
     args: &[&OsStr],
+    operation: &OperationContext,
 ) -> Result<GitOutput, DiscoveryError> {
-    let output = capture_git(current_dir, command_name, args)?;
+    let output = capture_git(current_dir, command_name, args, operation)?;
     if output.stdout_exceeded {
         return Err(DiscoveryError::OutputTooLarge {
             command: command_name,
@@ -248,6 +251,7 @@ fn git_output(
 /// This deliberately never assumes that Git administration lives at
 /// `<root>/.git`; linked worktrees commonly use a `.git` indirection file.
 pub fn resolve_repository_root(candidate: &Path) -> Result<PathBuf, DiscoveryError> {
+    let operation = OperationContext::unbounded();
     let output = git_output(
         candidate,
         "rev-parse --show-toplevel",
@@ -256,6 +260,7 @@ pub fn resolve_repository_root(candidate: &Path) -> Result<PathBuf, DiscoveryErr
             OsStr::new("--path-format=absolute"),
             OsStr::new("--show-toplevel"),
         ],
+        &operation,
     )?;
     let raw = std::str::from_utf8(&output.stdout).map_err(|_| DiscoveryError::NonUtf8Root)?;
     // `rev-parse` terminates this one path with a newline. Strip only line
@@ -275,6 +280,7 @@ pub fn resolve_repository_root(candidate: &Path) -> Result<PathBuf, DiscoveryErr
 /// identity of the Git-reported common administrative directory on supported
 /// platforms. No `.git` layout is assumed.
 pub fn resolve_repository_identity(candidate: &Path) -> Result<RepositoryId, DiscoveryError> {
+    let operation = OperationContext::unbounded();
     let root = resolve_repository_root(candidate)?;
     let roots = git_output(
         &root,
@@ -284,6 +290,7 @@ pub fn resolve_repository_identity(candidate: &Path) -> Result<RepositoryId, Dis
             OsStr::new("--max-parents=0"),
             OsStr::new("--all"),
         ],
+        &operation,
     )?;
     let mut object_ids = parse_root_object_ids(&roots.stdout)?;
     if !object_ids.is_empty() {
@@ -303,6 +310,7 @@ pub fn resolve_repository_identity(candidate: &Path) -> Result<RepositoryId, Dis
             OsStr::new("--path-format=absolute"),
             OsStr::new("--git-common-dir"),
         ],
+        &operation,
     )?;
     let common_dir = parse_single_path(&common_dir.stdout)?;
     let common_dir = std::fs::canonicalize(&common_dir).map_err(|source| {
@@ -326,6 +334,7 @@ pub fn resolve_workspace_identity(candidate: &Path) -> Result<WorkspaceIdentity,
 /// through Git itself. Callers can use these paths to ignore Git's own
 /// filesystem churn without assuming that administration lives in `.git`.
 pub fn resolve_git_administrative_paths(candidate: &Path) -> Result<Vec<PathBuf>, DiscoveryError> {
+    let operation = OperationContext::unbounded();
     let mut paths = Vec::new();
     for (command, argument) in [
         ("rev-parse --git-dir", "--git-dir"),
@@ -339,6 +348,7 @@ pub fn resolve_git_administrative_paths(candidate: &Path) -> Result<Vec<PathBuf>
                 OsStr::new("--path-format=absolute"),
                 OsStr::new(argument),
             ],
+            &operation,
         )?;
         let path = parse_single_path(&output.stdout)?;
         let canonical = std::fs::canonicalize(&path).map_err(|source| {
@@ -481,7 +491,15 @@ pub fn discover_source_files(root: &Path) -> Result<Vec<RepoRelativePath>, Disco
 pub fn discover_source_files_in_worktree(
     root: &Path,
 ) -> Result<Vec<RepoRelativePath>, DiscoveryError> {
-    discover_files_in_root(root, None)
+    discover_source_files_in_worktree_with_context(root, &OperationContext::unbounded())
+}
+
+/// Context-aware worktree discovery used by freshness reconciliation.
+pub fn discover_source_files_in_worktree_with_context(
+    root: &Path,
+    operation: &OperationContext,
+) -> Result<Vec<RepoRelativePath>, DiscoveryError> {
+    discover_files_in_root(root, None, operation)
 }
 
 fn discover_files(
@@ -489,12 +507,13 @@ fn discover_files(
     language: Option<Language>,
 ) -> Result<Vec<RepoRelativePath>, DiscoveryError> {
     let root = resolve_repository_root(root)?;
-    discover_files_in_root(&root, language)
+    discover_files_in_root(&root, language, &OperationContext::unbounded())
 }
 
 fn discover_files_in_root(
     root: &Path,
     language: Option<Language>,
+    operation: &OperationContext,
 ) -> Result<Vec<RepoRelativePath>, DiscoveryError> {
     let output = git_output(
         root,
@@ -506,18 +525,21 @@ fn discover_files_in_root(
             OsStr::new("--exclude-standard"),
             OsStr::new("-z"),
         ],
+        operation,
     )?;
 
-    source_files_from_git_output(root, &output.stdout, language)
+    source_files_from_git_output(root, &output.stdout, language, operation)
 }
 
 fn source_files_from_git_output(
     root: &Path,
     output: &[u8],
     language: Option<Language>,
+    operation: &OperationContext,
 ) -> Result<Vec<RepoRelativePath>, DiscoveryError> {
     let mut files = Vec::new();
     for raw in output.split(|byte| *byte == 0) {
+        operation.check()?;
         if raw.is_empty() {
             continue;
         }
@@ -693,6 +715,7 @@ mod tests {
             repository.path(),
             b"src/lib.rs\0unrelated-\xff.bin\0",
             Some(Language::Rust),
+            &OperationContext::unbounded(),
         )?;
         assert_eq!(files.len(), 1);
         assert_eq!(files[0].as_str(), "src/lib.rs");

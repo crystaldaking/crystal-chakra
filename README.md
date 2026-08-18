@@ -145,10 +145,14 @@ snippets at 20 lines / 4,096 characters. A complete serialized MCP query
 response is capped at 1 MiB. Every semantic collection cut sets `truncated`;
 an over-budget serialized response is rejected with a request to lower the
 limit without emitting it or constructing a full serialized buffer.
-Potentially expensive MCP queries share two execution slots. Cancellation
-before dispatch removes queued work; an already-dispatched synchronous query
-finishes inside that bound. Timed-out rust-analyzer requests send
-`$/cancelRequest`, and all provider waits have fixed deadlines.
+Potentially expensive MCP queries share two execution slots. Queueing is
+bounded to five seconds and execution to a 30-second end-to-end deadline.
+Cancellation before dispatch removes queued work; cancellation after dispatch
+cooperatively interrupts freshness, graph traversal, Git, and optional provider
+work while the request retains its slot through cleanup. Timed-out or cancelled
+rust-analyzer requests send `$/cancelRequest`. `status.data.query_execution`
+reports queued/running work, outcomes, and permit hold time without itself
+entering the expensive-query pool.
 
 Indexing defaults to 100,000 Git-discovered Rust/PHP files, 8 MiB per source,
 128 MiB total source, 500,000 symbols, 1,000,000 relationships, and 1,000,000
@@ -170,8 +174,10 @@ targets are observable warnings rather than nondeterministic inputs to graph
 contents.
 
 Git discovery/diff subprocesses retain bounded output and have a 30-second
-deadline. Initial indexing also supports cooperative cancellation between file
-and phase units; MCP-wide in-flight cancellation is planned separately.
+local deadline that can only be shortened by the query deadline. Cancellation
+kills and reaps the owned child and joins its bounded pipe readers. Initial and
+live indexing also support cooperative cancellation between file/phase units;
+private cancelled candidates are never published.
 
 ## Git diff scope
 

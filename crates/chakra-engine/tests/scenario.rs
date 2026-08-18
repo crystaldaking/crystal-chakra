@@ -7,6 +7,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use chakra_domain::location::{RepoRelativePath, SourceRange, TextPosition};
+use chakra_domain::operation::OperationContext;
 use chakra_domain::provenance::{Precision, Provenance};
 use chakra_domain::query::{
     CallersRequest, ContextRequest, DiffContextRequest, QueryError, QueryService, RepoMapRequest,
@@ -41,7 +42,11 @@ impl PreciseProvider for CountingRustProvider {
         ProviderState::Ready
     }
 
-    fn enrich(&self, request: PreciseQueryRequest) -> PreciseQueryResult {
+    fn enrich_with_context(
+        &self,
+        request: PreciseQueryRequest,
+        _operation: &OperationContext,
+    ) -> PreciseQueryResult {
         self.calls.fetch_add(1, Ordering::Relaxed);
         PreciseQueryResult::unavailable(request.workspace.revision, ProviderState::Degraded)
     }
@@ -64,7 +69,11 @@ impl PreciseProvider for FixedProvider {
         self.last_error.map(str::to_owned)
     }
 
-    fn enrich(&self, _request: PreciseQueryRequest) -> PreciseQueryResult {
+    fn enrich_with_context(
+        &self,
+        _request: PreciseQueryRequest,
+        _operation: &OperationContext,
+    ) -> PreciseQueryResult {
         self.result.clone()
     }
 }
@@ -99,6 +108,15 @@ fn status_reports_scenario_counts() -> Result<(), Box<dyn Error>> {
             chakra_domain::query::ProviderCapability::SynchronizationState,
         ]
     );
+    Ok(())
+}
+
+#[test]
+fn context_aware_query_rejects_an_expired_operation() -> Result<(), Box<dyn Error>> {
+    let (engine, _) = scenario_engine()?;
+    let operation = OperationContext::with_timeout(std::time::Duration::ZERO);
+    let result = engine.repo_map_with_context(RepoMapRequest::default(), &operation);
+    assert!(matches!(result, Err(QueryError::ExecutionDeadlineExceeded)));
     Ok(())
 }
 

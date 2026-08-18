@@ -34,5 +34,6 @@ Accepted decisions:
 - ADR-009: Git-aware repository and worktree identity
 - ADR-010: lazy syntax call-site resolution
 - ADR-011: bounded indexing and deterministic degradation
+- ADR-012: cooperative query deadlines and cancellation
 
 Do not pre-create empty ADRs merely to satisfy a list.

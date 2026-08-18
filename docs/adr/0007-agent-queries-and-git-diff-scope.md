@@ -34,6 +34,9 @@ would also violate atomic revision semantics.
   process deadline. Change-record parsing stops after enough records to prove
   the 10,000-file work-inventory cap instead of processing the retained output
   only to truncate its response.
+  ADR-012 shortens that process deadline to the query's remaining end-to-end
+  deadline when necessary; cancellation kills and waits for the child and
+  joins both pipe readers before returning.
 - Define the v0.1 default diff scope as `HEAD` to the final materialized
   worktree for indexed regular Rust and PHP files:
   - tracked staged and unstaged edits are combined; final worktree content wins;

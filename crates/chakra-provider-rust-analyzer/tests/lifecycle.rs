@@ -6,9 +6,11 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
-use std::time::Duration;
+use std::sync::mpsc;
+use std::time::{Duration, Instant};
 
 use chakra_domain::location::{RepoRelativePath, SourceRange, TextPosition};
+use chakra_domain::operation::OperationContext;
 use chakra_domain::revision::Revision;
 use chakra_domain::state::ProviderState;
 use chakra_engine::{
@@ -65,6 +67,7 @@ fn main() -> io::Result<()> {
         .is_some_and(|name| name.contains("record-open"));
     let cancelled_path: PathBuf = executable.with_extension("cancelled");
     let opened_path: PathBuf = executable.with_extension("opened");
+    let prepared_path: PathBuf = executable.with_extension("prepared");
     let stdin = io::stdin();
     let mut stdin = stdin.lock();
 
@@ -109,6 +112,7 @@ fn main() -> io::Result<()> {
                 .saturating_add(1);
             fs::write(&opened_path, opened.to_string())?;
         } else if body.contains("\"method\":\"textDocument/prepareCallHierarchy\"") {
+            fs::write(&prepared_path, body.as_bytes())?;
             if record_open {
                 if let Some(id) = request_id(&body) {
                     send(id, "[]")?;
@@ -226,6 +230,41 @@ fn timed_out_request_is_cancelled_before_shutdown() -> Result<(), Box<dyn Error>
     let cancellation = fs::read_to_string(executable.with_extension("cancelled"))?;
     assert!(cancellation.contains("$/cancelRequest"));
     assert!(cancellation.contains("\"id\":2"));
+    Ok(())
+}
+
+#[test]
+fn caller_cancellation_interrupts_an_in_flight_request() -> Result<(), Box<dyn Error>> {
+    let repository = tempfile::tempdir()?;
+    let executable = compile_fake_server(repository.path(), "fake-ra-hang-cancel")?;
+    let request = request(repository.path(), Revision(1))?;
+    let provider = RustAnalyzerProvider::start(request.workspace.clone(), config(&executable))?;
+    let operation = OperationContext::unbounded();
+    let worker_operation = operation.clone();
+    let worker_provider = provider.clone();
+    let (completed, result) = mpsc::sync_channel(1);
+    let query = std::thread::spawn(move || {
+        let response = worker_provider.enrich_with_context(request, &worker_operation);
+        let _ = completed.send(response);
+    });
+
+    let marker = executable.with_extension("prepared");
+    let marker_deadline = Instant::now() + Duration::from_secs(5);
+    while !marker.exists() {
+        if Instant::now() >= marker_deadline {
+            return Err("fake provider did not receive the precise request".into());
+        }
+        std::thread::yield_now();
+    }
+    operation.cancel();
+    let response = result
+        .recv_timeout(Duration::from_millis(250))
+        .map_err(|_| "cancelled provider request did not return promptly")?;
+    assert_eq!(response.state, ProviderState::CatchingUp);
+    query.join().map_err(|_| "provider query thread panicked")?;
+    provider.shutdown()?;
+    let cancellation = fs::read_to_string(executable.with_extension("cancelled"))?;
+    assert!(cancellation.contains("$/cancelRequest"));
     Ok(())
 }
 

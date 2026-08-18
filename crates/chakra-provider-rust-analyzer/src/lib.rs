@@ -15,10 +15,11 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
+use chakra_domain::operation::OperationContext;
 use chakra_domain::revision::Revision;
 use chakra_domain::state::ProviderState;
 use chakra_engine::{PreciseProvider, PreciseQueryRequest, PreciseQueryResult, ProviderWorkspace};
-use crossbeam_channel::{Sender, bounded};
+use crossbeam_channel::{SendTimeoutError, Sender, bounded};
 use thiserror::Error;
 
 use crate::worker::Worker;
@@ -90,6 +91,7 @@ impl Default for SharedState {
 enum Command {
     Enrich {
         request: Box<PreciseQueryRequest>,
+        operation: OperationContext,
         response: Sender<PreciseQueryResult>,
     },
 }
@@ -213,23 +215,36 @@ impl PreciseProvider for RustAnalyzerProvider {
     }
 
     fn enrich(&self, request: PreciseQueryRequest) -> PreciseQueryResult {
+        self.enrich_with_context(request, &OperationContext::unbounded())
+    }
+
+    fn enrich_with_context(
+        &self,
+        request: PreciseQueryRequest,
+        operation: &OperationContext,
+    ) -> PreciseQueryResult {
         let revision = request.workspace.revision;
-        if self.stopped.load(Ordering::Acquire) {
+        if self.stopped.load(Ordering::Acquire) || operation.check().is_err() {
             return PreciseQueryResult::unavailable(revision, ProviderState::Degraded);
         }
         let (sender, receiver) = bounded(1);
-        if self
-            .commands
-            .send_timeout(
-                Command::Enrich {
-                    request: Box::new(request),
-                    response: sender,
-                },
-                self.config.barrier_timeout,
-            )
-            .is_err()
-        {
-            return PreciseQueryResult::unavailable(revision, ProviderState::CatchingUp);
+        let queue_operation = operation.bounded_by(self.config.barrier_timeout);
+        let mut command = Command::Enrich {
+            request: Box::new(request),
+            operation: operation.clone(),
+            response: sender,
+        };
+        loop {
+            let Ok(wait) = queue_operation.poll_timeout(Duration::from_millis(10)) else {
+                return PreciseQueryResult::unavailable(revision, ProviderState::CatchingUp);
+            };
+            match self.commands.send_timeout(command, wait) {
+                Ok(()) => break,
+                Err(SendTimeoutError::Timeout(returned)) => command = returned,
+                Err(SendTimeoutError::Disconnected(_)) => {
+                    return PreciseQueryResult::unavailable(revision, ProviderState::Degraded);
+                }
+            }
         }
         // Cover initial startup, a lazy start, one transport restart, both
         // query attempts, and bounded cancellation/shutdown acknowledgements.
@@ -239,9 +254,19 @@ impl PreciseProvider for RustAnalyzerProvider {
             .saturating_mul(3)
             .saturating_add(self.config.request_timeout.saturating_mul(2))
             .saturating_add(self.config.barrier_timeout.saturating_mul(4));
-        receiver.recv_timeout(wait).unwrap_or_else(|_| {
-            PreciseQueryResult::unavailable(revision, ProviderState::CatchingUp)
-        })
+        let response_operation = operation.bounded_by(wait);
+        loop {
+            let Ok(poll) = response_operation.poll_timeout(Duration::from_millis(10)) else {
+                return PreciseQueryResult::unavailable(revision, ProviderState::CatchingUp);
+            };
+            match receiver.recv_timeout(poll) {
+                Ok(result) => return result,
+                Err(crossbeam_channel::RecvTimeoutError::Timeout) => {}
+                Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
+                    return PreciseQueryResult::unavailable(revision, ProviderState::Degraded);
+                }
+            }
+        }
     }
 }
 

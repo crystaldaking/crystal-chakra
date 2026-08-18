@@ -9,6 +9,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use chakra_domain::location::{RepoRelativePath, SourceRange};
+use chakra_domain::operation::{OperationAbort, OperationContext};
 use chakra_domain::provenance::Provenance;
 use chakra_domain::revision::Revision;
 use chakra_domain::state::ProviderState;
@@ -58,6 +59,36 @@ impl ProviderWorkspace {
             revision: snapshot.revision(),
             documents,
         }
+    }
+
+    pub(crate) fn from_snapshot_with_context(
+        snapshot: &WorkspaceSnapshot,
+        operation: &OperationContext,
+    ) -> Result<Self, OperationAbort> {
+        let documents = snapshot
+            .graph()
+            .snapshot_documents_with_context(operation)?
+            .into_iter()
+            .filter_map(|(path, source)| {
+                let language = snapshot
+                    .graph()
+                    .symbols_in_file(&path)
+                    .next()
+                    .map(|symbol| symbol.key.language)
+                    .or_else(|| language_from_path(path.as_str()))?;
+                Some(ProviderDocument {
+                    path,
+                    source,
+                    language,
+                })
+            })
+            .collect();
+        operation.check()?;
+        Ok(Self {
+            repository_root: snapshot.identity().root.clone(),
+            revision: snapshot.revision(),
+            documents,
+        })
     }
 }
 
@@ -134,7 +165,15 @@ pub trait PreciseProvider: std::fmt::Debug + Send + Sync {
 
     /// Lazily enrich one selected symbol. Implementations must bound waiting
     /// and return `CatchingUp`/`Degraded` rather than stale precise facts.
-    fn enrich(&self, request: PreciseQueryRequest) -> PreciseQueryResult;
+    fn enrich(&self, request: PreciseQueryRequest) -> PreciseQueryResult {
+        self.enrich_with_context(request, &OperationContext::unbounded())
+    }
+
+    fn enrich_with_context(
+        &self,
+        request: PreciseQueryRequest,
+        operation: &OperationContext,
+    ) -> PreciseQueryResult;
 }
 
 fn language_from_path(path: &str) -> Option<Language> {

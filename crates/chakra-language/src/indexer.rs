@@ -166,19 +166,29 @@ impl WorkspaceSyntaxIndex {
 
     pub fn reconcile_sources(
         &self,
+        scan: WorkspaceSourceScan,
+    ) -> Result<ReconcileReport, WorkspaceIndexError> {
+        self.reconcile_sources_with_cancellation(scan, &IndexCancellation::default())
+    }
+
+    pub fn reconcile_sources_with_cancellation(
+        &self,
         mut scan: WorkspaceSourceScan,
+        cancellation: &IndexCancellation,
     ) -> Result<ReconcileReport, WorkspaceIndexError> {
         let started = Instant::now();
+        check_cancelled(cancellation)?;
         let (rust_limits, php_limits) = self.live_graph_limits(&scan.sources);
-        let cancellation = IndexCancellation::default();
         let rust_sources = std::mem::take(&mut scan.sources.rust);
         let php_sources = std::mem::take(&mut scan.sources.php);
         let rust = self
             .rust
-            .reconcile_sources_bounded(rust_sources, rust_limits, &cancellation)?;
+            .reconcile_sources_bounded(rust_sources, rust_limits, cancellation)?;
+        check_cancelled(cancellation)?;
         let php = self
             .php
-            .reconcile_sources_bounded(php_sources, php_limits, &cancellation)?;
+            .reconcile_sources_bounded(php_sources, php_limits, cancellation)?;
+        check_cancelled(cancellation)?;
         let mut metrics = combine_reconcile_metrics(rust.metrics, php.metrics);
 
         let rust_build = rust
@@ -197,6 +207,7 @@ impl WorkspaceSyntaxIndex {
         let php_index = php.next_index.unwrap_or_else(|| self.php.clone());
 
         let (graph, composition_phase) = if graph_changed {
+            check_cancelled(cancellation)?;
             let composition_started = Instant::now();
             let graph =
                 SymbolGraph::merge([rust_index.graph().clone(), php_index.graph().clone()])?;

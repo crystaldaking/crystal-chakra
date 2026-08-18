@@ -12,6 +12,7 @@ use thiserror::Error;
 use crate::envelope::QueryEnvelope;
 use crate::identity::WorkspaceIdentity;
 use crate::location::{RepoRelativePath, SourceRange};
+use crate::operation::{OperationAbort, OperationContext};
 use crate::provenance::{Precision, Provenance};
 use crate::revision::Revision;
 use crate::state::{Freshness, FreshnessRequirement, ProviderState};
@@ -137,11 +138,29 @@ pub struct ProviderInfo {
     pub last_error: Option<String>,
 }
 
+/// Transport-neutral operational counters for the bounded query executor.
+/// Adapters that do not own such an executor leave this absent.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct QueryExecutionMetrics {
+    pub queued: u64,
+    pub running: u64,
+    pub started: u64,
+    pub cancelled: u64,
+    pub queue_timed_out: u64,
+    pub execution_timed_out: u64,
+    pub completed: u64,
+    pub failed: u64,
+    pub permit_hold_micros_total: u64,
+    pub permit_hold_micros_max: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct StatusData {
     pub workspace: WorkspaceIdentity,
     pub counts: IndexCounts,
     pub providers: Vec<ProviderInfo>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub query_execution: Option<QueryExecutionMetrics>,
 }
 
 // --- repo_map ---
@@ -383,6 +402,19 @@ pub enum QueryError {
     FreshnessUnavailable(String),
     #[error("Git diff state is unavailable: {0}")]
     DiffUnavailable(String),
+    #[error("query execution was cancelled by the caller")]
+    Cancelled,
+    #[error("query exceeded its end-to-end execution deadline")]
+    ExecutionDeadlineExceeded,
+}
+
+impl From<OperationAbort> for QueryError {
+    fn from(abort: OperationAbort) -> Self {
+        match abort {
+            OperationAbort::Cancelled => Self::Cancelled,
+            OperationAbort::DeadlineExceeded => Self::ExecutionDeadlineExceeded,
+        }
+    }
 }
 
 /// The MCP-independent application interface (SPEC §23).
@@ -396,17 +428,68 @@ pub enum QueryError {
 /// blocking worker when reconciliation is required.
 pub trait QueryService: Send + Sync {
     fn status(&self, request: StatusRequest) -> Result<QueryEnvelope<StatusData>, QueryError>;
-    fn repo_map(&self, request: RepoMapRequest) -> Result<QueryEnvelope<RepoMapData>, QueryError>;
-    fn search(&self, request: SearchRequest) -> Result<QueryEnvelope<SearchData>, QueryError>;
+    fn repo_map(&self, request: RepoMapRequest) -> Result<QueryEnvelope<RepoMapData>, QueryError> {
+        self.repo_map_with_context(request, &OperationContext::unbounded())
+    }
+    fn search(&self, request: SearchRequest) -> Result<QueryEnvelope<SearchData>, QueryError> {
+        self.search_with_context(request, &OperationContext::unbounded())
+    }
     fn symbol_search(
         &self,
         request: SymbolSearchRequest,
-    ) -> Result<QueryEnvelope<SymbolSearchData>, QueryError>;
-    fn context(&self, request: ContextRequest) -> Result<QueryEnvelope<ContextData>, QueryError>;
-    fn callers(&self, request: CallersRequest) -> Result<QueryEnvelope<CallersData>, QueryError>;
+    ) -> Result<QueryEnvelope<SymbolSearchData>, QueryError> {
+        self.symbol_search_with_context(request, &OperationContext::unbounded())
+    }
+    fn context(&self, request: ContextRequest) -> Result<QueryEnvelope<ContextData>, QueryError> {
+        self.context_with_context(request, &OperationContext::unbounded())
+    }
+    fn callers(&self, request: CallersRequest) -> Result<QueryEnvelope<CallersData>, QueryError> {
+        self.callers_with_context(request, &OperationContext::unbounded())
+    }
     fn diff_context(
         &self,
         request: DiffContextRequest,
+    ) -> Result<QueryEnvelope<DiffContextData>, QueryError> {
+        self.diff_context_with_context(request, &OperationContext::unbounded())
+    }
+
+    /// Context-aware entry points used by bounded execution adapters. These
+    /// are the required implementation contract; legacy/direct entry points
+    /// above supply an unbounded context for non-MCP callers.
+    fn repo_map_with_context(
+        &self,
+        request: RepoMapRequest,
+        operation: &OperationContext,
+    ) -> Result<QueryEnvelope<RepoMapData>, QueryError>;
+
+    fn search_with_context(
+        &self,
+        request: SearchRequest,
+        operation: &OperationContext,
+    ) -> Result<QueryEnvelope<SearchData>, QueryError>;
+
+    fn symbol_search_with_context(
+        &self,
+        request: SymbolSearchRequest,
+        operation: &OperationContext,
+    ) -> Result<QueryEnvelope<SymbolSearchData>, QueryError>;
+
+    fn context_with_context(
+        &self,
+        request: ContextRequest,
+        operation: &OperationContext,
+    ) -> Result<QueryEnvelope<ContextData>, QueryError>;
+
+    fn callers_with_context(
+        &self,
+        request: CallersRequest,
+        operation: &OperationContext,
+    ) -> Result<QueryEnvelope<CallersData>, QueryError>;
+
+    fn diff_context_with_context(
+        &self,
+        request: DiffContextRequest,
+        operation: &OperationContext,
     ) -> Result<QueryEnvelope<DiffContextData>, QueryError>;
 }
 

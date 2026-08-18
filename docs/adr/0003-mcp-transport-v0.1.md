@@ -2,7 +2,7 @@
 
 Status: accepted
 Date: 2026-08-15
-Last reviewed: 2026-08-16
+Last reviewed: 2026-08-18
 
 ## Context
 
@@ -37,10 +37,10 @@ mentions both.
   and concurrent CPU work is bounded without leaking async types into the
   query contract.
 - Cancellation while a request is waiting for a permit prevents dispatch.
-  Once synchronous work has entered the blocking pool it is allowed to finish
-  while retaining its permit, so cancelled work cannot escape the two-query
-  resource bound. Provider requests have their own deadlines and active LSP
-  cancellation.
+  ADR-012 adds a domain-owned operation context and drop guard so cancellation
+  after dispatch cooperatively unwinds freshness, graph, Git, and provider work
+  while retaining the permit until cleanup completes. Queue and execution
+  deadlines are distinct.
 - Stream each completed query envelope through a non-retaining 1 MiB
   transport-budget writer before returning it to rmcp. An oversized response
   is rejected without constructing a full serialized buffer, with a bounded
@@ -77,8 +77,9 @@ mentions both.
   transport verify server identity, all seven tools, a structured `status`
   call against a domain-only stub, and every high-level query against a real
   indexed Rust and PHP fixtures.
-- A unit regression exhausts both blocking-query permits, cancels a queued
-  request, and proves the synchronous service closure is never dispatched.
+- Unit regressions exhaust both blocking-query permits, prove a cancelled queued
+  request is never dispatched, then cancel two already-running requests and
+  prove a third starts without waiting for their original deadline.
 - A unit regression rejects an envelope whose serialized representation
   exceeds the transport budget.
 - All seven tools advertise read-only, non-destructive, idempotent, closed-world

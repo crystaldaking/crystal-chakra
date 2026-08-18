@@ -12,6 +12,7 @@ use std::sync::Arc;
 
 use chakra_domain::envelope::QueryEnvelope;
 use chakra_domain::location::{SourceRange, TextPosition};
+use chakra_domain::operation::OperationContext;
 use chakra_domain::provenance::{Precision, Provenance};
 use chakra_domain::query::{
     CallSiteView, CallersData, CallersRequest, ChangedFile, ChangedSymbol, ChangedSymbolBasis,
@@ -38,6 +39,26 @@ const MAX_MATCH_LINE_CHARS: usize = 512;
 const MAX_SNIPPET_LINES: usize = 20;
 const MAX_SNIPPET_CHARS: usize = 4_096;
 const MAX_FRESH_SNAPSHOT_ATTEMPTS: usize = 3;
+const CANCELLATION_POLL_WORK_ITEMS: usize = 256;
+
+struct CancellationPoll {
+    remaining: usize,
+}
+
+impl CancellationPoll {
+    fn new() -> Self {
+        Self { remaining: 0 }
+    }
+
+    fn observe(&mut self, operation: &OperationContext) -> Result<(), QueryError> {
+        if self.remaining == 0 {
+            operation.check()?;
+            self.remaining = CANCELLATION_POLL_WORK_ITEMS;
+        }
+        self.remaining -= 1;
+        Ok(())
+    }
+}
 
 /// Applies the SPEC §29 budget: default when absent, hard cap always.
 fn clamp_limit(limit: Option<u32>) -> usize {
@@ -57,6 +78,7 @@ fn resolve<'a>(
     graph: &'a SymbolGraph,
     reference: &SymbolRef,
     current_revision: Revision,
+    operation: &OperationContext,
 ) -> Result<&'a Symbol, QueryError> {
     match reference {
         SymbolRef::ById { id, revision } => {
@@ -74,7 +96,7 @@ fn resolve<'a>(
                 .ok_or_else(|| QueryError::SymbolNotFound(format!("{id:?}")))
         }
         SymbolRef::ByName(name) => {
-            let matches = graph.resolve_name(name);
+            let matches = graph.resolve_name_with_context(name, operation)?;
             match matches.len() {
                 0 => Err(QueryError::SymbolNotFound(name.clone())),
                 1 => matches
@@ -102,6 +124,28 @@ fn related(
         precision: edge.precision,
         location: edge.location.clone(),
     })
+}
+
+fn collect_related(
+    graph: &SymbolGraph,
+    edges: &[Edge],
+    kind: EdgeKind,
+    incoming: bool,
+    operation: &OperationContext,
+) -> Result<Vec<RelatedSymbol>, QueryError> {
+    let mut items = Vec::new();
+    let mut poll = CancellationPoll::new();
+    for edge in edges {
+        poll.observe(operation)?;
+        if edge.kind != kind {
+            continue;
+        }
+        let other = if incoming { edge.from } else { edge.to };
+        if let Some(item) = related(graph, edge, other) {
+            items.push(item);
+        }
+    }
+    Ok(items)
 }
 
 fn sort_related(items: &mut [RelatedSymbol]) {
@@ -179,11 +223,14 @@ fn outgoing_call_candidates(
     graph: &SymbolGraph,
     caller: EntityId,
     limit: usize,
-) -> (Vec<CallSiteView>, bool) {
+    operation: &OperationContext,
+) -> Result<(Vec<CallSiteView>, bool), QueryError> {
     let capacity = limit.saturating_add(1);
     let mut items = Vec::with_capacity(capacity);
     let mut truncated = false;
+    let mut poll = CancellationPoll::new();
     for call_site in graph.call_sites_from(caller) {
+        poll.observe(operation)?;
         match call_site.resolution {
             CallResolution::Resolved { .. } => continue,
             CallResolution::Unresolved => {
@@ -214,14 +261,16 @@ fn outgoing_call_candidates(
     sort_call_sites(&mut items);
     truncated |= items.len() > limit;
     items.truncate(limit);
-    (items, truncated)
+    Ok((items, truncated))
 }
 
 fn incoming_call_candidates(
     graph: &SymbolGraph,
     target: EntityId,
     limit: usize,
-) -> (Vec<CallSiteView>, bool) {
+    operation: &OperationContext,
+) -> Result<(Vec<CallSiteView>, bool), QueryError> {
+    operation.check()?;
     let (call_sites, mut truncated) = graph.call_sites_for_target(target, limit.saturating_add(1));
     let target = graph.symbol(target);
     let mut items: Vec<_> = call_sites
@@ -231,7 +280,8 @@ fn incoming_call_candidates(
     sort_call_sites(&mut items);
     truncated |= items.len() > limit;
     items.truncate(limit);
-    (items, truncated)
+    operation.check()?;
+    Ok((items, truncated))
 }
 
 fn provider_state_for(engine: &WorkspaceEngine, snapshot: &WorkspaceSnapshot) -> ProviderState {
@@ -329,14 +379,21 @@ fn enforce_freshness(
 fn query_snapshot(
     engine: &WorkspaceEngine,
     requirement: FreshnessRequirement,
+    operation: &OperationContext,
 ) -> Result<Arc<WorkspaceSnapshot>, QueryError> {
+    operation.check()?;
     if requirement == FreshnessRequirement::AllowStale {
         return Ok(engine.snapshot());
     }
     for _ in 0..MAX_FRESH_SNAPSHOT_ATTEMPTS {
         engine
-            .require_fresh()
-            .map_err(|error| QueryError::FreshnessUnavailable(error.to_string()))?;
+            .require_fresh_with_context(operation)
+            .map_err(|error| {
+                operation.check().map_or_else(QueryError::from, |_| {
+                    QueryError::FreshnessUnavailable(error.to_string())
+                })
+            })?;
+        operation.check()?;
         let snapshot = engine.snapshot();
         if requirement.is_satisfied_by(snapshot.freshness()) {
             return Ok(snapshot);
@@ -354,6 +411,7 @@ fn query_snapshot(
 fn query_workspace_diff(
     engine: &WorkspaceEngine,
     requirement: FreshnessRequirement,
+    operation: &OperationContext,
 ) -> Result<(Arc<WorkspaceSnapshot>, WorkspaceDiff), QueryError> {
     let provider = engine
         .diff_provider()
@@ -366,10 +424,15 @@ fn query_workspace_diff(
     let mut last_error = None;
 
     for _ in 0..attempts {
-        let snapshot = query_snapshot(engine, requirement)?;
-        let diff = match provider.diff(DiffWorkspace::from_snapshot(&snapshot)) {
+        operation.check()?;
+        let snapshot = query_snapshot(engine, requirement, operation)?;
+        let diff = match provider.diff_with_context(
+            DiffWorkspace::from_snapshot_with_context(&snapshot, operation)?,
+            operation,
+        ) {
             Ok(diff) => diff,
             Err(error) => {
+                operation.check()?;
                 last_error = Some(QueryError::DiffUnavailable(error.to_string()));
                 continue;
             }
@@ -384,8 +447,12 @@ fn query_workspace_diff(
         }
         if requirement != FreshnessRequirement::AllowStale {
             engine
-                .require_fresh()
-                .map_err(|error| QueryError::FreshnessUnavailable(error.to_string()))?;
+                .require_fresh_with_context(operation)
+                .map_err(|error| {
+                    operation.check().map_or_else(QueryError::from, |_| {
+                        QueryError::FreshnessUnavailable(error.to_string())
+                    })
+                })?;
             let confirmed = engine.snapshot();
             if confirmed.revision() != snapshot.revision()
                 || !requirement.is_satisfied_by(confirmed.freshness())
@@ -396,6 +463,7 @@ fn query_workspace_diff(
                 continue;
             }
         }
+        operation.check()?;
         return Ok((snapshot, diff));
     }
 
@@ -542,15 +610,24 @@ impl QueryService for WorkspaceEngine {
             workspace: snapshot.identity().clone(),
             counts,
             providers,
+            query_execution: None,
         };
         Ok(envelope(&snapshot, provider_state, false, data))
     }
 
     fn repo_map(&self, request: RepoMapRequest) -> Result<QueryEnvelope<RepoMapData>, QueryError> {
-        let snapshot = query_snapshot(self, request.freshness)?;
+        self.repo_map_with_context(request, &OperationContext::unbounded())
+    }
+
+    fn repo_map_with_context(
+        &self,
+        request: RepoMapRequest,
+        operation: &OperationContext,
+    ) -> Result<QueryEnvelope<RepoMapData>, QueryError> {
+        let snapshot = query_snapshot(self, request.freshness, operation)?;
         let summaries = snapshot
             .graph()
-            .file_summaries()
+            .file_summaries_with_context(operation)?
             .into_iter()
             .map(|(path, count, provenance, precision)| FileSummary {
                 path,
@@ -559,6 +636,7 @@ impl QueryService for WorkspaceEngine {
                 precision,
             })
             .collect();
+        operation.check()?;
         let (files, truncated) = bounded(summaries, clamp_limit(request.limit));
         Ok(envelope(
             &snapshot,
@@ -569,6 +647,14 @@ impl QueryService for WorkspaceEngine {
     }
 
     fn search(&self, request: SearchRequest) -> Result<QueryEnvelope<SearchData>, QueryError> {
+        self.search_with_context(request, &OperationContext::unbounded())
+    }
+
+    fn search_with_context(
+        &self,
+        request: SearchRequest,
+        operation: &OperationContext,
+    ) -> Result<QueryEnvelope<SearchData>, QueryError> {
         if request.query.is_empty() {
             return Err(QueryError::Invalid("query must be non-empty".to_owned()));
         }
@@ -577,7 +663,7 @@ impl QueryService for WorkspaceEngine {
                 "query exceeds the {MAX_QUERY_PATTERN_CHARS}-character pattern budget"
             )));
         }
-        let snapshot = query_snapshot(self, request.freshness)?;
+        let snapshot = query_snapshot(self, request.freshness, operation)?;
         let pattern = if request.regex {
             request.query.clone()
         } else {
@@ -590,10 +676,13 @@ impl QueryService for WorkspaceEngine {
         let limit = clamp_limit(request.limit);
         let mut matches = Vec::new();
         let mut truncated = false;
+        let mut poll = CancellationPoll::new();
 
-        'files: for (path, source) in snapshot.graph().source_files() {
+        'files: for (path, source) in snapshot.graph().source_files_with_context(operation)? {
             for (line_index, line) in source.lines().enumerate() {
+                poll.observe(operation)?;
                 for found in matcher.find_iter(line) {
+                    poll.observe(operation)?;
                     if matches.len() >= limit {
                         truncated = true;
                         break 'files;
@@ -638,6 +727,14 @@ impl QueryService for WorkspaceEngine {
         &self,
         request: SymbolSearchRequest,
     ) -> Result<QueryEnvelope<SymbolSearchData>, QueryError> {
+        self.symbol_search_with_context(request, &OperationContext::unbounded())
+    }
+
+    fn symbol_search_with_context(
+        &self,
+        request: SymbolSearchRequest,
+        operation: &OperationContext,
+    ) -> Result<QueryEnvelope<SymbolSearchData>, QueryError> {
         let query = request.query.trim();
         if query.is_empty() {
             return Err(QueryError::Invalid("query must be non-empty".to_owned()));
@@ -647,9 +744,12 @@ impl QueryService for WorkspaceEngine {
                 "query exceeds the {MAX_QUERY_PATTERN_CHARS}-character pattern budget"
             )));
         }
-        let snapshot = query_snapshot(self, request.freshness)?;
+        let snapshot = query_snapshot(self, request.freshness, operation)?;
         let limit = clamp_limit(request.limit);
-        let (matches, truncated) = snapshot.graph().search_names(query, limit);
+        let (matches, truncated) = snapshot
+            .graph()
+            .search_names_with_context(query, limit, operation)?;
+        operation.check()?;
         let mut candidates: Vec<SymbolView> = matches
             .into_iter()
             .filter_map(|id| snapshot.graph().symbol(id))
@@ -673,28 +773,38 @@ impl QueryService for WorkspaceEngine {
     }
 
     fn context(&self, request: ContextRequest) -> Result<QueryEnvelope<ContextData>, QueryError> {
+        self.context_with_context(request, &OperationContext::unbounded())
+    }
+
+    fn context_with_context(
+        &self,
+        request: ContextRequest,
+        operation: &OperationContext,
+    ) -> Result<QueryEnvelope<ContextData>, QueryError> {
         let reference = request
             .symbol
             .as_ref()
             .ok_or(QueryError::MissingSymbolRef)?;
-        let snapshot = query_snapshot(self, request.freshness)?;
+        let snapshot = query_snapshot(self, request.freshness, operation)?;
         let graph = snapshot.graph();
-        let symbol = resolve(graph, reference, snapshot.revision())?;
+        let symbol = resolve(graph, reference, snapshot.revision(), operation)?;
         let limit = clamp_limit(request.limit);
 
-        let mut callers: Vec<RelatedSymbol> = graph
-            .incoming_edges(symbol.id)
-            .iter()
-            .filter(|edge| edge.kind == EdgeKind::Calls)
-            .filter_map(|edge| related(graph, edge, edge.from))
-            .collect();
+        let mut callers = collect_related(
+            graph,
+            graph.incoming_edges(symbol.id),
+            EdgeKind::Calls,
+            true,
+            operation,
+        )?;
 
-        let mut callees: Vec<RelatedSymbol> = graph
-            .outgoing_edges(symbol.id)
-            .iter()
-            .filter(|edge| edge.kind == EdgeKind::Calls)
-            .filter_map(|edge| related(graph, edge, edge.to))
-            .collect();
+        let mut callees = collect_related(
+            graph,
+            graph.outgoing_edges(symbol.id),
+            EdgeKind::Calls,
+            false,
+            operation,
+        )?;
         let mut provider_state = provider_state_for_language(self, &snapshot, symbol.key.language);
         let mut provider_truncated = false;
         if snapshot.freshness() == Freshness::Fresh
@@ -702,19 +812,23 @@ impl QueryService for WorkspaceEngine {
                 .precise_provider()
                 .filter(|provider| provider.supports(symbol.key.language))
         {
-            let result = provider.enrich(PreciseQueryRequest {
-                workspace: ProviderWorkspace::from_snapshot(&snapshot),
-                symbol: ProviderSymbol {
-                    name: symbol.name().to_owned(),
-                    declaration: symbol.location.clone(),
-                    language: symbol.key.language,
+            let result = provider.enrich_with_context(
+                PreciseQueryRequest {
+                    workspace: ProviderWorkspace::from_snapshot_with_context(&snapshot, operation)?,
+                    symbol: ProviderSymbol {
+                        name: symbol.name().to_owned(),
+                        declaration: symbol.location.clone(),
+                        language: symbol.key.language,
+                    },
+                    directions: CallHierarchyDirections {
+                        incoming: true,
+                        outgoing: true,
+                    },
+                    limit,
                 },
-                directions: CallHierarchyDirections {
-                    incoming: true,
-                    outgoing: true,
-                },
-                limit,
-            });
+                operation,
+            );
+            operation.check()?;
             provider_state = if result.revision == snapshot.revision() {
                 result.state
             } else {
@@ -735,28 +849,30 @@ impl QueryService for WorkspaceEngine {
         let (callers, callers_truncated) = bounded(callers, limit);
         let (callees, callees_truncated) = bounded(callees, limit);
 
-        let mut implementations: Vec<RelatedSymbol> = graph
-            .incoming_edges(symbol.id)
-            .iter()
-            .filter(|edge| edge.kind == EdgeKind::Implements)
-            .filter_map(|edge| related(graph, edge, edge.from))
-            .collect();
+        let mut implementations = collect_related(
+            graph,
+            graph.incoming_edges(symbol.id),
+            EdgeKind::Implements,
+            true,
+            operation,
+        )?;
         sort_related(&mut implementations);
         let (implementations, implementations_truncated) = bounded(implementations, limit);
 
-        let mut tests: Vec<RelatedSymbol> = graph
-            .incoming_edges(symbol.id)
-            .iter()
-            .filter(|edge| edge.kind == EdgeKind::Tests)
-            .filter_map(|edge| related(graph, edge, edge.from))
-            .collect();
+        let mut tests = collect_related(
+            graph,
+            graph.incoming_edges(symbol.id),
+            EdgeKind::Tests,
+            true,
+            operation,
+        )?;
         sort_related(&mut tests);
         let (tests, tests_truncated) = bounded(tests, limit);
 
         let (mut syntax_call_candidates, outgoing_candidates_truncated) =
-            outgoing_call_candidates(graph, symbol.id, limit);
+            outgoing_call_candidates(graph, symbol.id, limit, operation)?;
         let (incoming_candidates, incoming_candidates_truncated) =
-            incoming_call_candidates(graph, symbol.id, limit);
+            incoming_call_candidates(graph, symbol.id, limit, operation)?;
         syntax_call_candidates.extend(incoming_candidates);
         syntax_call_candidates.retain(|candidate| {
             if candidate.caller.id == symbol.id {
@@ -817,42 +933,55 @@ impl QueryService for WorkspaceEngine {
     }
 
     fn callers(&self, request: CallersRequest) -> Result<QueryEnvelope<CallersData>, QueryError> {
+        self.callers_with_context(request, &OperationContext::unbounded())
+    }
+
+    fn callers_with_context(
+        &self,
+        request: CallersRequest,
+        operation: &OperationContext,
+    ) -> Result<QueryEnvelope<CallersData>, QueryError> {
         let reference = request
             .symbol
             .as_ref()
             .ok_or(QueryError::MissingSymbolRef)?;
-        let snapshot = query_snapshot(self, request.freshness)?;
+        let snapshot = query_snapshot(self, request.freshness, operation)?;
         let graph = snapshot.graph();
-        let target = resolve(graph, reference, snapshot.revision())?;
-        let mut callers: Vec<RelatedSymbol> = graph
-            .incoming_edges(target.id)
-            .iter()
-            .filter(|edge| edge.kind == EdgeKind::Calls)
-            .filter_map(|edge| related(graph, edge, edge.from))
-            .collect();
+        let target = resolve(graph, reference, snapshot.revision(), operation)?;
+        let mut callers = collect_related(
+            graph,
+            graph.incoming_edges(target.id),
+            EdgeKind::Calls,
+            true,
+            operation,
+        )?;
         let limit = clamp_limit(request.limit);
         let mut provider_state = provider_state_for_language(self, &snapshot, target.key.language);
         let mut provider_truncated = false;
         let (mut syntax_candidates, candidates_truncated) =
-            incoming_call_candidates(graph, target.id, limit);
+            incoming_call_candidates(graph, target.id, limit, operation)?;
         if snapshot.freshness() == Freshness::Fresh
             && let Some(provider) = self
                 .precise_provider()
                 .filter(|provider| provider.supports(target.key.language))
         {
-            let result = provider.enrich(PreciseQueryRequest {
-                workspace: ProviderWorkspace::from_snapshot(&snapshot),
-                symbol: ProviderSymbol {
-                    name: target.name().to_owned(),
-                    declaration: target.location.clone(),
-                    language: target.key.language,
+            let result = provider.enrich_with_context(
+                PreciseQueryRequest {
+                    workspace: ProviderWorkspace::from_snapshot_with_context(&snapshot, operation)?,
+                    symbol: ProviderSymbol {
+                        name: target.name().to_owned(),
+                        declaration: target.location.clone(),
+                        language: target.key.language,
+                    },
+                    directions: CallHierarchyDirections {
+                        incoming: true,
+                        outgoing: false,
+                    },
+                    limit,
                 },
-                directions: CallHierarchyDirections {
-                    incoming: true,
-                    outgoing: false,
-                },
-                limit,
-            });
+                operation,
+            );
+            operation.check()?;
             provider_state = if result.revision == snapshot.revision() {
                 result.state
             } else {
@@ -885,7 +1014,15 @@ impl QueryService for WorkspaceEngine {
         &self,
         request: DiffContextRequest,
     ) -> Result<QueryEnvelope<DiffContextData>, QueryError> {
-        let (snapshot, mut diff) = query_workspace_diff(self, request.freshness)?;
+        self.diff_context_with_context(request, &OperationContext::unbounded())
+    }
+
+    fn diff_context_with_context(
+        &self,
+        request: DiffContextRequest,
+        operation: &OperationContext,
+    ) -> Result<QueryEnvelope<DiffContextData>, QueryError> {
+        let (snapshot, mut diff) = query_workspace_diff(self, request.freshness, operation)?;
         let graph = snapshot.graph();
         let limit = clamp_limit(request.limit);
         diff.files.sort_by(|a, b| a.path.cmp(&b.path));
@@ -909,8 +1046,11 @@ impl QueryService for WorkspaceEngine {
         let mut tests = BTreeMap::new();
         let mut call_candidates = Vec::with_capacity(limit.saturating_add(1));
         let mut call_candidates_truncated = false;
+        let mut poll = CancellationPoll::new();
         for id in &symbol_ids {
+            poll.observe(operation)?;
             for edge in graph.incoming_edges(*id) {
+                poll.observe(operation)?;
                 let Some(item) = related(graph, edge, edge.from) else {
                     continue;
                 };
@@ -946,7 +1086,8 @@ impl QueryService for WorkspaceEngine {
                 call_candidates_truncated = true;
                 continue;
             }
-            let (candidates, truncated) = incoming_call_candidates(graph, *id, remaining);
+            let (candidates, truncated) =
+                incoming_call_candidates(graph, *id, remaining, operation)?;
             call_candidates_truncated |= truncated;
             call_candidates.extend(candidates.into_iter().map(|call_site| DiffCallSite {
                 changed_symbol_id: *id,

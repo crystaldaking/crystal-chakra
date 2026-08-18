@@ -49,6 +49,10 @@ background work is quiescent:
   bounded. A dedicated writer thread owns child stdin; the worker sends framed
   messages through a bounded queue and requires a deadline-bound completion
   acknowledgement, so a child that stops reading cannot hang provider shutdown.
+  ADR-012 additionally attaches each query's cooperative operation context to
+  the bounded command. Caller cancellation interrupts response waits and sends
+  `$/cancelRequest`; the workspace-owned child remains under provider lifecycle
+  ownership and is reaped on restart/shutdown.
 - Treat the atomically published syntax snapshot as canonical. A precise query
   receives captured `Arc<str>` documents and the selected symbol from one
   pinned snapshot. Every snapshot document is opened into the provider, not
@@ -139,6 +143,8 @@ background work is quiescent:
   write-timeout/degraded state and shuts down cleanly. A unit regression proves
   a prior quiescent status cannot make a newer sync generation ready without
   its request barrier.
+- A hermetic hanging peer proves caller cancellation returns before the local
+  request deadline and receives `$/cancelRequest`.
 - An ignored real-provider smoke test exercises initialization, quiescence,
   incoming Call Hierarchy before and after an edit, conversion, measured
   enrichment latency, and cooperative shutdown when rust-analyzer is

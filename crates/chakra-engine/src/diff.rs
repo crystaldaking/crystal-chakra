@@ -8,6 +8,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use chakra_domain::location::RepoRelativePath;
+use chakra_domain::operation::{OperationAbort, OperationContext};
 use chakra_domain::provenance::{Precision, Provenance};
 use chakra_domain::query::ChangeKind;
 use chakra_domain::revision::Revision;
@@ -32,18 +33,21 @@ pub struct DiffWorkspace {
 }
 
 impl DiffWorkspace {
-    pub(crate) fn from_snapshot(snapshot: &WorkspaceSnapshot) -> Self {
+    pub(crate) fn from_snapshot_with_context(
+        snapshot: &WorkspaceSnapshot,
+        operation: &OperationContext,
+    ) -> Result<Self, OperationAbort> {
         let documents = snapshot
             .graph()
-            .snapshot_documents()
+            .snapshot_documents_with_context(operation)?
             .into_iter()
             .map(|(path, source)| DiffDocument { path, source })
             .collect();
-        Self {
+        Ok(Self {
             repository_root: snapshot.identity().root.clone(),
             revision: snapshot.revision(),
             documents,
-        }
+        })
     }
 }
 
@@ -82,5 +86,13 @@ impl WorkspaceDiffError {
 
 /// Optional adapter installed for the one active v0.1 worktree.
 pub trait WorkspaceDiffProvider: std::fmt::Debug + Send + Sync {
-    fn diff(&self, workspace: DiffWorkspace) -> Result<WorkspaceDiff, WorkspaceDiffError>;
+    fn diff(&self, workspace: DiffWorkspace) -> Result<WorkspaceDiff, WorkspaceDiffError> {
+        self.diff_with_context(workspace, &OperationContext::unbounded())
+    }
+
+    fn diff_with_context(
+        &self,
+        workspace: DiffWorkspace,
+        operation: &OperationContext,
+    ) -> Result<WorkspaceDiff, WorkspaceDiffError>;
 }

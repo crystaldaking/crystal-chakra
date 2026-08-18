@@ -7,6 +7,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
 
 use chakra_domain::location::RepoRelativePath;
+use chakra_domain::operation::OperationContext;
 use chakra_domain::provenance::{Precision, Provenance};
 use chakra_domain::query::{ChangeKind, DiffContextRequest, QueryError, QueryService};
 use chakra_domain::revision::Revision;
@@ -33,7 +34,11 @@ impl StaticDiffProvider {
 }
 
 impl WorkspaceDiffProvider for StaticDiffProvider {
-    fn diff(&self, workspace: DiffWorkspace) -> Result<WorkspaceDiff, WorkspaceDiffError> {
+    fn diff_with_context(
+        &self,
+        workspace: DiffWorkspace,
+        _operation: &OperationContext,
+    ) -> Result<WorkspaceDiff, WorkspaceDiffError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         Ok(WorkspaceDiff {
             revision: if self.wrong_revision {
@@ -61,7 +66,10 @@ struct OneRevisionChange {
 }
 
 impl FreshnessBarrier for OneRevisionChange {
-    fn require_fresh(&self) -> Result<(), FreshnessBarrierError> {
+    fn require_fresh_with_context(
+        &self,
+        _operation: &OperationContext,
+    ) -> Result<(), FreshnessBarrierError> {
         let call = self.calls.fetch_add(1, Ordering::SeqCst);
         if call == 1 {
             let engine = self

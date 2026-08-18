@@ -9,6 +9,7 @@ pub mod envelope;
 pub mod identity;
 pub mod indexing;
 pub mod location;
+pub mod operation;
 pub mod provenance;
 pub mod query;
 pub mod revision;

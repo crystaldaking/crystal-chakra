@@ -65,7 +65,8 @@ pathological files or repositories.
   degraded graph is independent of edit history.
 - Initial indexing accepts a shared cooperative cancellation flag and checks it
   between file/phase units. Cancellation returns a typed error and never
-  publishes partial state. End-to-end MCP query cancellation remains issue #20.
+  publishes partial state. ADR-012 extends the same adapter-neutral ownership
+  model across end-to-end MCP query execution.
 - Do not add a scheduler or parallelism dependency here. Bounded parallel
   parsing is issue #21 and must use these work/memory contracts.
 
@@ -126,4 +127,4 @@ pathological files or repositories.
   reported 182,452,224 bytes maximum RSS. Atomic publication took 1 µs.
 - Issue #15 owns repeatable generated CI gates and the final v0.1.1 readiness
   record. Issue #16 owns structural publication, #17 freshness scan cost, #20
-  end-to-end query cancellation, and #21 bounded parallelism.
+  ADR-012 owns end-to-end query cancellation; #21 owns bounded parallelism.

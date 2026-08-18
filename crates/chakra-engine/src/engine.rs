@@ -11,6 +11,7 @@ use std::sync::{Arc, OnceLock};
 use arc_swap::ArcSwap;
 use chakra_domain::identity::WorkspaceIdentity;
 use chakra_domain::indexing::IndexingStatus;
+use chakra_domain::operation::OperationContext;
 use chakra_domain::revision::Revision;
 use chakra_domain::state::{Freshness, ProviderState, WorkspaceStatus};
 use thiserror::Error;
@@ -92,7 +93,14 @@ impl FreshnessBarrierError {
 /// the completed result before returning. The engine deliberately knows
 /// nothing about filesystem watcher or language-provider types.
 pub trait FreshnessBarrier: std::fmt::Debug + Send + Sync {
-    fn require_fresh(&self) -> Result<(), FreshnessBarrierError>;
+    fn require_fresh(&self) -> Result<(), FreshnessBarrierError> {
+        self.require_fresh_with_context(&OperationContext::unbounded())
+    }
+
+    fn require_fresh_with_context(
+        &self,
+        operation: &OperationContext,
+    ) -> Result<(), FreshnessBarrierError>;
 }
 
 /// A workspace has exactly one owner for freshness reconciliation.
@@ -267,6 +275,22 @@ impl WorkspaceEngine {
         self.freshness_barrier
             .get()
             .map_or(Ok(()), |barrier| barrier.require_fresh())
+    }
+
+    /// Context-aware form used by long-running queries so caller
+    /// cancellation and the end-to-end deadline reach reconciliation.
+    pub fn require_fresh_with_context(
+        &self,
+        operation: &OperationContext,
+    ) -> Result<(), FreshnessBarrierError> {
+        self.freshness_barrier.get().map_or_else(
+            || {
+                operation
+                    .check()
+                    .map_err(|error| FreshnessBarrierError::new(error.to_string()))
+            },
+            |barrier| barrier.require_fresh_with_context(operation),
+        )
     }
 
     /// The currently published revision, as a consistent immutable view.

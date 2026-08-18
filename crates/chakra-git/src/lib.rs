@@ -12,9 +12,10 @@ use std::io::{self, Read};
 use std::path::Path;
 use std::process::{Command, ExitStatus, Stdio};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use chakra_domain::location::RepoRelativePath;
+use chakra_domain::operation::OperationContext;
 use chakra_domain::provenance::{Precision, Provenance};
 use chakra_domain::query::ChangeKind;
 use chakra_engine::{
@@ -25,9 +26,9 @@ mod discovery;
 
 pub use discovery::{
     DiscoveryError, discover_language_files, discover_source_files,
-    discover_source_files_in_worktree, resolve_git_administrative_paths,
-    resolve_repository_identity, resolve_repository_root, resolve_workspace_identity,
-    source_language,
+    discover_source_files_in_worktree, discover_source_files_in_worktree_with_context,
+    resolve_git_administrative_paths, resolve_repository_identity, resolve_repository_root,
+    resolve_workspace_identity, source_language,
 };
 
 const MAX_GIT_OUTPUT_BYTES: usize = 8 * 1024 * 1024;
@@ -89,8 +90,23 @@ fn capture_git(
     root: &Path,
     display: &'static str,
     args: &[&OsStr],
+    operation: &OperationContext,
 ) -> Result<GitOutput, WorkspaceDiffError> {
-    let mut child = Command::new("git")
+    capture_command(OsStr::new("git"), root, display, args, operation)
+}
+
+fn capture_command(
+    executable: &OsStr,
+    root: &Path,
+    display: &'static str,
+    args: &[&OsStr],
+    operation: &OperationContext,
+) -> Result<GitOutput, WorkspaceDiffError> {
+    let operation = operation.bounded_by(GIT_COMMAND_TIMEOUT);
+    operation
+        .check()
+        .map_err(|error| WorkspaceDiffError::new(error.to_string()))?;
+    let mut child = Command::new(executable)
         .current_dir(root)
         .env("GIT_LITERAL_PATHSPECS", "1")
         .stdin(Stdio::null())
@@ -138,20 +154,16 @@ fn capture_git(
             )));
         }
     };
-    let deadline = Instant::now() + GIT_COMMAND_TIMEOUT;
     let status = loop {
+        if let Err(error) = operation.check() {
+            terminate_child(&mut child);
+            let _ = stdout_reader.join();
+            let _ = stderr_reader.join();
+            return Err(WorkspaceDiffError::new(error.to_string()));
+        }
         match child.try_wait() {
             Ok(Some(status)) => break status,
-            Ok(None) if Instant::now() < deadline => thread::sleep(CHILD_POLL_INTERVAL),
-            Ok(None) => {
-                terminate_child(&mut child);
-                let _ = stdout_reader.join();
-                let _ = stderr_reader.join();
-                return Err(WorkspaceDiffError::new(format!(
-                    "`{display}` exceeded the {} second process deadline",
-                    GIT_COMMAND_TIMEOUT.as_secs()
-                )));
-            }
+            Ok(None) => thread::sleep(CHILD_POLL_INTERVAL),
             Err(error) => {
                 terminate_child(&mut child);
                 let _ = stdout_reader.join();
@@ -188,8 +200,9 @@ fn git_output(
     root: &Path,
     display: &'static str,
     args: &[&OsStr],
+    operation: &OperationContext,
 ) -> Result<GitOutput, WorkspaceDiffError> {
-    let output = capture_git(root, display, args)?;
+    let output = capture_git(root, display, args, operation)?;
     if !output.status.success() {
         return Err(WorkspaceDiffError::new(format!(
             "`{display}` exited with status {}: {}",
@@ -205,11 +218,12 @@ fn git_output(
     Ok(output)
 }
 
-fn has_head(root: &Path) -> Result<bool, WorkspaceDiffError> {
+fn has_head(root: &Path, operation: &OperationContext) -> Result<bool, WorkspaceDiffError> {
     let worktree = git_output(
         root,
         "git rev-parse --is-inside-work-tree",
         &[OsStr::new("rev-parse"), OsStr::new("--is-inside-work-tree")],
+        operation,
     )?;
     if worktree.stdout != b"true\n" {
         return Err(WorkspaceDiffError::new(
@@ -226,6 +240,7 @@ fn has_head(root: &Path) -> Result<bool, WorkspaceDiffError> {
             OsStr::new("--quiet"),
             OsStr::new("HEAD"),
         ],
+        operation,
     )?;
     if output.stdout_exceeded {
         return Err(WorkspaceDiffError::new(format!(
@@ -287,6 +302,7 @@ fn insert_change(
 
 fn parse_tracked_changes(
     output: &[u8],
+    operation: &OperationContext,
 ) -> Result<(BTreeMap<RepoRelativePath, WorkspaceFileChange>, bool), WorkspaceDiffError> {
     let mut fields = output
         .split(|byte| *byte == 0)
@@ -294,6 +310,9 @@ fn parse_tracked_changes(
     let mut changes = BTreeMap::new();
 
     while let Some(raw_status) = fields.next() {
+        operation
+            .check()
+            .map_err(|error| WorkspaceDiffError::new(error.to_string()))?;
         if changes.len() > MAX_WORKSPACE_CHANGES {
             return Ok((changes, true));
         }
@@ -371,11 +390,15 @@ fn add_untracked_changes(
     output: &[u8],
     document_paths: &HashSet<&RepoRelativePath>,
     changes: &mut BTreeMap<RepoRelativePath, WorkspaceFileChange>,
+    operation: &OperationContext,
 ) -> Result<(), WorkspaceDiffError> {
     for raw_path in output
         .split(|byte| *byte == 0)
         .filter(|field| !field.is_empty())
     {
+        operation
+            .check()
+            .map_err(|error| WorkspaceDiffError::new(error.to_string()))?;
         if changes.len() > MAX_WORKSPACE_CHANGES {
             break;
         }
@@ -390,7 +413,7 @@ fn add_untracked_changes(
             .get(&path)
             .is_some_and(|change| change.change == ChangeKind::Deleted)
         {
-            if head_blob_id(root, &path)? == worktree_blob_id(root, &path)? {
+            if head_blob_id(root, &path, operation)? == worktree_blob_id(root, &path, operation)? {
                 changes.remove(&path);
             } else {
                 insert_change(
@@ -413,11 +436,15 @@ fn add_index_hidden_changes(
     output: &[u8],
     document_paths: &HashSet<&RepoRelativePath>,
     changes: &mut BTreeMap<RepoRelativePath, WorkspaceFileChange>,
+    operation: &OperationContext,
 ) -> Result<(), WorkspaceDiffError> {
     for record in output
         .split(|byte| *byte == 0)
         .filter(|record| !record.is_empty())
     {
+        operation
+            .check()
+            .map_err(|error| WorkspaceDiffError::new(error.to_string()))?;
         if changes.len() > MAX_WORKSPACE_CHANGES {
             break;
         }
@@ -437,7 +464,7 @@ fn add_index_hidden_changes(
         if changes.contains_key(&path) || !document_paths.contains(&path) {
             continue;
         }
-        if head_blob_id(root, &path)? != worktree_blob_id(root, &path)? {
+        if head_blob_id(root, &path, operation)? != worktree_blob_id(root, &path, operation)? {
             insert_change(
                 changes,
                 path,
@@ -453,6 +480,7 @@ fn add_index_hidden_changes(
 fn head_entry(
     root: &Path,
     path: &RepoRelativePath,
+    operation: &OperationContext,
 ) -> Result<Option<(String, String)>, WorkspaceDiffError> {
     let output = git_output(
         root,
@@ -464,6 +492,7 @@ fn head_entry(
             OsStr::new("--"),
             OsStr::new(path.as_str()),
         ],
+        operation,
     )?;
     let Some(record) = output
         .stdout
@@ -491,13 +520,21 @@ fn head_entry(
     Ok(Some((mode.to_owned(), object_id.to_owned())))
 }
 
-fn head_blob_id(root: &Path, path: &RepoRelativePath) -> Result<String, WorkspaceDiffError> {
-    head_entry(root, path)?
+fn head_blob_id(
+    root: &Path,
+    path: &RepoRelativePath,
+    operation: &OperationContext,
+) -> Result<String, WorkspaceDiffError> {
+    head_entry(root, path, operation)?
         .map(|(_, object_id)| object_id)
         .ok_or_else(|| WorkspaceDiffError::new(format!("HEAD has no blob for `{path}`")))
 }
 
-fn worktree_blob_id(root: &Path, path: &RepoRelativePath) -> Result<String, WorkspaceDiffError> {
+fn worktree_blob_id(
+    root: &Path,
+    path: &RepoRelativePath,
+    operation: &OperationContext,
+) -> Result<String, WorkspaceDiffError> {
     let output = git_output(
         root,
         "git hash-object",
@@ -506,6 +543,7 @@ fn worktree_blob_id(root: &Path, path: &RepoRelativePath) -> Result<String, Work
             OsStr::new("--"),
             OsStr::new(path.as_str()),
         ],
+        operation,
     )?;
     let object_id = std::str::from_utf8(&output.stdout)
         .map_err(|_| WorkspaceDiffError::new("Git returned a non-UTF-8 object id"))?
@@ -522,6 +560,7 @@ fn worktree_blob_id(root: &Path, path: &RepoRelativePath) -> Result<String, Work
 fn validate_current_sources(
     workspace: &DiffWorkspace,
     changes: &BTreeMap<RepoRelativePath, WorkspaceFileChange>,
+    operation: &OperationContext,
 ) -> Result<(), WorkspaceDiffError> {
     let documents: HashMap<_, _> = workspace
         .documents
@@ -529,6 +568,9 @@ fn validate_current_sources(
         .map(|document| (&document.path, document.source.as_ref()))
         .collect();
     for change in changes.values() {
+        operation
+            .check()
+            .map_err(|error| WorkspaceDiffError::new(error.to_string()))?;
         if change.change == ChangeKind::Deleted {
             continue;
         }
@@ -542,6 +584,9 @@ fn validate_current_sources(
                     change.path
                 ))
             })?;
+        operation
+            .check()
+            .map_err(|error| WorkspaceDiffError::new(error.to_string()))?;
         if materialized != *snapshot_source {
             return Err(WorkspaceDiffError::new(format!(
                 "materialized source `{}` changed after syntax revision {} was published",
@@ -555,6 +600,7 @@ fn validate_current_sources(
 fn validate_deleted_sources(
     workspace: &DiffWorkspace,
     changes: &mut BTreeMap<RepoRelativePath, WorkspaceFileChange>,
+    operation: &OperationContext,
 ) -> Result<(), WorkspaceDiffError> {
     let deleted: Vec<_> = changes
         .values()
@@ -562,9 +608,12 @@ fn validate_deleted_sources(
         .map(|change| change.path.clone())
         .collect();
     for path in deleted {
+        operation
+            .check()
+            .map_err(|error| WorkspaceDiffError::new(error.to_string()))?;
         // A tracked symlink (or submodule) with an `.rs` suffix can appear in
         // Git's name diff, but syntax discovery never indexed it as a source.
-        if !head_entry(&workspace.repository_root, &path)?
+        if !head_entry(&workspace.repository_root, &path, operation)?
             .is_some_and(|(mode, _)| mode == "100644" || mode == "100755")
         {
             changes.remove(&path);
@@ -590,12 +639,23 @@ fn validate_deleted_sources(
 
 impl WorkspaceDiffProvider for GitWorkspaceDiff {
     fn diff(&self, workspace: DiffWorkspace) -> Result<WorkspaceDiff, WorkspaceDiffError> {
+        self.diff_with_context(workspace, &OperationContext::unbounded())
+    }
+
+    fn diff_with_context(
+        &self,
+        workspace: DiffWorkspace,
+        operation: &OperationContext,
+    ) -> Result<WorkspaceDiff, WorkspaceDiffError> {
+        operation
+            .check()
+            .map_err(|error| WorkspaceDiffError::new(error.to_string()))?;
         let document_paths: HashSet<_> = workspace
             .documents
             .iter()
             .map(|document| &document.path)
             .collect();
-        let head_exists = has_head(&workspace.repository_root)?;
+        let head_exists = has_head(&workspace.repository_root, operation)?;
         let (mut changes, mut work_truncated) = if head_exists {
             let tracked = git_output(
                 &workspace.repository_root,
@@ -610,8 +670,9 @@ impl WorkspaceDiffProvider for GitWorkspaceDiff {
                     OsStr::new("HEAD"),
                     OsStr::new("--"),
                 ],
+                operation,
             )?;
-            parse_tracked_changes(&tracked.stdout)?
+            parse_tracked_changes(&tracked.stdout, operation)?
         } else {
             let mut unborn = BTreeMap::new();
             for document in &workspace.documents {
@@ -634,12 +695,14 @@ impl WorkspaceDiffProvider for GitWorkspaceDiff {
                 &workspace.repository_root,
                 "git ls-files -v",
                 &[OsStr::new("ls-files"), OsStr::new("-v"), OsStr::new("-z")],
+                operation,
             )?;
             add_index_hidden_changes(
                 &workspace.repository_root,
                 &hidden.stdout,
                 &document_paths,
                 &mut changes,
+                operation,
             )?;
 
             let untracked = git_output(
@@ -651,12 +714,14 @@ impl WorkspaceDiffProvider for GitWorkspaceDiff {
                     OsStr::new("--exclude-standard"),
                     OsStr::new("-z"),
                 ],
+                operation,
             )?;
             add_untracked_changes(
                 &workspace.repository_root,
                 &untracked.stdout,
                 &document_paths,
                 &mut changes,
+                operation,
             )?;
         }
 
@@ -666,8 +731,8 @@ impl WorkspaceDiffProvider for GitWorkspaceDiff {
         changes.retain(|_, change| {
             change.change == ChangeKind::Deleted || document_paths.contains(&change.path)
         });
-        validate_deleted_sources(&workspace, &mut changes)?;
-        validate_current_sources(&workspace, &changes)?;
+        validate_deleted_sources(&workspace, &mut changes, operation)?;
+        validate_current_sources(&workspace, &changes, operation)?;
         work_truncated |= changes.len() > MAX_WORKSPACE_CHANGES;
         let files = changes.into_values().take(MAX_WORKSPACE_CHANGES).collect();
         Ok(WorkspaceDiff {
@@ -685,6 +750,10 @@ mod tests {
     use std::path::Path;
     use std::process::Command;
     use std::sync::Arc;
+    #[cfg(unix)]
+    use std::sync::mpsc;
+    #[cfg(unix)]
+    use std::time::Instant;
 
     use chakra_domain::revision::Revision;
     use chakra_engine::{DiffDocument, DiffWorkspace, WorkspaceDiffProvider};
@@ -942,10 +1011,12 @@ mod tests {
         )]);
         let snapshot = workspace(repository.path(), &[])?;
 
-        let error = match validate_deleted_sources(&snapshot, &mut changes) {
-            Ok(()) => return Err("reappeared path was accepted as deleted".into()),
-            Err(error) => error,
-        };
+        let error =
+            match validate_deleted_sources(&snapshot, &mut changes, &OperationContext::unbounded())
+            {
+                Ok(()) => return Err("reappeared path was accepted as deleted".into()),
+                Err(error) => error,
+            };
         assert!(error.to_string().contains("reappeared"));
         Ok(())
     }
@@ -977,6 +1048,66 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn cancellation_terminates_and_reaps_an_owned_process() -> Result<(), Box<dyn Error>> {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = TempDir::new()?;
+        let executable = directory.path().join("fake-git");
+        let marker = directory.path().join("pid");
+        fs::write(
+            &executable,
+            "#!/bin/sh\nprintf '%s' \"$$\" > \"$1\"\nwhile :; do :; done\n",
+        )?;
+        let mut permissions = fs::metadata(&executable)?.permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&executable, permissions)?;
+
+        let operation = OperationContext::unbounded();
+        let worker_operation = operation.clone();
+        let worker_executable = executable.clone();
+        let worker_marker = marker.clone();
+        let (completed, result) = mpsc::sync_channel(1);
+        let worker = std::thread::spawn(move || {
+            let response = capture_command(
+                worker_executable.as_os_str(),
+                directory.path(),
+                "fake cancellable Git",
+                &[worker_marker.as_os_str()],
+                &worker_operation,
+            );
+            let _ = completed.send(response);
+        });
+
+        let marker_deadline = Instant::now() + Duration::from_secs(5);
+        while !marker.exists() {
+            if Instant::now() >= marker_deadline {
+                return Err("fake Git process did not start".into());
+            }
+            std::thread::yield_now();
+        }
+        let pid = fs::read_to_string(&marker)?;
+        operation.cancel();
+        let response = result
+            .recv_timeout(Duration::from_millis(250))
+            .map_err(|_| "cancelled Git process was not reaped promptly")?;
+        let error = match response {
+            Ok(_) => return Err("cancelled Git process unexpectedly succeeded".into()),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("cancelled"));
+        worker.join().map_err(|_| "Git worker thread panicked")?;
+
+        let alive = Command::new("kill")
+            .args(["-0", pid.trim()])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()?;
+        assert!(!alive.success(), "cancelled Git child still exists");
+        Ok(())
+    }
+
     #[test]
     fn unrelated_non_utf8_file_does_not_break_rust_diff() -> Result<(), Box<dyn Error>> {
         let mut changes = BTreeMap::new();
@@ -985,6 +1116,7 @@ mod tests {
             b"unrelated-\xff.bin\0",
             &HashSet::new(),
             &mut changes,
+            &OperationContext::unbounded(),
         )?;
         assert!(changes.is_empty());
         Ok(())

@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use chakra_domain::location::{RepoRelativePath, SourceRange};
+use chakra_domain::operation::{OperationAbort, OperationContext};
 use chakra_domain::revision::Revision;
 use chakra_domain::state::ProviderState;
 use chakra_engine::{
@@ -78,6 +79,8 @@ pub(crate) enum ProviderError {
     Transport(#[from] TransportError),
     #[error("timed out waiting for rust-analyzer response")]
     Timeout,
+    #[error("rust-analyzer request was cancelled by its caller")]
+    Cancelled,
     #[error("rust-analyzer request failed ({code}): {message}")]
     Request { code: i32, message: String },
     #[error("invalid rust-analyzer response: {0}")]
@@ -111,7 +114,7 @@ impl ProviderError {
 
     fn fallback_state(&self) -> ProviderState {
         match self {
-            Self::Timeout | Self::CatchingUp => ProviderState::CatchingUp,
+            Self::Timeout | Self::Cancelled | Self::CatchingUp => ProviderState::CatchingUp,
             _ => ProviderState::Degraded,
         }
     }
@@ -135,6 +138,7 @@ pub(crate) struct Worker {
     quiescent_generation: Option<u64>,
     cache: HashMap<CacheKey, PreciseQueryResult>,
     shutting_down: bool,
+    active_operation: Option<OperationContext>,
 }
 
 impl Worker {
@@ -164,6 +168,7 @@ impl Worker {
             quiescent_generation: None,
             cache: HashMap::new(),
             shutting_down: false,
+            active_operation: None,
         }
     }
 
@@ -173,8 +178,12 @@ impl Worker {
         }
         while !self.force_stop.load(Ordering::Acquire) {
             match self.commands.recv_timeout(IDLE_POLL) {
-                Ok(Command::Enrich { request, response }) => {
-                    let result = self.handle_enrich(*request);
+                Ok(Command::Enrich {
+                    request,
+                    operation,
+                    response,
+                }) => {
+                    let result = self.handle_enrich(*request, operation);
                     let _ = response.send(result);
                 }
                 Err(crossbeam_channel::RecvTimeoutError::Timeout) => self.drain_idle_messages(),
@@ -192,10 +201,24 @@ impl Worker {
         );
     }
 
-    fn handle_enrich(&mut self, request: PreciseQueryRequest) -> PreciseQueryResult {
+    fn handle_enrich(
+        &mut self,
+        request: PreciseQueryRequest,
+        operation: OperationContext,
+    ) -> PreciseQueryResult {
+        self.active_operation = Some(operation);
+        let result = self.handle_enrich_inner(request);
+        self.active_operation = None;
+        result
+    }
+
+    fn handle_enrich_inner(&mut self, request: PreciseQueryRequest) -> PreciseQueryResult {
         let mut request = request;
         request.limit = request.limit.min(MAX_PROVIDER_RESULTS);
         let revision = request.workspace.revision;
+        if self.check_operation().is_err() {
+            return PreciseQueryResult::unavailable(revision, ProviderState::CatchingUp);
+        }
         self.drain_idle_messages();
         if revision < self.known_revision {
             return PreciseQueryResult::unavailable(revision, ProviderState::CatchingUp);
@@ -255,6 +278,18 @@ impl Worker {
         PreciseQueryResult::unavailable(revision, state)
     }
 
+    fn check_operation(&self) -> Result<(), ProviderError> {
+        match self
+            .active_operation
+            .as_ref()
+            .map_or(Ok(()), OperationContext::check)
+        {
+            Ok(()) => Ok(()),
+            Err(OperationAbort::Cancelled) => Err(ProviderError::Cancelled),
+            Err(OperationAbort::DeadlineExceeded) => Err(ProviderError::Timeout),
+        }
+    }
+
     fn query_with_owned_session(
         &mut self,
         request: &PreciseQueryRequest,
@@ -272,6 +307,7 @@ impl Worker {
         session: &mut Session,
         request: &PreciseQueryRequest,
     ) -> Result<PreciseQueryResult, ProviderError> {
+        self.check_operation()?;
         self.set_state(ProviderState::CatchingUp, None, None);
         let deadline = Instant::now() + self.config.request_timeout;
         self.synchronize_documents(
@@ -284,6 +320,7 @@ impl Worker {
         let mut last_outgoing = Vec::new();
 
         for attempt in 0..2 {
+            self.check_operation()?;
             let items = self.prepare_call_hierarchy(session, request, deadline)?;
             self.confirm_sync_barrier();
             let Some(item) = self.select_hierarchy_item(items, request)? else {
@@ -456,6 +493,7 @@ impl Worker {
         target: &SourceRange,
         deadline: Instant,
     ) -> Result<(), ProviderError> {
+        self.check_operation()?;
         let current = document_map(&workspace.documents);
         if !current.contains_key(target.file()) {
             return Err(ProviderError::InvalidPosition);
@@ -489,6 +527,7 @@ impl Worker {
 
         let mut events = Vec::new();
         for path in deleted {
+            self.check_operation()?;
             if self.opened_versions.remove(&path).is_some() {
                 self.send_notification(
                     session,
@@ -507,6 +546,7 @@ impl Worker {
             });
         }
         for (path, source, content_changed) in upserts {
+            self.check_operation()?;
             if content_changed {
                 let change_type = if self.known_documents.contains_key(&path) {
                     FileChangeType::CHANGED
@@ -696,14 +736,14 @@ impl Worker {
         session.send(&Message::Request(request), deadline)?;
         let value = match self.wait_for_response(session, &id, deadline) {
             Ok(value) => value,
-            Err(ProviderError::Timeout) => {
+            Err(error @ (ProviderError::Timeout | ProviderError::Cancelled)) => {
                 let _ = self.send_notification(
                     session,
                     "$/cancelRequest",
                     json!({ "id": id }),
                     Instant::now() + self.config.barrier_timeout,
                 );
-                return Err(ProviderError::Timeout);
+                return Err(error);
             }
             Err(error) => return Err(error),
         };
@@ -735,6 +775,7 @@ impl Worker {
         deadline: Instant,
     ) -> Result<Value, ProviderError> {
         loop {
+            self.check_operation()?;
             if self.force_stop.load(Ordering::Acquire) && !self.shutting_down {
                 let _ = self.send_notification(
                     session,
@@ -895,6 +936,7 @@ impl Worker {
     fn wait_for_quiescence(&mut self, session: &mut Session) -> Result<(), ProviderError> {
         let deadline = Instant::now() + self.config.barrier_timeout;
         loop {
+            self.check_operation()?;
             if self.force_stop.load(Ordering::Acquire) {
                 return Err(ProviderError::CatchingUp);
             }
@@ -904,10 +946,19 @@ impl Worker {
             let remaining = deadline
                 .checked_duration_since(Instant::now())
                 .ok_or(ProviderError::CatchingUp)?;
-            let event = session
-                .incoming()
-                .recv_timeout(remaining)
-                .map_err(|_| ProviderError::CatchingUp)?;
+            let poll = remaining.min(IDLE_POLL);
+            let event = match session.incoming().recv_timeout(poll) {
+                Ok(event) => event,
+                Err(crossbeam_channel::RecvTimeoutError::Timeout) if poll < remaining => continue,
+                Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
+                    return Err(ProviderError::CatchingUp);
+                }
+                Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
+                    return Err(ProviderError::Transport(TransportError::Closed(
+                        "reader disconnected".to_owned(),
+                    )));
+                }
+            };
             match event {
                 TransportEvent::Message(Message::Notification(notification)) => {
                     self.handle_notification(notification);

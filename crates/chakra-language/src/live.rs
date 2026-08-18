@@ -14,6 +14,7 @@ use std::time::{Duration, Instant};
 use std::os::unix::fs::MetadataExt;
 
 use chakra_domain::location::RepoRelativePath;
+use chakra_domain::operation::OperationContext;
 use chakra_domain::state::{Freshness, WorkspaceStatus};
 use chakra_engine::{FreshnessBarrier, FreshnessBarrierError, SymbolGraph, WorkspaceEngine};
 use notify::event::{AccessKind, AccessMode};
@@ -30,6 +31,7 @@ const EVENT_QUEUE_CAPACITY: usize = 256;
 const DEBOUNCE_QUIET: Duration = Duration::from_millis(50);
 const DEBOUNCE_MAX: Duration = Duration::from_millis(250);
 const FRESHNESS_TIMEOUT: Duration = Duration::from_secs(30);
+const FRESHNESS_CANCELLATION_POLL: Duration = Duration::from_millis(10);
 const MAX_STABLE_SCAN_ATTEMPTS: usize = 3;
 const MAX_WATCHED_DIRECTORIES: usize = 4_096;
 const MAX_PUBLISH_ATTEMPTS: usize = 3;
@@ -312,7 +314,9 @@ enum WorkerSignal {
 struct BarrierState {
     requested: u64,
     completed: u64,
-    last_error: Option<String>,
+    waiters: BTreeMap<u64, OperationContext>,
+    outcomes: BTreeMap<u64, Result<(), String>>,
+    worker_operation: Option<OperationContext>,
     shutdown: bool,
 }
 
@@ -328,15 +332,96 @@ impl BarrierShared {
             .state
             .lock()
             .map_err(|_| "freshness state lock is poisoned".to_owned())?;
-        Ok((state.requested, state.completed))
+        let requested = state
+            .waiters
+            .keys()
+            .next_back()
+            .copied()
+            .unwrap_or(state.completed);
+        Ok((requested, state.completed))
+    }
+
+    fn register(&self, operation: OperationContext) -> Result<u64, FreshnessBarrierError> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| FreshnessBarrierError::new("freshness state lock is poisoned"))?;
+        if state.shutdown {
+            return Err(FreshnessBarrierError::new("live index worker is stopped"));
+        }
+        state.requested = state
+            .requested
+            .checked_add(1)
+            .ok_or_else(|| FreshnessBarrierError::new("freshness generation overflow"))?;
+        let target = state.requested;
+        state.waiters.insert(target, operation);
+        Ok(target)
+    }
+
+    fn begin_barrier_reconciliation(&self) -> Result<(u64, u64, OperationContext), String> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| "freshness state lock is poisoned".to_owned())?;
+        let generation = state
+            .waiters
+            .keys()
+            .next_back()
+            .copied()
+            .unwrap_or(state.completed);
+        let operation = OperationContext::unbounded();
+        if !state
+            .waiters
+            .range((state.completed.saturating_add(1))..=generation)
+            .any(|(_, waiter)| waiter.check().is_ok())
+        {
+            operation.cancel();
+        }
+        state.worker_operation = Some(operation.clone());
+        Ok((generation, state.completed, operation))
     }
 
     fn complete(&self, generation: u64, result: Result<(), String>) {
         let Ok(mut state) = self.state.lock() else {
             return;
         };
+        let outcome = result;
+        let targets: Vec<_> = state
+            .waiters
+            .range(..=generation)
+            .map(|(target, _)| *target)
+            .collect();
+        for target in targets {
+            state
+                .outcomes
+                .entry(target)
+                .or_insert_with(|| outcome.clone());
+        }
         state.completed = state.completed.max(generation);
-        state.last_error = result.err();
+        state.worker_operation = None;
+        self.completed.notify_all();
+    }
+
+    fn finish_waiter(&self, target: u64) {
+        let Ok(mut state) = self.state.lock() else {
+            return;
+        };
+        state.waiters.remove(&target);
+        state.outcomes.remove(&target);
+        let has_active = state.waiters.iter().any(|(generation, operation)| {
+            *generation > state.completed && operation.check().is_ok()
+        });
+        if !has_active && let Some(operation) = &state.worker_operation {
+            operation.cancel();
+        }
+        self.completed.notify_all();
+    }
+
+    fn abandon_worker(&self) {
+        let Ok(mut state) = self.state.lock() else {
+            return;
+        };
+        state.worker_operation = None;
         self.completed.notify_all();
     }
 
@@ -358,70 +443,62 @@ struct LiveFreshnessBarrier {
 
 impl FreshnessBarrier for LiveFreshnessBarrier {
     fn require_fresh(&self) -> Result<(), FreshnessBarrierError> {
+        self.require_fresh_with_context(&OperationContext::with_timeout(FRESHNESS_TIMEOUT))
+    }
+
+    fn require_fresh_with_context(
+        &self,
+        operation: &OperationContext,
+    ) -> Result<(), FreshnessBarrierError> {
         self.metrics
             .barrier_requests
             .fetch_add(1, Ordering::Relaxed);
-        let target = {
+        let operation = operation.bounded_by(FRESHNESS_TIMEOUT);
+        operation
+            .check()
+            .map_err(|error| FreshnessBarrierError::new(error.to_string()))?;
+        let target = self.shared.register(operation.clone())?;
+        match self.sender.try_send(WorkerSignal::Barrier) {
+            Ok(()) | Err(TrySendError::Full(_)) => {}
+            Err(TrySendError::Disconnected(_)) => {
+                self.shared.stop();
+                self.shared.finish_waiter(target);
+                return Err(FreshnessBarrierError::new("live index worker disconnected"));
+            }
+        }
+
+        let result = (|| {
             let mut state = self
                 .shared
                 .state
                 .lock()
                 .map_err(|_| FreshnessBarrierError::new("freshness state lock is poisoned"))?;
-            if state.shutdown {
-                return Err(FreshnessBarrierError::new("live index worker is stopped"));
+            loop {
+                operation
+                    .check()
+                    .map_err(|error| FreshnessBarrierError::new(error.to_string()))?;
+                if let Some(outcome) = state.outcomes.get(&target) {
+                    return outcome.as_ref().map_or_else(
+                        |message| Err(FreshnessBarrierError::new(message.clone())),
+                        |_| Ok(()),
+                    );
+                }
+                if state.shutdown {
+                    return Err(FreshnessBarrierError::new("live index worker stopped"));
+                }
+                let wait = operation
+                    .poll_timeout(FRESHNESS_CANCELLATION_POLL)
+                    .map_err(|error| FreshnessBarrierError::new(error.to_string()))?;
+                let (next, _) = self
+                    .shared
+                    .completed
+                    .wait_timeout(state, wait)
+                    .map_err(|_| FreshnessBarrierError::new("freshness state lock is poisoned"))?;
+                state = next;
             }
-            state.requested = state
-                .requested
-                .checked_add(1)
-                .ok_or_else(|| FreshnessBarrierError::new("freshness generation overflow"))?;
-            state.requested
-        };
-        match self.sender.try_send(WorkerSignal::Barrier) {
-            Ok(()) | Err(TrySendError::Full(_)) => {}
-            Err(TrySendError::Disconnected(_)) => {
-                self.shared.stop();
-                return Err(FreshnessBarrierError::new("live index worker disconnected"));
-            }
-        }
-
-        let deadline = Instant::now() + FRESHNESS_TIMEOUT;
-        let mut state = self
-            .shared
-            .state
-            .lock()
-            .map_err(|_| FreshnessBarrierError::new("freshness state lock is poisoned"))?;
-        loop {
-            if state.completed >= target {
-                return state.last_error.as_ref().map_or(Ok(()), |message| {
-                    Err(FreshnessBarrierError::new(message.clone()))
-                });
-            }
-            if state.shutdown {
-                return Err(FreshnessBarrierError::new("live index worker stopped"));
-            }
-            let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
-                self.metrics
-                    .reconciliation_failures
-                    .fetch_add(1, Ordering::Relaxed);
-                return Err(FreshnessBarrierError::new(
-                    "timed out waiting for filesystem reconciliation",
-                ));
-            };
-            let (next, timeout) = self
-                .shared
-                .completed
-                .wait_timeout(state, remaining)
-                .map_err(|_| FreshnessBarrierError::new("freshness state lock is poisoned"))?;
-            state = next;
-            if timeout.timed_out() && state.completed < target {
-                self.metrics
-                    .reconciliation_failures
-                    .fetch_add(1, Ordering::Relaxed);
-                return Err(FreshnessBarrierError::new(
-                    "timed out waiting for filesystem reconciliation",
-                ));
-            }
-        }
+        })();
+        self.shared.finish_waiter(target);
+        result
     }
 }
 
@@ -494,10 +571,16 @@ struct CachedSourceLoader<'a> {
     force_full: bool,
     files_read: u64,
     metrics: &'a MetricsState,
+    operation: &'a OperationContext,
 }
 
 impl<'a> CachedSourceLoader<'a> {
-    fn new(previous: &'a SourceSnapshotCache, force_full: bool, metrics: &'a MetricsState) -> Self {
+    fn new(
+        previous: &'a SourceSnapshotCache,
+        force_full: bool,
+        metrics: &'a MetricsState,
+        operation: &'a OperationContext,
+    ) -> Self {
         Self {
             previous,
             next: BTreeMap::new(),
@@ -505,6 +588,7 @@ impl<'a> CachedSourceLoader<'a> {
             force_full,
             files_read: 0,
             metrics,
+            operation,
         }
     }
 
@@ -534,6 +618,9 @@ impl WorkspaceSourceLoader for CachedSourceLoader<'_> {
         metadata: &fs::Metadata,
         max_bytes: u64,
     ) -> Result<Arc<str>, WorkspaceIndexError> {
+        self.operation
+            .check()
+            .map_err(|_| WorkspaceIndexError::Cancelled)?;
         let before = FileIdentity::from_metadata(metadata);
         let reused = !self.force_full
             && before.trustworthy_for_reuse()
@@ -571,6 +658,9 @@ impl WorkspaceSourceLoader for CachedSourceLoader<'_> {
                 .fetch_add(source.len() as u64, Ordering::Relaxed);
             Arc::<str>::from(source)
         };
+        self.operation
+            .check()
+            .map_err(|_| WorkspaceIndexError::Cancelled)?;
         let after = if reused {
             before.clone()
         } else {
@@ -900,6 +990,7 @@ fn run_worker(
                         &options,
                         &BTreeSet::new(),
                         false,
+                        true,
                     );
                 }
             }
@@ -982,6 +1073,7 @@ fn run_worker(
                     &options,
                     &hints,
                     uncertain,
+                    false,
                 );
             }
         }
@@ -1011,6 +1103,7 @@ fn run_worker(
                 &options,
                 &BTreeSet::new(),
                 false,
+                true,
             );
         }
     }
@@ -1110,8 +1203,17 @@ fn reconcile(
     options: &LiveIndexOptions,
     hints: &BTreeSet<RepoRelativePath>,
     uncertain_hint: bool,
+    cancel_when_unobserved: bool,
 ) {
-    let (generation, completed_before) = shared.pending_generation().unwrap_or((0, 0));
+    let pending = shared.pending_generation().unwrap_or((0, 0));
+    let (generation, completed_before, operation) = if cancel_when_unobserved {
+        let Ok(reconciliation) = shared.begin_barrier_reconciliation() else {
+            return;
+        };
+        reconciliation
+    } else {
+        (pending.0, pending.1, OperationContext::unbounded())
+    };
     let watcher_errors = metrics.watcher_errors.load(Ordering::Acquire);
     let dropped_events = metrics.dropped_watcher_events.load(Ordering::Acquire);
     let watcher_error_advanced = watcher_errors > *reconciled_watcher_errors;
@@ -1136,13 +1238,15 @@ fn reconcile(
                 shared,
                 source_cache,
                 force_full,
+                &operation,
             )?;
             let ReconcileReport {
                 graph,
                 metrics: reconcile_metrics,
                 next_index,
                 indexing,
-            } = syntax_index.reconcile_sources(stable.scan)?;
+            } = syntax_index
+                .reconcile_sources_with_cancellation(stable.scan, &operation.cancellation())?;
             let next_paths: Vec<_> = stable.cache.entries.keys().cloned().collect();
             let paths_changed = *indexed_paths != next_paths;
             if paths_changed || force_reinstall_watches || watch_set_dirty {
@@ -1176,6 +1280,9 @@ fn reconcile(
             if metrics.event_epoch.load(Ordering::Acquire) != stable.event_epoch {
                 continue;
             }
+            operation
+                .check()
+                .map_err(|_| WorkspaceIndexError::Cancelled)?;
             let published = publish_fresh(engine, graph.as_ref(), status, &indexing)
                 .map_err(WorkspaceIndexError::Update)?;
             if let Some(next_index) = next_index {
@@ -1220,6 +1327,10 @@ fn reconcile(
     }
     match result {
         Ok(completed_generation) => shared.complete(completed_generation, Ok(())),
+        Err(WorkspaceIndexError::Cancelled) => {
+            shared.abandon_worker();
+            info!("freshness reconciliation cancelled before publication");
+        }
         Err(error) => {
             metrics
                 .reconciliation_failures
@@ -1268,6 +1379,7 @@ fn stable_scan(
     shared: &BarrierShared,
     previous: &SourceSnapshotCache,
     force_full: bool,
+    operation: &OperationContext,
 ) -> Result<StableSourceSnapshot, WorkspaceIndexError> {
     let mut last_error = None;
     let mut attempt_force_full = force_full;
@@ -1277,10 +1389,16 @@ fn stable_scan(
     let initial_watcher_errors = metrics.watcher_errors.load(Ordering::Acquire);
     let initial_dropped_events = metrics.dropped_watcher_events.load(Ordering::Acquire);
     for _ in 0..MAX_STABLE_SCAN_ATTEMPTS {
+        operation
+            .check()
+            .map_err(|_| WorkspaceIndexError::Cancelled)?;
         let epoch = metrics.event_epoch.load(Ordering::Acquire);
         let inventory_started = Instant::now();
         metrics.git_subprocesses.fetch_add(1, Ordering::Relaxed);
-        let paths = match chakra_git::discover_source_files_in_worktree(repository_root) {
+        let paths = match chakra_git::discover_source_files_in_worktree_with_context(
+            repository_root,
+            operation,
+        ) {
             Ok(paths) => paths,
             Err(error) => {
                 last_error = Some(WorkspaceIndexError::Discovery(error));
@@ -1291,12 +1409,9 @@ fn stable_scan(
         };
         let inventory_elapsed = inventory_started.elapsed();
         let inventory_changed = !previous.initialized || previous.inventory != paths;
-        let scan_options = IndexOptions::new(
-            syntax_index.budgets(),
-            chakra_domain::indexing::IndexCancellation::default(),
-        )?;
+        let scan_options = IndexOptions::new(syntax_index.budgets(), operation.cancellation())?;
         let cache = retry_cache.as_ref().unwrap_or(previous);
-        let mut loader = CachedSourceLoader::new(cache, attempt_force_full, metrics);
+        let mut loader = CachedSourceLoader::new(cache, attempt_force_full, metrics, operation);
         let scan_result = scan_discovered_sources_with_options(
             repository_root,
             &scan_options,
@@ -1319,7 +1434,10 @@ fn stable_scan(
             .map_or(0, |(requested, _)| requested);
 
         metrics.git_subprocesses.fetch_add(1, Ordering::Relaxed);
-        let verified_paths = match chakra_git::discover_source_files_in_worktree(repository_root) {
+        let verified_paths = match chakra_git::discover_source_files_in_worktree_with_context(
+            repository_root,
+            operation,
+        ) {
             Ok(paths) => paths,
             Err(error) => {
                 last_error = Some(WorkspaceIndexError::Discovery(error));
@@ -1339,6 +1457,9 @@ fn stable_scan(
 
         let mut identities_match = true;
         for (path, expected) in &loader.observed {
+            operation
+                .check()
+                .map_err(|_| WorkspaceIndexError::Cancelled)?;
             let absolute = repository_root.join(path.as_str());
             match fs::metadata(&absolute) {
                 Ok(metadata) => {
@@ -1724,6 +1845,46 @@ mod tests {
             metrics.barrier_waiters_coalesced.load(Ordering::Relaxed),
             WAITERS - 1
         );
+        Ok(())
+    }
+
+    #[test]
+    fn later_success_does_not_overwrite_an_earlier_generation_error()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let shared = BarrierShared {
+            state: Mutex::new(BarrierState::default()),
+            completed: Condvar::new(),
+        };
+        let first = shared.register(OperationContext::unbounded())?;
+        let second = shared.register(OperationContext::unbounded())?;
+        shared.complete(first, Err("first failed".to_owned()));
+        shared.complete(second, Ok(()));
+
+        let state = shared.state.lock().map_err(|_| "barrier lock poisoned")?;
+        assert_eq!(
+            state.outcomes.get(&first),
+            Some(&Err("first failed".to_owned()))
+        );
+        assert_eq!(state.outcomes.get(&second), Some(&Ok(())));
+        Ok(())
+    }
+
+    #[test]
+    fn cancelling_the_last_waiter_cancels_barrier_only_reconciliation()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let shared = BarrierShared {
+            state: Mutex::new(BarrierState::default()),
+            completed: Condvar::new(),
+        };
+        let waiter = OperationContext::unbounded();
+        let target = shared.register(waiter.clone())?;
+        let (_, _, worker) = shared.begin_barrier_reconciliation()?;
+        assert!(worker.check().is_ok());
+
+        waiter.cancel();
+        shared.finish_waiter(target);
+        assert!(worker.check().is_err());
+        assert_eq!(shared.pending_generation()?, (0, 0));
         Ok(())
     }
 }
