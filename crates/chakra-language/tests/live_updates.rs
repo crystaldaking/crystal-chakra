@@ -11,13 +11,16 @@ use chakra_domain::identity::WorkspaceIdentity;
 use chakra_domain::indexing::{IndexBudgetKind, IndexBudgets, IndexCancellation, IndexPhase};
 use chakra_domain::location::RepoRelativePath;
 use chakra_domain::query::{
-    ContextRequest, QueryError, QueryService, RepoMapRequest, SymbolRef, SymbolSearchRequest,
+    ContextRequest, DiffContextRequest, QueryError, QueryService, RepoMapRequest, SymbolRef,
+    SymbolSearchRequest,
 };
 use chakra_domain::state::{Freshness, FreshnessRequirement, WorkspaceStatus};
 use chakra_domain::symbol::{CallResolution, Language};
 use chakra_engine::WorkspaceEngine;
 use chakra_language::{
-    IndexOptions, LiveIndex, index_repository, index_repository_with_options, start_live_index,
+    IndexOptions, LiveIndex, LiveIndexError, LiveIndexOptions, ReconciliationKind,
+    index_repository, index_repository_with_options, start_live_index,
+    start_live_index_with_options,
 };
 use tempfile::TempDir;
 
@@ -50,6 +53,13 @@ fn repository() -> Result<TempDir, Box<dyn Error>> {
 }
 
 fn start(repository: &TempDir) -> Result<(Arc<WorkspaceEngine>, LiveIndex), Box<dyn Error>> {
+    start_with_options(repository, None)
+}
+
+fn start_with_options(
+    repository: &TempDir,
+    options: Option<LiveIndexOptions>,
+) -> Result<(Arc<WorkspaceEngine>, LiveIndex), Box<dyn Error>> {
     let report = index_repository(repository.path())?;
     let identity = WorkspaceIdentity::for_primary_worktree(&report.repository_root)?;
     let engine = Arc::new(WorkspaceEngine::new(identity));
@@ -59,8 +69,40 @@ fn start(repository: &TempDir) -> Result<(Arc<WorkspaceEngine>, LiveIndex), Box<
     update.set_status(WorkspaceStatus::Indexing);
     update.set_freshness(Freshness::Stale);
     engine.publish(update)?;
-    let live = start_live_index(report.repository_root, report.syntax_index, engine.clone())?;
+    let live = if let Some(options) = options {
+        start_live_index_with_options(
+            report.repository_root,
+            report.syntax_index,
+            engine.clone(),
+            options,
+        )?
+    } else {
+        start_live_index(report.repository_root, report.syntax_index, engine.clone())?
+    };
     Ok((engine, live))
+}
+
+#[test]
+fn zero_full_reconciliation_interval_is_rejected() -> Result<(), Box<dyn Error>> {
+    let repository = repository()?;
+    let report = index_repository(repository.path())?;
+    let identity = WorkspaceIdentity::for_primary_worktree(&report.repository_root)?;
+    let engine = Arc::new(WorkspaceEngine::new(identity));
+
+    let result = start_live_index_with_options(
+        report.repository_root,
+        report.syntax_index,
+        engine,
+        LiveIndexOptions {
+            full_reconcile_interval: 0,
+        },
+    );
+
+    assert!(matches!(
+        result,
+        Err(LiveIndexError::InvalidFullReconcileInterval)
+    ));
+    Ok(())
 }
 
 #[test]
@@ -220,7 +262,7 @@ fn immediate_fresh_read_is_atomic_and_reindexes_only_one_file() -> Result<(), Bo
             reference_revision,
             current_revision,
         }) if reference_revision == old_snapshot.revision()
-            && current_revision == current.revision()
+            && current_revision > old_snapshot.revision()
     ));
     assert!(
         !current
@@ -237,6 +279,11 @@ fn immediate_fresh_read_is_atomic_and_reindexes_only_one_file() -> Result<(), Bo
         metrics.relationship_files_recomputed - baseline.relationship_files_recomputed,
         1,
         "unrelated relationship owners must not be recomputed"
+    );
+    assert_eq!(
+        metrics.full_reconciliations - baseline.full_reconciliations,
+        0,
+        "a normal supported-source edit must remain a targeted reconciliation"
     );
     let publication = current.indexing().publication;
     assert!(publication.structurally_incremental);
@@ -604,5 +651,171 @@ fn first_file_of_a_live_language_receives_budget_without_reparsing_other_files()
     );
     engine.snapshot().graph().validate_consistency()?;
     live.shutdown()?;
+    Ok(())
+}
+
+#[test]
+fn warmed_noop_fresh_barrier_reads_no_source_bodies_or_watch_sets() -> Result<(), Box<dyn Error>> {
+    let repository = repository()?;
+    let (engine, live) = start(&repository)?;
+    let baseline = live.metrics();
+    let started = Instant::now();
+
+    assert_eq!(symbols(&engine, "one::alpha")?, ["one::alpha"]);
+
+    let elapsed = started.elapsed();
+    let metrics = live.metrics();
+    assert_eq!(metrics.barrier_requests - baseline.barrier_requests, 1);
+    assert_eq!(
+        metrics.barrier_generations_completed - baseline.barrier_generations_completed,
+        1
+    );
+    assert_eq!(metrics.git_subprocesses - baseline.git_subprocesses, 2);
+    assert_eq!(metrics.files_read - baseline.files_read, 0);
+    assert_eq!(metrics.source_bytes_read - baseline.source_bytes_read, 0);
+    assert_eq!(metrics.files_reparsed - baseline.files_reparsed, 0);
+    assert_eq!(
+        metrics.watch_set_recomputations - baseline.watch_set_recomputations,
+        0
+    );
+    assert_eq!(
+        metrics.no_op_reconciliations - baseline.no_op_reconciliations,
+        1
+    );
+    assert_eq!(metrics.last_reconciliation_kind, ReconciliationKind::Noop);
+    eprintln!(
+        "live_noop_fresh: elapsed_us={} files_inspected={} bytes_inspected={} git_subprocesses={} files_read={} bytes_read={}",
+        elapsed.as_micros(),
+        metrics.files_inspected - baseline.files_inspected,
+        metrics.source_bytes_inspected - baseline.source_bytes_inspected,
+        metrics.git_subprocesses - baseline.git_subprocesses,
+        metrics.files_read - baseline.files_read,
+        metrics.source_bytes_read - baseline.source_bytes_read,
+    );
+    live.shutdown()?;
+    Ok(())
+}
+
+#[test]
+fn clean_diff_context_uses_two_lightweight_proofs_without_body_scans() -> Result<(), Box<dyn Error>>
+{
+    let repository = repository()?;
+    for args in [
+        ["config", "user.email", "tests@example.invalid"].as_slice(),
+        ["config", "user.name", "Chakra Tests"].as_slice(),
+        ["add", "src"].as_slice(),
+        ["commit", "--quiet", "-m", "fixture"].as_slice(),
+    ] {
+        let status = Command::new("git")
+            .current_dir(repository.path())
+            .args(args)
+            .status()?;
+        if !status.success() {
+            return Err(format!("git {} failed", args.join(" ")).into());
+        }
+    }
+    let (engine, live) = start(&repository)?;
+    engine.install_diff_provider(Arc::new(chakra_git::GitWorkspaceDiff))?;
+    let baseline = live.metrics();
+
+    let response = engine.diff_context(DiffContextRequest {
+        limit: None,
+        freshness: FreshnessRequirement::RequireFresh,
+    })?;
+
+    assert!(response.data.changed_files.is_empty());
+    let metrics = live.metrics();
+    assert_eq!(metrics.barrier_requests - baseline.barrier_requests, 2);
+    assert_eq!(metrics.git_subprocesses - baseline.git_subprocesses, 4);
+    assert_eq!(metrics.files_read - baseline.files_read, 0);
+    assert_eq!(metrics.source_bytes_read - baseline.source_bytes_read, 0);
+    assert_eq!(metrics.files_reparsed - baseline.files_reparsed, 0);
+    assert_eq!(
+        metrics.no_op_reconciliations - baseline.no_op_reconciliations,
+        2
+    );
+    assert_eq!(
+        metrics.full_reconciliations - baseline.full_reconciliations,
+        0
+    );
+    live.shutdown()?;
+    Ok(())
+}
+
+#[test]
+fn configured_checkpoint_forces_a_bounded_full_reread() -> Result<(), Box<dyn Error>> {
+    let repository = repository()?;
+    let (engine, live) = start_with_options(
+        &repository,
+        Some(LiveIndexOptions {
+            full_reconcile_interval: 1,
+        }),
+    )?;
+    assert_eq!(symbols(&engine, "one::alpha")?, ["one::alpha"]);
+    let baseline = live.metrics();
+
+    assert_eq!(symbols(&engine, "one::alpha")?, ["one::alpha"]);
+
+    let metrics = live.metrics();
+    assert_eq!(
+        metrics.full_reconciliations - baseline.full_reconciliations,
+        1
+    );
+    assert_eq!(metrics.files_read - baseline.files_read, 3);
+    assert_eq!(metrics.files_reparsed - baseline.files_reparsed, 0);
+    assert_eq!(metrics.last_reconciliation_kind, ReconciliationKind::Full);
+    live.shutdown()?;
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn same_size_timestamp_preserving_edit_is_read_immediately() -> Result<(), Box<dyn Error>> {
+    let repository = repository()?;
+    let source = repository.path().join("src/one.rs");
+    let timestamp_reference = repository.path().join("one.timestamp-reference");
+    let copied = Command::new("cp")
+        .args(["-p"])
+        .arg(&source)
+        .arg(&timestamp_reference)
+        .status()?;
+    if !copied.success() {
+        return Err("cp -p failed".into());
+    }
+    let (engine, live) = start(&repository)?;
+    let baseline = live.metrics();
+    fs::write(&source, "pub fn omega() {}\n")?;
+    let restored = Command::new("touch")
+        .args(["-r"])
+        .arg(&timestamp_reference)
+        .arg(&source)
+        .status()?;
+    if !restored.success() {
+        return Err("touch -r failed".into());
+    }
+
+    assert_eq!(symbols(&engine, "one::omega")?, ["one::omega"]);
+    assert!(
+        engine
+            .snapshot()
+            .graph()
+            .resolve_name("one::alpha")
+            .is_empty()
+    );
+
+    let metrics = live.shutdown_with_metrics()?;
+    assert!(
+        (1..=2).contains(&(metrics.files_read - baseline.files_read)),
+        "a racing watcher epoch may retry the changed body, but must not trigger a full body scan"
+    );
+    assert_eq!(metrics.files_reparsed - baseline.files_reparsed, 1);
+    assert_eq!(
+        metrics.targeted_reconciliations - baseline.targeted_reconciliations,
+        1
+    );
+    assert_eq!(
+        metrics.full_reconciliations - baseline.full_reconciliations,
+        0
+    );
     Ok(())
 }

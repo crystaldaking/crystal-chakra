@@ -527,12 +527,68 @@ pub fn scan_repository_sources_with_options(
     repository_root: &Path,
     options: &IndexOptions,
 ) -> Result<WorkspaceSourceScan, WorkspaceIndexError> {
-    let budgets = options.budgets.validate()?;
     check_cancelled(&options.cancellation)?;
     let inventory_started = Instant::now();
     let paths = chakra_git::discover_source_files(repository_root)?;
-    let discovered_files = paths.len() as u64;
     let inventory_elapsed = inventory_started.elapsed();
+    scan_discovered_sources_with_options(
+        repository_root,
+        options,
+        &paths,
+        inventory_elapsed,
+        &mut FilesystemSourceLoader,
+    )
+}
+
+pub(crate) trait WorkspaceSourceLoader {
+    fn observe(&mut self, path: &RepoRelativePath, metadata: &fs::Metadata);
+
+    fn load(
+        &mut self,
+        absolute: &Path,
+        path: &RepoRelativePath,
+        metadata: &fs::Metadata,
+        max_bytes: u64,
+    ) -> Result<Arc<str>, WorkspaceIndexError>;
+}
+
+struct FilesystemSourceLoader;
+
+impl WorkspaceSourceLoader for FilesystemSourceLoader {
+    fn observe(&mut self, _path: &RepoRelativePath, _metadata: &fs::Metadata) {}
+
+    fn load(
+        &mut self,
+        absolute: &Path,
+        path: &RepoRelativePath,
+        _metadata: &fs::Metadata,
+        max_bytes: u64,
+    ) -> Result<Arc<str>, WorkspaceIndexError> {
+        let file = fs::File::open(absolute).map_err(|source| WorkspaceIndexError::Read {
+            path: path.clone(),
+            source,
+        })?;
+        let mut source = String::new();
+        file.take(max_bytes.saturating_add(1))
+            .read_to_string(&mut source)
+            .map_err(|source| WorkspaceIndexError::Read {
+                path: path.clone(),
+                source,
+            })?;
+        Ok(Arc::<str>::from(source))
+    }
+}
+
+pub(crate) fn scan_discovered_sources_with_options(
+    repository_root: &Path,
+    options: &IndexOptions,
+    paths: &[RepoRelativePath],
+    inventory_elapsed: Duration,
+    loader: &mut impl WorkspaceSourceLoader,
+) -> Result<WorkspaceSourceScan, WorkspaceIndexError> {
+    let budgets = options.budgets.validate()?;
+    check_cancelled(&options.cancellation)?;
+    let discovered_files = paths.len() as u64;
     let read_started = Instant::now();
     let mut rust = BTreeMap::new();
     let mut php = BTreeMap::new();
@@ -552,6 +608,7 @@ pub fn scan_repository_sources_with_options(
             path: path.clone(),
             source,
         })?;
+        loader.observe(path, &metadata);
         let measured_len = metadata.len();
         if measured_len > budgets.max_source_file_bytes {
             oversized_files = oversized_files.saturating_add(1);
@@ -563,17 +620,7 @@ pub fn scan_repository_sources_with_options(
             workspace_observed = workspace_observed.max(source_bytes.saturating_add(measured_len));
             continue;
         }
-        let file = fs::File::open(&absolute).map_err(|source| WorkspaceIndexError::Read {
-            path: path.clone(),
-            source,
-        })?;
-        let mut source = String::new();
-        file.take(budgets.max_source_file_bytes.saturating_add(1))
-            .read_to_string(&mut source)
-            .map_err(|source| WorkspaceIndexError::Read {
-                path: path.clone(),
-                source,
-            })?;
+        let source = loader.load(&absolute, path, &metadata, budgets.max_source_file_bytes)?;
         let actual_len = source.len() as u64;
         if actual_len > budgets.max_source_file_bytes {
             oversized_files = oversized_files.saturating_add(1);
@@ -586,7 +633,6 @@ pub fn scan_repository_sources_with_options(
             continue;
         }
         source_bytes = source_bytes.saturating_add(actual_len);
-        let source = Arc::<str>::from(source);
         match chakra_git::source_language(path.as_str()) {
             Some(Language::Rust) => {
                 rust.insert(path.clone(), source);

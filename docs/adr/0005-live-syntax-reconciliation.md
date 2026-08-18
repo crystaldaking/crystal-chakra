@@ -2,7 +2,7 @@
 
 Status: accepted
 Date: 2026-08-15
-Last reviewed: 2026-08-16
+Last reviewed: 2026-08-18
 
 ## Context
 
@@ -41,6 +41,13 @@ over native filesystem mechanisms:
   with an older graph labeled fresh. A full channel increments an observable
   dropped-event counter. Correctness never depends on every event reaching the
   worker.
+- Resolve the worktree-specific and common Git administrative directories at
+  startup with Git's absolute `rev-parse --git-dir` and `--git-common-dir`
+  results. Events wholly inside those directories are ignored without assuming
+  that administration is a `.git` directory below the worktree. Event paths
+  are retained only as a bounded 32-path hint set; an empty, out-of-worktree,
+  unsupported, invalid, or overflowing set is conservative uncertainty rather
+  than proof of what changed.
 - Own the watcher and syntax state in one named blocking worker thread. The
   worker has an explicit shutdown signal and join path. It coalesces event
   bursts with a 50 ms quiet window capped at 250 ms, which tolerates common
@@ -54,13 +61,37 @@ over native filesystem mechanisms:
   reconciliation and waits for its generation; MCP runs these synchronous
   domain queries on its bounded blocking executor. Static engines retain the
   previously published freshness behavior when no live owner is installed.
-- Reconcile by asking Git for the current tracked plus untracked non-ignored
-  Rust/PHP inventory, reading exact current contents, and requiring two identical
-  scans with an unchanged watcher epoch. A bounded retry handles replacement
-  races. This scan is authoritative even when events were missed or reordered.
-  Unchanged source text is compared exactly and is never reparsed. If an event
-  advances the epoch after a stable scan, the private candidate is discarded
-  and reconciliation retries instead of publishing it.
+- Capture the latest requested barrier generation after the candidate content
+  snapshot but before its final verification. One successful verification
+  completes every generation covered by that snapshot; later generations stay
+  pending. A barrier arriving during an editor burst does not cut the bounded
+  quiet window short, so write/metadata/rename sequences converge to one latest
+  state without requiring a caller sleep.
+- Reconcile from one Git-aware tracked plus untracked non-ignored Rust/PHP
+  inventory and partition that inventory by language. A stable reconciliation
+  has two identical Git inventory checkpoints around one content snapshot,
+  unchanged watcher epoch, and identical pre/post filesystem identities for
+  every admitted source. It does not perform the former two complete body
+  scans. A bounded retry retains the already observed candidate cache, so a
+  delayed notification for state already captured does not reread that body.
+  The scan remains authoritative even when a notification has not reached user
+  space.
+- Cache source bodies by repository-relative path and a strong filesystem
+  identity. On Unix that identity includes length, device, inode, mode, mtime,
+  ctime, and their nanosecond components; mtime alone is never sufficient. A
+  matching identity reuses the immutable body, while a mismatch rereads that
+  file and exact source comparison prevents an unchanged body from being
+  reparsed. Platforms without that identity strength conservatively reread
+  admitted bodies rather than weakening `RequireFresh`.
+- Force a full bounded body reread when the cache is uninitialized, a watcher
+  error/degradation or dropped event advanced, an uncovered watcher epoch is
+  non-contiguous/reordered, an event hint is uncertain, a Git inventory
+  checkpoint is uncertain, or the configurable periodic
+  checkpoint is due. `LiveIndexOptions` defaults the checkpoint interval to
+  256 successful reconciliations and rejects zero. Ordinary known changes and
+  no-op barriers use non-full paths. Watch directories are recomputed only
+  when the indexed path set changes or watcher recovery requires
+  reinstallation.
 - Reconciliation reuses the initial revision's validated indexing budgets and
   one shared Rust/PHP Git inventory per scan (ADR-011). Budget coverage and
   degradation are published atomically with changed graph contents. A
@@ -82,7 +113,10 @@ over native filesystem mechanisms:
   fresh. Publication failure leaves the prior reusable index state installed.
   Tree-sitter error trees remain valid syntax revisions, so temporary syntax
   errors do not expose a partial graph or erase valid declarations elsewhere.
-- Instrument reconciliations, publications, scanned/unchanged/reparsed files,
+- Instrument barrier requests/completed/coalesced generations, reconciliation
+  kind, Git subprocesses, filesystem identities and bytes inspected, source
+  bodies and bytes read, full/targeted/no-op reconciliations, watch-set
+  recomputations, publications, scanned/unchanged/reparsed files,
   recomputed relationship owners, create/modify/delete counts, syntax-error
   files, watcher events/errors/drops, watched directories, and graph
   files/source bytes/symbols/edges/call sites reused, rebuilt, or copied.
@@ -122,11 +156,16 @@ over native filesystem mechanisms:
   its minimum, below Chakra's pinned Rust 1.97.1. Compile and transitive cost
   are accepted for a mature native watcher rather than reimplementing
   platform APIs.
-- A fresh barrier performs repository inventory and content reads, but only
-  changed files incur Tree-sitter parsing and only affected owners incur
-  relationship resolution. Benchmarks may later justify a more selective
-  reconciliation proof. Persistent graph nodes solve publication copying; they
-  do not replace Git/worktree reconciliation and are not an on-disk cache.
+- A warmed no-op fresh barrier performs two Git inventory checkpoints and two
+  filesystem identity passes but reads zero source bodies. Both identity passes
+  are required to prove that no admitted file changed while the snapshot was
+  assembled; watcher silence cannot replace either proof. On the recorded
+  `psp-app` corpus this costs 23.9–26.2 ms in release mode versus the former
+  91.7–98.8 ms (3.5–4.1× faster). The issue's preferred 5× target is not used as
+  a reason to weaken read-your-writes: 27 ms is the explicitly measured accepted
+  correctness budget until bounded parallel identity inspection (#21) is
+  validated. Persistent graph nodes solve publication copying; they do not
+  replace Git/worktree reconciliation and are not an on-disk cache.
 - Watcher degradation affects responsiveness, not correctness: a
   `RequireFresh` query still performs authoritative reconciliation. A failed
   reconciliation publishes stale/degraded metadata and returns a typed error.
@@ -140,6 +179,21 @@ over native filesystem mechanisms:
   create/rename/delete, atomic replacement, temporary syntax errors, rapid
   editor-style replacement bursts, and recovery. Queries synchronize through
   the barrier; no arbitrary test sleep is used.
+- A same-length write with restored mtime proves that ctime-backed identity
+  invalidation exposes the latest source immediately and reparses only that
+  file. A configured checkpoint regression proves the full-reread policy, and
+  pure policy regressions cover watcher degradation, errors, dropped events,
+  uncertain hints, and periodic checkpoints; an epoch-sequence regression
+  covers gaps and reordering.
+- A clean `diff_context` regression proves its two revision-pin barriers issue
+  four lightweight Git inventory subprocesses in total, read zero source
+  bodies, and perform no full reconciliation. The second barrier remains
+  necessary to reject a mixed syntax/Git join.
+- The opt-in large-workspace harness records warmed no-op latency, Git
+  subprocesses, identities/bytes inspected, and source bodies/bytes read. The
+  2026-08-18 release-mode `psp-app` run used 1,158 admitted sources, ten samples,
+  23,898/25,690/26,217 µs min/median/max, twenty Git subprocesses, and zero
+  source bodies or bytes read.
 - A pure unit test checks both quiet and absolute debounce deadlines using
   synthetic instants.
 - The hardening measurement records the fresh barrier and reparse counters for
@@ -154,6 +208,7 @@ over native filesystem mechanisms:
   the new revision is published atomically.
 - A deterministic event-classification regression proves source read/open
   access does not invalidate reconciliation while mutation-capable events do.
-- Periodic background reconciliation is deferred. v0.1 recovers missed events
-  on every fresh-query barrier, which is the correctness boundary required by
-  the current query contract.
+- Periodic background reconciliation remains deferred. Every fresh-query
+  barrier recovers missed events, and periodic *full checkpoints within those
+  successful barriers* limit retained-identity risk without adding an
+  autonomous scan loop.

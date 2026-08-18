@@ -208,6 +208,8 @@ The reproducible v0.1 measurement entry points and the latest recorded local
 run are in [docs/evaluation/v0.1-readiness.md](docs/evaluation/v0.1-readiness.md).
 The Zed/`psp-app` bounded-indexing results are in
 [docs/evaluation/v0.1.1-indexing-budgets.md](docs/evaluation/v0.1.1-indexing-budgets.md).
+The warmed deterministic freshness measurements are in
+[docs/evaluation/v0.1.1-freshness-reconciliation.md](docs/evaluation/v0.1.1-freshness-reconciliation.md).
 Use [docs/evaluation/v0.1-template.md](docs/evaluation/v0.1-template.md) for
 real agent comparisons before expanding scope.
 

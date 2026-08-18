@@ -9,7 +9,7 @@ use std::time::Instant;
 
 use chakra_domain::indexing::IndexPhase;
 use chakra_domain::query::{QueryService, RepoMapRequest, SymbolSearchRequest};
-use chakra_domain::state::{Freshness, WorkspaceStatus};
+use chakra_domain::state::{Freshness, FreshnessRequirement, WorkspaceStatus};
 use chakra_engine::WorkspaceEngine;
 use chakra_language::{index_repository, start_live_index};
 use tempfile::TempDir;
@@ -189,6 +189,78 @@ fn large_repository_one_file_revision_is_structural() -> Result<(), Box<dyn Erro
         snapshot.indexing().memory.observed_phase_peak_rss_bytes,
     );
 
+    live.shutdown()?;
+    Ok(())
+}
+
+#[test]
+#[ignore = "set CHAKRA_LARGE_REPOSITORY to an external Git worktree"]
+fn large_repository_warmed_noop_freshness_is_bounded() -> Result<(), Box<dyn Error>> {
+    const RUNS: u64 = 10;
+    let repository = PathBuf::from(
+        std::env::var_os("CHAKRA_LARGE_REPOSITORY")
+            .ok_or("CHAKRA_LARGE_REPOSITORY must name an external Git worktree")?,
+    );
+    let report = index_repository(&repository)?;
+    let query = report
+        .graph
+        .symbols()
+        .first()
+        .map(|symbol| symbol.name().to_owned())
+        .ok_or("large repository has no indexed symbols")?;
+    let identity = chakra_git::resolve_workspace_identity(&report.repository_root)?;
+    let engine = Arc::new(WorkspaceEngine::new(identity));
+    let mut update = engine.begin_update();
+    update.replace_graph(report.graph);
+    update.set_indexing(report.metrics.indexing);
+    update.set_status(WorkspaceStatus::Indexing);
+    update.set_freshness(Freshness::Stale);
+    engine.publish(update)?;
+    let live = start_live_index(report.repository_root, report.syntax_index, engine.clone())?;
+    let baseline = live.metrics();
+    let mut samples = Vec::with_capacity(RUNS as usize);
+
+    for _ in 0..RUNS {
+        let started = Instant::now();
+        let response = engine.symbol_search(SymbolSearchRequest {
+            query: query.clone(),
+            limit: Some(1),
+            freshness: FreshnessRequirement::RequireFresh,
+        })?;
+        samples.push(started.elapsed());
+        assert_eq!(response.freshness, Freshness::Fresh);
+        assert!(!response.data.candidates.is_empty());
+    }
+
+    samples.sort();
+    let metrics = live.metrics();
+    assert_eq!(metrics.files_read - baseline.files_read, 0);
+    assert_eq!(metrics.source_bytes_read - baseline.source_bytes_read, 0);
+    assert_eq!(
+        metrics.git_subprocesses - baseline.git_subprocesses,
+        RUNS * 2
+    );
+    assert_eq!(
+        metrics.no_op_reconciliations - baseline.no_op_reconciliations,
+        RUNS
+    );
+    assert_eq!(
+        metrics.full_reconciliations - baseline.full_reconciliations,
+        0
+    );
+    eprintln!(
+        "large_workspace_noop_fresh: root={} runs={} min_us={} median_us={} max_us={} files_inspected={} bytes_inspected={} git_subprocesses={} files_read={} bytes_read={}",
+        repository.display(),
+        RUNS,
+        samples.first().map_or(0, |sample| sample.as_micros()),
+        samples[samples.len() / 2].as_micros(),
+        samples.last().map_or(0, |sample| sample.as_micros()),
+        metrics.files_inspected - baseline.files_inspected,
+        metrics.source_bytes_inspected - baseline.source_bytes_inspected,
+        metrics.git_subprocesses - baseline.git_subprocesses,
+        metrics.files_read - baseline.files_read,
+        metrics.source_bytes_read - baseline.source_bytes_read,
+    );
     live.shutdown()?;
     Ok(())
 }

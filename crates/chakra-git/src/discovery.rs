@@ -69,6 +69,8 @@ pub enum DiscoveryError {
     TooManyRootObjects,
     #[error("Git returned a non-UTF-8 administrative path")]
     NonUtf8AdministrativePath,
+    #[error("Git returned an empty administrative path")]
+    EmptyAdministrativePath,
     #[error("failed to canonicalize Git administrative path {path}: {source}")]
     CanonicalizeAdministrativePath {
         path: PathBuf,
@@ -320,6 +322,38 @@ pub fn resolve_workspace_identity(candidate: &Path) -> Result<WorkspaceIdentity,
     Ok(WorkspaceIdentity::for_repository(&root, repository)?)
 }
 
+/// Resolves the worktree-specific and shared Git administrative directories
+/// through Git itself. Callers can use these paths to ignore Git's own
+/// filesystem churn without assuming that administration lives in `.git`.
+pub fn resolve_git_administrative_paths(candidate: &Path) -> Result<Vec<PathBuf>, DiscoveryError> {
+    let mut paths = Vec::new();
+    for (command, argument) in [
+        ("rev-parse --git-dir", "--git-dir"),
+        ("rev-parse --git-common-dir", "--git-common-dir"),
+    ] {
+        let output = git_output(
+            candidate,
+            command,
+            &[
+                OsStr::new("rev-parse"),
+                OsStr::new("--path-format=absolute"),
+                OsStr::new(argument),
+            ],
+        )?;
+        let path = parse_single_path(&output.stdout)?;
+        let canonical = std::fs::canonicalize(&path).map_err(|source| {
+            DiscoveryError::CanonicalizeAdministrativePath {
+                path: path.clone(),
+                source,
+            }
+        })?;
+        paths.push(canonical);
+    }
+    paths.sort();
+    paths.dedup();
+    Ok(paths)
+}
+
 fn parse_root_object_ids(output: &[u8]) -> Result<Vec<String>, DiscoveryError> {
     let text = std::str::from_utf8(output)
         .map_err(|_| DiscoveryError::InvalidRootObjectId("non-UTF-8 output".to_owned()))?;
@@ -345,7 +379,11 @@ fn parse_root_object_ids(output: &[u8]) -> Result<Vec<String>, DiscoveryError> {
 fn parse_single_path(output: &[u8]) -> Result<PathBuf, DiscoveryError> {
     let raw = std::str::from_utf8(output).map_err(|_| DiscoveryError::NonUtf8AdministrativePath)?;
     let raw = raw.strip_suffix('\n').unwrap_or(raw);
-    Ok(PathBuf::from(raw.strip_suffix('\r').unwrap_or(raw)))
+    let raw = raw.strip_suffix('\r').unwrap_or(raw);
+    if raw.is_empty() {
+        return Err(DiscoveryError::EmptyAdministrativePath);
+    }
+    Ok(PathBuf::from(raw))
 }
 
 #[cfg(unix)]
@@ -433,13 +471,33 @@ pub fn discover_source_files(root: &Path) -> Result<Vec<RepoRelativePath>, Disco
     discover_files(root, None)
 }
 
+/// Discovers supported sources when `root` is already the Git-resolved
+/// worktree root.
+///
+/// Live reconciliation retains that canonical root for its lifetime, so it
+/// can avoid a redundant `rev-parse` subprocess on every freshness check.
+/// Discovery still goes through Git and never assumes an administrative
+/// `.git` layout.
+pub fn discover_source_files_in_worktree(
+    root: &Path,
+) -> Result<Vec<RepoRelativePath>, DiscoveryError> {
+    discover_files_in_root(root, None)
+}
+
 fn discover_files(
     root: &Path,
     language: Option<Language>,
 ) -> Result<Vec<RepoRelativePath>, DiscoveryError> {
     let root = resolve_repository_root(root)?;
+    discover_files_in_root(&root, language)
+}
+
+fn discover_files_in_root(
+    root: &Path,
+    language: Option<Language>,
+) -> Result<Vec<RepoRelativePath>, DiscoveryError> {
     let output = git_output(
-        &root,
+        root,
         "ls-files --cached --others --exclude-standard",
         &[
             OsStr::new("ls-files"),
@@ -450,7 +508,7 @@ fn discover_files(
         ],
     )?;
 
-    source_files_from_git_output(&root, &output.stdout, language)
+    source_files_from_git_output(root, &output.stdout, language)
 }
 
 fn source_files_from_git_output(
@@ -597,6 +655,16 @@ mod tests {
         let files = discover_language_files(&worktree, Language::Rust)?;
         assert_eq!(files.len(), 1);
         assert_eq!(files[0].as_str(), "src/lib.rs");
+        assert_eq!(discover_source_files_in_worktree(&worktree)?, files);
+        let administrative = resolve_git_administrative_paths(&worktree)?;
+        assert!(!administrative.is_empty());
+        assert!(administrative.iter().all(|path| path.is_absolute()));
+        assert!(
+            administrative
+                .iter()
+                .all(|path| !path.starts_with(&worktree)),
+            "linked-worktree administration must be resolved through Git, not assumed below the worktree"
+        );
         Ok(())
     }
 
@@ -608,6 +676,14 @@ mod tests {
         assert!(captured.exceeded);
         assert_eq!(input.position(), 10);
         Ok(())
+    }
+
+    #[test]
+    fn rejects_an_empty_git_administrative_path() {
+        assert!(matches!(
+            parse_single_path(b"\n"),
+            Err(DiscoveryError::EmptyAdministrativePath)
+        ));
     }
 
     #[test]

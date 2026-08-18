@@ -1,6 +1,8 @@
 //! Bounded filesystem notifications plus deterministic multi-language freshness.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
+use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
@@ -8,6 +10,10 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
+#[cfg(unix)]
+use std::os::unix::fs::MetadataExt;
+
+use chakra_domain::location::RepoRelativePath;
 use chakra_domain::state::{Freshness, WorkspaceStatus};
 use chakra_engine::{FreshnessBarrier, FreshnessBarrierError, SymbolGraph, WorkspaceEngine};
 use notify::event::{AccessKind, AccessMode};
@@ -16,8 +22,8 @@ use thiserror::Error;
 use tracing::{error, info, warn};
 
 use crate::indexer::{
-    ReconcileMetrics, ReconcileReport, WorkspaceIndexError, WorkspaceSourceScan,
-    WorkspaceSyntaxIndex,
+    IndexOptions, ReconcileMetrics, ReconcileReport, WorkspaceIndexError, WorkspaceSourceLoader,
+    WorkspaceSourceScan, WorkspaceSyntaxIndex, scan_discovered_sources_with_options,
 };
 
 const EVENT_QUEUE_CAPACITY: usize = 256;
@@ -27,9 +33,38 @@ const FRESHNESS_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_STABLE_SCAN_ATTEMPTS: usize = 3;
 const MAX_WATCHED_DIRECTORIES: usize = 4_096;
 const MAX_PUBLISH_ATTEMPTS: usize = 3;
+const MAX_EVENT_HINT_PATHS: usize = 32;
+const DEFAULT_FULL_RECONCILE_INTERVAL: u64 = 256;
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ReconciliationKind {
+    #[default]
+    None,
+    Noop,
+    Targeted,
+    Full,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LiveIndexOptions {
+    /// Successful reconciliations between forced content rereads. Metadata
+    /// identities and Git inventory are still verified on every barrier.
+    pub full_reconcile_interval: u64,
+}
+
+impl Default for LiveIndexOptions {
+    fn default() -> Self {
+        Self {
+            full_reconcile_interval: DEFAULT_FULL_RECONCILE_INTERVAL,
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct LiveIndexMetrics {
+    pub barrier_requests: u64,
+    pub barrier_generations_completed: u64,
+    pub barrier_waiters_coalesced: u64,
     pub reconciliations: u64,
     pub reconciliation_failures: u64,
     pub published_revisions: u64,
@@ -59,10 +94,24 @@ pub struct LiveIndexMetrics {
     pub dropped_watcher_events: u64,
     pub watcher_errors: u64,
     pub watched_directories: u64,
+    pub watcher_hint_paths: u64,
+    pub git_subprocesses: u64,
+    pub files_inspected: u64,
+    pub source_bytes_inspected: u64,
+    pub files_read: u64,
+    pub source_bytes_read: u64,
+    pub no_op_reconciliations: u64,
+    pub targeted_reconciliations: u64,
+    pub full_reconciliations: u64,
+    pub watch_set_recomputations: u64,
+    pub last_reconciliation_kind: ReconciliationKind,
 }
 
 #[derive(Debug, Default)]
 struct MetricsState {
+    barrier_requests: AtomicU64,
+    barrier_generations_completed: AtomicU64,
+    barrier_waiters_coalesced: AtomicU64,
     reconciliations: AtomicU64,
     reconciliation_failures: AtomicU64,
     published_revisions: AtomicU64,
@@ -92,6 +141,17 @@ struct MetricsState {
     dropped_watcher_events: AtomicU64,
     watcher_errors: AtomicU64,
     watched_directories: AtomicU64,
+    watcher_hint_paths: AtomicU64,
+    git_subprocesses: AtomicU64,
+    files_inspected: AtomicU64,
+    source_bytes_inspected: AtomicU64,
+    files_read: AtomicU64,
+    source_bytes_read: AtomicU64,
+    no_op_reconciliations: AtomicU64,
+    targeted_reconciliations: AtomicU64,
+    full_reconciliations: AtomicU64,
+    watch_set_recomputations: AtomicU64,
+    last_reconciliation_kind: AtomicU64,
     event_epoch: AtomicU64,
 }
 
@@ -99,6 +159,9 @@ impl MetricsState {
     fn snapshot(&self) -> LiveIndexMetrics {
         let load = |value: &AtomicU64| value.load(Ordering::Relaxed);
         LiveIndexMetrics {
+            barrier_requests: load(&self.barrier_requests),
+            barrier_generations_completed: load(&self.barrier_generations_completed),
+            barrier_waiters_coalesced: load(&self.barrier_waiters_coalesced),
             reconciliations: load(&self.reconciliations),
             reconciliation_failures: load(&self.reconciliation_failures),
             published_revisions: load(&self.published_revisions),
@@ -128,7 +191,42 @@ impl MetricsState {
             dropped_watcher_events: load(&self.dropped_watcher_events),
             watcher_errors: load(&self.watcher_errors),
             watched_directories: load(&self.watched_directories),
+            watcher_hint_paths: load(&self.watcher_hint_paths),
+            git_subprocesses: load(&self.git_subprocesses),
+            files_inspected: load(&self.files_inspected),
+            source_bytes_inspected: load(&self.source_bytes_inspected),
+            files_read: load(&self.files_read),
+            source_bytes_read: load(&self.source_bytes_read),
+            no_op_reconciliations: load(&self.no_op_reconciliations),
+            targeted_reconciliations: load(&self.targeted_reconciliations),
+            full_reconciliations: load(&self.full_reconciliations),
+            watch_set_recomputations: load(&self.watch_set_recomputations),
+            last_reconciliation_kind: match load(&self.last_reconciliation_kind) {
+                1 => ReconciliationKind::Noop,
+                2 => ReconciliationKind::Targeted,
+                3 => ReconciliationKind::Full,
+                _ => ReconciliationKind::None,
+            },
         }
+    }
+
+    fn record_reconciliation_kind(&self, kind: ReconciliationKind) {
+        let (counter, raw) = match kind {
+            ReconciliationKind::None => return,
+            ReconciliationKind::Noop => (&self.no_op_reconciliations, 1),
+            ReconciliationKind::Targeted => (&self.targeted_reconciliations, 2),
+            ReconciliationKind::Full => (&self.full_reconciliations, 3),
+        };
+        counter.fetch_add(1, Ordering::Relaxed);
+        self.last_reconciliation_kind.store(raw, Ordering::Relaxed);
+    }
+
+    fn record_barrier_completion(&self, covered: u64, completed_before: u64) {
+        let completed = covered.saturating_sub(completed_before);
+        self.barrier_generations_completed
+            .fetch_add(completed, Ordering::Relaxed);
+        self.barrier_waiters_coalesced
+            .fetch_add(completed.saturating_sub(1), Ordering::Relaxed);
     }
 
     fn record_reconcile(&self, metrics: ReconcileMetrics) {
@@ -191,15 +289,21 @@ pub enum LiveIndexError {
     StartupDisconnected,
     #[error("workspace freshness owner is already installed")]
     BarrierAlreadyInstalled,
+    #[error("full reconciliation interval must be greater than zero")]
+    InvalidFullReconcileInterval,
     #[error(transparent)]
     Freshness(#[from] FreshnessBarrierError),
     #[error("live index worker panicked")]
     WorkerPanicked,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug)]
 enum WorkerSignal {
-    Filesystem(u64),
+    Filesystem {
+        epoch: u64,
+        hints: Vec<chakra_domain::location::RepoRelativePath>,
+        uncertain: bool,
+    },
     Barrier,
     Shutdown,
 }
@@ -254,6 +358,9 @@ struct LiveFreshnessBarrier {
 
 impl FreshnessBarrier for LiveFreshnessBarrier {
     fn require_fresh(&self) -> Result<(), FreshnessBarrierError> {
+        self.metrics
+            .barrier_requests
+            .fetch_add(1, Ordering::Relaxed);
         let target = {
             let mut state = self
                 .shared
@@ -318,6 +425,179 @@ impl FreshnessBarrier for LiveFreshnessBarrier {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FileIdentity {
+    len: u64,
+    modified: Option<std::time::SystemTime>,
+    created: Option<std::time::SystemTime>,
+    #[cfg(unix)]
+    device: u64,
+    #[cfg(unix)]
+    inode: u64,
+    #[cfg(unix)]
+    mode: u32,
+    #[cfg(unix)]
+    modified_seconds: i64,
+    #[cfg(unix)]
+    modified_nanoseconds: i64,
+    #[cfg(unix)]
+    changed_seconds: i64,
+    #[cfg(unix)]
+    changed_nanoseconds: i64,
+}
+
+impl FileIdentity {
+    fn from_metadata(metadata: &fs::Metadata) -> Self {
+        Self {
+            len: metadata.len(),
+            modified: metadata.modified().ok(),
+            created: metadata.created().ok(),
+            #[cfg(unix)]
+            device: metadata.dev(),
+            #[cfg(unix)]
+            inode: metadata.ino(),
+            #[cfg(unix)]
+            mode: metadata.mode(),
+            #[cfg(unix)]
+            modified_seconds: metadata.mtime(),
+            #[cfg(unix)]
+            modified_nanoseconds: metadata.mtime_nsec(),
+            #[cfg(unix)]
+            changed_seconds: metadata.ctime(),
+            #[cfg(unix)]
+            changed_nanoseconds: metadata.ctime_nsec(),
+        }
+    }
+
+    fn trustworthy_for_reuse(&self) -> bool {
+        cfg!(unix)
+    }
+}
+
+#[derive(Debug, Clone)]
+struct CachedSource {
+    identity: FileIdentity,
+    source: Arc<str>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct SourceSnapshotCache {
+    initialized: bool,
+    inventory: Vec<chakra_domain::location::RepoRelativePath>,
+    entries: BTreeMap<chakra_domain::location::RepoRelativePath, CachedSource>,
+}
+
+struct CachedSourceLoader<'a> {
+    previous: &'a SourceSnapshotCache,
+    next: BTreeMap<chakra_domain::location::RepoRelativePath, CachedSource>,
+    observed: BTreeMap<chakra_domain::location::RepoRelativePath, FileIdentity>,
+    force_full: bool,
+    files_read: u64,
+    metrics: &'a MetricsState,
+}
+
+impl<'a> CachedSourceLoader<'a> {
+    fn new(previous: &'a SourceSnapshotCache, force_full: bool, metrics: &'a MetricsState) -> Self {
+        Self {
+            previous,
+            next: BTreeMap::new(),
+            observed: BTreeMap::new(),
+            force_full,
+            files_read: 0,
+            metrics,
+        }
+    }
+
+    fn inspect(&self, metadata: &fs::Metadata) {
+        self.metrics.files_inspected.fetch_add(1, Ordering::Relaxed);
+        self.metrics
+            .source_bytes_inspected
+            .fetch_add(metadata.len(), Ordering::Relaxed);
+    }
+}
+
+impl WorkspaceSourceLoader for CachedSourceLoader<'_> {
+    fn observe(
+        &mut self,
+        path: &chakra_domain::location::RepoRelativePath,
+        metadata: &fs::Metadata,
+    ) {
+        self.inspect(metadata);
+        self.observed
+            .insert(path.clone(), FileIdentity::from_metadata(metadata));
+    }
+
+    fn load(
+        &mut self,
+        absolute: &Path,
+        path: &chakra_domain::location::RepoRelativePath,
+        metadata: &fs::Metadata,
+        max_bytes: u64,
+    ) -> Result<Arc<str>, WorkspaceIndexError> {
+        let before = FileIdentity::from_metadata(metadata);
+        let reused = !self.force_full
+            && before.trustworthy_for_reuse()
+            && self
+                .previous
+                .entries
+                .get(path)
+                .is_some_and(|cached| cached.identity == before);
+        let source = if reused {
+            self.previous
+                .entries
+                .get(path)
+                .map(|cached| cached.source.clone())
+                .ok_or_else(|| {
+                    WorkspaceIndexError::Update(format!(
+                        "source cache entry disappeared for `{path}`"
+                    ))
+                })?
+        } else {
+            let file = fs::File::open(absolute).map_err(|source| WorkspaceIndexError::Read {
+                path: path.clone(),
+                source,
+            })?;
+            let mut source = String::new();
+            file.take(max_bytes.saturating_add(1))
+                .read_to_string(&mut source)
+                .map_err(|source| WorkspaceIndexError::Read {
+                    path: path.clone(),
+                    source,
+                })?;
+            self.files_read = self.files_read.saturating_add(1);
+            self.metrics.files_read.fetch_add(1, Ordering::Relaxed);
+            self.metrics
+                .source_bytes_read
+                .fetch_add(source.len() as u64, Ordering::Relaxed);
+            Arc::<str>::from(source)
+        };
+        let after = if reused {
+            before.clone()
+        } else {
+            let after_metadata =
+                fs::metadata(absolute).map_err(|source| WorkspaceIndexError::Read {
+                    path: path.clone(),
+                    source,
+                })?;
+            self.inspect(&after_metadata);
+            FileIdentity::from_metadata(&after_metadata)
+        };
+        if before != after {
+            return Err(WorkspaceIndexError::Update(format!(
+                "source `{path}` changed while its freshness snapshot was read"
+            )));
+        }
+        self.next.insert(
+            path.clone(),
+            CachedSource {
+                identity: after,
+                source: source.clone(),
+            },
+        );
+        Ok(source)
+    }
+}
+
 /// Owner of the watcher, worker cancellation, and live instrumentation.
 #[derive(Debug)]
 pub struct LiveIndex {
@@ -334,6 +614,13 @@ impl LiveIndex {
 
     pub fn shutdown(mut self) -> Result<(), LiveIndexError> {
         self.stop_and_join()
+    }
+
+    /// Stops the watcher owner, waits for any in-flight reconciliation, and
+    /// then returns a stable instrumentation snapshot.
+    pub fn shutdown_with_metrics(mut self) -> Result<LiveIndexMetrics, LiveIndexError> {
+        self.stop_and_join()?;
+        Ok(self.metrics.snapshot())
     }
 
     fn stop_and_join(&mut self) -> Result<(), LiveIndexError> {
@@ -384,6 +671,23 @@ pub fn start_live_index(
     syntax_index: WorkspaceSyntaxIndex,
     engine: Arc<WorkspaceEngine>,
 ) -> Result<LiveIndex, LiveIndexError> {
+    start_live_index_with_options(
+        repository_root,
+        syntax_index,
+        engine,
+        LiveIndexOptions::default(),
+    )
+}
+
+pub fn start_live_index_with_options(
+    repository_root: PathBuf,
+    syntax_index: WorkspaceSyntaxIndex,
+    engine: Arc<WorkspaceEngine>,
+    options: LiveIndexOptions,
+) -> Result<LiveIndex, LiveIndexError> {
+    if options.full_reconcile_interval == 0 {
+        return Err(LiveIndexError::InvalidFullReconcileInterval);
+    }
     let (sender, receiver) = mpsc::sync_channel(EVENT_QUEUE_CAPACITY);
     let (ready_sender, ready_receiver) = mpsc::sync_channel(1);
     let shared = Arc::new(BarrierShared {
@@ -410,6 +714,7 @@ pub fn start_live_index(
                 worker_metrics,
                 worker_publication_gate,
                 ready_sender,
+                options,
             );
         })?;
 
@@ -472,34 +777,54 @@ fn run_worker(
     metrics: Arc<MetricsState>,
     publication_gate: Arc<Mutex<()>>,
     ready: SyncSender<Result<(), String>>,
+    options: LiveIndexOptions,
 ) {
+    let administrative_paths = match chakra_git::resolve_git_administrative_paths(&repository_root)
+    {
+        Ok(paths) => paths,
+        Err(error) => {
+            let _ = ready.send(Err(error.to_string()));
+            shared.stop();
+            return;
+        }
+    };
     let callback_sender = sender.clone();
     let callback_metrics = metrics.clone();
     let callback_engine = engine.clone();
     let callback_publication_gate = publication_gate.clone();
+    let callback_root = repository_root.clone();
     let watcher = notify::recommended_watcher(move |event: notify::Result<Event>| {
-        match event {
+        let (hints, uncertain) = match event {
             Ok(event) => {
                 callback_metrics
                     .watcher_events
                     .fetch_add(1, Ordering::Relaxed);
-                if !event_may_change_workspace(&event) {
+                if !event_may_change_workspace(&event, &administrative_paths) {
                     return;
                 }
+                event_hints(&callback_root, &event)
             }
             Err(error) => {
                 callback_metrics
                     .watcher_errors
                     .fetch_add(1, Ordering::Relaxed);
                 warn!(%error, "filesystem watcher reported an error");
+                (Vec::new(), true)
             }
-        }
+        };
+        callback_metrics
+            .watcher_hint_paths
+            .fetch_add(hints.len() as u64, Ordering::Relaxed);
         let epoch = invalidate_for_event(
             &callback_engine,
             &callback_metrics,
             &callback_publication_gate,
         );
-        match callback_sender.try_send(WorkerSignal::Filesystem(epoch)) {
+        match callback_sender.try_send(WorkerSignal::Filesystem {
+            epoch,
+            hints,
+            uncertain,
+        }) {
             Ok(()) => {}
             Err(TrySendError::Full(_)) => {
                 callback_metrics
@@ -518,12 +843,17 @@ fn run_worker(
         }
     };
     let mut watched = BTreeSet::new();
+    let initial_paths = syntax_index.paths();
+    metrics
+        .watch_set_recomputations
+        .fetch_add(1, Ordering::Relaxed);
     let mut watcher_degraded = match refresh_watches(
         &mut watcher,
         &repository_root,
-        &syntax_index,
+        &initial_paths,
         &mut watched,
         &metrics,
+        false,
     ) {
         Ok(degraded) => degraded,
         Err(error) => {
@@ -538,6 +868,11 @@ fn run_worker(
     }
 
     let mut reconciled_event_epoch = 0_u64;
+    let mut source_cache = SourceSnapshotCache::default();
+    let mut reconciliations_since_full = 0_u64;
+    let mut reconciled_watcher_errors = 0_u64;
+    let mut reconciled_dropped_events = 0_u64;
+    let mut indexed_paths = initial_paths;
     while let Ok(signal) = receiver.recv() {
         match signal {
             WorkerSignal::Shutdown => break,
@@ -557,24 +892,63 @@ fn run_worker(
                         &mut watcher_degraded,
                         &mut reconciled_event_epoch,
                         &publication_gate,
+                        &mut source_cache,
+                        &mut reconciliations_since_full,
+                        &mut reconciled_watcher_errors,
+                        &mut reconciled_dropped_events,
+                        &mut indexed_paths,
+                        &options,
+                        &BTreeSet::new(),
+                        false,
                     );
                 }
             }
-            WorkerSignal::Filesystem(epoch) => {
+            WorkerSignal::Filesystem {
+                epoch,
+                hints,
+                uncertain,
+            } => {
                 if epoch <= reconciled_event_epoch {
                     continue;
                 }
                 mark_stale(&engine);
                 let mut window = DebounceWindow::new(Instant::now());
                 let mut shutdown = false;
+                let mut hints: BTreeSet<_> = hints.into_iter().collect();
+                let mut latest_signal_epoch = epoch;
+                let mut uncertain = uncertain || epoch != reconciled_event_epoch.saturating_add(1);
                 loop {
                     let deadline = window.deadline();
                     let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
                         break;
                     };
                     match receiver.recv_timeout(remaining) {
-                        Ok(WorkerSignal::Filesystem(_)) => window.observe(Instant::now()),
-                        Ok(WorkerSignal::Barrier) => break,
+                        Ok(WorkerSignal::Filesystem {
+                            epoch: observed_epoch,
+                            hints: observed,
+                            uncertain: observed_uncertain,
+                        }) => {
+                            window.observe(Instant::now());
+                            let non_contiguous = event_epoch_is_non_contiguous(
+                                &mut latest_signal_epoch,
+                                observed_epoch,
+                            );
+                            uncertain |= observed_uncertain || non_contiguous;
+                            for hint in observed {
+                                if hints.len() >= MAX_EVENT_HINT_PATHS {
+                                    uncertain = true;
+                                    break;
+                                }
+                                hints.insert(hint);
+                            }
+                        }
+                        // The generation counter already records the waiter.
+                        // Keep the bounded quiet window open so an editor's
+                        // write/metadata/rename burst is reconciled as one
+                        // stable state instead of publishing an avoidable
+                        // intermediate revision merely because a caller asked
+                        // for freshness immediately.
+                        Ok(WorkerSignal::Barrier) => {}
                         Ok(WorkerSignal::Shutdown) => {
                             shutdown = true;
                             break;
@@ -600,6 +974,14 @@ fn run_worker(
                     &mut watcher_degraded,
                     &mut reconciled_event_epoch,
                     &publication_gate,
+                    &mut source_cache,
+                    &mut reconciliations_since_full,
+                    &mut reconciled_watcher_errors,
+                    &mut reconciled_dropped_events,
+                    &mut indexed_paths,
+                    &options,
+                    &hints,
+                    uncertain,
                 );
             }
         }
@@ -621,6 +1003,14 @@ fn run_worker(
                 &mut watcher_degraded,
                 &mut reconciled_event_epoch,
                 &publication_gate,
+                &mut source_cache,
+                &mut reconciliations_since_full,
+                &mut reconciled_watcher_errors,
+                &mut reconciled_dropped_events,
+                &mut indexed_paths,
+                &options,
+                &BTreeSet::new(),
+                false,
             );
         }
     }
@@ -628,7 +1018,16 @@ fn run_worker(
     info!("live syntax index worker stopped");
 }
 
-fn event_may_change_workspace(event: &Event) -> bool {
+fn event_may_change_workspace(event: &Event, administrative_paths: &[PathBuf]) -> bool {
+    if !event.paths.is_empty()
+        && event.paths.iter().all(|path| {
+            administrative_paths
+                .iter()
+                .any(|administrative| path.starts_with(administrative))
+        })
+    {
+        return false;
+    }
     match event.kind {
         // Linux inotify reports the indexer's own source reads as open/close
         // access events. Treating them as mutations makes every stable scan
@@ -638,6 +1037,41 @@ fn event_may_change_workspace(event: &Event) -> bool {
         EventKind::Access(_) => false,
         _ => true,
     }
+}
+
+fn event_hints(repository_root: &Path, event: &Event) -> (Vec<RepoRelativePath>, bool) {
+    let mut hints = Vec::new();
+    let mut uncertain = event.paths.is_empty();
+    for absolute in event.paths.iter().take(MAX_EVENT_HINT_PATHS) {
+        let Ok(relative) = absolute.strip_prefix(repository_root) else {
+            uncertain = true;
+            continue;
+        };
+        let Some(relative) = relative.to_str() else {
+            uncertain = true;
+            continue;
+        };
+        if chakra_git::source_language(relative).is_none() {
+            uncertain = true;
+            continue;
+        }
+        match RepoRelativePath::new(relative) {
+            Ok(path) => hints.push(path),
+            Err(_) => uncertain = true,
+        }
+    }
+    if event.paths.len() > MAX_EVENT_HINT_PATHS {
+        uncertain = true;
+    }
+    hints.sort();
+    hints.dedup();
+    (hints, uncertain)
+}
+
+fn event_epoch_is_non_contiguous(latest: &mut u64, observed: u64) -> bool {
+    let non_contiguous = observed != latest.saturating_add(1);
+    *latest = (*latest).max(observed);
+    non_contiguous
 }
 
 fn invalidate_for_event(
@@ -668,22 +1102,67 @@ fn reconcile(
     watcher_degraded: &mut bool,
     reconciled_event_epoch: &mut u64,
     publication_gate: &Mutex<()>,
+    source_cache: &mut SourceSnapshotCache,
+    reconciliations_since_full: &mut u64,
+    reconciled_watcher_errors: &mut u64,
+    reconciled_dropped_events: &mut u64,
+    indexed_paths: &mut Vec<RepoRelativePath>,
+    options: &LiveIndexOptions,
+    hints: &BTreeSet<RepoRelativePath>,
+    uncertain_hint: bool,
 ) {
-    let generation = shared
-        .pending_generation()
-        .map_or(0, |(requested, _)| requested);
+    let (generation, completed_before) = shared.pending_generation().unwrap_or((0, 0));
+    let watcher_errors = metrics.watcher_errors.load(Ordering::Acquire);
+    let dropped_events = metrics.dropped_watcher_events.load(Ordering::Acquire);
+    let watcher_error_advanced = watcher_errors > *reconciled_watcher_errors;
+    let dropped_event_advanced = dropped_events > *reconciled_dropped_events;
+    let force_full = requires_full_reconciliation(ReconciliationPolicy {
+        cache_initialized: source_cache.initialized,
+        watcher_degraded: *watcher_degraded,
+        watcher_error_advanced,
+        dropped_event_advanced,
+        uncertain_hint,
+        reconciliations_since_full: *reconciliations_since_full,
+        full_reconcile_interval: options.full_reconcile_interval,
+    });
+    let force_reinstall_watches = *watcher_degraded || watcher_error_advanced;
+    let mut watch_set_dirty = false;
     let result = (|| {
         for _ in 0..MAX_STABLE_SCAN_ATTEMPTS {
-            let (scan, event_epoch) = stable_scan(repository_root, syntax_index, metrics)?;
+            let stable = stable_scan(
+                repository_root,
+                syntax_index,
+                metrics,
+                shared,
+                source_cache,
+                force_full,
+            )?;
             let ReconcileReport {
                 graph,
                 metrics: reconcile_metrics,
                 next_index,
                 indexing,
-            } = syntax_index.reconcile_sources(scan)?;
-            let watch_index = next_index.as_ref().unwrap_or(syntax_index);
-            *watcher_degraded =
-                refresh_watches(watcher, repository_root, watch_index, watched, metrics)?;
+            } = syntax_index.reconcile_sources(stable.scan)?;
+            let next_paths: Vec<_> = stable.cache.entries.keys().cloned().collect();
+            let paths_changed = *indexed_paths != next_paths;
+            if paths_changed || force_reinstall_watches || watch_set_dirty {
+                metrics
+                    .watch_set_recomputations
+                    .fetch_add(1, Ordering::Relaxed);
+                // Until this candidate publishes, the external watcher may no
+                // longer match `indexed_paths`. A discarded candidate forces
+                // another refresh; a failed reconciliation leaves the watcher
+                // degraded so the next barrier reinstalls it.
+                watch_set_dirty = true;
+                *watcher_degraded = refresh_watches(
+                    watcher,
+                    repository_root,
+                    &next_paths,
+                    watched,
+                    metrics,
+                    force_reinstall_watches,
+                )?;
+            }
             let status = if *watcher_degraded || indexing.is_degraded() {
                 WorkspaceStatus::Degraded
             } else {
@@ -694,7 +1173,7 @@ fn reconcile(
                 Ok(guard) => guard,
                 Err(poisoned) => poisoned.into_inner(),
             };
-            if metrics.event_epoch.load(Ordering::Acquire) != event_epoch {
+            if metrics.event_epoch.load(Ordering::Acquire) != stable.event_epoch {
                 continue;
             }
             let published = publish_fresh(engine, graph.as_ref(), status, &indexing)
@@ -702,19 +1181,45 @@ fn reconcile(
             if let Some(next_index) = next_index {
                 *syntax_index = next_index;
             }
+            *source_cache = stable.cache;
+            *indexed_paths = next_paths;
+            watch_set_dirty = false;
+            if stable.kind == ReconciliationKind::Full {
+                *reconciliations_since_full = 0;
+            } else {
+                *reconciliations_since_full = (*reconciliations_since_full).saturating_add(1);
+            }
+            // Consume only the uncertainty that this reconciliation observed
+            // before it started. Errors or drops racing the scan remain
+            // outstanding and force the next reconciliation to be full.
+            *reconciled_watcher_errors = watcher_errors;
+            *reconciled_dropped_events = dropped_events;
             metrics.record_reconcile(reconcile_metrics);
+            metrics.record_reconciliation_kind(stable.kind);
             if published {
                 metrics.published_revisions.fetch_add(1, Ordering::Relaxed);
             }
-            *reconciled_event_epoch = event_epoch;
-            return Ok(());
+            *reconciled_event_epoch = stable.event_epoch;
+            metrics.record_barrier_completion(stable.covered_generation, completed_before);
+            info!(
+                kind = ?stable.kind,
+                hinted_paths = hints.len(),
+                force_full,
+                files_read = stable.files_read,
+                covered_generation = stable.covered_generation,
+                "freshness reconciliation completed"
+            );
+            return Ok(stable.covered_generation);
         }
         Err(WorkspaceIndexError::Update(
             "worktree changed before fresh revision publication".to_owned(),
         ))
     })();
+    if watch_set_dirty {
+        *watcher_degraded = true;
+    }
     match result {
-        Ok(()) => shared.complete(generation, Ok(())),
+        Ok(completed_generation) => shared.complete(completed_generation, Ok(())),
         Err(error) => {
             metrics
                 .reconciliation_failures
@@ -727,31 +1232,183 @@ fn reconcile(
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+struct ReconciliationPolicy {
+    cache_initialized: bool,
+    watcher_degraded: bool,
+    watcher_error_advanced: bool,
+    dropped_event_advanced: bool,
+    uncertain_hint: bool,
+    reconciliations_since_full: u64,
+    full_reconcile_interval: u64,
+}
+
+fn requires_full_reconciliation(policy: ReconciliationPolicy) -> bool {
+    !policy.cache_initialized
+        || policy.watcher_degraded
+        || policy.watcher_error_advanced
+        || policy.dropped_event_advanced
+        || policy.uncertain_hint
+        || policy.reconciliations_since_full >= policy.full_reconcile_interval
+}
+
+struct StableSourceSnapshot {
+    scan: WorkspaceSourceScan,
+    event_epoch: u64,
+    covered_generation: u64,
+    cache: SourceSnapshotCache,
+    kind: ReconciliationKind,
+    files_read: u64,
+}
+
 fn stable_scan(
     repository_root: &Path,
     syntax_index: &WorkspaceSyntaxIndex,
     metrics: &MetricsState,
-) -> Result<(WorkspaceSourceScan, u64), WorkspaceIndexError> {
+    shared: &BarrierShared,
+    previous: &SourceSnapshotCache,
+    force_full: bool,
+) -> Result<StableSourceSnapshot, WorkspaceIndexError> {
     let mut last_error = None;
+    let mut attempt_force_full = force_full;
+    let mut full_performed = force_full;
+    let mut retry_cache = None;
+    let mut files_read = 0_u64;
+    let initial_watcher_errors = metrics.watcher_errors.load(Ordering::Acquire);
+    let initial_dropped_events = metrics.dropped_watcher_events.load(Ordering::Acquire);
     for _ in 0..MAX_STABLE_SCAN_ATTEMPTS {
         let epoch = metrics.event_epoch.load(Ordering::Acquire);
-        let first = match syntax_index.scan_repository(repository_root) {
-            Ok(sources) => sources,
+        let inventory_started = Instant::now();
+        metrics.git_subprocesses.fetch_add(1, Ordering::Relaxed);
+        let paths = match chakra_git::discover_source_files_in_worktree(repository_root) {
+            Ok(paths) => paths,
             Err(error) => {
-                last_error = Some(error);
+                last_error = Some(WorkspaceIndexError::Discovery(error));
+                attempt_force_full = true;
+                full_performed = true;
                 continue;
             }
         };
-        let second = match syntax_index.scan_repository(repository_root) {
-            Ok(sources) => sources,
+        let inventory_elapsed = inventory_started.elapsed();
+        let inventory_changed = !previous.initialized || previous.inventory != paths;
+        let scan_options = IndexOptions::new(
+            syntax_index.budgets(),
+            chakra_domain::indexing::IndexCancellation::default(),
+        )?;
+        let cache = retry_cache.as_ref().unwrap_or(previous);
+        let mut loader = CachedSourceLoader::new(cache, attempt_force_full, metrics);
+        let scan_result = scan_discovered_sources_with_options(
+            repository_root,
+            &scan_options,
+            &paths,
+            inventory_elapsed,
+            &mut loader,
+        );
+        files_read = files_read.saturating_add(loader.files_read);
+        let scan = match scan_result {
+            Ok(scan) => scan,
             Err(error) => {
                 last_error = Some(error);
+                attempt_force_full = true;
+                full_performed = true;
                 continue;
             }
         };
-        if first.sources == second.sources && epoch == metrics.event_epoch.load(Ordering::Acquire) {
-            return Ok((second, epoch));
+        let covered_generation = shared
+            .pending_generation()
+            .map_or(0, |(requested, _)| requested);
+
+        metrics.git_subprocesses.fetch_add(1, Ordering::Relaxed);
+        let verified_paths = match chakra_git::discover_source_files_in_worktree(repository_root) {
+            Ok(paths) => paths,
+            Err(error) => {
+                last_error = Some(WorkspaceIndexError::Discovery(error));
+                attempt_force_full = true;
+                full_performed = true;
+                continue;
+            }
+        };
+        if verified_paths != paths {
+            last_error = Some(WorkspaceIndexError::Update(
+                "Git source inventory changed during freshness reconciliation".to_owned(),
+            ));
+            attempt_force_full = true;
+            full_performed = true;
+            continue;
         }
+
+        let mut identities_match = true;
+        for (path, expected) in &loader.observed {
+            let absolute = repository_root.join(path.as_str());
+            match fs::metadata(&absolute) {
+                Ok(metadata) => {
+                    metrics.files_inspected.fetch_add(1, Ordering::Relaxed);
+                    metrics
+                        .source_bytes_inspected
+                        .fetch_add(metadata.len(), Ordering::Relaxed);
+                    if FileIdentity::from_metadata(&metadata) != *expected {
+                        identities_match = false;
+                        break;
+                    }
+                }
+                Err(error) => {
+                    last_error = Some(WorkspaceIndexError::Read {
+                        path: path.clone(),
+                        source: error,
+                    });
+                    identities_match = false;
+                    break;
+                }
+            }
+        }
+        if !identities_match || epoch != metrics.event_epoch.load(Ordering::Acquire) {
+            // A normal watcher event racing this snapshot does not make the
+            // retained cache untrustworthy: the next pass rechecks every
+            // identity and rereads only bodies whose identity changed. Full
+            // rereads are reserved for explicit watcher/inventory uncertainty.
+            // Retain the bodies and identities just observed. A retry still
+            // checks them all against the filesystem, but a delayed event
+            // whose state was already captured no longer causes a duplicate
+            // body read. If the file changed again, the identity comparison
+            // below the loader makes that retry read it normally.
+            let new_watcher_uncertainty = metrics.watcher_errors.load(Ordering::Acquire)
+                > initial_watcher_errors
+                || metrics.dropped_watcher_events.load(Ordering::Acquire) > initial_dropped_events;
+            if new_watcher_uncertainty {
+                attempt_force_full = true;
+                full_performed = true;
+                retry_cache = None;
+            } else {
+                let entries = std::mem::take(&mut loader.next);
+                drop(loader);
+                retry_cache = Some(SourceSnapshotCache {
+                    initialized: true,
+                    inventory: paths,
+                    entries,
+                });
+                attempt_force_full = false;
+            }
+            continue;
+        }
+        let kind = if full_performed {
+            ReconciliationKind::Full
+        } else if inventory_changed || files_read != 0 {
+            ReconciliationKind::Targeted
+        } else {
+            ReconciliationKind::Noop
+        };
+        return Ok(StableSourceSnapshot {
+            scan,
+            event_epoch: epoch,
+            covered_generation,
+            cache: SourceSnapshotCache {
+                initialized: true,
+                inventory: paths,
+                entries: loader.next,
+            },
+            kind,
+            files_read,
+        });
     }
     Err(last_error.unwrap_or_else(|| {
         WorkspaceIndexError::Update(
@@ -762,10 +1419,10 @@ fn stable_scan(
 
 fn desired_watch_directories(
     repository_root: &Path,
-    syntax_index: &WorkspaceSyntaxIndex,
+    indexed_paths: &[RepoRelativePath],
 ) -> (BTreeSet<PathBuf>, bool) {
     let mut desired = BTreeSet::from([repository_root.to_path_buf()]);
-    for path in syntax_index.paths() {
+    for path in indexed_paths {
         if let Some(parent) = Path::new(path.as_str()).parent() {
             let mut directory = repository_root.join(parent);
             while directory != repository_root {
@@ -792,11 +1449,12 @@ fn desired_watch_directories(
 fn refresh_watches(
     watcher: &mut RecommendedWatcher,
     repository_root: &Path,
-    syntax_index: &WorkspaceSyntaxIndex,
+    indexed_paths: &[RepoRelativePath],
     watched: &mut BTreeSet<PathBuf>,
     metrics: &MetricsState,
+    force_reinstall: bool,
 ) -> Result<bool, WorkspaceIndexError> {
-    let (desired, mut degraded) = desired_watch_directories(repository_root, syntax_index);
+    let (desired, mut degraded) = desired_watch_directories(repository_root, indexed_paths);
     if degraded {
         metrics.watcher_errors.fetch_add(1, Ordering::Relaxed);
         warn!(
@@ -804,7 +1462,12 @@ fn refresh_watches(
             "watch directory bound reached; freshness barriers remain authoritative"
         );
     }
-    for directory in watched.difference(&desired).cloned().collect::<Vec<_>>() {
+    let removed = if force_reinstall {
+        std::mem::take(watched).into_iter().collect::<Vec<_>>()
+    } else {
+        watched.difference(&desired).cloned().collect::<Vec<_>>()
+    };
+    for directory in removed {
         if let Err(error) = watcher.unwatch(&directory) {
             metrics.watcher_errors.fetch_add(1, Ordering::Relaxed);
             warn!(path = %directory.display(), %error, "failed to remove filesystem watch");
@@ -956,10 +1619,111 @@ mod tests {
         let write = Event::new(EventKind::Access(AccessKind::Close(AccessMode::Write)));
         let modified = Event::new(EventKind::Modify(ModifyKind::Data(DataChange::Content)));
 
-        assert!(!event_may_change_workspace(&opened));
-        assert!(!event_may_change_workspace(&read));
-        assert!(event_may_change_workspace(&write));
-        assert!(event_may_change_workspace(&modified));
-        assert!(event_may_change_workspace(&Event::new(EventKind::Any)));
+        assert!(!event_may_change_workspace(&opened, &[]));
+        assert!(!event_may_change_workspace(&read, &[]));
+        assert!(event_may_change_workspace(&write, &[]));
+        assert!(event_may_change_workspace(&modified, &[]));
+        assert!(event_may_change_workspace(&Event::new(EventKind::Any), &[]));
+    }
+
+    #[test]
+    fn git_administration_events_are_not_workspace_mutations() {
+        let root = PathBuf::from("/worktree");
+        let administrative = root.join("linked-admin");
+        let event = Event::new(EventKind::Any).add_path(administrative.join("index.lock"));
+        assert!(!event_may_change_workspace(&event, &[administrative]));
+    }
+
+    #[test]
+    fn full_reconciliation_policy_covers_uncertainty_and_checkpoints() {
+        let baseline = ReconciliationPolicy {
+            cache_initialized: true,
+            watcher_degraded: false,
+            watcher_error_advanced: false,
+            dropped_event_advanced: false,
+            uncertain_hint: false,
+            reconciliations_since_full: 1,
+            full_reconcile_interval: 256,
+        };
+        assert!(!requires_full_reconciliation(baseline));
+        assert!(requires_full_reconciliation(ReconciliationPolicy {
+            cache_initialized: false,
+            ..baseline
+        }));
+        assert!(requires_full_reconciliation(ReconciliationPolicy {
+            watcher_degraded: true,
+            ..baseline
+        }));
+        assert!(requires_full_reconciliation(ReconciliationPolicy {
+            watcher_error_advanced: true,
+            ..baseline
+        }));
+        assert!(requires_full_reconciliation(ReconciliationPolicy {
+            dropped_event_advanced: true,
+            ..baseline
+        }));
+        assert!(requires_full_reconciliation(ReconciliationPolicy {
+            uncertain_hint: true,
+            ..baseline
+        }));
+        assert!(requires_full_reconciliation(ReconciliationPolicy {
+            reconciliations_since_full: 256,
+            ..baseline
+        }));
+    }
+
+    #[test]
+    fn event_epoch_sequence_marks_gaps_and_reordering_as_uncertain() {
+        let mut latest = 7;
+        assert!(!event_epoch_is_non_contiguous(&mut latest, 8));
+        assert!(event_epoch_is_non_contiguous(&mut latest, 10));
+        assert_eq!(latest, 10);
+        assert!(event_epoch_is_non_contiguous(&mut latest, 9));
+        assert_eq!(latest, 10);
+    }
+
+    #[test]
+    fn one_completed_generation_releases_all_covered_waiters()
+    -> Result<(), Box<dyn std::error::Error>> {
+        const WAITERS: u64 = 4;
+        let (sender, receiver) = mpsc::sync_channel(WAITERS as usize);
+        let shared = Arc::new(BarrierShared {
+            state: Mutex::new(BarrierState::default()),
+            completed: Condvar::new(),
+        });
+        let metrics = Arc::new(MetricsState::default());
+        let barrier = Arc::new(LiveFreshnessBarrier {
+            shared: shared.clone(),
+            sender,
+            metrics: metrics.clone(),
+        });
+        let waiters: Vec<_> = (0..WAITERS)
+            .map(|_| {
+                let barrier = barrier.clone();
+                thread::spawn(move || barrier.require_fresh())
+            })
+            .collect();
+
+        for _ in 0..WAITERS {
+            assert!(matches!(receiver.recv()?, WorkerSignal::Barrier));
+        }
+        assert_eq!(shared.pending_generation()?, (WAITERS, 0));
+        shared.complete(WAITERS, Ok(()));
+        metrics.record_barrier_completion(WAITERS, 0);
+        for waiter in waiters {
+            waiter.join().map_err(|_| "waiter panicked")??;
+        }
+        assert_eq!(metrics.barrier_requests.load(Ordering::Relaxed), WAITERS);
+        assert_eq!(
+            metrics
+                .barrier_generations_completed
+                .load(Ordering::Relaxed),
+            WAITERS
+        );
+        assert_eq!(
+            metrics.barrier_waiters_coalesced.load(Ordering::Relaxed),
+            WAITERS - 1
+        );
+        Ok(())
     }
 }
