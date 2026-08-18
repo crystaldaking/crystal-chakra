@@ -7,93 +7,301 @@
   "skip_reason": "",
   "provider_phase": "not-configured",
   "scenario_count": 11,
-  "passed": 1,
-  "failed": 1,
-  "skipped": 9,
+  "passed": 11,
+  "failed": 0,
+  "skipped": 0,
   "scenarios": [
     {
       "id": "cold-index",
-      "status": "fail",
-      "details": "cold index failed: failed to read source src/Symfony/Component/Cache/Traits/ValueWrapper.php: stream did not contain valid UTF-8",
+      "status": "pass",
+      "details": "full index from scratch; coverage counts recorded",
       "phases": [
         {
-          "name": "index",
-          "wall_micros": 212849
+          "name": "GitInventory",
+          "wall_micros": 190505
+        },
+        {
+          "name": "SourceRead",
+          "wall_micros": 1075303
+        },
+        {
+          "name": "ParseExtraction/Rust",
+          "wall_micros": 1
+        },
+        {
+          "name": "SymbolCatalog/Rust",
+          "wall_micros": 0
+        },
+        {
+          "name": "Relationships/Rust",
+          "wall_micros": 0
+        },
+        {
+          "name": "GraphMaterialization/Rust",
+          "wall_micros": 5
+        },
+        {
+          "name": "ParseExtraction/Php",
+          "wall_micros": 1873718
+        },
+        {
+          "name": "SymbolCatalog/Php",
+          "wall_micros": 48382
+        },
+        {
+          "name": "Relationships/Php",
+          "wall_micros": 12053
+        },
+        {
+          "name": "GraphMaterialization/Php",
+          "wall_micros": 1615225
+        },
+        {
+          "name": "LanguageComposition",
+          "wall_micros": 3
+        },
+        {
+          "name": "GraphValidation",
+          "wall_micros": 933963
+        },
+        {
+          "name": "total",
+          "wall_micros": 5805218
         }
       ],
-      "measurements": {},
-      "budget_verdicts": []
+      "measurements": {
+        "ambiguous_call_sites": 55,
+        "call_sites": 254777,
+        "degradations": 0,
+        "degraded": false,
+        "discovered_files": 11116,
+        "edges": 245502,
+        "parsed_files": 11114,
+        "peak_rss_bytes": 1113899008,
+        "php_files": 11114,
+        "rust_files": 0,
+        "source_bytes": 90694860,
+        "symbols": 121822,
+        "syntax_error_files": 11,
+        "unresolved_call_sites": 167373,
+        "wall_micros": 5805218
+      },
+      "budget_verdicts": [
+        {
+          "budget": "cold_index_peak_rss_bytes",
+          "observed": 1113899008,
+          "limit": 4294967296,
+          "status": "pass"
+        },
+        {
+          "budget": "cold_index_wall_micros",
+          "observed": 5805218,
+          "limit": 120000000,
+          "status": "pass"
+        }
+      ]
     },
     {
       "id": "warm-noop",
-      "status": "skipped",
-      "details": "cold index failed",
-      "phases": [],
-      "measurements": {},
-      "budget_verdicts": []
+      "status": "pass",
+      "details": "unchanged checkout: no reindex work behind the freshness barrier",
+      "phases": [
+        {
+          "name": "fresh_barrier",
+          "wall_micros": 213405
+        }
+      ],
+      "measurements": {
+        "files_inspected": 22232,
+        "git_subprocesses": 2,
+        "no_op_reconciliations": 1,
+        "wall_micros": 213405
+      },
+      "budget_verdicts": [
+        {
+          "budget": "warm_noop_wall_micros",
+          "observed": 213406,
+          "limit": 30000000,
+          "status": "pass"
+        }
+      ]
     },
     {
       "id": "fingerprint",
-      "status": "skipped",
-      "details": "cold index failed",
-      "phases": [],
-      "measurements": {},
+      "status": "pass",
+      "details": "two cold indexes produce identical fingerprints and counts",
+      "phases": [
+        {
+          "name": "reindex",
+          "wall_micros": 5958811
+        }
+      ],
+      "measurements": {
+        "fingerprint": "a926c72085831d51",
+        "rerun_edges": 245502,
+        "rerun_symbols": 121822
+      },
       "budget_verdicts": []
     },
     {
       "id": "one-file-edit",
-      "status": "skipped",
-      "details": "cold index failed",
-      "phases": [],
-      "measurements": {},
+      "status": "pass",
+      "details": "one-file edit: targeted reconcile, fresh query sees the change",
+      "phases": [
+        {
+          "name": "edit_and_barrier",
+          "wall_micros": 637006
+        }
+      ],
+      "measurements": {
+        "files_reparsed": 1,
+        "full_reconciliations": 0,
+        "wall_micros": 637006
+      },
       "budget_verdicts": []
     },
     {
       "id": "atomic-replace",
-      "status": "skipped",
-      "details": "cold index failed",
-      "phases": [],
-      "measurements": {},
+      "status": "pass",
+      "details": "write-temp-then-rename: targeted reconcile, fresh query sees the change",
+      "phases": [
+        {
+          "name": "replace_and_barrier",
+          "wall_micros": 798774
+        }
+      ],
+      "measurements": {
+        "files_reparsed": 1,
+        "full_reconciliations": 0,
+        "wall_micros": 798774
+      },
       "budget_verdicts": []
     },
     {
       "id": "rename-delete",
-      "status": "skipped",
-      "details": "cold index failed",
-      "phases": [],
-      "measurements": {},
+      "status": "pass",
+      "details": "rename + delete: inventory correct after the freshness barrier",
+      "phases": [
+        {
+          "name": "rename_delete_and_barrier",
+          "wall_micros": 2632596
+        }
+      ],
+      "measurements": {
+        "created_files": 1,
+        "deleted_files": 2,
+        "wall_micros": 2632597
+      },
       "budget_verdicts": []
     },
     {
       "id": "syntax-error",
-      "status": "skipped",
-      "details": "cold index failed",
-      "phases": [],
-      "measurements": {},
+      "status": "pass",
+      "details": "last-good revision: `hasDefinition` stays queryable; temporary syntax error: attributed diagnostics; restore returns to baseline on a newer revision",
+      "phases": [
+        {
+          "name": "break_and_barrier",
+          "wall_micros": 558458
+        }
+      ],
+      "measurements": {
+        "baseline_total_diagnostics": 22
+      },
       "budget_verdicts": []
     },
     {
       "id": "diff-context",
-      "status": "skipped",
-      "details": "cold index failed",
-      "phases": [],
-      "measurements": {},
+      "status": "pass",
+      "details": "clean tree: empty diff; after edits: correct changed-file attribution",
+      "phases": [
+        {
+          "name": "clean_diff",
+          "wall_micros": 4748813
+        },
+        {
+          "name": "dirty_diff",
+          "wall_micros": 808125
+        }
+      ],
+      "measurements": {
+        "changed_files": [
+          {
+            "change": "Deleted",
+            "path": ".agents/skills/symfony-sync-translations/scripts/add_message.php",
+            "previous_path": null
+          },
+          {
+            "change": "Deleted",
+            "path": ".github/build-packages.php",
+            "previous_path": null
+          },
+          {
+            "change": "Added",
+            "path": ".github/build-packages__chakra_moved.php",
+            "previous_path": null
+          }
+        ],
+        "clean_diff_wall_micros": 679128
+      },
       "budget_verdicts": []
     },
     {
       "id": "queries",
-      "status": "skipped",
-      "details": "cold index failed",
-      "phases": [],
-      "measurements": {},
+      "status": "pass",
+      "details": "high-degree targets chosen from the index; bounded responses with explicit truncation",
+      "phases": [
+        {
+          "name": "symbol_search",
+          "wall_micros": 209
+        },
+        {
+          "name": "callers",
+          "wall_micros": 2013
+        },
+        {
+          "name": "context",
+          "wall_micros": 441
+        }
+      ],
+      "measurements": {
+        "callers_returned": 5,
+        "target": "Symfony::Component::DependencyInjection::ContainerBuilder::hasDefinition",
+        "target_incoming_calls": 258,
+        "target_precision": "TreeSitter/Syntax",
+        "targets": [
+          {
+            "incoming_calls": 258,
+            "qualified_name": "Symfony::Component::DependencyInjection::ContainerBuilder::hasDefinition"
+          },
+          {
+            "incoming_calls": 225,
+            "qualified_name": "Symfony::Bridge::Twig::Test::FormLayoutTestCase::assertMatchesXpath"
+          },
+          {
+            "incoming_calls": 199,
+            "qualified_name": "Symfony::Component::DependencyInjection::ContainerBuilder::removeDefinition"
+          }
+        ]
+      },
       "budget_verdicts": []
     },
     {
       "id": "cancellation",
-      "status": "skipped",
-      "details": "cold index failed",
-      "phases": [],
-      "measurements": {},
+      "status": "pass",
+      "details": "cancelled index and query stop promptly; no partial publication",
+      "phases": [
+        {
+          "name": "cancelled_cold_index",
+          "wall_micros": 12
+        },
+        {
+          "name": "cancelled_query",
+          "wall_micros": 0
+        }
+      ],
+      "measurements": {
+        "cancelled_index_wall_micros": 13
+      },
       "budget_verdicts": []
     },
     {

@@ -22,7 +22,7 @@ Target list reviewed: 2026-08 (GitHub Octoverse 2025 top languages plus pre-exis
 | BUDGET-01 | pass | query work budgets (ADR-0025) |
 | CANCEL-01 | pass | cooperative cancellation (ADR-0025) |
 | CONFORM-01 | pass | chakra-conformance harness |
-| CORPUS-01 | missing | Public corpus evaluation lands with #25. |
+| CORPUS-01 | pass | pinned public corpus evaluation (ADR-0029) |
 | DEGRADE-01 | pass | bounded degradation (ADR-0011) |
 | DISC-01 | pass | chakra-git discovery |
 | DISC-02 | pass | composer-aware scopes |

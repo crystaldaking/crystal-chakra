@@ -83,10 +83,11 @@ measured values vary by machine and run.
 
 ## Known findings
 
-- `symfony/symfony` currently fails `cold-index`:
+- `symfony/symfony` previously failed `cold-index`:
   `src/Symfony/Component/Cache/Traits/ValueWrapper.php` is genuinely
-  ISO-8859-encoded (a Latin-1 `©`), and the source scan aborts the whole
-  cold index on a non-UTF-8 file instead of degrading past it. This is a
-  chakra-language robustness gap surfaced by the corpus, not a runner
-  artifact; the failing result file is committed deliberately as the
-  record. Follow-up belongs to the PHP parity work.
+  ISO-8859-encoded (a Latin-1 `©`), and the source scan aborted the whole
+  cold index on a non-UTF-8 file instead of degrading past it. Fixed during
+  the PHP parity work (#32): per-file read failures (invalid UTF-8, I/O
+  errors, files vanishing between inventory and read) are now skipped,
+  counted in `coverage.unreadable_files`, and no longer abort the index.
+  Both PHP repositories pass the full scenario catalog.

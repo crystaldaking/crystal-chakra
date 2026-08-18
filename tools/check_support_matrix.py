@@ -8,6 +8,11 @@ Implements the enforcement half of docs/language-parity-contract.md (#22):
 - requires evidence pointers to exist for pass/equivalent capabilities;
 - refuses advertised status unless every mandatory capability (and every
   triggered conditional one) is satisfied with conformance/corpus evidence;
+- parses conformance results referenced by `conformance_results` and fails on
+  any non-pass scenario;
+- parses every `docs/support/corpus/results/<language>-*.json` artifact when
+  `corpus_results` is set and fails on any non-pass scenario (skipped
+  repositories are allowed and reported);
 - regenerates docs/support/matrix.json and docs/support/SUPPORT_MATRIX.md.
 
 Usage:
@@ -28,6 +33,7 @@ LANGUAGES_DIR = SUPPORT_DIR / "languages"
 MATRIX_JSON = SUPPORT_DIR / "matrix.json"
 MATRIX_MD = SUPPORT_DIR / "SUPPORT_MATRIX.md"
 TARGET_FILE = SUPPORT_DIR / "target_languages.json"
+CORPUS_RESULTS_DIR = SUPPORT_DIR / "corpus" / "results"
 
 # Keep in sync with docs/language-parity-contract.md §3.
 MANDATORY_CAPABILITIES = [
@@ -136,6 +142,69 @@ def validate_manifest(path: Path, manifest: dict, errors: list[str]) -> None:
                 fail(errors, where, f"advertised but {field} does not exist: {value}")
 
 
+def validate_result_payloads(manifest: dict, errors: list[str], notes: list[str]) -> None:
+    """Parse referenced result artifacts and fail on non-pass outcomes."""
+    language = manifest.get("language")
+    if not isinstance(language, str) or not language:
+        return
+    where = f"{language}.json"
+
+    conformance = manifest.get("conformance_results")
+    if isinstance(conformance, str) and conformance:
+        path = REPO_ROOT / conformance
+        if path.exists():
+            data = load_json(path, errors)
+            if data is not None:
+                if data.get("failed") != 0:
+                    fail(errors, where, f"{conformance}: failed count is {data.get('failed')!r}")
+                scenarios = data.get("scenarios")
+                if isinstance(scenarios, list):
+                    for scenario in scenarios:
+                        if isinstance(scenario, dict) and scenario.get("status") != "pass":
+                            fail(
+                                errors,
+                                where,
+                                f"{conformance}: scenario {scenario.get('id')!r} "
+                                f"status is {scenario.get('status')!r}",
+                            )
+
+    corpus = manifest.get("corpus_results")
+    if isinstance(corpus, str) and corpus:
+        # Convention: corpus artifacts are per-repository; validate every
+        # <language>-*.json under the results directory regardless of whether
+        # corpus_results points at one file or at the directory itself.
+        artifacts = sorted(CORPUS_RESULTS_DIR.glob(f"{language}-*.json"))
+        if not artifacts:
+            fail(
+                errors,
+                where,
+                f"corpus_results is set but no {language}-*.json artifacts exist "
+                f"under {CORPUS_RESULTS_DIR.relative_to(REPO_ROOT)}",
+            )
+        for artifact in artifacts:
+            data = load_json(artifact, errors)
+            if data is None:
+                continue
+            name = artifact.name
+            status = data.get("status")
+            if status == "skipped":
+                notes.append(f"{name}: repository skipped ({data.get('skip_reason') or 'no reason'})")
+                continue
+            if status == "fail":
+                fail(errors, where, f"{name}: repository status is 'fail'")
+                continue
+            scenarios = data.get("scenarios")
+            if isinstance(scenarios, list):
+                for scenario in scenarios:
+                    if isinstance(scenario, dict) and scenario.get("status") != "pass":
+                        fail(
+                            errors,
+                            where,
+                            f"{name}: scenario {scenario.get('id')!r} "
+                            f"status is {scenario.get('status')!r}",
+                        )
+
+
 def render_markdown(matrix: dict) -> str:
     lines = [
         "# Language Support Matrix",
@@ -191,6 +260,7 @@ def main() -> int:
     args = parser.parse_args()
 
     errors: list[str] = []
+    notes: list[str] = []
 
     target = load_json(TARGET_FILE, errors) or {}
     manifests: list[dict] = []
@@ -201,6 +271,7 @@ def main() -> int:
             manifest = load_json(path, errors)
             if manifest is not None:
                 validate_manifest(path, manifest, errors)
+                validate_result_payloads(manifest, errors, notes)
                 manifests.append(manifest)
 
     matrix = {
@@ -227,6 +298,8 @@ def main() -> int:
 
     advertised = [m["language"] for m in manifests if m.get("advertised")]
     print(f"support matrix OK: {len(manifests)} language manifests, advertised: {advertised or 'none'}")
+    for note in notes:
+        print(f"note: {note}")
     return 0
 
 
