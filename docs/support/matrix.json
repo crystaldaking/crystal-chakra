@@ -225,8 +225,8 @@
     },
     {
       "language": "rust",
-      "advertised": false,
-      "tier": "in-progress",
+      "advertised": true,
+      "tier": "first-class",
       "grammar": {
         "name": "tree-sitter-rust",
         "version": "0.24",
@@ -428,17 +428,24 @@
           ]
         },
         "CORPUS-01": {
-          "status": "missing",
-          "note": "Public corpus evaluation lands with #25."
+          "status": "pass",
+          "mechanism": "pinned public corpus evaluation (ADR-0029)",
+          "evidence": [
+            "docs/support/corpus/results/rust-tokio-rs__tokio.json",
+            "docs/support/corpus/results/rust-BurntSushi__ripgrep.json"
+          ]
         },
         "DOCS-01": {
-          "status": "missing",
-          "note": "Per-language install/runtime documentation pending."
+          "status": "pass",
+          "mechanism": "per-language documentation",
+          "evidence": [
+            "docs/languages/rust.md"
+          ]
         }
       },
       "conformance_results": "docs/support/conformance/rust.json",
-      "corpus_results": null,
-      "docs": null
+      "corpus_results": "docs/support/corpus/results/rust-tokio-rs__tokio.json",
+      "docs": "docs/languages/rust.md"
     }
   ]
 }
