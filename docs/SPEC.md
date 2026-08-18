@@ -376,6 +376,10 @@ Provider capabilities differ by language and tool.
 
 It does **not** mean identical semantic precision across languages.
 
+The testable pass/fail definition of first-class support, its capability
+catalog, and the machine-readable support matrix live in
+`docs/language-parity-contract.md` (ADR-0026).
+
 ## 16. Rust provider
 
 The initial precise provider is rust-analyzer.
