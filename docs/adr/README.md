@@ -51,5 +51,6 @@ Accepted decisions:
 - ADR-026: first-class language parity contract and generated support matrix
 - ADR-027: syntax grammar and precise provider selection for target languages
 - ADR-028: cross-language conformance harness and scenario manifest
+- ADR-029: pinned public evaluation corpus and budgeted runner
 
 Do not pre-create empty ADRs merely to satisfy a list.

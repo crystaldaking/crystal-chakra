@@ -64,6 +64,10 @@ jobs:
           emitted="$(mktemp -d)"
           cargo run --locked -p chakra-conformance -- emit "$emitted"
           diff -r docs/support/conformance "$emitted"
+      # Committed public-corpus artifacts must stay well-formed and
+      # manifest-consistent. Structure only: measured values are never
+      # diffed, and nothing is fetched from the network.
+      - run: cargo run --locked -p chakra-conformance -- corpus --verify
 
   large-repository-gate:
     runs-on: ubuntu-latest

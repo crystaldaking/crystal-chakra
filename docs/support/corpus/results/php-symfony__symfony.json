@@ -1,0 +1,108 @@
+{
+  "schema_version": 1,
+  "language": "php",
+  "repository": "symfony/symfony",
+  "sha": "add4ddb9867ba5dc5adc58d41f75b751caa5edd1",
+  "status": "evaluated",
+  "skip_reason": "",
+  "provider_phase": "not-configured",
+  "scenario_count": 11,
+  "passed": 1,
+  "failed": 1,
+  "skipped": 9,
+  "scenarios": [
+    {
+      "id": "cold-index",
+      "status": "fail",
+      "details": "cold index failed: failed to read source src/Symfony/Component/Cache/Traits/ValueWrapper.php: stream did not contain valid UTF-8",
+      "phases": [
+        {
+          "name": "index",
+          "wall_micros": 212849
+        }
+      ],
+      "measurements": {},
+      "budget_verdicts": []
+    },
+    {
+      "id": "warm-noop",
+      "status": "skipped",
+      "details": "cold index failed",
+      "phases": [],
+      "measurements": {},
+      "budget_verdicts": []
+    },
+    {
+      "id": "fingerprint",
+      "status": "skipped",
+      "details": "cold index failed",
+      "phases": [],
+      "measurements": {},
+      "budget_verdicts": []
+    },
+    {
+      "id": "one-file-edit",
+      "status": "skipped",
+      "details": "cold index failed",
+      "phases": [],
+      "measurements": {},
+      "budget_verdicts": []
+    },
+    {
+      "id": "atomic-replace",
+      "status": "skipped",
+      "details": "cold index failed",
+      "phases": [],
+      "measurements": {},
+      "budget_verdicts": []
+    },
+    {
+      "id": "rename-delete",
+      "status": "skipped",
+      "details": "cold index failed",
+      "phases": [],
+      "measurements": {},
+      "budget_verdicts": []
+    },
+    {
+      "id": "syntax-error",
+      "status": "skipped",
+      "details": "cold index failed",
+      "phases": [],
+      "measurements": {},
+      "budget_verdicts": []
+    },
+    {
+      "id": "diff-context",
+      "status": "skipped",
+      "details": "cold index failed",
+      "phases": [],
+      "measurements": {},
+      "budget_verdicts": []
+    },
+    {
+      "id": "queries",
+      "status": "skipped",
+      "details": "cold index failed",
+      "phases": [],
+      "measurements": {},
+      "budget_verdicts": []
+    },
+    {
+      "id": "cancellation",
+      "status": "skipped",
+      "details": "cold index failed",
+      "phases": [],
+      "measurements": {},
+      "budget_verdicts": []
+    },
+    {
+      "id": "cache-restore",
+      "status": "pass",
+      "details": "checkout restored to the pinned SHA with a clean worktree",
+      "phases": [],
+      "measurements": {},
+      "budget_verdicts": []
+    }
+  ]
+}

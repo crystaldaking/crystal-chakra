@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "note": "Per-language starting budgets for the corpus evaluation runner (issue #25). Initial values are sized generously from a real local run on 2026-08-18 (macOS/arm64, release build; see RESULTS.md): observed cold-index wall times were 0.19-1.75 s, peak RSS 120-591 MiB, warm-noop barriers 0.06-0.10 s. Budgets are ~25-100x those observations, so they trip on order-of-magnitude regressions (e.g. an accidental full reindex behind a warm barrier), not on machine noise. Tightening a budget or changing a baseline requires review and a deliberate commit.",
+  "languages": {
+    "rust": {
+      "cold_index_wall_micros": 60000000,
+      "cold_index_peak_rss_bytes": 2147483648,
+      "warm_noop_wall_micros": 10000000
+    },
+    "php": {
+      "cold_index_wall_micros": 120000000,
+      "cold_index_peak_rss_bytes": 4294967296,
+      "warm_noop_wall_micros": 30000000
+    }
+  }
+}
