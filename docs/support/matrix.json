@@ -204,8 +204,11 @@
           ]
         },
         "CONFORM-01": {
-          "status": "missing",
-          "note": "Shared conformance harness lands with #24."
+          "status": "pass",
+          "mechanism": "chakra-conformance harness",
+          "evidence": [
+            "docs/support/conformance/php.json"
+          ]
         },
         "CORPUS-01": {
           "status": "missing",
@@ -216,7 +219,7 @@
           "note": "Per-language install/runtime documentation pending."
         }
       },
-      "conformance_results": null,
+      "conformance_results": "docs/support/conformance/php.json",
       "corpus_results": null,
       "docs": null
     },
@@ -418,8 +421,11 @@
           ]
         },
         "CONFORM-01": {
-          "status": "missing",
-          "note": "Shared conformance harness lands with #24."
+          "status": "pass",
+          "mechanism": "chakra-conformance harness",
+          "evidence": [
+            "docs/support/conformance/rust.json"
+          ]
         },
         "CORPUS-01": {
           "status": "missing",
@@ -430,7 +436,7 @@
           "note": "Per-language install/runtime documentation pending."
         }
       },
-      "conformance_results": null,
+      "conformance_results": "docs/support/conformance/rust.json",
       "corpus_results": null,
       "docs": null
     }

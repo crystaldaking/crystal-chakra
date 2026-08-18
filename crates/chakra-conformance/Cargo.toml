@@ -1,0 +1,22 @@
+[package]
+name = "chakra-conformance"
+description = "Cross-language conformance fixture and parity test harness for Chakra (issue #24)"
+version = "0.1.1"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+chakra-domain = { path = "../chakra-domain", version = "0.1.1" }
+chakra-engine = { path = "../chakra-engine", version = "0.1.1" }
+chakra-git = { path = "../chakra-git", version = "0.1.1" }
+chakra-language = { path = "../chakra-language", version = "0.1.1" }
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+
+[lints]
+workspace = true

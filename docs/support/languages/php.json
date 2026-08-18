@@ -39,11 +39,11 @@
     "BUDGET-01": {"status": "pass", "mechanism": "query work budgets (ADR-0025)", "evidence": ["crates/chakra-engine/tests/query_work_budgets.rs"]},
     "CANCEL-01": {"status": "pass", "mechanism": "cooperative cancellation (ADR-0025)", "evidence": ["crates/chakra-engine/tests/query_work_budgets.rs"]},
     "DEGRADE-01": {"status": "pass", "mechanism": "bounded degradation (ADR-0011)", "evidence": ["crates/chakra-engine/tests/query_work_budgets.rs"]},
-    "CONFORM-01": {"status": "missing", "note": "Shared conformance harness lands with #24."},
+    "CONFORM-01": {"status": "pass", "mechanism": "chakra-conformance harness", "evidence": ["docs/support/conformance/php.json"]},
     "CORPUS-01": {"status": "missing", "note": "Public corpus evaluation lands with #25."},
     "DOCS-01": {"status": "missing", "note": "Per-language install/runtime documentation pending."}
   },
-  "conformance_results": null,
+  "conformance_results": "docs/support/conformance/php.json",
   "corpus_results": null,
   "docs": null
 }
