@@ -105,6 +105,6 @@ must remain inside their adapters.
 - A hermetic LSP peer proves caller cancellation interrupts an already-sent
   precise request and records `$/cancelRequest` without requiring a global
   rust-analyzer installation.
-- Provider lifecycle refinements and broader provider-specific cancellation
-  cases remain tracked by issue #14; generated large-workspace cancellation
-  gates remain part of issue #15.
+- ADR-013 covers provider lifecycle refinements and broader provider-specific
+  cancellation cases; the generated large-workspace gate exercises
+  cancellation under load.

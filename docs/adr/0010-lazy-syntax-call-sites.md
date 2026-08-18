@@ -32,7 +32,8 @@ precise enrichment.
 - Resolve against the complete callable catalog while materializing a private
   graph revision:
   - exactly one syntax candidate creates one heuristic `CALLS` edge;
-  - a resolved call owned by a test also creates one heuristic `TESTS` edge;
+  - a resolved call owned by a test also creates a heuristic `TESTS` edge,
+    deduplicated per test/target pair as refined by ADR-012;
   - multiple candidates record `ambiguous { candidates }` without candidate
     edges;
   - no candidate records `unresolved`;
@@ -42,9 +43,11 @@ precise enrichment.
   capped at 128 Unicode scalar values and never converts an unknown receiver
   into a global method lookup.
 - Expand ambiguous candidates only for the selected symbol in `context`,
-  `callers`, and `diff_context`. Expansion uses the existing per-section
-  request limit and envelope truncation flag. Candidate facts are returned in
-  dedicated `syntax_call_candidates`, `syntax_candidates`, and
+  `callers`, and `diff_context`. Expansion uses per-section item/byte budgets
+  and typed envelope truncation metadata. Under ADR-024, repeated sites are
+  aggregated by caller and candidate target with an exact occurrence count
+  and at most three representative evidence records. Candidate facts are
+  returned in dedicated `syntax_call_candidates`, `syntax_candidates`, and
   `related_call_candidates` collections with heuristic precision; they are not
   mixed into materialized/precise caller or callee collections.
 - Precise provider results for the pinned syntax revision replace matching
@@ -87,13 +90,13 @@ precise enrichment.
 - Graph size is proportional to declarations, exact relationships, and call
   sites rather than the product of calls and same-name declarations.
 - `callers` can distinguish materialized/precise callers from possible syntax
-  candidates. Existing clients receive additive response fields and should
-  continue treating provenance and precision as authoritative.
+  candidates. ADR-024's schema-v6 aggregation changes the evidence shape;
+  clients must continue treating provenance and precision as authoritative.
 - Some calls that previously appeared as heuristic edges now appear as
   unresolved evidence until a qualifier or precise provider result is
   available. This is an intentional correctness improvement.
-- PHP issue #1 can refine receiver/type hints without changing graph ownership
-  or query contracts.
+- ADR-015 refines PHP receiver/type hints without changing graph ownership or
+  query contracts.
 
 ## Validation / follow-up
 

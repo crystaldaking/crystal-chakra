@@ -187,7 +187,7 @@ fn cache_entry_bytes(key: &CacheKey, result: &PreciseQueryResult) -> usize {
         size_of::<chakra_engine::PreciseRelation>()
             + relation.name.len()
             + range_bytes(&relation.declaration)
-            + relation.call_site.as_ref().map_or(0, range_bytes)
+            + relation.call_sites.iter().map(range_bytes).sum::<usize>()
     };
     size_of::<CacheKey>()
         .saturating_add(key.name.len())
@@ -487,7 +487,8 @@ impl Worker {
                         state: ProviderState::Ready,
                         incoming: Vec::new(),
                         outgoing: Vec::new(),
-                        truncated: false,
+                        incoming_truncated: false,
+                        outgoing_truncated: false,
                     });
                 }
                 self.wait_for_quiescence(session)?;
@@ -535,26 +536,28 @@ impl Worker {
             }
         }
 
-        let mut truncated = false;
+        let mut incoming_truncated = false;
         let incoming = convert_incoming(
             last_incoming,
             &request.workspace,
             request.limit,
-            &mut truncated,
+            &mut incoming_truncated,
         );
+        let mut outgoing_truncated = false;
         let outgoing = convert_outgoing(
             last_outgoing,
             &request.workspace,
             request.symbol.declaration.file(),
             request.limit,
-            &mut truncated,
+            &mut outgoing_truncated,
         );
         Ok(PreciseQueryResult {
             revision: request.workspace.revision,
             state: ProviderState::Ready,
             incoming,
             outgoing,
-            truncated,
+            incoming_truncated,
+            outgoing_truncated,
         })
     }
 
@@ -1534,11 +1537,13 @@ mod tests {
             incoming: vec![chakra_engine::PreciseRelation {
                 name: name.to_owned(),
                 declaration: range.clone(),
-                call_site: None,
+                occurrence_count: 1,
+                call_sites: Vec::new(),
                 provenance: Provenance::RustAnalyzer,
             }],
             outgoing: Vec::new(),
-            truncated: false,
+            incoming_truncated: false,
+            outgoing_truncated: false,
         };
         let first_key = key("first");
         let first_result = result("first");

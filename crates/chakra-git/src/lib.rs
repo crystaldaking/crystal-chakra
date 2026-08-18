@@ -1,9 +1,9 @@
 //! Git-backed source discovery and current worktree change adapter.
 //!
-//! The adapter asks Git to compare `HEAD` with the final materialized
-//! worktree and adds untracked, non-ignored supported source files. It never constructs
-//! or inspects an administrative Git path, and repository-controlled paths
-//! are passed as data rather than through a shell.
+//! The adapter asks Git to compare a resolved commit baseline with the final
+//! materialized worktree and adds untracked, non-ignored supported source
+//! files. It never constructs or inspects an administrative Git path, and
+//! repository-controlled paths are passed as data rather than through a shell.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ffi::OsStr;
@@ -17,12 +17,13 @@ use std::time::Duration;
 use chakra_domain::location::RepoRelativePath;
 use chakra_domain::operation::OperationContext;
 use chakra_domain::provenance::{Precision, Provenance};
-use chakra_domain::query::ChangeKind;
+use chakra_domain::query::{ChangeKind, DiffScope, ResolvedDiffScope};
 use chakra_engine::{
     DiffWorkspace, WorkspaceDiff, WorkspaceDiffError, WorkspaceDiffProvider, WorkspaceFileChange,
 };
 
 mod discovery;
+mod source_metadata;
 
 pub use discovery::{
     DiscoveryError, discover_language_files, discover_source_files,
@@ -30,17 +31,33 @@ pub use discovery::{
     resolve_git_administrative_paths, resolve_repository_identity, resolve_repository_root,
     resolve_workspace_identity, source_language,
 };
+pub use source_metadata::{ClassifiedSource, discover_classified_sources};
 
 const MAX_GIT_OUTPUT_BYTES: usize = 8 * 1024 * 1024;
 const MAX_WORKSPACE_CHANGES: usize = 10_000;
 const MAX_ERROR_CHARS: usize = 1_024;
 const MAX_GIT_STDERR_BYTES: usize = 16 * 1024;
+const MAX_GIT_REFERENCE_CHARS: usize = 1_024;
 const GIT_COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
 const CHILD_POLL_INTERVAL: Duration = Duration::from_millis(1);
 
 /// Fixed-argument Git implementation for the active materialized worktree.
 #[derive(Debug, Default)]
 pub struct GitWorkspaceDiff;
+
+#[derive(Debug)]
+struct ResolvedBaseline {
+    public: ResolvedDiffScope,
+    head_commit: Option<String>,
+    reference_commit: Option<String>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct GitInventory {
+    tracked: Vec<u8>,
+    index: Vec<u8>,
+    untracked: Vec<u8>,
+}
 
 #[derive(Debug)]
 struct BoundedRead {
@@ -109,6 +126,7 @@ fn capture_command(
     let mut child = Command::new(executable)
         .current_dir(root)
         .env("GIT_LITERAL_PATHSPECS", "1")
+        .env("LC_ALL", "C")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -218,7 +236,7 @@ fn git_output(
     Ok(output)
 }
 
-fn has_head(root: &Path, operation: &OperationContext) -> Result<bool, WorkspaceDiffError> {
+fn ensure_worktree(root: &Path, operation: &OperationContext) -> Result<(), WorkspaceDiffError> {
     let worktree = git_output(
         root,
         "git rev-parse --is-inside-work-tree",
@@ -230,7 +248,33 @@ fn has_head(root: &Path, operation: &OperationContext) -> Result<bool, Workspace
             "repository root is not inside a Git worktree",
         ));
     }
+    Ok(())
+}
 
+fn parse_object_id(output: &[u8], operation: &str) -> Result<String, WorkspaceDiffError> {
+    let output = std::str::from_utf8(output)
+        .map_err(|_| WorkspaceDiffError::new(format!("{operation} returned non-UTF-8 output")))?;
+    let mut lines = output.lines().filter(|line| !line.is_empty());
+    let object_id = lines
+        .next()
+        .ok_or_else(|| WorkspaceDiffError::new(format!("{operation} returned no commit")))?;
+    if lines.next().is_some() {
+        return Err(WorkspaceDiffError::new(format!(
+            "{operation} returned more than one commit"
+        )));
+    }
+    if !object_id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(WorkspaceDiffError::new(format!(
+            "{operation} returned an invalid object id"
+        )));
+    }
+    Ok(object_id.to_owned())
+}
+
+fn resolve_head(
+    root: &Path,
+    operation: &OperationContext,
+) -> Result<Option<String>, WorkspaceDiffError> {
     let output = capture_git(
         root,
         "git rev-parse HEAD",
@@ -248,9 +292,9 @@ fn has_head(root: &Path, operation: &OperationContext) -> Result<bool, Workspace
         )));
     }
     if output.status.success() {
-        Ok(true)
+        parse_object_id(&output.stdout, "git rev-parse HEAD").map(Some)
     } else if output.stdout.is_empty() && output.stderr.is_empty() {
-        Ok(false)
+        Ok(None)
     } else {
         Err(WorkspaceDiffError::new(format!(
             "`git rev-parse HEAD` exited with status {}: {}",
@@ -258,6 +302,234 @@ fn has_head(root: &Path, operation: &OperationContext) -> Result<bool, Workspace
             bounded_text(&output.stderr)
         )))
     }
+}
+
+fn validate_reference(reference: &str) -> Result<(), WorkspaceDiffError> {
+    if reference.trim().is_empty() {
+        return Err(WorkspaceDiffError::new(
+            "Git base reference must not be empty",
+        ));
+    }
+    if reference.chars().count() > MAX_GIT_REFERENCE_CHARS {
+        return Err(WorkspaceDiffError::new(format!(
+            "Git base reference exceeds the {MAX_GIT_REFERENCE_CHARS}-character request budget"
+        )));
+    }
+    if reference.chars().any(char::is_control) {
+        return Err(WorkspaceDiffError::new(
+            "Git base reference must not contain control characters",
+        ));
+    }
+    Ok(())
+}
+
+fn resolve_commit(
+    root: &Path,
+    reference: &str,
+    operation: &OperationContext,
+) -> Result<String, WorkspaceDiffError> {
+    validate_reference(reference)?;
+    let peeled = format!("{reference}^{{commit}}");
+    let output = capture_git(
+        root,
+        "git rev-parse base reference",
+        &[
+            OsStr::new("rev-parse"),
+            OsStr::new("--verify"),
+            OsStr::new("--end-of-options"),
+            OsStr::new(&peeled),
+        ],
+        operation,
+    )?;
+    if output.stdout_exceeded {
+        return Err(WorkspaceDiffError::new(format!(
+            "`git rev-parse base reference` output exceeded the {MAX_GIT_OUTPUT_BYTES}-byte safety budget"
+        )));
+    }
+    if !output.status.success() {
+        return Err(WorkspaceDiffError::new(format!(
+            "invalid Git base reference `{reference}`: {}",
+            bounded_text(&output.stderr)
+        )));
+    }
+    if !output.stderr.is_empty() {
+        let diagnostics = bounded_text(&output.stderr);
+        if diagnostics.contains("ambiguous") {
+            return Err(WorkspaceDiffError::new(format!(
+                "ambiguous Git base reference `{reference}`: {diagnostics}"
+            )));
+        }
+        return Err(WorkspaceDiffError::new(format!(
+            "Git base reference `{reference}` produced diagnostics: {diagnostics}"
+        )));
+    }
+    parse_object_id(&output.stdout, "git rev-parse base reference")
+}
+
+fn resolve_merge_base(
+    root: &Path,
+    head: &str,
+    reference_commit: &str,
+    operation: &OperationContext,
+) -> Result<String, WorkspaceDiffError> {
+    let output = capture_git(
+        root,
+        "git merge-base --all",
+        &[
+            OsStr::new("merge-base"),
+            OsStr::new("--all"),
+            OsStr::new(head),
+            OsStr::new(reference_commit),
+        ],
+        operation,
+    )?;
+    if output.stdout_exceeded {
+        return Err(WorkspaceDiffError::new(format!(
+            "`git merge-base --all` output exceeded the {MAX_GIT_OUTPUT_BYTES}-byte safety budget"
+        )));
+    }
+    if !output.status.success() {
+        return Err(WorkspaceDiffError::new(format!(
+            "Git base reference and HEAD do not have a merge base: {}",
+            bounded_text(&output.stderr)
+        )));
+    }
+    parse_object_id(&output.stdout, "git merge-base --all").map_err(|error| {
+        WorkspaceDiffError::new(format!(
+            "Git base reference and HEAD do not have a unique merge base: {error}"
+        ))
+    })
+}
+
+fn resolve_baseline(
+    root: &Path,
+    scope: DiffScope,
+    operation: &OperationContext,
+) -> Result<ResolvedBaseline, WorkspaceDiffError> {
+    ensure_worktree(root, operation)?;
+    match scope {
+        DiffScope::Worktree => {
+            let head_commit = resolve_head(root, operation)?;
+            Ok(ResolvedBaseline {
+                public: ResolvedDiffScope {
+                    requested: DiffScope::Worktree,
+                    base_commit: head_commit.clone(),
+                },
+                head_commit,
+                reference_commit: None,
+            })
+        }
+        DiffScope::BaseRef { reference } => {
+            let reference_commit = resolve_commit(root, &reference, operation)?;
+            Ok(ResolvedBaseline {
+                public: ResolvedDiffScope {
+                    requested: DiffScope::BaseRef { reference },
+                    base_commit: Some(reference_commit.clone()),
+                },
+                head_commit: None,
+                reference_commit: Some(reference_commit),
+            })
+        }
+        DiffScope::MergeBase { reference } => {
+            let head_commit = resolve_head(root, operation)?.ok_or_else(|| {
+                WorkspaceDiffError::new(
+                    "merge-base diff scope requires a repository with a HEAD commit",
+                )
+            })?;
+            let reference_commit = resolve_commit(root, &reference, operation)?;
+            let base_commit = resolve_merge_base(root, &head_commit, &reference_commit, operation)?;
+            Ok(ResolvedBaseline {
+                public: ResolvedDiffScope {
+                    requested: DiffScope::MergeBase { reference },
+                    base_commit: Some(base_commit),
+                },
+                head_commit: Some(head_commit),
+                reference_commit: Some(reference_commit),
+            })
+        }
+    }
+}
+
+fn verify_baseline(
+    root: &Path,
+    baseline: &ResolvedBaseline,
+    operation: &OperationContext,
+) -> Result<(), WorkspaceDiffError> {
+    match &baseline.public.requested {
+        DiffScope::Worktree => {
+            if resolve_head(root, operation)? != baseline.head_commit {
+                return Err(WorkspaceDiffError::new(
+                    "HEAD changed while Git diff state was being read",
+                ));
+            }
+        }
+        DiffScope::BaseRef { reference } => {
+            if Some(resolve_commit(root, reference, operation)?) != baseline.reference_commit {
+                return Err(WorkspaceDiffError::new(format!(
+                    "Git base reference `{reference}` changed while diff state was being read"
+                )));
+            }
+        }
+        DiffScope::MergeBase { reference } => {
+            if resolve_head(root, operation)? != baseline.head_commit
+                || Some(resolve_commit(root, reference, operation)?) != baseline.reference_commit
+            {
+                return Err(WorkspaceDiffError::new(format!(
+                    "HEAD or Git base reference `{reference}` changed while diff state was being read"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn read_git_inventory(
+    root: &Path,
+    base_commit: &str,
+    operation: &OperationContext,
+) -> Result<GitInventory, WorkspaceDiffError> {
+    let tracked = git_output(
+        root,
+        "git diff --name-status base commit",
+        &[
+            OsStr::new("diff"),
+            OsStr::new("--name-status"),
+            OsStr::new("-z"),
+            OsStr::new("--find-renames"),
+            OsStr::new("--no-ext-diff"),
+            OsStr::new("--ignore-submodules=all"),
+            OsStr::new(base_commit),
+            OsStr::new("--"),
+        ],
+        operation,
+    )?;
+    let index = git_output(
+        root,
+        "git ls-files --stage -v",
+        &[
+            OsStr::new("ls-files"),
+            OsStr::new("--stage"),
+            OsStr::new("-v"),
+            OsStr::new("-z"),
+        ],
+        operation,
+    )?;
+    let untracked = git_output(
+        root,
+        "git ls-files --others --exclude-standard",
+        &[
+            OsStr::new("ls-files"),
+            OsStr::new("--others"),
+            OsStr::new("--exclude-standard"),
+            OsStr::new("-z"),
+        ],
+        operation,
+    )?;
+    Ok(GitInventory {
+        tracked: tracked.stdout,
+        index: index.stdout,
+        untracked: untracked.stdout,
+    })
 }
 
 fn is_supported_source(path: &str) -> bool {
@@ -387,6 +659,7 @@ fn parse_tracked_changes(
 
 fn add_untracked_changes(
     root: &Path,
+    base_commit: &str,
     output: &[u8],
     document_paths: &HashSet<&RepoRelativePath>,
     changes: &mut BTreeMap<RepoRelativePath, WorkspaceFileChange>,
@@ -413,7 +686,9 @@ fn add_untracked_changes(
             .get(&path)
             .is_some_and(|change| change.change == ChangeKind::Deleted)
         {
-            if head_blob_id(root, &path, operation)? == worktree_blob_id(root, &path, operation)? {
+            if base_blob_id(root, base_commit, &path, operation)?
+                == worktree_blob_id(root, &path, operation)?
+            {
                 changes.remove(&path);
             } else {
                 insert_change(
@@ -433,6 +708,7 @@ fn add_untracked_changes(
 
 fn add_index_hidden_changes(
     root: &Path,
+    base_commit: &str,
     output: &[u8],
     document_paths: &HashSet<&RepoRelativePath>,
     changes: &mut BTreeMap<RepoRelativePath, WorkspaceFileChange>,
@@ -451,12 +727,18 @@ fn add_index_hidden_changes(
         let Some((&tag, raw_path)) = record.split_first() else {
             continue;
         };
-        let raw_path = raw_path.strip_prefix(b" ").ok_or_else(|| {
-            WorkspaceDiffError::new("Git returned an invalid ls-files status record")
-        })?;
-        // `git ls-files -v` lowercases the normal tag for assume-unchanged
-        // entries; `S` denotes skip-worktree. Both can suppress ordinary
-        // `git diff` inspection even when a regular file is materialized.
+        let raw_path = if let Some(tab) = raw_path.iter().position(|byte| *byte == b'\t') {
+            &raw_path[tab + 1..]
+        } else {
+            raw_path.strip_prefix(b" ").ok_or_else(|| {
+                WorkspaceDiffError::new("Git returned an invalid ls-files status record")
+            })?
+        };
+        // `git ls-files --stage -v` lowercases the normal tag for
+        // assume-unchanged entries; `S` denotes skip-worktree. Both can
+        // suppress ordinary `git diff` inspection even when a regular file
+        // is materialized. The stage/object fields also make the retained
+        // inventory sensitive to concurrent index changes.
         if !(tag.is_ascii_lowercase() || tag == b'S') || !raw_is_supported_source(raw_path)? {
             continue;
         }
@@ -464,7 +746,9 @@ fn add_index_hidden_changes(
         if changes.contains_key(&path) || !document_paths.contains(&path) {
             continue;
         }
-        if head_blob_id(root, &path, operation)? != worktree_blob_id(root, &path, operation)? {
+        if base_blob_id(root, base_commit, &path, operation)?
+            != worktree_blob_id(root, &path, operation)?
+        {
             insert_change(
                 changes,
                 path,
@@ -477,18 +761,19 @@ fn add_index_hidden_changes(
     Ok(())
 }
 
-fn head_entry(
+fn base_entry(
     root: &Path,
+    base_commit: &str,
     path: &RepoRelativePath,
     operation: &OperationContext,
 ) -> Result<Option<(String, String)>, WorkspaceDiffError> {
     let output = git_output(
         root,
-        "git ls-tree HEAD",
+        "git ls-tree base commit",
         &[
             OsStr::new("ls-tree"),
             OsStr::new("-z"),
-            OsStr::new("HEAD"),
+            OsStr::new(base_commit),
             OsStr::new("--"),
             OsStr::new(path.as_str()),
         ],
@@ -520,14 +805,15 @@ fn head_entry(
     Ok(Some((mode.to_owned(), object_id.to_owned())))
 }
 
-fn head_blob_id(
+fn base_blob_id(
     root: &Path,
+    base_commit: &str,
     path: &RepoRelativePath,
     operation: &OperationContext,
 ) -> Result<String, WorkspaceDiffError> {
-    head_entry(root, path, operation)?
+    base_entry(root, base_commit, path, operation)?
         .map(|(_, object_id)| object_id)
-        .ok_or_else(|| WorkspaceDiffError::new(format!("HEAD has no blob for `{path}`")))
+        .ok_or_else(|| WorkspaceDiffError::new(format!("diff baseline has no blob for `{path}`")))
 }
 
 fn worktree_blob_id(
@@ -599,6 +885,7 @@ fn validate_current_sources(
 
 fn validate_deleted_sources(
     workspace: &DiffWorkspace,
+    base_commit: &str,
     changes: &mut BTreeMap<RepoRelativePath, WorkspaceFileChange>,
     operation: &OperationContext,
 ) -> Result<(), WorkspaceDiffError> {
@@ -613,7 +900,7 @@ fn validate_deleted_sources(
             .map_err(|error| WorkspaceDiffError::new(error.to_string()))?;
         // A tracked symlink (or submodule) with an `.rs` suffix can appear in
         // Git's name diff, but syntax discovery never indexed it as a source.
-        if !head_entry(&workspace.repository_root, &path, operation)?
+        if !base_entry(&workspace.repository_root, base_commit, &path, operation)?
             .is_some_and(|(mode, _)| mode == "100644" || mode == "100755")
         {
             changes.remove(&path);
@@ -655,24 +942,19 @@ impl WorkspaceDiffProvider for GitWorkspaceDiff {
             .iter()
             .map(|document| &document.path)
             .collect();
-        let head_exists = has_head(&workspace.repository_root, operation)?;
-        let (mut changes, mut work_truncated) = if head_exists {
-            let tracked = git_output(
-                &workspace.repository_root,
-                "git diff --name-status HEAD",
-                &[
-                    OsStr::new("diff"),
-                    OsStr::new("--name-status"),
-                    OsStr::new("-z"),
-                    OsStr::new("--find-renames"),
-                    OsStr::new("--no-ext-diff"),
-                    OsStr::new("--ignore-submodules=all"),
-                    OsStr::new("HEAD"),
-                    OsStr::new("--"),
-                ],
-                operation,
-            )?;
-            parse_tracked_changes(&tracked.stdout, operation)?
+        let baseline = resolve_baseline(
+            &workspace.repository_root,
+            workspace.scope.clone(),
+            operation,
+        )?;
+        let mut inventory = None;
+        let (mut changes, mut work_truncated) = if let Some(base_commit) =
+            baseline.public.base_commit.as_deref()
+        {
+            let captured = read_git_inventory(&workspace.repository_root, base_commit, operation)?;
+            let changes = parse_tracked_changes(&captured.tracked, operation)?;
+            inventory = Some(captured);
+            changes
         } else {
             let mut unborn = BTreeMap::new();
             for document in &workspace.documents {
@@ -690,35 +972,22 @@ impl WorkspaceDiffProvider for GitWorkspaceDiff {
             (unborn, truncated)
         };
 
-        if head_exists {
-            let hidden = git_output(
-                &workspace.repository_root,
-                "git ls-files -v",
-                &[OsStr::new("ls-files"), OsStr::new("-v"), OsStr::new("-z")],
-                operation,
-            )?;
+        if let Some(base_commit) = baseline.public.base_commit.as_deref() {
+            let captured = inventory.as_ref().ok_or_else(|| {
+                WorkspaceDiffError::new("Git inventory was not captured for the resolved baseline")
+            })?;
             add_index_hidden_changes(
                 &workspace.repository_root,
-                &hidden.stdout,
+                base_commit,
+                &captured.index,
                 &document_paths,
                 &mut changes,
                 operation,
             )?;
-
-            let untracked = git_output(
-                &workspace.repository_root,
-                "git ls-files --others --exclude-standard",
-                &[
-                    OsStr::new("ls-files"),
-                    OsStr::new("--others"),
-                    OsStr::new("--exclude-standard"),
-                    OsStr::new("-z"),
-                ],
-                operation,
-            )?;
             add_untracked_changes(
                 &workspace.repository_root,
-                &untracked.stdout,
+                base_commit,
+                &captured.untracked,
                 &document_paths,
                 &mut changes,
                 operation,
@@ -731,14 +1000,30 @@ impl WorkspaceDiffProvider for GitWorkspaceDiff {
         changes.retain(|_, change| {
             change.change == ChangeKind::Deleted || document_paths.contains(&change.path)
         });
-        validate_deleted_sources(&workspace, &mut changes, operation)?;
+        if let Some(base_commit) = baseline.public.base_commit.as_deref() {
+            validate_deleted_sources(&workspace, base_commit, &mut changes, operation)?;
+        }
         validate_current_sources(&workspace, &changes, operation)?;
+        if let (Some(base_commit), Some(captured)) =
+            (baseline.public.base_commit.as_deref(), inventory.as_ref())
+            && read_git_inventory(&workspace.repository_root, base_commit, operation)? != *captured
+        {
+            return Err(WorkspaceDiffError::new(
+                "Git index or materialized change inventory changed while diff state was being read",
+            ));
+        }
+        verify_baseline(&workspace.repository_root, &baseline, operation)?;
         work_truncated |= changes.len() > MAX_WORKSPACE_CHANGES;
         let files = changes.into_values().take(MAX_WORKSPACE_CHANGES).collect();
+        let truncation = work_truncated.then_some(chakra_engine::DiffInventoryTruncation {
+            limit: MAX_WORKSPACE_CHANGES,
+            omitted: None,
+        });
         Ok(WorkspaceDiff {
             revision: workspace.revision,
+            scope: baseline.public,
             files,
-            truncated: work_truncated,
+            truncation,
         })
     }
 }
@@ -838,6 +1123,7 @@ mod tests {
         Ok(DiffWorkspace {
             repository_root: root.to_path_buf(),
             revision: Revision(9),
+            scope: DiffScope::Worktree,
             documents,
         })
     }
@@ -896,7 +1182,7 @@ mod tests {
         )?;
         let diff = GitWorkspaceDiff.diff(workspace)?;
         assert_eq!(diff.revision, Revision(9));
-        assert!(!diff.truncated);
+        assert!(diff.truncation.is_none());
         let by_path: BTreeMap<_, _> = diff
             .files
             .iter()
@@ -1011,13 +1297,41 @@ mod tests {
         )]);
         let snapshot = workspace(repository.path(), &[])?;
 
+        let operation = OperationContext::unbounded();
+        let base_commit =
+            resolve_head(repository.path(), &operation)?.ok_or("HEAD commit missing")?;
         let error =
-            match validate_deleted_sources(&snapshot, &mut changes, &OperationContext::unbounded())
-            {
+            match validate_deleted_sources(&snapshot, &base_commit, &mut changes, &operation) {
                 Ok(()) => return Err("reappeared path was accepted as deleted".into()),
                 Err(error) => error,
             };
         assert!(error.to_string().contains("reappeared"));
+        Ok(())
+    }
+
+    #[test]
+    fn a_base_ref_that_moves_during_the_read_is_rejected() -> Result<(), Box<dyn Error>> {
+        let repository = repository()?;
+        let root = repository.path();
+        let operation = OperationContext::unbounded();
+        git(root, &["branch", "moving-base"])?;
+        let baseline = resolve_baseline(
+            root,
+            DiffScope::BaseRef {
+                reference: "moving-base".to_owned(),
+            },
+            &operation,
+        )?;
+
+        write(root, "src/new_commit.rs", "pub fn later() {}\n")?;
+        git(root, &["add", "src/new_commit.rs"])?;
+        git(root, &["commit", "--quiet", "-m", "move target"])?;
+        git(root, &["branch", "--force", "moving-base", "HEAD"])?;
+
+        let error = verify_baseline(root, &baseline, &operation)
+            .err()
+            .ok_or("moved base reference was accepted")?;
+        assert!(error.to_string().contains("changed while diff state"));
         Ok(())
     }
 
@@ -1113,6 +1427,7 @@ mod tests {
         let mut changes = BTreeMap::new();
         add_untracked_changes(
             Path::new("."),
+            "HEAD",
             b"unrelated-\xff.bin\0",
             &HashSet::new(),
             &mut changes,

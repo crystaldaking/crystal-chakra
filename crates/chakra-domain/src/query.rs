@@ -9,12 +9,16 @@
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use crate::diagnostic::{DiagnosticTruncationCause, SyntaxDiagnostic};
 use crate::envelope::QueryEnvelope;
-use crate::identity::WorkspaceIdentity;
+use crate::identity::{WorkspaceId, WorkspaceIdentity};
 use crate::location::{RepoRelativePath, SourceRange};
 use crate::operation::{OperationAbort, OperationContext};
 use crate::provenance::{Precision, Provenance};
 use crate::revision::Revision;
+use crate::source::{
+    SourceClassification, SourceMetadata, SourceMetadataCoverage, SourcePackage, SourceRole,
+};
 use crate::state::{Freshness, FreshnessRequirement, ProviderState};
 use crate::symbol::{
     CallForm, CallResolution, CallTargetKind, EdgeKind, EntityId, Language, SymbolKind,
@@ -24,6 +28,8 @@ use crate::symbol::{
 pub const DEFAULT_QUERY_LIMIT: u32 = 20;
 /// Hard upper bound for any requested limit; responses are never unbounded.
 pub const MAX_QUERY_LIMIT: u32 = 500;
+/// Fixed status budget for actionable syntax diagnostics.
+pub const MAX_STATUS_DIAGNOSTICS: usize = 100;
 
 /// Reference to a symbol for entity-based queries (SPEC §24).
 ///
@@ -55,10 +61,18 @@ pub struct SymbolView {
     pub signature: Option<String>,
     pub provenance: Provenance,
     pub precision: Precision,
+    pub source_role: SourceRole,
+    pub source_classification: SourceClassification,
+    pub package: Option<SourcePackage>,
 }
 
-impl From<&crate::symbol::Symbol> for SymbolView {
-    fn from(symbol: &crate::symbol::Symbol) -> Self {
+impl SymbolView {
+    /// Builds a response view using metadata captured in the symbol's graph
+    /// revision rather than reclassifying its path at query time.
+    pub fn from_symbol_with_metadata(
+        symbol: &crate::symbol::Symbol,
+        metadata: &SourceMetadata,
+    ) -> Self {
         Self {
             id: symbol.id,
             language: symbol.key.language,
@@ -69,7 +83,17 @@ impl From<&crate::symbol::Symbol> for SymbolView {
             signature: symbol.signature.clone(),
             provenance: symbol.provenance,
             precision: symbol.precision,
+            source_role: metadata.role,
+            source_classification: metadata.classification,
+            package: metadata.package.clone(),
         }
+    }
+}
+
+impl From<&crate::symbol::Symbol> for SymbolView {
+    fn from(symbol: &crate::symbol::Symbol) -> Self {
+        let metadata = SourceMetadata::path_fallback(&symbol.key.path);
+        Self::from_symbol_with_metadata(symbol, &metadata)
     }
 }
 
@@ -80,25 +104,65 @@ pub struct RelatedSymbol {
     pub edge_kind: EdgeKind,
     pub provenance: Provenance,
     pub precision: Precision,
-    /// Range of the relation itself when known (e.g. call site).
-    pub location: Option<SourceRange>,
+    /// Total relations represented by this caller/target entry.
+    pub occurrence_count: u64,
+    /// Small deterministic sample of known relation ranges (e.g. call sites).
+    pub representative_locations: Vec<SourceRange>,
+    /// Known relation ranges omitted from `representative_locations`.
+    pub locations_omitted: u64,
+    /// Bounded syntax evidence for materialized heuristic call relations.
+    /// Precise-provider and non-call relations do not fabricate this field.
+    pub representative_call_sites: Vec<CallSiteEvidence>,
+    /// Known call-site evidence omitted from `representative_call_sites`.
+    pub call_site_evidence_omitted: u64,
+}
+
+/// Direction of a typed relation relative to the symbol whose context was
+/// requested.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, schemars::JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum RelationDirection {
+    Incoming,
+    Outgoing,
+}
+
+/// A bounded non-call relationship whose direction cannot be inferred from
+/// the response section name alone.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct DirectedRelatedSymbol {
+    pub direction: RelationDirection,
+    pub relation: RelatedSymbol,
+}
+
+/// One representative syntax call expression retained inside an aggregated
+/// caller/target entry.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct CallSiteEvidence {
+    pub form: CallForm,
+    pub target_kind: CallTargetKind,
+    pub name: String,
+    pub qualifier: Option<String>,
+    pub receiver_type: Option<String>,
+    pub receiver_type_source: Option<crate::symbol::ReceiverTypeSource>,
+    pub receiver_hint: Option<String>,
+    pub location: SourceRange,
+    pub resolution: CallResolution,
 }
 
 /// Bounded syntax call-site evidence that was not materialized as a graph
-/// edge because its target is ambiguous or unresolved.
+/// edge because its target is ambiguous or unresolved. Repeated sites are
+/// aggregated by caller and candidate target so they consume one result slot.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct CallSiteView {
     pub caller: SymbolView,
     /// One possible target for an ambiguous call, or `None` when no target can
     /// be justified from syntax alone.
     pub candidate_target: Option<SymbolView>,
-    pub form: CallForm,
-    pub target_kind: CallTargetKind,
-    pub name: String,
-    pub qualifier: Option<String>,
-    pub receiver_hint: Option<String>,
-    pub location: SourceRange,
-    pub resolution: CallResolution,
+    pub occurrence_count: u64,
+    pub representative_evidence: Vec<CallSiteEvidence>,
+    pub evidence_omitted: u64,
     pub provenance: Provenance,
     pub precision: Precision,
 }
@@ -116,6 +180,10 @@ pub struct IndexCounts {
     pub call_sites: u64,
     pub ambiguous_call_sites: u64,
     pub unresolved_call_sites: u64,
+    /// Workspace call sites whose syntax candidate set was cut before query
+    /// time. The lazy call-site model normally keeps this at zero; it remains
+    /// separate from response-local truncation.
+    pub call_sites_with_truncated_candidates: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -248,12 +316,34 @@ pub struct StatusData {
     pub providers: Vec<ProviderInfo>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub query_execution: Option<QueryExecutionMetrics>,
+    pub source_metadata: SourceMetadataCoverage,
+    pub syntax_diagnostics: SyntaxDiagnosticSummary,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct SyntaxDiagnosticSummary {
+    pub files_with_diagnostics: u64,
+    pub total_diagnostics: u64,
+    pub diagnostics: Vec<SyntaxDiagnostic>,
+    pub omitted_diagnostics: u64,
+    pub truncated: bool,
+    pub truncation_causes: Vec<DiagnosticTruncationCause>,
 }
 
 // --- repo_map ---
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct RepoMapRequest {
+    /// Empty means every indexed language.
+    #[serde(default)]
+    pub include_languages: Vec<Language>,
+    #[serde(default)]
+    pub source: SourceFilter,
+    /// Self-contained continuation returned by an earlier `repo_map` page.
+    /// Filters must be omitted when a cursor is supplied because the cursor
+    /// already carries the normalized scope.
+    #[serde(default)]
+    pub cursor: Option<RepoMapCursor>,
     #[serde(default)]
     pub limit: Option<u32>,
     #[serde(default)]
@@ -263,14 +353,80 @@ pub struct RepoMapRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct FileSummary {
     pub path: RepoRelativePath,
+    pub language: Language,
     pub symbol_count: u64,
     pub provenance: Provenance,
     pub precision: Precision,
+    pub source_role: SourceRole,
+    pub source_classification: SourceClassification,
+    pub package: Option<SourcePackage>,
+}
+
+/// Scope captured inside a revision-scoped repository-map cursor.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct RepoMapScope {
+    pub include_languages: Vec<Language>,
+    pub source: SourceFilter,
+}
+
+/// Stable continuation for the exact filtered path ordering of one revision.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct RepoMapCursor {
+    pub workspace_id: WorkspaceId,
+    pub revision: Revision,
+    pub after: RepoRelativePath,
+    pub scope: RepoMapScope,
+}
+
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, schemars::JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum RepoMapGroupKind {
+    TopLevelDirectory,
+    CargoPackage,
+    ComposerPsr4,
+}
+
+/// Overlapping structural aggregation used by the first repository-map page.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct RepoMapGroup {
+    pub kind: RepoMapGroupKind,
+    pub name: String,
+    /// `None` denotes the repository root.
+    pub root: Option<RepoRelativePath>,
+    pub language: Language,
+    pub file_count: u64,
+    pub symbol_count: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct RepoMapData {
+    /// Present only on the first page; ranked by structural usefulness and
+    /// bounded by the same result limit as `files`.
+    pub overview: Vec<RepoMapGroup>,
+    pub overview_truncated: bool,
     pub files: Vec<FileSummary>,
+    pub next_cursor: Option<RepoMapCursor>,
+    pub source_metadata: SourceMetadataCoverage,
+}
+
+/// Language-neutral source scope shared by repository and symbol queries.
+/// Empty include/exclude lists preserve access to every indexed role.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct SourceFilter {
+    /// Exact Cargo or Composer package name when package metadata is available.
+    #[serde(default)]
+    pub package: Option<String>,
+    /// Repository-relative file or directory prefix.
+    #[serde(default)]
+    pub path_prefix: Option<String>,
+    /// Empty means every role. Otherwise only listed roles are eligible.
+    #[serde(default)]
+    pub include_roles: Vec<SourceRole>,
+    /// Applied after `include_roles`.
+    #[serde(default)]
+    pub exclude_roles: Vec<SourceRole>,
 }
 
 // --- search (text) ---
@@ -313,6 +469,20 @@ pub struct SearchData {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct SymbolSearchRequest {
     pub query: String,
+    /// Empty means every indexed language.
+    #[serde(default)]
+    pub include_languages: Vec<Language>,
+    /// Empty means every symbol kind.
+    #[serde(default)]
+    pub include_kinds: Vec<SymbolKind>,
+    /// Applied after `include_kinds`; imports can be excluded explicitly.
+    #[serde(default)]
+    pub exclude_kinds: Vec<SymbolKind>,
+    /// Exact, case-sensitive qualified-name segment prefix.
+    #[serde(default)]
+    pub namespace_prefix: Option<String>,
+    #[serde(default)]
+    pub source: SourceFilter,
     #[serde(default)]
     pub limit: Option<u32>,
     #[serde(default)]
@@ -357,7 +527,11 @@ pub struct ContextData {
     pub callees: Vec<RelatedSymbol>,
     pub implementations: Vec<RelatedSymbol>,
     pub tests: Vec<RelatedSymbol>,
+    /// Typed dependency/framework relations, including deterministic
+    /// container, route, dispatch, listener, schedule, and policy facts.
+    pub related_relations: Vec<DirectedRelatedSymbol>,
     pub syntax_call_candidates: Vec<CallSiteView>,
+    /// Files referenced by the bounded response items above.
     pub related_files: Vec<RepoRelativePath>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<ProviderQueryInfo>,
@@ -385,12 +559,41 @@ pub struct CallersData {
 
 // --- diff_context ---
 
+/// Git baseline used by [`DiffContextRequest`]. Every scope compares its
+/// resolved baseline commit with the final materialized worktree, so staged,
+/// unstaged, and untracked changes remain visible alongside committed changes.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum DiffScope {
+    /// Compare `HEAD` with the materialized worktree. This is the v0.1
+    /// behavior and remains the default for backward compatibility.
+    #[default]
+    Worktree,
+    /// Compare the named Git commit-ish directly with the materialized
+    /// worktree (two-dot-style feature review semantics).
+    BaseRef { reference: String },
+    /// Compare the unique merge-base of the named commit-ish and `HEAD` with
+    /// the materialized worktree (three-dot-style feature review semantics).
+    MergeBase { reference: String },
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct DiffContextRequest {
+    #[serde(default)]
+    pub scope: DiffScope,
     #[serde(default)]
     pub limit: Option<u32>,
     #[serde(default)]
     pub freshness: FreshnessRequirement,
+}
+
+/// Reproducible Git baseline selected for one completed diff query.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct ResolvedDiffScope {
+    pub requested: DiffScope,
+    /// Immutable commit object used as the baseline. This is `None` only for
+    /// the default scope in an unborn repository.
+    pub base_commit: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -417,8 +620,9 @@ pub struct ChangedFile {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ChangedSymbolBasis {
-    /// The declaration belongs to a current file changed relative to HEAD.
-    /// v0.1 does not claim that the declaration or body overlaps a diff hunk.
+    /// The declaration belongs to a current file changed relative to the
+    /// selected baseline. Chakra does not claim that the declaration or body
+    /// overlaps a diff hunk.
     DeclaredInChangedFile,
 }
 
@@ -446,14 +650,23 @@ pub struct DiffCallSite {
     pub call_site: CallSiteView,
 }
 
+/// A directed relation anchored to a changed symbol in `diff_context`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct DiffDirectedRelatedSymbol {
+    pub changed_symbol_id: EntityId,
+    pub relation: DirectedRelatedSymbol,
+}
+
 /// Bounded structured result of a diff walk (SPEC §26). Facts must be
 /// distinguishable from heuristics through their precision fields.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct DiffContextData {
+    pub scope: ResolvedDiffScope,
     pub changed_files: Vec<ChangedFile>,
     pub changed_symbols: Vec<ChangedSymbol>,
     pub related_callers: Vec<DiffRelatedSymbol>,
     pub related_tests: Vec<DiffRelatedSymbol>,
+    pub related_relations: Vec<DiffDirectedRelatedSymbol>,
     pub related_call_candidates: Vec<DiffCallSite>,
 }
 
@@ -473,6 +686,20 @@ pub enum QueryError {
     StaleSymbolRef {
         reference_revision: Revision,
         current_revision: Revision,
+    },
+    #[error(
+        "repository-map cursor was created for revision {cursor_revision}, but the published revision is {current_revision}; restart repo_map without a cursor"
+    )]
+    StaleCursor {
+        cursor_revision: Revision,
+        current_revision: Revision,
+    },
+    #[error(
+        "repository-map cursor belongs to workspace {cursor_workspace}, but this query targets {current_workspace}; restart repo_map without a cursor"
+    )]
+    CursorWorkspaceMismatch {
+        cursor_workspace: WorkspaceId,
+        current_workspace: WorkspaceId,
     },
     #[error("symbol not found: {0}")]
     SymbolNotFound(String),
@@ -497,6 +724,8 @@ pub enum QueryError {
     Cancelled,
     #[error("query exceeded its end-to-end execution deadline")]
     ExecutionDeadlineExceeded,
+    #[error("query response construction failed: {0}")]
+    ResponseConstruction(String),
 }
 
 impl From<OperationAbort> for QueryError {
@@ -614,6 +843,27 @@ mod tests {
     fn request_defaults_require_fresh() {
         let request = SymbolSearchRequest::default();
         assert_eq!(request.freshness, FreshnessRequirement::RequireFresh);
+    }
+
+    #[test]
+    fn diff_scope_defaults_to_worktree_and_has_a_typed_wire_shape()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let default: DiffContextRequest = serde_json::from_value(serde_json::json!({}))?;
+        assert_eq!(default.scope, DiffScope::Worktree);
+
+        let merge_base: DiffContextRequest = serde_json::from_value(serde_json::json!({
+            "scope": {
+                "kind": "merge_base",
+                "reference": "origin/develop"
+            }
+        }))?;
+        assert_eq!(
+            merge_base.scope,
+            DiffScope::MergeBase {
+                reference: "origin/develop".to_owned()
+            }
+        );
+        Ok(())
     }
 
     #[test]

@@ -73,6 +73,9 @@ pub struct LiveIndexMetrics {
     pub files_scanned: u64,
     pub files_reparsed: u64,
     pub relationship_files_recomputed: u64,
+    pub framework_files_reparsed: u64,
+    pub framework_relationship_files_recomputed: u64,
+    pub framework_truncated_files: u64,
     pub unchanged_files: u64,
     pub created_files: u64,
     pub modified_files: u64,
@@ -120,6 +123,9 @@ struct MetricsState {
     files_scanned: AtomicU64,
     files_reparsed: AtomicU64,
     relationship_files_recomputed: AtomicU64,
+    framework_files_reparsed: AtomicU64,
+    framework_relationship_files_recomputed: AtomicU64,
+    framework_truncated_files: AtomicU64,
     unchanged_files: AtomicU64,
     created_files: AtomicU64,
     modified_files: AtomicU64,
@@ -170,6 +176,11 @@ impl MetricsState {
             files_scanned: load(&self.files_scanned),
             files_reparsed: load(&self.files_reparsed),
             relationship_files_recomputed: load(&self.relationship_files_recomputed),
+            framework_files_reparsed: load(&self.framework_files_reparsed),
+            framework_relationship_files_recomputed: load(
+                &self.framework_relationship_files_recomputed,
+            ),
+            framework_truncated_files: load(&self.framework_truncated_files),
             unchanged_files: load(&self.unchanged_files),
             created_files: load(&self.created_files),
             modified_files: load(&self.modified_files),
@@ -239,6 +250,14 @@ impl MetricsState {
             .fetch_add(metrics.reparsed_files, Ordering::Relaxed);
         self.relationship_files_recomputed
             .fetch_add(metrics.relationship_files_recomputed, Ordering::Relaxed);
+        self.framework_files_reparsed
+            .fetch_add(metrics.framework_files_reparsed, Ordering::Relaxed);
+        self.framework_relationship_files_recomputed.fetch_add(
+            metrics.framework_relationship_files_recomputed,
+            Ordering::Relaxed,
+        );
+        self.framework_truncated_files
+            .store(metrics.framework_truncated_files, Ordering::Relaxed);
         self.unchanged_files
             .fetch_add(metrics.unchanged_files, Ordering::Relaxed);
         self.created_files

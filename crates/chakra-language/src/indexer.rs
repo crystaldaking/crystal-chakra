@@ -30,8 +30,8 @@ const INDEX_WORKER_MEMORY_RESERVE_BYTES: u64 = 64 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkspaceSources {
-    pub rust: BTreeMap<RepoRelativePath, Arc<str>>,
-    pub php: BTreeMap<RepoRelativePath, Arc<str>>,
+    pub rust: chakra_language_rust::RustSources,
+    pub php: chakra_language_php::PhpSources,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -181,6 +181,9 @@ pub struct ReconcileMetrics {
     pub modified_files: u64,
     pub deleted_files: u64,
     pub relationship_files_recomputed: u64,
+    pub framework_files_reparsed: u64,
+    pub framework_relationship_files_recomputed: u64,
+    pub framework_truncated_files: u64,
     pub syntax_error_files: u64,
     pub truncated_call_sites: u64,
     pub publication: IndexPublicationMetrics,
@@ -207,6 +210,10 @@ pub struct IndexMetrics {
     pub unresolved_call_sites: u64,
     pub rust_files: u64,
     pub php_files: u64,
+    pub laravel_detected: bool,
+    pub framework_symbols: u64,
+    pub framework_edges: u64,
+    pub framework_truncated_files: u64,
     pub elapsed: Duration,
     pub indexing: IndexingStatus,
 }
@@ -299,13 +306,15 @@ impl WorkspaceSyntaxIndex {
         let (rust_limits, php_limits) = self.live_graph_limits(&scan.sources);
         let rust_sources = std::mem::take(&mut scan.sources.rust);
         let php_sources = std::mem::take(&mut scan.sources.php);
-        let rust = self
-            .rust
-            .reconcile_sources_bounded(rust_sources, rust_limits, cancellation)?;
+        let rust = self.rust.reconcile_classified_sources_bounded(
+            rust_sources,
+            rust_limits,
+            cancellation,
+        )?;
         check_cancelled(cancellation)?;
-        let php = self
-            .php
-            .reconcile_sources_bounded(php_sources, php_limits, cancellation)?;
+        let php =
+            self.php
+                .reconcile_classified_sources_bounded(php_sources, php_limits, cancellation)?;
         check_cancelled(cancellation)?;
         let mut metrics = combine_reconcile_metrics(rust.metrics, php.metrics);
 
@@ -449,6 +458,9 @@ fn combine_reconcile_metrics(
         deleted_files: rust.deleted_files + php.deleted_files,
         relationship_files_recomputed: rust.relationship_files_recomputed
             + php.relationship_files_recomputed,
+        framework_files_reparsed: php.framework_files_reparsed,
+        framework_relationship_files_recomputed: php.framework_relationship_files_recomputed,
+        framework_truncated_files: php.framework_truncated_files,
         syntax_error_files: rust.syntax_error_files + php.syntax_error_files,
         truncated_call_sites: rust.truncated_call_sites + php.truncated_call_sites,
         publication: combine_publication(rust.publication, php.publication),
@@ -511,7 +523,7 @@ pub fn index_repository_with_options(
     let rust_sources = std::mem::take(&mut scan.sources.rust);
     let php_sources = std::mem::take(&mut scan.sources.php);
     let (rust, rust_graph, rust_metrics) =
-        chakra_language_rust::RustSyntaxIndex::from_sources_scheduled(
+        chakra_language_rust::RustSyntaxIndex::from_classified_sources_scheduled(
             rust_sources,
             rust_limits,
             worker_policy.effective_worker_limit as usize,
@@ -519,12 +531,23 @@ pub fn index_repository_with_options(
             &options.cancellation,
         )?;
     rss_peak = max_option(rss_peak, process_rss_bytes());
+    let laravel_detected = match chakra_language_php::detect_laravel(&repository_root) {
+        Ok(detected) => detected,
+        Err(error) => {
+            warn!(
+                error = %error,
+                "Laravel enrichment disabled because Composer metadata is unavailable or invalid"
+            );
+            false
+        }
+    };
     let (php, php_graph, php_metrics) =
-        chakra_language_php::PhpSyntaxIndex::from_sources_scheduled(
+        chakra_language_php::PhpSyntaxIndex::from_classified_sources_scheduled(
             php_sources,
             php_limits,
             worker_policy.effective_worker_limit as usize,
             PARALLEL_PARSE_FILE_THRESHOLD as usize,
+            laravel_detected,
             &options.cancellation,
         )?;
     rss_peak = max_option(rss_peak, process_rss_bytes());
@@ -634,6 +657,10 @@ pub fn index_repository_with_options(
         unresolved_call_sites: graph.unresolved_call_site_count(),
         rust_files: rust_metrics.facts.files,
         php_files: php_metrics.facts.files,
+        laravel_detected: php_metrics.laravel_detected,
+        framework_symbols: php_metrics.framework_symbols,
+        framework_edges: php_metrics.framework_edges,
+        framework_truncated_files: php_metrics.framework_truncated_files,
         elapsed,
         indexing,
     };
@@ -815,6 +842,24 @@ fn scan_discovered_sources_with_inventory_phase(
         }
     }
 
+    let rust_metadata = chakra_git::discover_classified_sources(repository_root, Language::Rust)?
+        .into_iter()
+        .filter(|source| rust.contains_key(&source.path))
+        .map(|source| (source.path, source.metadata))
+        .collect();
+    let rust = chakra_language_rust::RustSources {
+        files: rust,
+        metadata: rust_metadata,
+    };
+    let php_metadata = chakra_git::discover_classified_sources(repository_root, Language::Php)?
+        .into_iter()
+        .filter(|source| php.contains_key(&source.path))
+        .map(|source| (source.path, source.metadata))
+        .collect();
+    let php = chakra_language_php::PhpSources {
+        files: php,
+        metadata: php_metadata,
+    };
     let indexed_files = (rust.len() + php.len()) as u64;
     let mut degradations = Vec::new();
     if discovered_files > budgets.max_files {

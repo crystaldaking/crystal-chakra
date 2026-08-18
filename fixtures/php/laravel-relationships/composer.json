@@ -1,0 +1,7 @@
+{
+  "name": "chakra/laravel-fixture",
+  "require": {
+    "php": "^8.3",
+    "laravel/framework": "^13.0"
+  }
+}

@@ -7,6 +7,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
+use std::time::Instant;
 
 use chakra_domain::envelope::QueryEnvelope;
 use chakra_domain::identity::WorkspaceIdentity;
@@ -16,6 +17,7 @@ use chakra_domain::query::{
     RepoMapRequest, SearchRequest, StatusData, StatusRequest, SymbolSearchRequest,
 };
 use chakra_domain::revision::Revision;
+use chakra_domain::source::SourceMetadataCoverage;
 use chakra_domain::state::{Freshness, ProviderState, WorkspaceStatus};
 use chakra_engine::WorkspaceEngine;
 use chakra_language::index_repository;
@@ -45,7 +47,7 @@ impl QueryService for StubService {
             Freshness::Fresh,
             WorkspaceStatus::Ready,
             ProviderState::NotConfigured,
-            false,
+            Vec::new(),
             StatusData {
                 workspace: identity,
                 counts: IndexCounts {
@@ -55,9 +57,17 @@ impl QueryService for StubService {
                     call_sites: 0,
                     ambiguous_call_sites: 0,
                     unresolved_call_sites: 0,
+                    call_sites_with_truncated_candidates: 0,
                 },
                 providers: vec![],
                 query_execution: None,
+                source_metadata: SourceMetadataCoverage {
+                    total_files: 1,
+                    cargo_metadata_files: 0,
+                    composer_metadata_files: 0,
+                    path_fallback_files: 1,
+                },
+                syntax_diagnostics: Default::default(),
             },
         ))
     }
@@ -154,6 +164,15 @@ async fn status_tool_is_listed_and_callable() -> Result<(), Box<dyn Error + Send
         .find(|tool| tool.name == "status")
         .ok_or("status tool not listed")?;
     assert!(status_tool.description.is_some());
+    let status_output_schema = status_tool
+        .output_schema
+        .as_deref()
+        .ok_or("status output schema missing")?;
+    let status_output_schema = serde_json::to_value(status_output_schema)?;
+    assert!(status_output_schema.to_string().contains("schema_version"));
+    assert!(status_output_schema.to_string().contains("truncation"));
+    assert!(status_output_schema.to_string().contains("providers"));
+    assert!(tools.iter().all(|tool| tool.output_schema.is_some()));
     for name in [
         "repo_map",
         "symbol_search",
@@ -184,6 +203,7 @@ async fn status_tool_is_listed_and_callable() -> Result<(), Box<dyn Error + Send
         .call_tool(CallToolRequestParams::new("status"))
         .await?;
     assert_eq!(result.is_error, Some(false));
+    assert!(result.content.is_empty());
     let structured = result
         .structured_content
         .ok_or("status must return structured content")?;
@@ -191,9 +211,14 @@ async fn status_tool_is_listed_and_callable() -> Result<(), Box<dyn Error + Send
         structured["schema_version"],
         chakra_domain::envelope::SCHEMA_VERSION
     );
+    assert_eq!(structured["truncation"], serde_json::json!([]));
     assert_eq!(structured["revision"], 7);
     assert_eq!(structured["freshness"], "fresh");
     assert_eq!(structured["status"], "ready");
+    assert_eq!(
+        structured["data"]["counts"]["call_sites_with_truncated_candidates"],
+        0
+    );
     assert_eq!(structured["provider_state"], "not_configured");
     assert_eq!(structured["indexing"]["budgets"]["max_files"], 100_000);
     assert!(structured["indexing"]["coverage"].is_object());
@@ -202,6 +227,10 @@ async fn status_tool_is_listed_and_callable() -> Result<(), Box<dyn Error + Send
     assert_eq!(structured["data"]["counts"]["symbols"], 2);
     assert_eq!(structured["data"]["query_execution"]["queued"], 0);
     assert_eq!(structured["data"]["query_execution"]["running"], 0);
+    assert_eq!(
+        structured["data"]["syntax_diagnostics"]["total_diagnostics"],
+        0
+    );
 
     client.cancel().await?;
     let running = server_task
@@ -219,6 +248,29 @@ fn source_fixture_root() -> PathBuf {
         .join("fixtures")
         .join("rust")
         .join("controller-service-provider")
+}
+
+fn laravel_fixture_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
+        .join("fixtures")
+        .join("php")
+        .join("laravel-relationships")
+}
+
+fn copy_fixture_tree(source: &Path, target: &Path) -> Result<(), Box<dyn Error + Send + Sync>> {
+    for entry in fs::read_dir(source)? {
+        let entry = entry?;
+        let destination = target.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            fs::create_dir_all(&destination)?;
+            copy_fixture_tree(&entry.path(), &destination)?;
+        } else {
+            fs::copy(entry.path(), destination)?;
+        }
+    }
+    Ok(())
 }
 
 fn copy_rust_tree(source: &Path, target: &Path) -> Result<(), Box<dyn Error + Send + Sync>> {
@@ -263,6 +315,7 @@ fn indexed_fixture_engine() -> Result<(TempDir, WorkspaceEngine), Box<dyn Error 
     copy_rust_tree(&source_fixture_root(), repository.path())?;
     git(repository.path(), &["add", "src", "tests"])?;
     git(repository.path(), &["commit", "--quiet", "-m", "base"])?;
+    git(repository.path(), &["tag", "fixture-base"])?;
     let service_path = repository.path().join("src/service/payment_service.rs");
     let service_source = fs::read_to_string(&service_path)?;
     if !service_source.contains("amount_cents == 0") {
@@ -318,6 +371,46 @@ async fn indexed_fixture_is_queryable_through_structured_mcp_tools()
     assert_eq!(repo_map["data"]["files"].as_array().map(Vec::len), Some(7));
     assert_eq!(repo_map["data"]["files"][0]["provenance"], "git");
     assert_eq!(repo_map["data"]["files"][0]["precision"], "precise");
+    assert_eq!(repo_map["data"]["files"][0]["language"], "rust");
+    assert!(
+        repo_map["data"]["overview"]
+            .as_array()
+            .is_some_and(|groups| !groups.is_empty())
+    );
+
+    let page_started = Instant::now();
+    let first_page_args = serde_json::from_value(serde_json::json!({
+        "include_languages": ["rust"],
+        "limit": 2
+    }))?;
+    let first_page = client
+        .call_tool(CallToolRequestParams::new("repo_map").with_arguments(first_page_args))
+        .await?
+        .structured_content
+        .ok_or("first repo_map page missing")?;
+    let cursor = first_page["data"]["next_cursor"].clone();
+    assert!(cursor.is_object());
+    assert_eq!(cursor["workspace_id"], first_page["workspace_id"]);
+    let second_page_args = serde_json::from_value(serde_json::json!({
+        "cursor": cursor,
+        "limit": 2
+    }))?;
+    let second_page = client
+        .call_tool(CallToolRequestParams::new("repo_map").with_arguments(second_page_args))
+        .await?
+        .structured_content
+        .ok_or("second repo_map page missing")?;
+    assert_eq!(second_page["revision"], first_page["revision"]);
+    assert_eq!(
+        second_page["data"]["overview"].as_array().map(Vec::len),
+        Some(0)
+    );
+    let encoded_page_bytes = serde_json::to_vec(&first_page)?.len();
+    assert!(encoded_page_bytes < 1024 * 1024);
+    eprintln!(
+        "repo_map_mcp_page: elapsed={:?}, bytes={encoded_page_bytes}",
+        page_started.elapsed()
+    );
 
     let search_args = serde_json::from_value(serde_json::json!({
         "query": "amount must be positive",
@@ -360,6 +453,34 @@ async fn indexed_fixture_is_queryable_through_structured_mcp_tools()
             candidate["qualified_name"] == "service::payment_service::PaymentService::refund"
         })
         .ok_or("service refund candidate missing")?;
+
+    let filtered_args = serde_json::from_value(serde_json::json!({
+        "query": "PaymentService",
+        "include_languages": ["rust"],
+        "include_kinds": ["struct"],
+        "exclude_kinds": ["import"],
+        "namespace_prefix": "service::payment_service::",
+        "source": {
+            "path_prefix": "src/service",
+            "include_roles": ["production"]
+        },
+        "limit": 5
+    }))?;
+    let filtered = client
+        .call_tool(CallToolRequestParams::new("symbol_search").with_arguments(filtered_args))
+        .await?
+        .structured_content
+        .ok_or("filtered symbol_search must return structured content")?;
+    let filtered = filtered["data"]["candidates"]
+        .as_array()
+        .ok_or("filtered candidates missing")?;
+    assert_eq!(filtered.len(), 1);
+    assert_eq!(
+        filtered[0]["qualified_name"],
+        "service::payment_service::PaymentService"
+    );
+    assert_eq!(filtered[0]["source_role"], "production");
+
     let callers_args = serde_json::from_value(serde_json::json!({
         "symbol": {
             "by_id": {
@@ -425,6 +546,12 @@ async fn indexed_fixture_is_queryable_through_structured_mcp_tools()
         .structured_content
         .ok_or("diff_context must return structured content")?;
     assert_eq!(diff["freshness"], "fresh");
+    assert_eq!(diff["data"]["scope"]["requested"]["kind"], "worktree");
+    assert!(
+        diff["data"]["scope"]["base_commit"]
+            .as_str()
+            .is_some_and(|commit| commit.len() >= 40)
+    );
     assert_eq!(
         diff["data"]["changed_files"].as_array().map(Vec::len),
         Some(1)
@@ -466,6 +593,34 @@ async fn indexed_fixture_is_queryable_through_structured_mcp_tools()
             }))
     );
 
+    let base_ref_args = serde_json::from_value(serde_json::json!({
+        "scope": {
+            "kind": "base_ref",
+            "reference": "fixture-base"
+        },
+        "limit": 20
+    }))?;
+    let base_ref_diff = client
+        .call_tool(CallToolRequestParams::new("diff_context").with_arguments(base_ref_args))
+        .await?
+        .structured_content
+        .ok_or("base-ref diff_context must return structured content")?;
+    assert_eq!(
+        base_ref_diff["data"]["scope"]["requested"],
+        serde_json::json!({
+            "kind": "base_ref",
+            "reference": "fixture-base"
+        })
+    );
+    assert_eq!(
+        base_ref_diff["data"]["scope"]["base_commit"],
+        diff["data"]["scope"]["base_commit"]
+    );
+    assert_eq!(
+        base_ref_diff["data"]["changed_files"],
+        diff["data"]["changed_files"]
+    );
+
     let bounded_args = serde_json::from_value(serde_json::json!({ "limit": 1 }))?;
     let bounded = client
         .call_tool(CallToolRequestParams::new("diff_context").with_arguments(bounded_args))
@@ -473,11 +628,22 @@ async fn indexed_fixture_is_queryable_through_structured_mcp_tools()
         .structured_content
         .ok_or("bounded diff_context must return structured content")?;
     assert_eq!(bounded["truncated"], true);
+    assert!(
+        bounded["truncation"]
+            .as_array()
+            .is_some_and(|details| !details.is_empty())
+    );
+    assert!(bounded["truncation"].as_array().is_some_and(|details| {
+        details.iter().any(|detail| {
+            detail["section"] == "diff_context_changed_symbols" && detail["cause"] == "item_limit"
+        })
+    }));
     for section in [
         "changed_files",
         "changed_symbols",
         "related_callers",
         "related_tests",
+        "related_relations",
         "related_call_candidates",
     ] {
         assert!(
@@ -486,6 +652,128 @@ async fn indexed_fixture_is_queryable_through_structured_mcp_tools()
                 .is_some_and(|items| items.len() <= 1)
         );
     }
+
+    client.cancel().await?;
+    let running = server_task
+        .await
+        .map_err(|error| std::io::Error::other(format!("server task join: {error}")))?
+        .map_err(|error| std::io::Error::other(format!("server serve: {error}")))?;
+    running.cancel().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn laravel_relationships_are_queryable_through_mcp()
+-> Result<(), Box<dyn Error + Send + Sync>> {
+    let repository = TempDir::new()?;
+    git(repository.path(), &["init", "--quiet"])?;
+    git(
+        repository.path(),
+        &["config", "user.email", "tests@example.invalid"],
+    )?;
+    git(repository.path(), &["config", "user.name", "Chakra Tests"])?;
+    copy_fixture_tree(&laravel_fixture_root(), repository.path())?;
+    git(
+        repository.path(),
+        &["add", "composer.json", "app", "routes"],
+    )?;
+    git(repository.path(), &["commit", "--quiet", "-m", "base"])?;
+    let model_path = repository.path().join("app/Models/User.php");
+    let model_source = fs::read_to_string(&model_path)?;
+    fs::write(
+        &model_path,
+        format!("{model_source}\n// current policy edit\n"),
+    )?;
+    let report = index_repository(repository.path())?;
+    assert!(report.metrics.laravel_detected);
+    let identity = WorkspaceIdentity::for_primary_worktree(&report.repository_root)?;
+    let engine = WorkspaceEngine::new(identity);
+    let mut update = engine.begin_update();
+    update.replace_graph(report.graph);
+    update.set_status(WorkspaceStatus::Ready);
+    update.set_freshness(Freshness::Fresh);
+    engine.publish(update)?;
+    engine.install_diff_provider(Arc::new(chakra_git::GitWorkspaceDiff))?;
+
+    let server = ChakraMcpServer::new(Arc::new(engine));
+    let (server_transport, client_transport) = tokio::io::duplex(32 * 1024);
+    let server_task = tokio::spawn(async move { server.serve(server_transport).await });
+    let client = ().serve(client_transport).await?;
+
+    let model_context =
+        client
+            .call_tool(CallToolRequestParams::new("context").with_arguments(
+                serde_json::from_value(serde_json::json!({
+                    "symbol": { "by_name": "App::Models::User" },
+                    "limit": 20
+                }))?,
+            ))
+            .await?
+            .structured_content
+            .ok_or("Laravel model context missing")?;
+    let policy = model_context["data"]["related_relations"]
+        .as_array()
+        .and_then(|relations| {
+            relations.iter().find(|relation| {
+                relation["direction"] == "outgoing"
+                    && relation["relation"]["edge_kind"] == "AUTHORIZES_WITH"
+            })
+        })
+        .ok_or("policy relationship missing")?;
+    assert_eq!(
+        policy["relation"]["symbol"]["qualified_name"],
+        "App::Policies::UserPolicy"
+    );
+    assert_eq!(policy["relation"]["provenance"], "heuristic");
+    assert_eq!(policy["relation"]["precision"], "heuristic");
+
+    let controller_context =
+        client
+            .call_tool(CallToolRequestParams::new("context").with_arguments(
+                serde_json::from_value(serde_json::json!({
+                    "symbol": { "by_name": "App::Http::Controllers::UserController::show" },
+                    "limit": 20
+                }))?,
+            ))
+            .await?
+            .structured_content
+            .ok_or("Laravel controller context missing")?;
+    assert!(
+        controller_context["data"]["related_relations"]
+            .as_array()
+            .is_some_and(|relations| relations.iter().any(|relation| {
+                relation["direction"] == "incoming"
+                    && relation["relation"]["edge_kind"] == "ROUTES_TO"
+                    && relation["relation"]["symbol"]["kind"] == "configuration"
+            }))
+    );
+
+    let diff = client
+        .call_tool(
+            CallToolRequestParams::new("diff_context")
+                .with_arguments(serde_json::from_value(serde_json::json!({ "limit": 20 }))?),
+        )
+        .await?
+        .structured_content
+        .ok_or("Laravel diff context missing")?;
+    let changed_user = diff["data"]["changed_symbols"]
+        .as_array()
+        .and_then(|symbols| {
+            symbols
+                .iter()
+                .find(|symbol| symbol["symbol"]["qualified_name"] == "App::Models::User")
+        })
+        .ok_or("changed Laravel model missing")?;
+    let changed_user_id = &changed_user["symbol"]["id"];
+    assert!(
+        diff["data"]["related_relations"]
+            .as_array()
+            .is_some_and(|relations| relations.iter().any(|relation| {
+                relation["changed_symbol_id"] == *changed_user_id
+                    && relation["relation"]["direction"] == "outgoing"
+                    && relation["relation"]["relation"]["edge_kind"] == "AUTHORIZES_WITH"
+            }))
+    );
 
     client.cancel().await?;
     let running = server_task
@@ -521,12 +809,30 @@ final class PaymentService {
         repository.path().join("src/PaymentController.php"),
         r#"<?php
 namespace App\Api;
+use App\Service\PaymentService;
 final class PaymentController {
+    public function __construct(private PaymentService $service) {}
     public function refund(): void { $this->service->refund(100); }
 }
 "#,
     )?;
-    git(repository.path(), &["add", "src"])?;
+    fs::create_dir_all(repository.path().join("tests"))?;
+    fs::write(
+        repository.path().join("tests/PaymentServiceTest.php"),
+        r#"<?php
+namespace App\Tests;
+use App\Service\PaymentService;
+final class PaymentServiceTest {
+    public function testRefundTwice(): void {
+        $service = new PaymentService();
+        $service->refund(100);
+        $service->refund(200);
+    }
+    public function testDynamicRefund($service): void { $service->refund(300); }
+}
+"#,
+    )?;
+    git(repository.path(), &["add", "src", "tests"])?;
     git(repository.path(), &["commit", "--quiet", "-m", "base"])?;
     let source = fs::read_to_string(&service_path)?;
     fs::write(
@@ -591,10 +897,40 @@ final class PaymentController {
             .structured_content
             .ok_or("PHP context must return structured content")?;
     assert_eq!(context["data"]["symbol"]["language"], "php");
-    assert!(
-        context["data"]["callers"]
-            .as_array()
-            .is_some_and(|items| items.is_empty())
+    let php_callers = context["data"]["callers"]
+        .as_array()
+        .ok_or("PHP callers missing")?;
+    let controller_caller = php_callers
+        .iter()
+        .find(|caller| caller["symbol"]["qualified_name"] == "App::Api::PaymentController::refund")
+        .ok_or("PHP controller caller missing")?;
+    assert_eq!(controller_caller["precision"], "heuristic");
+    assert_eq!(
+        controller_caller["representative_call_sites"][0]["receiver_type"],
+        "App::Service::PaymentService"
+    );
+    assert_eq!(
+        controller_caller["representative_call_sites"][0]["receiver_type_source"],
+        "promoted_property"
+    );
+    assert_eq!(controller_caller["provenance"], "tree_sitter");
+    assert_eq!(controller_caller["precision"], "heuristic");
+    let php_tests = context["data"]["tests"]
+        .as_array()
+        .ok_or("PHP tests missing")?;
+    assert_eq!(php_tests.len(), 1);
+    assert_eq!(
+        php_tests[0]["symbol"]["qualified_name"],
+        "App::Tests::PaymentServiceTest::testRefundTwice"
+    );
+    assert_eq!(php_tests[0]["precision"], "heuristic");
+    assert_eq!(
+        php_tests[0]["representative_call_sites"][0]["receiver_type"],
+        "App::Service::PaymentService"
+    );
+    assert_eq!(
+        php_tests[0]["representative_call_sites"][0]["receiver_type_source"],
+        "local_new"
     );
     let controller_context =
         client
@@ -613,15 +949,11 @@ final class PaymentController {
     assert!(
         controller_context["data"]["syntax_call_candidates"]
             .as_array()
-            .is_some_and(|items| {
-                items.iter().any(|item| {
-                    item["caller"]["qualified_name"] == "App::Api::PaymentController::refund"
-                        && item["name"] == "refund"
-                        && item["candidate_target"].is_null()
-                        && item["resolution"] == "unresolved"
-                        && item["precision"] == "syntax"
-                })
-            })
+            .is_some_and(|items| items.is_empty())
+    );
+    assert_eq!(
+        controller_context["data"]["callees"][0]["symbol"]["qualified_name"],
+        "App::Service::PaymentService::refund"
     );
 
     let diff = client
@@ -645,6 +977,18 @@ final class PaymentController {
                         && item["symbol"]["language"] == "php"
                 })
             })
+    );
+    let related_tests = diff["data"]["related_tests"]
+        .as_array()
+        .ok_or("PHP diff related tests missing")?;
+    assert_eq!(related_tests.len(), 1);
+    assert_eq!(
+        related_tests[0]["relation"]["symbol"]["qualified_name"],
+        "App::Tests::PaymentServiceTest::testRefundTwice"
+    );
+    assert_eq!(
+        related_tests[0]["relation"]["representative_call_sites"][0]["receiver_type_source"],
+        "local_new"
     );
 
     client.cancel().await?;

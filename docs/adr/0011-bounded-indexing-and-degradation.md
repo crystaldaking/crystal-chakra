@@ -67,8 +67,8 @@ pathological files or repositories.
   between file/phase units. Cancellation returns a typed error and never
   publishes partial state. ADR-012 extends the same adapter-neutral ownership
   model across end-to-end MCP query execution.
-- Do not add a scheduler or parallelism dependency here. Bounded parallel
-  parsing is issue #21 and must use these work/memory contracts.
+- Do not add a scheduler dependency here. ADR-014's bounded parallel parsing
+  uses worker-local parsers under these work/memory contracts.
 
 ## Alternatives considered
 
@@ -95,10 +95,9 @@ pathological files or repositories.
 - Language graph quotas can leave unused capacity when one language has a much
   higher fact density than its file share. This conservative policy is stable
   and safe; measurements may justify a two-phase allocator later.
-- The current v0.1 arena still duplicates/remaps language graphs during
-  composition. Issue #16 owns structural sharing and transient publication
-  memory; this ADR bounds contents without claiming that work is already
-  structurally incremental.
+- ADR-002's persistent language partitions provide structural sharing and
+  bounded transient publication memory; this ADR independently bounds retained
+  graph contents.
 - A degraded relationship layer may perform a complete bounded relationship
   rebuild to restore deterministic lexical allocation. The ordinary
   under-budget single-file path remains incremental.
@@ -125,7 +124,8 @@ pathological files or repositories.
 - On the current private `psp-app` worktree (source not copied), the same harness
   indexed 1,158 PHP files / 7,568,594 bytes in 0.991 seconds; `/usr/bin/time -l`
   reported 182,452,224 bytes maximum RSS. Atomic publication took 1 µs.
-- Issue #15 owns repeatable generated CI gates and the final v0.1.1 readiness
-  record. Issue #16 owns structural publication, #17 freshness scan cost, #20
-  ADR-012 owns end-to-end query cancellation; ADR-014 resolves #21 with bounded
-  worker-local parsing and resource-aware scheduling.
+- The large-repository gate owns repeatable generated CI checks and the final
+  v0.1.1 readiness record. ADR-002 covers structural publication, ADR-005
+  covers freshness scan cost, ADR-012 covers end-to-end query cancellation,
+  and ADR-014 covers bounded worker-local parsing and resource-aware
+  scheduling.

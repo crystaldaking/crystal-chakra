@@ -286,7 +286,10 @@ pub struct PreciseQueryRequest {
 pub struct PreciseRelation {
     pub name: String,
     pub declaration: SourceRange,
-    pub call_site: Option<SourceRange>,
+    /// Total provider-reported calls represented by this relationship.
+    pub occurrence_count: u64,
+    /// Bounded representative provider-reported call-site ranges.
+    pub call_sites: Vec<SourceRange>,
     pub provenance: Provenance,
 }
 
@@ -297,7 +300,8 @@ pub struct PreciseQueryResult {
     pub state: ProviderState,
     pub incoming: Vec<PreciseRelation>,
     pub outgoing: Vec<PreciseRelation>,
-    pub truncated: bool,
+    pub incoming_truncated: bool,
+    pub outgoing_truncated: bool,
 }
 
 impl PreciseQueryResult {
@@ -308,7 +312,8 @@ impl PreciseQueryResult {
             state,
             incoming: Vec::new(),
             outgoing: Vec::new(),
-            truncated: false,
+            incoming_truncated: false,
+            outgoing_truncated: false,
         }
     }
 }

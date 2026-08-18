@@ -7,6 +7,8 @@ use chakra_engine::{PreciseRelation, ProviderWorkspace};
 use lsp_types::{
     CallHierarchyIncomingCall, CallHierarchyItem, CallHierarchyOutgoingCall, Position, Range, Uri,
 };
+
+const MAX_REPRESENTATIVE_CALL_SITES: usize = 3;
 use url::Url;
 
 use crate::worker::ProviderError;
@@ -167,15 +169,19 @@ pub(crate) fn convert_incoming(
             break;
         }
         let source = workspace.document(&path);
-        let call_site = source.as_ref().and_then(|document| {
+        let occurrence_count = u64::try_from(call.from_ranges.len().max(1)).unwrap_or(u64::MAX);
+        let call_sites = source.as_ref().map_or_else(Vec::new, |document| {
             call.from_ranges
-                .first()
-                .and_then(|range| convert_range(path.clone(), &document.source, *range))
+                .iter()
+                .filter_map(|range| convert_range(path.clone(), &document.source, *range))
+                .take(MAX_REPRESENTATIVE_CALL_SITES)
+                .collect()
         });
         result.push(PreciseRelation {
             name: call.from.name,
             declaration,
-            call_site,
+            occurrence_count,
+            call_sites,
             provenance: Provenance::RustAnalyzer,
         });
     }
@@ -199,15 +205,19 @@ pub(crate) fn convert_outgoing(
             *truncated = true;
             break;
         }
-        let call_site = caller_source.as_ref().and_then(|document| {
+        let occurrence_count = u64::try_from(call.from_ranges.len().max(1)).unwrap_or(u64::MAX);
+        let call_sites = caller_source.as_ref().map_or_else(Vec::new, |document| {
             call.from_ranges
-                .first()
-                .and_then(|range| convert_range(caller_path.clone(), &document.source, *range))
+                .iter()
+                .filter_map(|range| convert_range(caller_path.clone(), &document.source, *range))
+                .take(MAX_REPRESENTATIVE_CALL_SITES)
+                .collect()
         });
         result.push(PreciseRelation {
             name: call.to.name,
             declaration,
-            call_site,
+            occurrence_count,
+            call_sites,
             provenance: Provenance::RustAnalyzer,
         });
     }
@@ -271,6 +281,36 @@ mod tests {
         let converted = convert_incoming(calls, &workspace, 1, &mut truncated);
         assert_eq!(converted.len(), 1);
         assert_eq!(converted[0].name, "inside");
+        assert!(!truncated);
+        Ok(())
+    }
+
+    #[test]
+    fn incoming_relations_preserve_occurrence_count_with_bounded_ranges()
+    -> Result<(), Box<dyn Error>> {
+        let repository = TempDir::new()?;
+        let path = RepoRelativePath::new("src/lib.rs")?;
+        let workspace = ProviderWorkspace::from_documents(
+            repository.path().to_path_buf(),
+            Revision(4),
+            vec![ProviderDocument {
+                path: path.clone(),
+                source: Arc::<str>::from("fn inside() {}\n"),
+                language: chakra_domain::symbol::Language::Rust,
+            }],
+        );
+        let inside = path_to_uri(repository.path(), &path)?;
+        let range = Range::new(Position::new(0, 3), Position::new(0, 9));
+        let calls = vec![CallHierarchyIncomingCall {
+            from: item("inside", inside),
+            from_ranges: vec![range; 5],
+        }];
+        let mut truncated = false;
+
+        let converted = convert_incoming(calls, &workspace, 10, &mut truncated);
+        assert_eq!(converted.len(), 1);
+        assert_eq!(converted[0].occurrence_count, 5);
+        assert_eq!(converted[0].call_sites.len(), 3);
         assert!(!truncated);
         Ok(())
     }

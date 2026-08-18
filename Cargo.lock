@@ -174,7 +174,10 @@ dependencies = [
  "chakra-domain",
  "regex",
  "rpds",
+ "serde",
+ "serde_json",
  "thiserror",
+ "tracing",
 ]
 
 [[package]]
@@ -183,6 +186,7 @@ version = "0.1.0"
 dependencies = [
  "chakra-domain",
  "chakra-engine",
+ "serde_json",
  "tempfile",
  "thiserror",
 ]
@@ -211,6 +215,7 @@ dependencies = [
  "chakra-engine",
  "chakra-git",
  "nix",
+ "serde_json",
  "tempfile",
  "thiserror",
  "tracing",
@@ -242,11 +247,13 @@ dependencies = [
  "chakra-git",
  "chakra-language",
  "rmcp",
+ "schemars",
  "serde",
  "serde_json",
  "tempfile",
  "thiserror",
  "tokio",
+ "tracing",
 ]
 
 [[package]]

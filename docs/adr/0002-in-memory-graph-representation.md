@@ -23,6 +23,7 @@ representation must support the atomic publication model of ADR-001.
   matching workspace revision, even when an unchanged payload happens to reuse
   the same numeric id in the next revision;
 - a persistent ordered file map stores `Arc<IndexedFile>` membership
+  and provides deterministic bounded path streaming
   (`repo_map`) and the immutable source text captured for that same graph
   revision (`search` and bounded context snippets); source strings use
   `Arc<str>` so private snapshot construction does not repeatedly copy file
@@ -32,7 +33,9 @@ representation must support the atomic publication model of ADR-001.
   file so a private revision can remove and replace one contribution exactly;
 - a persistent compact call-site arena plus caller/lookup indexes for
   ambiguous and unresolved syntax calls; only uniquely resolved syntax calls
-  become graph edges (ADR-010).
+  become graph edges (ADR-010);
+- a persistent exact-name index maps simple and qualified names to bounded
+  candidate lists before query traversal begins.
 
 A workspace graph is a shallow immutable list of disjoint Rust/PHP partitions.
 Queries traverse that facade, while live reconciliation mutates only a cloned
@@ -44,10 +47,10 @@ checks symbol, edge, and call-site quotas before allocation and reports exact
 retained/omitted work. A truncated symbol catalog never resolves call sites,
 because removing one declaration could otherwise manufacture false uniqueness.
 
-Name resolution is a deliberate ordered linear scan over live arena entries
-(exact for `resolve_name`, case-insensitive substring for `symbol_search`): a
-name index would be cloned on every update while v0.1 repositories are small.
-Add one only when measurements justify it.
+Exact name resolution uses the derived name index because high-degree query
+budgets must apply before allocating all matching symbols (ADR-025). Broad
+case-insensitive substring matching for `symbol_search` remains a linear arena
+scan with bounded top-k allocation and an examined-symbol work limit.
 
 Mutation happens only while building privately (`add_file` / `add_symbol` /
 owned relationship and call-site replacement) with validation: files are
@@ -88,9 +91,9 @@ high-degree callers and identical parallel edges.
 
 ## Consequences
 
-- Lookups used by v0.1 queries are map hits or single linear scans with
-  documented budgets; naive ranking is deliberate until benchmarks say
-  otherwise (SPEC §33, roadmap §18).
+- Lookups used by v0.1 queries are map hits or bounded linear scans. ADR-025
+  applies deterministic top-k/result/work limits during high-degree query
+  construction instead of collecting repository-sized result vectors.
 - Complete old graphs stay readable through their snapshot `Arc`. A private
   update shares persistent roots and `Arc` payloads, copies only bounded trie
   paths/affected adjacency vectors, and replaces the snapshot with one atomic

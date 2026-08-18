@@ -1,6 +1,7 @@
 //! MCP server: typed tools over stdio (ADR-0003).
 
-use std::io::{self, Write};
+use std::borrow::Cow;
+use std::marker::PhantomData;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -13,15 +14,18 @@ use chakra_domain::query::{
     SearchRequest, StatusData, StatusRequest, SymbolSearchData, SymbolSearchRequest,
 };
 use rmcp::handler::server::router::tool::ToolRouter;
-use rmcp::handler::server::wrapper::{Json, Parameters};
+use rmcp::handler::server::tool::IntoCallToolResult;
+use rmcp::handler::server::wrapper::Parameters;
+use rmcp::model::{CallToolResponse, CallToolResult};
 use rmcp::transport::stdio;
 use rmcp::{ErrorData, ServerHandler, ServiceExt, tool, tool_handler, tool_router};
+use schemars::JsonSchema;
 use serde::Serialize;
 use thiserror::Error;
 use tokio::sync::Semaphore;
 
 const MAX_CONCURRENT_QUERIES: usize = 2;
-const MAX_MCP_RESPONSE_BYTES: usize = 1024 * 1024;
+const MAX_MCP_ENVELOPE_BYTES: usize = 1024 * 1024;
 const QUERY_QUEUE_TIMEOUT: Duration = Duration::from_secs(5);
 const QUERY_EXECUTION_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_ERROR_MESSAGE_CHARS: usize = 1_024;
@@ -197,12 +201,15 @@ fn to_error_data(error: QueryError) -> ErrorData {
         QueryError::Invalid(_)
         | QueryError::MissingSymbolRef
         | QueryError::StaleSymbolRef { .. }
+        | QueryError::StaleCursor { .. }
+        | QueryError::CursorWorkspaceMismatch { .. }
         | QueryError::SymbolNotFound(_)
         | QueryError::AmbiguousSymbol { .. }
         | QueryError::FreshnessNotMet { .. } => ErrorData::invalid_params(error.to_string(), None),
         QueryError::Unsupported(_)
         | QueryError::FreshnessUnavailable(_)
-        | QueryError::DiffUnavailable(_) => ErrorData::internal_error(error.to_string(), None),
+        | QueryError::DiffUnavailable(_)
+        | QueryError::ResponseConstruction(_) => ErrorData::internal_error(error.to_string(), None),
         QueryError::Cancelled => execution_error("client_cancelled", error.to_string()),
         QueryError::ExecutionDeadlineExceeded => {
             execution_error("execution_deadline", error.to_string())
@@ -219,43 +226,107 @@ fn execution_error(kind: &'static str, message: impl Into<String>) -> ErrorData 
     ErrorData::internal_error(message, Some(serde_json::json!({ "kind": kind })))
 }
 
-struct ResponseBudgetWriter {
-    remaining: usize,
-    exceeded: bool,
+/// Structured response already converted to the protocol's JSON value.
+/// Unlike rmcp's `Json<T>`, this wrapper lets Chakra validate the exact wire
+/// size without serializing the typed envelope into a counting writer first.
+struct BudgetedJson<T> {
+    value: serde_json::Value,
+    marker: PhantomData<T>,
 }
 
-impl Write for ResponseBudgetWriter {
-    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        if bytes.len() > self.remaining {
-            self.exceeded = true;
-            return Err(io::Error::other("MCP response budget exceeded"));
+impl<T: JsonSchema> JsonSchema for BudgetedJson<T> {
+    fn schema_name() -> Cow<'static, str> {
+        T::schema_name()
+    }
+
+    fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        T::json_schema(generator)
+    }
+}
+
+impl<T: JsonSchema + 'static> IntoCallToolResult for BudgetedJson<T> {
+    fn into_call_tool_result(self) -> Result<CallToolResponse, ErrorData> {
+        let mut result = CallToolResult::default();
+        result.structured_content = Some(self.value);
+        result.is_error = Some(false);
+        Ok(result.into())
+    }
+}
+
+fn encoded_string_len(value: &str) -> usize {
+    value.chars().fold(2_usize, |bytes, character| {
+        bytes.saturating_add(match character {
+            '"' | '\\' | '\u{08}' | '\u{0c}' | '\n' | '\r' | '\t' => 2,
+            '\u{00}'..='\u{1f}' => 6,
+            other => other.len_utf8(),
+        })
+    })
+}
+
+/// Exact compact JSON length for a protocol value, without serializing it a
+/// second time or allocating a full encoded response buffer.
+fn encoded_json_len(value: &serde_json::Value) -> usize {
+    match value {
+        serde_json::Value::Null => 4,
+        serde_json::Value::Bool(true) => 4,
+        serde_json::Value::Bool(false) => 5,
+        serde_json::Value::Number(number) => number.to_string().len(),
+        serde_json::Value::String(string) => encoded_string_len(string),
+        serde_json::Value::Array(items) => items
+            .iter()
+            .fold(2_usize, |bytes, item| {
+                bytes.saturating_add(encoded_json_len(item))
+            })
+            .saturating_add(items.len().saturating_sub(1)),
+        serde_json::Value::Object(entries) => entries
+            .iter()
+            .fold(2_usize, |bytes, (key, value)| {
+                bytes
+                    .saturating_add(encoded_string_len(key))
+                    .saturating_add(1)
+                    .saturating_add(encoded_json_len(value))
+            })
+            .saturating_add(entries.len().saturating_sub(1)),
+    }
+}
+
+impl<T> BudgetedJson<T>
+where
+    T: Serialize + JsonSchema + 'static,
+{
+    fn new(envelope: T) -> Result<Self, ErrorData> {
+        let serialization_started = Instant::now();
+        let value = serde_json::to_value(envelope).map_err(|error| {
+            ErrorData::internal_error(
+                format!("failed to serialize structured response: {error}"),
+                None,
+            )
+        })?;
+        let serialization_micros =
+            u64::try_from(serialization_started.elapsed().as_micros()).unwrap_or(u64::MAX);
+        let budget_started = Instant::now();
+        let response_bytes = encoded_json_len(&value);
+        let budget_check_micros =
+            u64::try_from(budget_started.elapsed().as_micros()).unwrap_or(u64::MAX);
+        tracing::debug!(
+            response_bytes,
+            serialization_micros,
+            budget_check_micros,
+            transport_serialization = "rmcp_owned",
+            "MCP structured response prepared"
+        );
+        if response_bytes > MAX_MCP_ENVELOPE_BYTES {
+            return Err(ErrorData::internal_error(
+                format!(
+                    "query envelope exceeds the {MAX_MCP_ENVELOPE_BYTES}-byte MCP budget; lower the requested limit"
+                ),
+                None,
+            ));
         }
-        self.remaining -= bytes.len();
-        Ok(bytes.len())
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
-    }
-}
-
-fn enforce_response_budget<T: Serialize>(value: &T) -> Result<(), ErrorData> {
-    let mut writer = ResponseBudgetWriter {
-        remaining: MAX_MCP_RESPONSE_BYTES,
-        exceeded: false,
-    };
-    match serde_json::to_writer(&mut writer, value) {
-        Ok(()) => Ok(()),
-        Err(_) if writer.exceeded => Err(execution_error(
-            "resource_budget",
-            format!(
-                "query response exceeds the {MAX_MCP_RESPONSE_BYTES}-byte MCP budget; lower the requested limit"
-            ),
-        )),
-        Err(error) => Err(ErrorData::internal_error(
-            format!("failed to size query response: {error}"),
-            None,
-        )),
+        Ok(Self {
+            value,
+            marker: PhantomData,
+        })
     }
 }
 
@@ -288,9 +359,12 @@ impl ChakraMcpServer {
         }
     }
 
-    async fn execute_query<T, F>(&self, query: F) -> Result<Json<QueryEnvelope<T>>, ErrorData>
+    async fn execute_query<T, F>(
+        &self,
+        query: F,
+    ) -> Result<BudgetedJson<QueryEnvelope<T>>, ErrorData>
     where
-        T: Send + Serialize + 'static,
+        T: Send + Serialize + JsonSchema + 'static,
         F: FnOnce(&dyn QueryService, &OperationContext) -> Result<QueryEnvelope<T>, QueryError>
             + Send
             + 'static,
@@ -340,19 +414,18 @@ impl ChakraMcpServer {
             let result = query(service.as_ref(), &blocking_operation);
             hold.finish(&result);
             let envelope = result.map_err(to_error_data)?;
-            enforce_response_budget(&envelope)?;
-            Ok(envelope)
+            BudgetedJson::new(envelope)
         })
         .await
         .map_err(|error| ErrorData::internal_error(format!("query worker failed: {error}"), None));
         cancellation.disarm();
-        let envelope = joined??;
-        Ok(Json(envelope))
+        joined?
     }
 
     #[tool(
         name = "status",
         description = "Chakra workspace status: identity, published revision, index counts, provider state",
+        output_schema = rmcp::handler::server::tool::schema_for_output::<QueryEnvelope<StatusData>>(),
         annotations(
             read_only_hint = true,
             destructive_hint = false,
@@ -360,16 +433,16 @@ impl ChakraMcpServer {
             open_world_hint = false
         )
     )]
-    async fn status(&self) -> Result<Json<QueryEnvelope<StatusData>>, ErrorData> {
+    async fn status(&self) -> Result<BudgetedJson<QueryEnvelope<StatusData>>, ErrorData> {
         let mut envelope = self.service.status(StatusRequest).map_err(to_error_data)?;
         envelope.data.query_execution = Some(self.query_metrics.snapshot());
-        enforce_response_budget(&envelope)?;
-        Ok(Json(envelope))
+        BudgetedJson::new(envelope)
     }
 
     #[tool(
         name = "repo_map",
-        description = "List indexed Rust and PHP files with bounded syntax-symbol counts",
+        description = "Browse indexed Rust and PHP structure with a bounded overview, filters, and revision-scoped cursor pages",
+        output_schema = rmcp::handler::server::tool::schema_for_output::<QueryEnvelope<RepoMapData>>(),
         annotations(
             read_only_hint = true,
             destructive_hint = false,
@@ -380,7 +453,7 @@ impl ChakraMcpServer {
     async fn repo_map(
         &self,
         Parameters(request): Parameters<RepoMapRequest>,
-    ) -> Result<Json<QueryEnvelope<RepoMapData>>, ErrorData> {
+    ) -> Result<BudgetedJson<QueryEnvelope<RepoMapData>>, ErrorData> {
         self.execute_query(move |service, operation| {
             service.repo_map_with_context(request, operation)
         })
@@ -390,6 +463,7 @@ impl ChakraMcpServer {
     #[tool(
         name = "search",
         description = "Search the atomically indexed source snapshot using literal or regex text matching",
+        output_schema = rmcp::handler::server::tool::schema_for_output::<QueryEnvelope<SearchData>>(),
         annotations(
             read_only_hint = true,
             destructive_hint = false,
@@ -400,7 +474,7 @@ impl ChakraMcpServer {
     async fn search(
         &self,
         Parameters(request): Parameters<SearchRequest>,
-    ) -> Result<Json<QueryEnvelope<SearchData>>, ErrorData> {
+    ) -> Result<BudgetedJson<QueryEnvelope<SearchData>>, ErrorData> {
         self.execute_query(move |service, operation| {
             service.search_with_context(request, operation)
         })
@@ -410,6 +484,7 @@ impl ChakraMcpServer {
     #[tool(
         name = "symbol_search",
         description = "Find bounded Rust and PHP syntax symbol candidates by simple or qualified name",
+        output_schema = rmcp::handler::server::tool::schema_for_output::<QueryEnvelope<SymbolSearchData>>(),
         annotations(
             read_only_hint = true,
             destructive_hint = false,
@@ -420,7 +495,7 @@ impl ChakraMcpServer {
     async fn symbol_search(
         &self,
         Parameters(request): Parameters<SymbolSearchRequest>,
-    ) -> Result<Json<QueryEnvelope<SymbolSearchData>>, ErrorData> {
+    ) -> Result<BudgetedJson<QueryEnvelope<SymbolSearchData>>, ErrorData> {
         self.execute_query(move |service, operation| {
             service.symbol_search_with_context(request, operation)
         })
@@ -430,6 +505,7 @@ impl ChakraMcpServer {
     #[tool(
         name = "context",
         description = "Get bounded syntax context for one resolved Rust or PHP symbol, with optional current precise enrichment when supported",
+        output_schema = rmcp::handler::server::tool::schema_for_output::<QueryEnvelope<ContextData>>(),
         annotations(
             read_only_hint = true,
             destructive_hint = false,
@@ -440,7 +516,7 @@ impl ChakraMcpServer {
     async fn context(
         &self,
         Parameters(request): Parameters<ContextRequest>,
-    ) -> Result<Json<QueryEnvelope<ContextData>>, ErrorData> {
+    ) -> Result<BudgetedJson<QueryEnvelope<ContextData>>, ErrorData> {
         self.execute_query(move |service, operation| {
             service.context_with_context(request, operation)
         })
@@ -450,6 +526,7 @@ impl ChakraMcpServer {
     #[tool(
         name = "callers",
         description = "Get bounded callers for one resolved Rust or PHP symbol, preferring current provider precision when supported and retaining honest syntax fallback",
+        output_schema = rmcp::handler::server::tool::schema_for_output::<QueryEnvelope<CallersData>>(),
         annotations(
             read_only_hint = true,
             destructive_hint = false,
@@ -460,7 +537,7 @@ impl ChakraMcpServer {
     async fn callers(
         &self,
         Parameters(request): Parameters<CallersRequest>,
-    ) -> Result<Json<QueryEnvelope<CallersData>>, ErrorData> {
+    ) -> Result<BudgetedJson<QueryEnvelope<CallersData>>, ErrorData> {
         self.execute_query(move |service, operation| {
             service.callers_with_context(request, operation)
         })
@@ -469,7 +546,8 @@ impl ChakraMcpServer {
 
     #[tool(
         name = "diff_context",
-        description = "Summarize bounded Rust and PHP changes from HEAD to the materialized worktree, with changed symbols and related callers/tests",
+        description = "Summarize bounded Rust and PHP changes from HEAD, a base ref, or a merge base to the materialized worktree, with changed symbols and related callers/tests",
+        output_schema = rmcp::handler::server::tool::schema_for_output::<QueryEnvelope<DiffContextData>>(),
         annotations(
             read_only_hint = true,
             destructive_hint = false,
@@ -480,7 +558,7 @@ impl ChakraMcpServer {
     async fn diff_context(
         &self,
         Parameters(request): Parameters<DiffContextRequest>,
-    ) -> Result<Json<QueryEnvelope<DiffContextData>>, ErrorData> {
+    ) -> Result<BudgetedJson<QueryEnvelope<DiffContextData>>, ErrorData> {
         self.execute_query(move |service, operation| {
             service.diff_context_with_context(request, operation)
         })
@@ -490,7 +568,7 @@ impl ChakraMcpServer {
 
 #[tool_handler(
     name = "chakra",
-    instructions = "Chakra Rust and PHP code intelligence: inspect status and repo_map, search indexed source, resolve ambiguous names through symbol_search, request context or callers for one entity, and use diff_context for current worktree changes. Results are bounded and carry language, revision, freshness, provider state and capabilities, provenance, and precision.",
+    instructions = "Chakra Rust and PHP code intelligence: inspect status and repo_map, search indexed source, resolve ambiguous names through symbol_search, request context or callers for one entity, and use diff_context for current worktree or branch-relative changes. Results are bounded and carry language, revision, freshness, provider state and capabilities, provenance, and precision.",
     router = self.tool_router
 )]
 impl ServerHandler for ChakraMcpServer {}
@@ -523,7 +601,7 @@ pub async fn serve_stdio(service: Arc<dyn QueryService>) -> Result<(), ServeErro
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::mpsc;
 
     use chakra_domain::identity::WorkspaceIdentity;
@@ -531,6 +609,61 @@ mod tests {
     use chakra_engine::WorkspaceEngine;
 
     use super::*;
+
+    static SERIALIZE_CALLS: AtomicUsize = AtomicUsize::new(0);
+
+    struct CountedPayload;
+
+    impl Serialize for CountedPayload {
+        fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+        where
+            S: serde::Serializer,
+        {
+            SERIALIZE_CALLS.fetch_add(1, Ordering::SeqCst);
+            serializer.serialize_str("counted")
+        }
+    }
+
+    impl JsonSchema for CountedPayload {
+        fn schema_name() -> Cow<'static, str> {
+            String::schema_name()
+        }
+
+        fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+            String::json_schema(generator)
+        }
+    }
+
+    #[test]
+    fn exact_value_size_matches_serde_json_for_escaped_and_multibyte_content()
+    -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let controls: String = (0_u8..=31).map(char::from).collect();
+        let values = [
+            serde_json::json!(null),
+            serde_json::json!(true),
+            serde_json::json!(-123.5),
+            serde_json::json!(format!(
+                "quote=\" slash=\\ {controls} 🦀 界 \u{2028}\u{2029}"
+            )),
+            serde_json::json!({
+                "multibyte-界": ["🦀", "line\nfeed", {"nested": false}],
+            }),
+        ];
+        for value in values {
+            assert_eq!(encoded_json_len(&value), serde_json::to_vec(&value)?.len());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn budget_boundary_serializes_the_typed_payload_once()
+    -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        SERIALIZE_CALLS.store(0, Ordering::SeqCst);
+        let response = BudgetedJson::<CountedPayload>::new(CountedPayload)?;
+        assert_eq!(response.value, serde_json::json!("counted"));
+        assert_eq!(SERIALIZE_CALLS.load(Ordering::SeqCst), 1);
+        Ok(())
+    }
 
     #[tokio::test]
     async fn cancelling_a_queued_query_prevents_dispatch()
@@ -580,8 +713,8 @@ mod tests {
                     chakra_domain::state::Freshness::Fresh,
                     chakra_domain::state::WorkspaceStatus::Ready,
                     chakra_domain::state::ProviderState::NotConfigured,
-                    false,
-                    "x".repeat(MAX_MCP_RESPONSE_BYTES),
+                    Vec::new(),
+                    "x".repeat(MAX_MCP_ENVELOPE_BYTES),
                 ))
             })
             .await;
@@ -648,7 +781,7 @@ mod tests {
                         chakra_domain::state::Freshness::Fresh,
                         chakra_domain::state::WorkspaceStatus::Ready,
                         chakra_domain::state::ProviderState::NotConfigured,
-                        false,
+                        Vec::new(),
                         "started after cancellation".to_owned(),
                     ))
                 })
@@ -664,7 +797,7 @@ mod tests {
             .map_err(|_| "replacement query did not acquire a released permit")?;
         let response = joined.map_err(|error| format!("replacement query task failed: {error}"))?;
         let third = response?;
-        assert_eq!(third.0.data, "started after cancellation");
+        assert_eq!(third.value["data"], "started after cancellation");
 
         // Acquiring the whole executor proves both cancelled blocking workers
         // have observed cancellation and released their permits. The aborted

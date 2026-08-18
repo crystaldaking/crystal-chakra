@@ -5,16 +5,19 @@
 //! payloads; a workspace graph is a shallow view over disjoint language
 //! partitions. See `docs/adr/0002-in-memory-graph-representation.md`.
 
+use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use chakra_domain::diagnostic::SyntaxDiagnostic;
 use chakra_domain::location::{RepoRelativePath, SourceRange};
 use chakra_domain::operation::{OperationAbort, OperationContext};
 use chakra_domain::provenance::{Precision, Provenance};
+use chakra_domain::source::{SourceClassification, SourceMetadata, SourceMetadataCoverage};
 use chakra_domain::symbol::{
     CallForm, CallResolution, CallSite, CallTargetKind, Edge, EdgeKind, EntityId, Language,
-    MAX_RECEIVER_HINT_CHARS, Symbol, SymbolKey, SymbolKind,
+    MAX_RECEIVER_HINT_CHARS, ReceiverTypeSource, Symbol, SymbolKey, SymbolKind,
 };
 use rpds::{HashTrieMapSync, RedBlackTreeMapSync};
 use thiserror::Error;
@@ -40,6 +43,8 @@ pub enum GraphError {
     EmptyCallSiteName,
     #[error("call-site receiver hint exceeds the {limit}-character budget")]
     ReceiverHintTooLong { limit: usize },
+    #[error("call-site receiver type and its evidence source must be present together")]
+    ReceiverTypeEvidenceMismatch,
     #[error("call site for {caller:?} is in `{site_path}`, not caller file `{caller_path}`")]
     CallSiteLocationMismatch {
         caller: EntityId,
@@ -58,6 +63,20 @@ pub enum GraphError {
     EntityIdSpaceExhausted(Language),
     #[error("cannot preserve {id:?} while changing its symbol key")]
     PreservedEntityKeyChanged { id: EntityId },
+    #[error("diagnostic range file `{diagnostic_path}` does not match indexed file `{file_path}`")]
+    DiagnosticPathMismatch {
+        file_path: RepoRelativePath,
+        diagnostic_path: RepoRelativePath,
+    },
+    #[error("diagnostic total {total} is smaller than the {retained} retained diagnostics")]
+    DiagnosticCountUnderflow { total: u64, retained: usize },
+    #[error(
+        "syntax diagnostic must use tree_sitter/syntax quality, got {provenance:?}/{precision:?}"
+    )]
+    InvalidDiagnosticQuality {
+        provenance: Provenance,
+        precision: Precision,
+    },
     #[error("graph consistency audit failed: {0}")]
     Consistency(#[from] ConsistencyError),
 }
@@ -70,6 +89,8 @@ pub struct CallSiteInput {
     pub target_kind: CallTargetKind,
     pub name: String,
     pub qualifier: Option<String>,
+    pub receiver_type: Option<String>,
+    pub receiver_type_source: Option<ReceiverTypeSource>,
     pub receiver_hint: Option<String>,
     pub location: SourceRange,
     pub provenance: Provenance,
@@ -134,6 +155,32 @@ impl BoundedGraphBuilder {
         source: impl Into<Arc<str>>,
     ) -> Result<(), GraphError> {
         self.graph.add_file(path, source)
+    }
+
+    pub fn add_file_with_metadata(
+        &mut self,
+        path: RepoRelativePath,
+        source: impl Into<Arc<str>>,
+        metadata: SourceMetadata,
+    ) -> Result<(), GraphError> {
+        self.graph.add_file_with_metadata(path, source, metadata)
+    }
+
+    pub fn add_file_with_metadata_and_diagnostics(
+        &mut self,
+        path: RepoRelativePath,
+        source: impl Into<Arc<str>>,
+        metadata: SourceMetadata,
+        diagnostics: Vec<SyntaxDiagnostic>,
+        diagnostic_count: u64,
+    ) -> Result<(), GraphError> {
+        self.graph.add_file_with_metadata_and_diagnostics(
+            path,
+            source,
+            metadata,
+            diagnostics,
+            diagnostic_count,
+        )
     }
 
     pub fn add_symbol(
@@ -289,6 +336,28 @@ struct IndexedFile {
     source: Option<Arc<str>>,
     provenance: Provenance,
     precision: Precision,
+    metadata: SourceMetadata,
+    diagnostics: Vec<SyntaxDiagnostic>,
+    diagnostic_count: u64,
+}
+
+/// Deterministic file view used by repository-level queries.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GraphFileSummary {
+    pub path: RepoRelativePath,
+    pub symbol_count: u64,
+    pub provenance: Provenance,
+    pub precision: Precision,
+    pub metadata: SourceMetadata,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GraphDiagnosticSummary {
+    pub files_with_diagnostics: u64,
+    pub total_diagnostics: u64,
+    pub diagnostics: Vec<SyntaxDiagnostic>,
+    pub capture_omitted: u64,
+    pub response_omitted: u64,
 }
 
 /// Symbols and typed relations of one workspace revision.
@@ -303,6 +372,8 @@ pub struct SymbolGraph {
     /// Persistent ordered arena. Values are independently shared so updating
     /// a trie path never copies unchanged symbol payloads.
     symbols: RedBlackTreeMapSync<EntityId, Arc<Symbol>>,
+    /// Exact simple and qualified name lookup used before bounded traversal.
+    symbols_by_exact_name: HashTrieMapSync<String, Arc<Vec<EntityId>>>,
     /// File → captured source plus entities declared in it.
     files: RedBlackTreeMapSync<RepoRelativePath, Arc<IndexedFile>>,
     outgoing: HashTrieMapSync<EntityId, Arc<Vec<Edge>>>,
@@ -432,6 +503,32 @@ impl SymbolGraph {
         path: RepoRelativePath,
         source: impl Into<Arc<str>>,
     ) -> Result<(), GraphError> {
+        let metadata = SourceMetadata::path_fallback(&path);
+        self.add_file_with_metadata(path, source, metadata)
+    }
+
+    /// Adds one discovered source with explicit language-neutral role and
+    /// package metadata.
+    pub fn add_file_with_metadata(
+        &mut self,
+        path: RepoRelativePath,
+        source: impl Into<Arc<str>>,
+        metadata: SourceMetadata,
+    ) -> Result<(), GraphError> {
+        self.add_file_with_metadata_and_diagnostics(path, source, metadata, Vec::new(), 0)
+    }
+
+    /// Adds one discovered source plus bounded diagnostics from the exact
+    /// Tree-sitter parse that produced this graph revision.
+    pub fn add_file_with_metadata_and_diagnostics(
+        &mut self,
+        path: RepoRelativePath,
+        source: impl Into<Arc<str>>,
+        metadata: SourceMetadata,
+        diagnostics: Vec<SyntaxDiagnostic>,
+        diagnostic_count: u64,
+    ) -> Result<(), GraphError> {
+        validate_diagnostics(&path, &diagnostics, diagnostic_count)?;
         self.ensure_owned()?;
         match self.files.get(&path) {
             None => {
@@ -442,6 +539,9 @@ impl SymbolGraph {
                         source: Some(source.into()),
                         provenance: Provenance::Git,
                         precision: Precision::Precise,
+                        metadata,
+                        diagnostics,
+                        diagnostic_count,
                     }),
                 );
             }
@@ -453,6 +553,9 @@ impl SymbolGraph {
                 file.source = Some(source.into());
                 file.provenance = Provenance::Git;
                 file.precision = Precision::Precise;
+                file.metadata = metadata;
+                file.diagnostics = diagnostics;
+                file.diagnostic_count = diagnostic_count;
                 self.files.insert_mut(path, Arc::new(file));
             }
         }
@@ -518,6 +621,9 @@ impl SymbolGraph {
                 source: None,
                 provenance: symbol.provenance,
                 precision: symbol.precision,
+                metadata: SourceMetadata::path_fallback(&file_path),
+                diagnostics: Vec::new(),
+                diagnostic_count: 0,
             });
         file.symbols.push(id);
         self.files.insert_mut(file_path, Arc::new(file));
@@ -528,6 +634,18 @@ impl SymbolGraph {
                 .map_or_else(Vec::new, |ids| ids.as_ref().clone());
             ids.push(id);
             self.callables.insert_mut(lookup, Arc::new(ids));
+        }
+        let simple_name = symbol.name().to_owned();
+        for name in [simple_name.clone(), symbol.key.qualified_name.clone()] {
+            let mut ids = self
+                .symbols_by_exact_name
+                .get(&name)
+                .map_or_else(Vec::new, |ids| ids.as_ref().clone());
+            ids.push(id);
+            self.symbols_by_exact_name.insert_mut(name, Arc::new(ids));
+            if simple_name == symbol.key.qualified_name {
+                break;
+            }
         }
         self.symbols.insert_mut(id, Arc::new(symbol));
         Ok(id)
@@ -670,6 +788,22 @@ impl SymbolGraph {
                     self.callables.insert_mut(lookup, Arc::new(ids));
                 }
             }
+            let simple_name = symbol.name().to_owned();
+            for name in [simple_name.clone(), symbol.key.qualified_name.clone()] {
+                if let Some(existing) = self.symbols_by_exact_name.get(&name) {
+                    let mut ids = existing.as_ref().clone();
+                    ids.retain(|candidate| candidate != id);
+                    if ids.is_empty() {
+                        self.symbols_by_exact_name.remove_mut(&name);
+                    } else {
+                        self.symbols_by_exact_name
+                            .insert_mut(name.clone(), Arc::new(ids));
+                    }
+                }
+                if simple_name == symbol.key.qualified_name {
+                    break;
+                }
+            }
             match symbol.key.language {
                 Language::Rust => self.rust_symbol_count = self.rust_symbol_count.saturating_sub(1),
                 Language::Php => self.php_symbol_count = self.php_symbol_count.saturating_sub(1),
@@ -694,6 +828,30 @@ impl SymbolGraph {
         file.source = Some(source);
         file.provenance = Provenance::Git;
         file.precision = Precision::Precise;
+        self.files.insert_mut(path.clone(), Arc::new(file));
+        Ok(())
+    }
+
+    /// Replaces captured text and diagnostics while preserving declaration
+    /// ids for an incrementally reparsed file with stable symbol keys.
+    pub fn replace_file_source_and_diagnostics(
+        &mut self,
+        path: &RepoRelativePath,
+        source: Arc<str>,
+        diagnostics: Vec<SyntaxDiagnostic>,
+        diagnostic_count: u64,
+    ) -> Result<(), GraphError> {
+        validate_diagnostics(path, &diagnostics, diagnostic_count)?;
+        self.ensure_owned()?;
+        let Some(existing) = self.files.get(path) else {
+            return Err(GraphError::UnknownFile(path.clone()));
+        };
+        let mut file = existing.as_ref().clone();
+        file.source = Some(source);
+        file.provenance = Provenance::Git;
+        file.precision = Precision::Precise;
+        file.diagnostics = diagnostics;
+        file.diagnostic_count = diagnostic_count;
         self.files.insert_mut(path.clone(), Arc::new(file));
         Ok(())
     }
@@ -831,6 +989,12 @@ impl SymbolGraph {
             if self
                 .symbol(input.caller)
                 .is_some_and(|symbol| symbol.key.kind == SymbolKind::Test)
+                && !self.call_sites_from(input.caller).any(|call_site| {
+                    matches!(
+                        call_site.resolution,
+                        CallResolution::Resolved { target: previous } if previous == target
+                    )
+                })
             {
                 self.add_edge_raw(Edge {
                     kind: EdgeKind::Tests,
@@ -848,6 +1012,8 @@ impl SymbolGraph {
             target_kind: input.target_kind,
             name: input.name,
             qualifier: input.qualifier,
+            receiver_type: input.receiver_type,
+            receiver_type_source: input.receiver_type_source,
             receiver_hint: input.receiver_hint,
             location: input.location,
             resolution: resolution.clone(),
@@ -902,40 +1068,74 @@ impl SymbolGraph {
     }
 
     /// Files with the number of symbols declared in each, sorted by path.
-    pub fn file_summaries(&self) -> Vec<(RepoRelativePath, u64, Provenance, Precision)> {
+    pub fn file_summaries(&self) -> Vec<GraphFileSummary> {
         if let Some(parts) = self.parts.as_ref() {
             let mut summaries: Vec<_> =
                 parts.iter().flat_map(SymbolGraph::file_summaries).collect();
-            summaries.sort_by(|a, b| a.0.cmp(&b.0));
+            summaries.sort_by(|a, b| a.path.cmp(&b.path));
             return summaries;
         }
         let mut summaries: Vec<_> = self
             .files
             .iter()
-            .map(|(path, file)| {
-                (
-                    path.clone(),
-                    file.symbols.len() as u64,
-                    file.provenance,
-                    file.precision,
-                )
+            .map(|(path, file)| GraphFileSummary {
+                path: path.clone(),
+                symbol_count: file.symbols.len() as u64,
+                provenance: file.provenance,
+                precision: file.precision,
+                metadata: file.metadata.clone(),
             })
             .collect();
-        summaries.sort_by(|a, b| a.0.cmp(&b.0));
+        summaries.sort_by(|a, b| a.path.cmp(&b.path));
         summaries
+    }
+
+    /// Streams file summaries in global path order without first
+    /// materializing the complete workspace inventory. Composite graphs use
+    /// a small k-way merge over their immutable ordered language partitions.
+    pub fn file_summaries_iter(&self) -> Box<dyn Iterator<Item = GraphFileSummary> + '_> {
+        if let Some(parts) = self.parts.as_ref() {
+            let mut iterators: Vec<_> = parts
+                .iter()
+                .map(|part| part.file_summaries_iter().peekable())
+                .collect();
+            return Box::new(std::iter::from_fn(move || {
+                let mut best: Option<(usize, RepoRelativePath)> = None;
+                for (index, iterator) in iterators.iter_mut().enumerate() {
+                    let Some(summary) = iterator.peek() else {
+                        continue;
+                    };
+                    if best
+                        .as_ref()
+                        .is_none_or(|(_, path)| summary.path.cmp(path) == Ordering::Less)
+                    {
+                        best = Some((index, summary.path.clone()));
+                    }
+                }
+                let (index, _) = best?;
+                iterators[index].next()
+            }));
+        }
+        Box::new(self.files.iter().map(|(path, file)| GraphFileSummary {
+            path: path.clone(),
+            symbol_count: file.symbols.len() as u64,
+            provenance: file.provenance,
+            precision: file.precision,
+            metadata: file.metadata.clone(),
+        }))
     }
 
     pub fn file_summaries_with_context(
         &self,
         operation: &OperationContext,
-    ) -> Result<Vec<(RepoRelativePath, u64, Provenance, Precision)>, OperationAbort> {
+    ) -> Result<Vec<GraphFileSummary>, OperationAbort> {
         if let Some(parts) = self.parts.as_ref() {
             let mut summaries = Vec::new();
             for part in parts.iter() {
                 operation.check()?;
                 summaries.extend(part.file_summaries_with_context(operation)?);
             }
-            summaries.sort_by(|a, b| a.0.cmp(&b.0));
+            summaries.sort_by(|a, b| a.path.cmp(&b.path));
             return Ok(summaries);
         }
         let mut summaries = Vec::with_capacity(self.files.size());
@@ -943,16 +1143,137 @@ impl SymbolGraph {
             if index % CANCELLATION_POLL_ITEMS == 0 {
                 operation.check()?;
             }
-            summaries.push((
-                path.clone(),
-                file.symbols.len() as u64,
-                file.provenance,
-                file.precision,
-            ));
+            summaries.push(GraphFileSummary {
+                path: path.clone(),
+                symbol_count: file.symbols.len() as u64,
+                provenance: file.provenance,
+                precision: file.precision,
+                metadata: file.metadata.clone(),
+            });
         }
-        summaries.sort_by(|a, b| a.0.cmp(&b.0));
+        summaries.sort_by(|a, b| a.path.cmp(&b.path));
         operation.check()?;
         Ok(summaries)
+    }
+
+    pub fn file_metadata(&self, path: &RepoRelativePath) -> Option<&SourceMetadata> {
+        if let Some(parts) = self.parts.as_ref() {
+            return parts.iter().find_map(|part| part.file_metadata(path));
+        }
+        self.files.get(path).map(|file| &file.metadata)
+    }
+
+    pub fn source_metadata_coverage(&self) -> SourceMetadataCoverage {
+        if let Some(parts) = self.parts.as_ref() {
+            return parts
+                .iter()
+                .fold(SourceMetadataCoverage::default(), |mut coverage, part| {
+                    let part = part.source_metadata_coverage();
+                    coverage.total_files = coverage.total_files.saturating_add(part.total_files);
+                    coverage.cargo_metadata_files = coverage
+                        .cargo_metadata_files
+                        .saturating_add(part.cargo_metadata_files);
+                    coverage.composer_metadata_files = coverage
+                        .composer_metadata_files
+                        .saturating_add(part.composer_metadata_files);
+                    coverage.path_fallback_files = coverage
+                        .path_fallback_files
+                        .saturating_add(part.path_fallback_files);
+                    coverage
+                });
+        }
+        let mut coverage = SourceMetadataCoverage {
+            total_files: self.files.size() as u64,
+            ..SourceMetadataCoverage::default()
+        };
+        for (_, file) in self.files.iter() {
+            match file.metadata.classification {
+                SourceClassification::CargoMetadata => coverage.cargo_metadata_files += 1,
+                SourceClassification::ComposerMetadata => coverage.composer_metadata_files += 1,
+                SourceClassification::PathFallback => coverage.path_fallback_files += 1,
+            }
+        }
+        coverage
+    }
+
+    /// Deterministic bounded diagnostic view for one immutable graph.
+    pub fn syntax_diagnostics(&self, limit: usize) -> GraphDiagnosticSummary {
+        if let Some(parts) = self.parts.as_ref() {
+            let mut combined = GraphDiagnosticSummary {
+                files_with_diagnostics: 0,
+                total_diagnostics: 0,
+                diagnostics: Vec::with_capacity(limit),
+                capture_omitted: 0,
+                response_omitted: 0,
+            };
+            let mut captured_diagnostics = 0_u64;
+            for part in parts.iter() {
+                let summary = part.syntax_diagnostics(limit);
+                combined.files_with_diagnostics = combined
+                    .files_with_diagnostics
+                    .saturating_add(summary.files_with_diagnostics);
+                combined.total_diagnostics = combined
+                    .total_diagnostics
+                    .saturating_add(summary.total_diagnostics);
+                combined.capture_omitted = combined
+                    .capture_omitted
+                    .saturating_add(summary.capture_omitted);
+                captured_diagnostics = captured_diagnostics
+                    .saturating_add(summary.diagnostics.len() as u64)
+                    .saturating_add(summary.response_omitted);
+                for diagnostic in summary.diagnostics {
+                    let position = combined
+                        .diagnostics
+                        .binary_search_by(|candidate| diagnostic_cmp(candidate, &diagnostic))
+                        .unwrap_or_else(|position| position);
+                    if combined.diagnostics.len() < limit {
+                        combined.diagnostics.insert(position, diagnostic);
+                    } else if position < limit {
+                        combined.diagnostics.insert(position, diagnostic);
+                        combined.diagnostics.pop();
+                    }
+                }
+            }
+            combined.response_omitted =
+                captured_diagnostics.saturating_sub(combined.diagnostics.len() as u64);
+            return combined;
+        }
+        let mut files_with_diagnostics = 0_u64;
+        let mut total_diagnostics = 0_u64;
+        let mut captured_diagnostics = 0_u64;
+        let mut capture_omitted = 0_u64;
+        let mut diagnostics = Vec::with_capacity(limit);
+        for file in self.files.values() {
+            if file.diagnostic_count > 0 {
+                files_with_diagnostics += 1;
+            }
+            total_diagnostics = total_diagnostics.saturating_add(file.diagnostic_count);
+            captured_diagnostics =
+                captured_diagnostics.saturating_add(file.diagnostics.len() as u64);
+            capture_omitted = capture_omitted.saturating_add(
+                file.diagnostic_count
+                    .saturating_sub(file.diagnostics.len() as u64),
+            );
+            for diagnostic in &file.diagnostics {
+                let position = diagnostics
+                    .binary_search_by(|candidate| diagnostic_cmp(candidate, diagnostic))
+                    .unwrap_or_else(|position| position);
+                if diagnostics.len() < limit {
+                    diagnostics.insert(position, diagnostic.clone());
+                } else if position < limit {
+                    diagnostics.insert(position, diagnostic.clone());
+                    diagnostics.pop();
+                }
+            }
+        }
+        let response_omitted = captured_diagnostics.saturating_sub(diagnostics.len() as u64);
+        GraphDiagnosticSummary {
+            files_with_diagnostics,
+            total_diagnostics,
+            diagnostics,
+            capture_omitted,
+            response_omitted,
+        }
     }
 
     /// Captured source for one file in this graph revision.
@@ -1015,6 +1336,18 @@ impl SymbolGraph {
             .collect();
         files.sort_by(|a, b| a.0.cmp(b.0));
         files
+    }
+
+    /// Streams captured sources without materializing the complete inventory.
+    pub fn source_files_iter(&self) -> Box<dyn Iterator<Item = (&RepoRelativePath, &str)> + '_> {
+        if let Some(parts) = self.parts.as_ref() {
+            return Box::new(parts.iter().flat_map(SymbolGraph::source_files_iter));
+        }
+        Box::new(
+            self.files
+                .iter()
+                .filter_map(|(path, file)| file.source.as_deref().map(|source| (path, source))),
+        )
     }
 
     pub fn source_files_with_context(
@@ -1106,10 +1439,28 @@ impl SymbolGraph {
     /// construction stops at the caller's budget plus the first omitted
     /// match, so a broad query cannot allocate one view per graph symbol.
     pub fn search_names(&self, needle: &str, limit: usize) -> (Vec<EntityId>, bool) {
+        self.search_names_where(needle, limit, |_, _| true)
+    }
+
+    /// Bounded name search with a file-metadata predicate applied before the
+    /// result budget, so filtered-out symbols cannot crowd out matching ones.
+    pub fn search_names_where(
+        &self,
+        needle: &str,
+        limit: usize,
+        mut predicate: impl FnMut(&Symbol, &SourceMetadata) -> bool,
+    ) -> (Vec<EntityId>, bool) {
         let needle = needle.to_lowercase();
         let mut matches = Vec::with_capacity(limit.min(self.symbol_count() as usize));
         for symbol in self.symbols() {
-            if symbol.key.qualified_name.to_lowercase().contains(&needle) {
+            // The simple name is a suffix of the qualified name, so one
+            // comparison covers both without a second lowercase allocation.
+            let Some(metadata) = self.file_metadata(&symbol.key.path) else {
+                continue;
+            };
+            if symbol.key.qualified_name.to_lowercase().contains(&needle)
+                && predicate(symbol, metadata)
+            {
                 if matches.len() == limit {
                     return (matches, true);
                 }
@@ -1125,6 +1476,16 @@ impl SymbolGraph {
         limit: usize,
         operation: &OperationContext,
     ) -> Result<(Vec<EntityId>, bool), OperationAbort> {
+        self.search_names_where_with_context(needle, limit, operation, |_, _| true)
+    }
+
+    pub fn search_names_where_with_context(
+        &self,
+        needle: &str,
+        limit: usize,
+        operation: &OperationContext,
+        mut predicate: impl FnMut(&Symbol, &SourceMetadata) -> bool,
+    ) -> Result<(Vec<EntityId>, bool), OperationAbort> {
         let needle = needle.to_lowercase();
         let mut matches = Vec::with_capacity(limit.min(self.symbol_count() as usize));
         for (index, symbol) in self.symbols().into_iter().enumerate() {
@@ -1133,7 +1494,12 @@ impl SymbolGraph {
             }
             // The simple name is a suffix of the qualified name, so one
             // comparison covers both without a second lowercase allocation.
-            if symbol.key.qualified_name.to_lowercase().contains(&needle) {
+            let Some(metadata) = self.file_metadata(&symbol.key.path) else {
+                continue;
+            };
+            if symbol.key.qualified_name.to_lowercase().contains(&needle)
+                && predicate(symbol, metadata)
+            {
                 if matches.len() == limit {
                     return Ok((matches, true));
                 }
@@ -1145,11 +1511,21 @@ impl SymbolGraph {
 
     /// Exact resolution by simple or qualified name (SPEC §24).
     pub fn resolve_name(&self, name: &str) -> Vec<EntityId> {
-        self.symbols()
-            .into_iter()
-            .filter(|symbol| symbol.name() == name || symbol.key.qualified_name == name)
-            .map(|symbol| symbol.id)
-            .collect()
+        self.resolve_name_candidates(name)
+    }
+
+    pub(crate) fn resolve_name_candidates(&self, name: &str) -> Vec<EntityId> {
+        if let Some(parts) = self.parts.as_ref() {
+            let mut candidates: Vec<_> = parts
+                .iter()
+                .flat_map(|part| part.resolve_name_candidates(name))
+                .collect();
+            candidates.sort_unstable();
+            return candidates;
+        }
+        self.symbols_by_exact_name
+            .get(name)
+            .map_or_else(Vec::new, |ids| ids.as_ref().clone())
     }
 
     pub fn resolve_name_with_context(
@@ -1157,15 +1533,9 @@ impl SymbolGraph {
         name: &str,
         operation: &OperationContext,
     ) -> Result<Vec<EntityId>, OperationAbort> {
-        let mut matches = Vec::new();
-        for (index, symbol) in self.symbols().into_iter().enumerate() {
-            if index % CANCELLATION_POLL_ITEMS == 0 {
-                operation.check()?;
-            }
-            if symbol.name() == name || symbol.key.qualified_name == name {
-                matches.push(symbol.id);
-            }
-        }
+        operation.check()?;
+        let matches = self.resolve_name_candidates(name);
+        operation.check()?;
         Ok(matches)
     }
 
@@ -1221,6 +1591,7 @@ impl SymbolGraph {
             return Ok(0);
         };
         let mut removed = 0_u64;
+        let mut removed_test_relations = HashSet::new();
         for caller in &file.symbols {
             let Some(indexes) = self.call_sites_by_caller.get(caller).cloned() else {
                 continue;
@@ -1241,6 +1612,7 @@ impl SymbolGraph {
                     if self
                         .symbol(call_site.caller)
                         .is_some_and(|symbol| symbol.key.kind == SymbolKind::Test)
+                        && removed_test_relations.insert((call_site.caller, target))
                     {
                         self.remove_edge_raw(&Edge {
                             kind: EdgeKind::Tests,
@@ -1277,6 +1649,20 @@ impl SymbolGraph {
             self.call_sites_by_caller.remove_mut(caller);
         }
         Ok(removed)
+    }
+
+    /// Syntax call site that materialized a `CALLS`/`TESTS` edge, when the
+    /// relation originated from the lazy syntax call-site arena.
+    pub fn call_site_for_edge(&self, edge: &Edge) -> Option<&CallSite> {
+        if !matches!(edge.kind, EdgeKind::Calls | EdgeKind::Tests) {
+            return None;
+        }
+        self.call_sites_from(edge.from).find(|call_site| {
+            matches!(
+                call_site.resolution,
+                CallResolution::Resolved { target } if target == edge.to
+            ) && edge.location.as_ref() == Some(&call_site.location)
+        })
     }
 
     /// Bounded candidate declarations for one ambiguous call site.
@@ -1332,12 +1718,13 @@ impl SymbolGraph {
             return (Vec::new(), false);
         };
         let mut indexes = Vec::with_capacity(limit.saturating_add(1));
+        let mut seen = HashSet::with_capacity(limit.saturating_add(1));
         'keys: for key in callable_lookup_keys(symbol) {
             let Some(call_sites) = self.call_sites_by_lookup.get(&key) else {
                 continue;
             };
             for index in call_sites.iter() {
-                if !indexes.contains(index) {
+                if seen.insert(*index) {
                     indexes.push(*index);
                     if indexes.len() > limit {
                         break 'keys;
@@ -1368,6 +1755,9 @@ impl SymbolGraph {
                 limit: MAX_RECEIVER_HINT_CHARS,
             });
         }
+        if input.receiver_type.is_some() != input.receiver_type_source.is_some() {
+            return Err(GraphError::ReceiverTypeEvidenceMismatch);
+        }
         let caller = self
             .symbol(input.caller)
             .ok_or(GraphError::UnknownEntity(input.caller))?;
@@ -1388,6 +1778,8 @@ impl SymbolGraph {
             target_kind: call_site.target_kind,
             name: call_site.name.clone(),
             qualifier: call_site.qualifier.clone(),
+            receiver_type: call_site.receiver_type.clone(),
+            receiver_type_source: call_site.receiver_type_source,
             receiver_hint: call_site.receiver_hint.clone(),
             location: call_site.location.clone(),
             provenance: call_site.provenance,
@@ -1520,6 +1912,58 @@ impl SymbolGraph {
         if !file_index_matches {
             return Err(ConsistencyError::FileIndexMismatch);
         }
+        for (path, file) in &self.files {
+            if file.diagnostic_count < file.diagnostics.len() as u64 {
+                return Err(ConsistencyError::DiagnosticCountUnderflow {
+                    path: path.clone(),
+                    total: file.diagnostic_count,
+                    retained: file.diagnostics.len(),
+                });
+            }
+            if let Some(diagnostic) = file
+                .diagnostics
+                .iter()
+                .find(|diagnostic| diagnostic.range.file() != path)
+            {
+                return Err(ConsistencyError::DiagnosticPathMismatch {
+                    file_path: path.clone(),
+                    diagnostic_path: diagnostic.range.file().clone(),
+                });
+            }
+            if let Some(diagnostic) = file.diagnostics.iter().find(|diagnostic| {
+                diagnostic.provenance != Provenance::TreeSitter
+                    || diagnostic.precision != Precision::Syntax
+            }) {
+                return Err(ConsistencyError::InvalidDiagnosticQuality {
+                    path: path.clone(),
+                    provenance: diagnostic.provenance,
+                    precision: diagnostic.precision,
+                });
+            }
+        }
+
+        let mut expected_by_name: HashMap<String, Vec<EntityId>> = HashMap::new();
+        for (_, symbol) in self.symbols.iter() {
+            let simple_name = symbol.name().to_owned();
+            expected_by_name
+                .entry(simple_name.clone())
+                .or_default()
+                .push(symbol.id);
+            if symbol.key.qualified_name != simple_name {
+                expected_by_name
+                    .entry(symbol.key.qualified_name.clone())
+                    .or_default()
+                    .push(symbol.id);
+            }
+        }
+        let actual_by_name: HashMap<_, _> = self
+            .symbols_by_exact_name
+            .iter()
+            .map(|(name, ids)| (name.clone(), ids.as_ref().clone()))
+            .collect();
+        if expected_by_name != actual_by_name {
+            return Err(ConsistencyError::ExactNameIndexMismatch);
+        }
 
         // Count each outgoing edge once. The mirror count is consumed by the
         // incoming index below; the call-site count is consumed by resolved
@@ -1566,6 +2010,7 @@ impl SymbolGraph {
         }
         let mut expected_by_caller: HashMap<EntityId, Vec<u64>> = HashMap::new();
         let mut expected_by_lookup: HashMap<CallLookupKey, Vec<u64>> = HashMap::new();
+        let mut expected_test_relations = HashSet::new();
         let mut ambiguous = 0_u64;
         let mut unresolved = 0_u64;
         for (index, call_site) in self.call_sites.iter() {
@@ -1616,7 +2061,9 @@ impl SymbolGraph {
                         });
                     }
                     *available_calls -= 1;
-                    if caller.key.kind == SymbolKind::Test {
+                    if caller.key.kind == SymbolKind::Test
+                        && expected_test_relations.insert((call_site.caller, target))
+                    {
                         let expected_test = Edge {
                             kind: EdgeKind::Tests,
                             from: call_site.caller,
@@ -1864,6 +2311,61 @@ fn call_site_lookup_key(
     })
 }
 
+fn validate_diagnostics(
+    path: &RepoRelativePath,
+    diagnostics: &[SyntaxDiagnostic],
+    diagnostic_count: u64,
+) -> Result<(), GraphError> {
+    if diagnostic_count < diagnostics.len() as u64 {
+        return Err(GraphError::DiagnosticCountUnderflow {
+            total: diagnostic_count,
+            retained: diagnostics.len(),
+        });
+    }
+    if let Some(diagnostic) = diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic.range.file() != path)
+    {
+        return Err(GraphError::DiagnosticPathMismatch {
+            file_path: path.clone(),
+            diagnostic_path: diagnostic.range.file().clone(),
+        });
+    }
+    if let Some(diagnostic) = diagnostics.iter().find(|diagnostic| {
+        diagnostic.provenance != Provenance::TreeSitter || diagnostic.precision != Precision::Syntax
+    }) {
+        return Err(GraphError::InvalidDiagnosticQuality {
+            provenance: diagnostic.provenance,
+            precision: diagnostic.precision,
+        });
+    }
+    Ok(())
+}
+
+fn diagnostic_cmp(left: &SyntaxDiagnostic, right: &SyntaxDiagnostic) -> Ordering {
+    left.range
+        .file()
+        .cmp(right.range.file())
+        .then(left.range.start().cmp(&right.range.start()))
+        .then(left.range.end().cmp(&right.range.end()))
+        .then(left.language.cmp(&right.language))
+        .then(left.kind.cmp(&right.kind))
+        .then(left.precision.cmp(&right.precision))
+        .then(provenance_rank(left.provenance).cmp(&provenance_rank(right.provenance)))
+        .then(left.cause.cmp(&right.cause))
+        .then(left.node_kind.cmp(&right.node_kind))
+}
+
+fn provenance_rank(provenance: Provenance) -> u8 {
+    match provenance {
+        Provenance::RustAnalyzer => 0,
+        Provenance::TreeSitter => 1,
+        Provenance::Git => 2,
+        Provenance::TextSearch => 3,
+        Provenance::Heuristic => 4,
+    }
+}
+
 /// A broken internal graph invariant found by [`SymbolGraph::audit_consistency`].
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum ConsistencyError {
@@ -1889,6 +2391,8 @@ pub enum ConsistencyError {
     },
     #[error("file index does not cover exactly the arena symbols")]
     FileIndexMismatch,
+    #[error("exact-name index does not match the symbol arena")]
+    ExactNameIndexMismatch,
     #[error("callable lookup index does not match the symbol arena")]
     CallableIndexMismatch,
     #[error("call site at index {index} is not in its caller's file")]
@@ -1912,11 +2416,33 @@ pub enum ConsistencyError {
     },
     #[error("file-owned relationship contributions do not match non-call graph edges")]
     RelationshipOwnershipMismatch,
+    #[error(
+        "file {path} records {total} diagnostics but retains {retained}, which exceeds that total"
+    )]
+    DiagnosticCountUnderflow {
+        path: RepoRelativePath,
+        total: u64,
+        retained: usize,
+    },
+    #[error("diagnostic range file `{diagnostic_path}` does not match indexed file `{file_path}`")]
+    DiagnosticPathMismatch {
+        file_path: RepoRelativePath,
+        diagnostic_path: RepoRelativePath,
+    },
+    #[error(
+        "file {path} has a syntax diagnostic with invalid quality {provenance:?}/{precision:?}"
+    )]
+    InvalidDiagnosticQuality {
+        path: RepoRelativePath,
+        provenance: Provenance,
+        precision: Precision,
+    },
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chakra_domain::diagnostic::{SyntaxDiagnosticCause, SyntaxDiagnosticKind};
     use chakra_domain::location::TextPosition;
     use chakra_domain::symbol::{Language, SymbolKind};
 
@@ -1937,6 +2463,18 @@ mod tests {
             kind: SymbolKind::Function,
             path,
         }
+    }
+
+    fn diagnostic(path: RepoRelativePath) -> Result<SyntaxDiagnostic, Box<dyn std::error::Error>> {
+        Ok(SyntaxDiagnostic {
+            language: Language::Rust,
+            range: range(path)?,
+            kind: SyntaxDiagnosticKind::Error,
+            provenance: Provenance::TreeSitter,
+            precision: Precision::Syntax,
+            cause: SyntaxDiagnosticCause::ParseRecovery,
+            node_kind: "ERROR".to_owned(),
+        })
     }
 
     fn add_fn(
@@ -1993,6 +2531,8 @@ mod tests {
             target_kind,
             name: name.to_owned(),
             qualifier: qualifier.map(str::to_owned),
+            receiver_type: None,
+            receiver_type_source: None,
             receiver_hint: receiver_hint.map(str::to_owned),
             location: range(file(path)?)?,
             provenance: Provenance::TreeSitter,
@@ -2350,6 +2890,122 @@ mod tests {
     }
 
     #[test]
+    fn repeated_calls_from_one_test_create_one_test_relation()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut graph = SymbolGraph::new();
+        let test_caller = add_callable(
+            &mut graph,
+            "service_runs_twice",
+            None,
+            SymbolKind::Test,
+            "tests/service.rs",
+        )?;
+        let target = add_fn(&mut graph, "run", "src/service.rs")?;
+
+        let first = call_site_input(
+            test_caller,
+            CallForm::Function,
+            CallTargetKind::Function,
+            "run",
+            None,
+            None,
+            "tests/service.rs",
+        )?;
+        let first_location = first.location.clone();
+        graph.add_call_site(first)?;
+
+        let mut second = call_site_input(
+            test_caller,
+            CallForm::Function,
+            CallTargetKind::Function,
+            "run",
+            None,
+            None,
+            "tests/service.rs",
+        )?;
+        second.location = SourceRange::new(
+            file("tests/service.rs")?,
+            TextPosition::new(2, 1)?,
+            TextPosition::new(2, 4)?,
+        )?;
+        graph.add_call_site(second)?;
+
+        let calls: Vec<_> = graph
+            .outgoing_edges(test_caller)
+            .iter()
+            .filter(|edge| edge.kind == EdgeKind::Calls && edge.to == target)
+            .collect();
+        assert_eq!(calls.len(), 2);
+        let tests: Vec<_> = graph
+            .outgoing_edges(test_caller)
+            .iter()
+            .filter(|edge| edge.kind == EdgeKind::Tests && edge.to == target)
+            .collect();
+        assert_eq!(tests.len(), 1);
+        assert_eq!(tests[0].location.as_ref(), Some(&first_location));
+        assert_eq!(graph.call_sites_from(test_caller).count(), 2);
+        assert_eq!(
+            graph
+                .call_site_for_edge(tests[0])
+                .map(|site| &site.location),
+            Some(&first_location)
+        );
+        graph.validate_consistency()?;
+        Ok(())
+    }
+
+    #[test]
+    fn audit_rejects_a_test_relation_with_the_wrong_representative_range()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut graph = SymbolGraph::new();
+        let test_caller = add_callable(
+            &mut graph,
+            "service_runs",
+            None,
+            SymbolKind::Test,
+            "tests/service.rs",
+        )?;
+        let target = add_fn(&mut graph, "run", "src/service.rs")?;
+        graph.add_call_site(call_site_input(
+            test_caller,
+            CallForm::Function,
+            CallTargetKind::Function,
+            "run",
+            None,
+            None,
+            "tests/service.rs",
+        )?)?;
+
+        let wrong_location = SourceRange::new(
+            file("tests/service.rs")?,
+            TextPosition::new(3, 1)?,
+            TextPosition::new(3, 4)?,
+        )?;
+        if let Some(edges) = graph.outgoing.get_mut(&test_caller) {
+            for edge in Arc::make_mut(edges)
+                .iter_mut()
+                .filter(|edge| edge.kind == EdgeKind::Tests && edge.to == target)
+            {
+                edge.location = Some(wrong_location.clone());
+            }
+        }
+        if let Some(edges) = graph.incoming.get_mut(&target) {
+            for edge in Arc::make_mut(edges)
+                .iter_mut()
+                .filter(|edge| edge.kind == EdgeKind::Tests && edge.from == test_caller)
+            {
+                edge.location = Some(wrong_location.clone());
+            }
+        }
+
+        assert!(matches!(
+            graph.validate_consistency(),
+            Err(ConsistencyError::ResolvedTestEdgeMissing { .. })
+        ));
+        Ok(())
+    }
+
+    #[test]
     fn call_site_receiver_hints_are_bounded() -> Result<(), Box<dyn std::error::Error>> {
         let mut graph = SymbolGraph::new();
         let caller = add_fn(&mut graph, "caller", "src/caller.rs")?;
@@ -2372,6 +3028,42 @@ mod tests {
             GraphError::ReceiverHintTooLong {
                 limit: MAX_RECEIVER_HINT_CHARS
             }
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn receiver_type_requires_a_typed_evidence_source() -> Result<(), Box<dyn std::error::Error>> {
+        let mut graph = SymbolGraph::new();
+        let caller = add_fn(&mut graph, "caller", "src/caller.rs")?;
+        let mut input = call_site_input(
+            caller,
+            CallForm::Member,
+            CallTargetKind::Method,
+            "target",
+            Some("Service"),
+            Some("service"),
+            "src/caller.rs",
+        )?;
+        input.receiver_type = Some("Service".to_owned());
+        assert_eq!(
+            graph.add_call_site(input),
+            Err(GraphError::ReceiverTypeEvidenceMismatch)
+        );
+
+        let mut input = call_site_input(
+            caller,
+            CallForm::Member,
+            CallTargetKind::Method,
+            "target",
+            Some("Service"),
+            Some("service"),
+            "src/caller.rs",
+        )?;
+        input.receiver_type_source = Some(ReceiverTypeSource::Parameter);
+        assert_eq!(
+            graph.add_call_site(input),
+            Err(GraphError::ReceiverTypeEvidenceMismatch)
         );
         Ok(())
     }
@@ -2493,16 +3185,91 @@ mod tests {
         let path = file("src/comments.rs")?;
         graph.add_file(path.clone(), "//! Documentation only.\n")?;
         assert_eq!(graph.file_count(), 1);
-        assert_eq!(
-            graph.file_summaries(),
-            vec![(path.clone(), 0, Provenance::Git, Precision::Precise)]
-        );
+        let summaries = graph.file_summaries();
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(summaries[0].path, path);
+        assert_eq!(summaries[0].symbol_count, 0);
+        assert_eq!(summaries[0].provenance, Provenance::Git);
+        assert_eq!(summaries[0].precision, Precision::Precise);
         assert_eq!(graph.file_source(&path), Some("//! Documentation only.\n"));
         assert!(matches!(
             graph.add_file(path.clone(), "changed"),
             Err(GraphError::DuplicateFile(duplicate)) if duplicate == path
         ));
         graph.validate_consistency()?;
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_inconsistent_diagnostic_metadata() -> Result<(), Box<dyn std::error::Error>> {
+        let mut graph = SymbolGraph::new();
+        let indexed_path = file("src/a.rs")?;
+        let wrong_path = file("src/b.rs")?;
+        assert!(matches!(
+            graph.add_file_with_metadata_and_diagnostics(
+                indexed_path.clone(),
+                "broken",
+                SourceMetadata::path_fallback(&indexed_path),
+                vec![diagnostic(wrong_path)?],
+                1,
+            ),
+            Err(GraphError::DiagnosticPathMismatch { .. })
+        ));
+        assert!(matches!(
+            graph.add_file_with_metadata_and_diagnostics(
+                indexed_path.clone(),
+                "broken",
+                SourceMetadata::path_fallback(&indexed_path),
+                vec![diagnostic(indexed_path.clone())?],
+                0,
+            ),
+            Err(GraphError::DiagnosticCountUnderflow {
+                total: 0,
+                retained: 1
+            })
+        ));
+        let mut invalid_quality = diagnostic(indexed_path.clone())?;
+        invalid_quality.precision = Precision::Precise;
+        assert!(matches!(
+            graph.add_file_with_metadata_and_diagnostics(
+                indexed_path.clone(),
+                "broken",
+                SourceMetadata::path_fallback(&indexed_path),
+                vec![invalid_quality],
+                1,
+            ),
+            Err(GraphError::InvalidDiagnosticQuality {
+                provenance: Provenance::TreeSitter,
+                precision: Precision::Precise
+            })
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn diagnostic_summary_is_ordered_and_bounded_independent_of_insertion_order()
+    -> Result<(), Box<dyn std::error::Error>> {
+        fn graph_with_order(paths: [&str; 2]) -> Result<SymbolGraph, Box<dyn std::error::Error>> {
+            let mut graph = SymbolGraph::new();
+            for raw_path in paths {
+                let path = RepoRelativePath::new(raw_path)?;
+                graph.add_file_with_metadata_and_diagnostics(
+                    path.clone(),
+                    "broken",
+                    SourceMetadata::path_fallback(&path),
+                    vec![diagnostic(path)?],
+                    1,
+                )?;
+            }
+            Ok(graph)
+        }
+
+        let forward = graph_with_order(["src/a.rs", "src/b.rs"])?.syntax_diagnostics(1);
+        let reverse = graph_with_order(["src/b.rs", "src/a.rs"])?.syntax_diagnostics(1);
+        assert_eq!(forward, reverse);
+        assert_eq!(forward.total_diagnostics, 2);
+        assert_eq!(forward.response_omitted, 1);
+        assert_eq!(forward.diagnostics[0].range.file().as_str(), "src/a.rs");
         Ok(())
     }
 
@@ -2718,6 +3485,20 @@ mod tests {
                 incoming: 1
             })
         ));
+        Ok(())
+    }
+
+    #[test]
+    fn audit_catches_exact_name_index_drift() -> Result<(), Box<dyn std::error::Error>> {
+        let mut graph = SymbolGraph::new();
+        add_fn(&mut graph, "module::target", "src/target.rs")?;
+
+        graph.symbols_by_exact_name = Default::default();
+
+        assert_eq!(
+            graph.validate_consistency(),
+            Err(ConsistencyError::ExactNameIndexMismatch)
+        );
         Ok(())
     }
 }

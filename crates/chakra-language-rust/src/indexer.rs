@@ -14,6 +14,7 @@ use chakra_domain::indexing::{
 };
 use chakra_domain::location::{RepoRelativePath, SourceRange};
 use chakra_domain::provenance::{Precision, Provenance};
+use chakra_domain::source::SourceMetadata;
 use chakra_domain::symbol::{CallResolution, Edge, EdgeKind, Language, SymbolKind};
 use chakra_engine::{
     BoundedGraphBuilder, CallSiteInput, ConsistencyError, GraphBuildLimits, GraphBuildReport,
@@ -27,7 +28,7 @@ use nix::sys::resource::{UsageWho, getrusage};
 #[cfg(unix)]
 use nix::sys::time::TimeValLike;
 
-use crate::discovery::{DiscoveryError, discover_rust_files, resolve_repository_root};
+use crate::discovery::{DiscoveryError, discover_rust_sources, resolve_repository_root};
 use crate::parser::{ParsedFile, RustParser, SymbolDraft};
 
 const MAX_SOURCE_FILE_BYTES: usize = 8 * 1024 * 1024;
@@ -125,6 +126,23 @@ pub struct IndexReport {
     pub graph: SymbolGraph,
     pub metrics: IndexMetrics,
     pub syntax_index: RustSyntaxIndex,
+}
+
+/// Latest Rust source text plus role/package metadata from the same scan.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RustSources {
+    pub files: BTreeMap<RepoRelativePath, Arc<str>>,
+    pub metadata: BTreeMap<RepoRelativePath, SourceMetadata>,
+}
+
+impl RustSources {
+    pub fn len(&self) -> usize {
+        self.files.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.files.is_empty()
+    }
 }
 
 /// Failure to discover, read, parse, or validate the Rust syntax index.
@@ -242,6 +260,7 @@ impl<'a> SymbolCatalog<'a> {
 #[derive(Debug, Clone)]
 pub struct RustSyntaxIndex {
     files: BTreeMap<RepoRelativePath, Arc<ParsedFile>>,
+    metadata: BTreeMap<RepoRelativePath, SourceMetadata>,
     relationships: BTreeMap<RepoRelativePath, Arc<RelationshipContribution>>,
     graph_limits: GraphBuildLimits,
     graph: SymbolGraph,
@@ -252,6 +271,7 @@ impl Default for RustSyntaxIndex {
     fn default() -> Self {
         Self {
             files: BTreeMap::new(),
+            metadata: BTreeMap::new(),
             relationships: BTreeMap::new(),
             graph_limits: GraphBuildLimits::UNLIMITED,
             graph: SymbolGraph::new(),
@@ -287,6 +307,50 @@ impl RustSyntaxIndex {
         parallel_file_threshold: usize,
         cancellation: &IndexCancellation,
     ) -> Result<(Self, SymbolGraph, LanguageBuildMetrics), RustIndexError> {
+        let metadata = sources
+            .keys()
+            .map(|path| (path.clone(), SourceMetadata::path_fallback(path)))
+            .collect();
+        Self::from_classified_sources_scheduled(
+            RustSources {
+                files: sources,
+                metadata,
+            },
+            graph_limits,
+            worker_limit,
+            parallel_file_threshold,
+            cancellation,
+        )
+    }
+
+    pub fn from_classified_sources(
+        sources: RustSources,
+    ) -> Result<(Self, SymbolGraph), RustIndexError> {
+        let cancellation = IndexCancellation::default();
+        let (index, graph, _) = Self::from_classified_sources_scheduled(
+            sources,
+            GraphBuildLimits::UNLIMITED,
+            1,
+            usize::MAX,
+            &cancellation,
+        )?;
+        Ok((index, graph))
+    }
+
+    /// Builds a bounded classified index while preserving the source scan's
+    /// role and package metadata.
+    pub fn from_classified_sources_scheduled(
+        sources: RustSources,
+        graph_limits: GraphBuildLimits,
+        worker_limit: usize,
+        parallel_file_threshold: usize,
+        cancellation: &IndexCancellation,
+    ) -> Result<(Self, SymbolGraph, LanguageBuildMetrics), RustIndexError> {
+        let RustSources {
+            files: sources,
+            metadata,
+        } = sources;
+        let metadata = normalized_metadata(&sources, metadata);
         check_cancelled(cancellation)?;
         let parse_started = PhaseTimer::start();
         let (files, parse_schedule) = parse_sources_scheduled(
@@ -338,6 +402,7 @@ impl RustSyntaxIndex {
         );
         let mut index = Self {
             files,
+            metadata,
             relationships,
             graph_limits,
             graph: SymbolGraph::new(),
@@ -405,6 +470,42 @@ impl RustSyntaxIndex {
         graph_limits: GraphBuildLimits,
         cancellation: &IndexCancellation,
     ) -> Result<ReconcileReport, RustIndexError> {
+        let metadata = sources
+            .keys()
+            .map(|path| (path.clone(), SourceMetadata::path_fallback(path)))
+            .collect();
+        self.reconcile_classified_sources_bounded(
+            RustSources {
+                files: sources,
+                metadata,
+            },
+            graph_limits,
+            cancellation,
+        )
+    }
+
+    pub fn reconcile_classified_sources(
+        &self,
+        sources: RustSources,
+    ) -> Result<ReconcileReport, RustIndexError> {
+        self.reconcile_classified_sources_bounded(
+            sources,
+            self.graph_limits,
+            &IndexCancellation::default(),
+        )
+    }
+
+    pub fn reconcile_classified_sources_bounded(
+        &self,
+        sources: RustSources,
+        graph_limits: GraphBuildLimits,
+        cancellation: &IndexCancellation,
+    ) -> Result<ReconcileReport, RustIndexError> {
+        let RustSources {
+            files: sources,
+            metadata,
+        } = sources;
+        let metadata = normalized_metadata(&sources, metadata);
         check_cancelled(cancellation)?;
         let limits_changed = graph_limits != self.graph_limits;
         let mut metrics = ReconcileMetrics {
@@ -433,7 +534,8 @@ impl RustSyntaxIndex {
                 changed_paths.insert(path.clone());
             }
         }
-        if changed_paths.is_empty() && !limits_changed {
+        let metadata_changed = self.metadata != metadata;
+        if changed_paths.is_empty() && !limits_changed && !metadata_changed {
             metrics.syntax_error_files = self.syntax_error_files();
             metrics.truncated_call_sites = self.truncated_call_sites();
             metrics.publication = self.reuse_all_publication();
@@ -574,6 +676,7 @@ impl RustSyntaxIndex {
 
         let next = Self {
             files: next_files,
+            metadata,
             relationships: next_relationships,
             graph_limits,
             graph: SymbolGraph::new(),
@@ -586,7 +689,8 @@ impl RustSyntaxIndex {
             && self.graph_report.omitted_call_sites == 0;
         let delta_fits = next_facts.symbols <= graph_limits.max_symbols
             && next_facts.call_sites <= graph_limits.max_call_sites;
-        let delta_candidate = !limits_changed && complete_previous && delta_fits;
+        let delta_candidate =
+            !limits_changed && !metadata_changed && complete_previous && delta_fits;
         let delta = if delta_candidate {
             next.materialize_graph_delta(
                 &self.graph,
@@ -725,7 +829,18 @@ impl RustSyntaxIndex {
         let mut ids = BTreeMap::new();
         for (path, file) in &self.files {
             check_cancelled(cancellation)?;
-            graph.add_file(path.clone(), file.source.clone())?;
+            let metadata = self
+                .metadata
+                .get(path)
+                .cloned()
+                .unwrap_or_else(|| SourceMetadata::path_fallback(path));
+            graph.add_file_with_metadata_and_diagnostics(
+                path.clone(),
+                file.source.clone(),
+                metadata,
+                file.diagnostics.clone(),
+                file.diagnostic_count,
+            )?;
             for (index, symbol) in file.symbols.iter().enumerate() {
                 let id = graph.add_symbol(
                     symbol.key.clone(),
@@ -786,6 +901,8 @@ impl RustSyntaxIndex {
                     target_kind: call_site.target_kind,
                     name: call_site.name.clone(),
                     qualifier: call_site.qualifier.clone(),
+                    receiver_type: None,
+                    receiver_type_source: None,
                     receiver_hint: call_site.receiver_hint.clone(),
                     location: call_site.location.clone(),
                     provenance: Provenance::TreeSitter,
@@ -826,7 +943,12 @@ impl RustSyntaxIndex {
                     .symbols_in_file(path)
                     .map(|symbol| symbol.id)
                     .collect();
-                graph.replace_file_source(path, file.source.clone())?;
+                graph.replace_file_source_and_diagnostics(
+                    path,
+                    file.source.clone(),
+                    file.diagnostics.clone(),
+                    file.diagnostic_count,
+                )?;
                 for (id, symbol) in ids.into_iter().zip(&file.symbols) {
                     graph.replace_symbol_payload(
                         id,
@@ -848,7 +970,18 @@ impl RustSyntaxIndex {
             let Some(file) = self.files.get(path) else {
                 continue;
             };
-            graph.add_file(path.clone(), file.source.clone())?;
+            let metadata = self
+                .metadata
+                .get(path)
+                .cloned()
+                .unwrap_or_else(|| SourceMetadata::path_fallback(path));
+            graph.add_file_with_metadata_and_diagnostics(
+                path.clone(),
+                file.source.clone(),
+                metadata,
+                file.diagnostics.clone(),
+                file.diagnostic_count,
+            )?;
             for symbol in &file.symbols {
                 graph.add_symbol(
                     symbol.key.clone(),
@@ -902,6 +1035,8 @@ impl RustSyntaxIndex {
                     target_kind: call_site.target_kind,
                     name: call_site.name.clone(),
                     qualifier: call_site.qualifier.clone(),
+                    receiver_type: None,
+                    receiver_type_source: None,
                     receiver_hint: call_site.receiver_hint.clone(),
                     location: call_site.location.clone(),
                     provenance: Provenance::TreeSitter,
@@ -1397,6 +1532,22 @@ fn exported_dependencies(file: &ParsedFile) -> HashSet<DependencyKey> {
     keys
 }
 
+fn normalized_metadata(
+    sources: &BTreeMap<RepoRelativePath, Arc<str>>,
+    metadata: BTreeMap<RepoRelativePath, SourceMetadata>,
+) -> BTreeMap<RepoRelativePath, SourceMetadata> {
+    sources
+        .keys()
+        .map(|path| {
+            let metadata = metadata
+                .get(path)
+                .cloned()
+                .unwrap_or_else(|| SourceMetadata::path_fallback(path));
+            (path.clone(), metadata)
+        })
+        .collect()
+}
+
 fn symbol_keys_equal(left: &ParsedFile, right: &ParsedFile) -> bool {
     left.symbols.len() == right.symbols.len()
         && left
@@ -1591,13 +1742,13 @@ fn relationships_for_file(
     contribution
 }
 
-fn read_sources(
-    repository_root: &Path,
-) -> Result<BTreeMap<RepoRelativePath, Arc<str>>, RustIndexError> {
-    let files = discover_rust_files(repository_root)?;
+fn read_sources(repository_root: &Path) -> Result<RustSources, RustIndexError> {
+    let files = discover_rust_sources(repository_root)?;
     let mut sources = BTreeMap::new();
+    let mut metadata = BTreeMap::new();
     let mut total_bytes = 0_usize;
-    for path in files {
+    for discovered in files {
+        let path = discovered.path;
         let file = fs::File::open(repository_root.join(path.as_str())).map_err(|source| {
             RustIndexError::Read {
                 path: path.clone(),
@@ -1628,9 +1779,13 @@ fn read_sources(
                 limit: MAX_REPOSITORY_SOURCE_BYTES,
             });
         }
+        metadata.insert(path.clone(), discovered.metadata);
         sources.insert(path, Arc::<str>::from(source));
     }
-    Ok(sources)
+    Ok(RustSources {
+        files: sources,
+        metadata,
+    })
 }
 
 /// Builds a complete Rust syntax index from the actual materialized Git
@@ -1641,8 +1796,8 @@ pub fn index_repository(root: &Path) -> Result<IndexReport, RustIndexError> {
     let span = info_span!("rust_repository_index", root = %repository_root.display());
     let _entered = span.enter();
     let sources = read_sources(&repository_root)?;
-    let discovered_files = sources.len() as u64;
-    let (syntax_index, graph) = RustSyntaxIndex::from_sources(sources)?;
+    let discovered_files = sources.files.len() as u64;
+    let (syntax_index, graph) = RustSyntaxIndex::from_classified_sources(sources)?;
     let metrics = IndexMetrics {
         discovered_files,
         parsed_files: discovered_files,
@@ -1676,9 +1831,7 @@ pub fn index_repository(root: &Path) -> Result<IndexReport, RustIndexError> {
 }
 
 /// Reads the latest Git-aware Rust file inventory and exact contents.
-pub fn scan_repository_sources(
-    repository_root: &Path,
-) -> Result<BTreeMap<RepoRelativePath, Arc<str>>, RustIndexError> {
+pub fn scan_repository_sources(repository_root: &Path) -> Result<RustSources, RustIndexError> {
     read_sources(repository_root)
 }
 
@@ -1866,6 +2019,42 @@ mod tests {
             .count();
         assert_eq!(call_edges, 0);
         graph.validate_consistency()?;
+        Ok(())
+    }
+
+    #[test]
+    fn metadata_change_republishes_without_reparsing_source() -> Result<(), Box<dyn Error>> {
+        let path = RepoRelativePath::new("src/lib.rs")?;
+        let source = Arc::<str>::from("pub fn stable() {}\n");
+        let initial = RustSources {
+            files: BTreeMap::from([(path.clone(), source.clone())]),
+            metadata: BTreeMap::from([(path.clone(), SourceMetadata::path_fallback(&path))]),
+        };
+        let (index, _) = RustSyntaxIndex::from_classified_sources(initial)?;
+        let changed = RustSources {
+            files: BTreeMap::from([(path.clone(), source)]),
+            metadata: BTreeMap::from([(
+                path.clone(),
+                SourceMetadata {
+                    role: chakra_domain::source::SourceRole::Production,
+                    classification: chakra_domain::source::SourceClassification::CargoMetadata,
+                    package: Some(chakra_domain::source::SourcePackage {
+                        name: "app".to_owned(),
+                        root: None,
+                    }),
+                },
+            )]),
+        };
+        let reconciled = index.reconcile_classified_sources(changed)?;
+        assert_eq!(reconciled.metrics.reparsed_files, 0);
+        let graph = reconciled.graph.ok_or("metadata-only graph missing")?;
+        assert_eq!(
+            graph
+                .file_metadata(&path)
+                .and_then(|metadata| metadata.package.as_ref())
+                .map(|package| package.name.as_str()),
+            Some("app")
+        );
         Ok(())
     }
 

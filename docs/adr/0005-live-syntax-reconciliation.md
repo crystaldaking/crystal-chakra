@@ -163,8 +163,8 @@ over native filesystem mechanisms:
   `psp-app` corpus this costs 23.9–26.2 ms in release mode versus the former
   91.7–98.8 ms (3.5–4.1× faster). The issue's preferred 5× target is not used as
   a reason to weaken read-your-writes: 27 ms is the explicitly measured accepted
-  correctness budget until bounded parallel identity inspection (#21) is
-  validated. Persistent graph nodes solve publication copying; they do not
+  correctness budget; further identity-scan tuning requires a separately
+  measured change. Persistent graph nodes solve publication copying; they do not
   replace Git/worktree reconciliation and are not an on-disk cache.
 - Watcher degradation affects responsiveness, not correctness: a
   `RequireFresh` query still performs authoritative reconciliation. A failed

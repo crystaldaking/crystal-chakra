@@ -1,11 +1,18 @@
 //! Tree-sitter PHP extraction into language-neutral Chakra drafts.
 
+use std::collections::HashMap;
 use std::num::TryFromIntError;
 use std::sync::Arc;
 
+use chakra_domain::diagnostic::{
+    KnownSyntaxGrammarGap, MAX_SYNTAX_DIAGNOSTICS_PER_FILE, SyntaxDiagnostic,
+    SyntaxDiagnosticCause, SyntaxDiagnosticKind,
+};
 use chakra_domain::location::{RepoRelativePath, SourceRange, TextPosition};
+use chakra_domain::provenance::{Precision, Provenance};
 use chakra_domain::symbol::{
-    CallForm, CallTargetKind, EdgeKind, Language, MAX_RECEIVER_HINT_CHARS, SymbolKey, SymbolKind,
+    CallForm, CallTargetKind, EdgeKind, Language, MAX_RECEIVER_HINT_CHARS, ReceiverTypeSource,
+    SymbolKey, SymbolKind,
 };
 use thiserror::Error;
 use tree_sitter::{Node, Parser, Point};
@@ -43,7 +50,10 @@ pub(crate) struct ParsedFile {
     pub symbols: Vec<SymbolDraft>,
     pub calls: Vec<CallDraft>,
     pub named_relations: Vec<NamedRelationDraft>,
+    pub type_relations: Vec<TypeRelationDraft>,
     pub has_errors: bool,
+    pub diagnostics: Vec<SyntaxDiagnostic>,
+    pub diagnostic_count: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -61,6 +71,8 @@ pub(crate) struct CallDraft {
     pub target_kind: CallTargetKind,
     pub name: String,
     pub qualifier: Option<String>,
+    pub receiver_type: Option<String>,
+    pub receiver_type_source: Option<ReceiverTypeSource>,
     pub receiver_hint: Option<String>,
     pub location: SourceRange,
 }
@@ -70,6 +82,8 @@ struct CallTarget<'tree> {
     target_kind: CallTargetKind,
     name: String,
     qualifier: Option<String>,
+    receiver_type: Option<String>,
+    receiver_type_source: Option<ReceiverTypeSource>,
     receiver_hint: Option<String>,
     location: Node<'tree>,
 }
@@ -82,6 +96,48 @@ pub(crate) struct NamedRelationDraft {
     pub kind: EdgeKind,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TypeRelationDraft {
+    pub from: usize,
+    pub target: String,
+    pub kind: TypeRelationKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum TypeRelationKind {
+    Trait,
+    Extends,
+    Implements,
+}
+
+#[derive(Debug, Clone, Default)]
+struct Imports {
+    types: HashMap<String, String>,
+    functions: HashMap<String, String>,
+}
+
+#[derive(Debug, Clone)]
+struct PropertyType {
+    name: String,
+    promoted: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ReceiverType {
+    name: String,
+    source: ReceiverTypeSource,
+}
+
+#[derive(Debug, Clone)]
+struct ReceiverEnvironment {
+    namespace: Vec<String>,
+    imports: Arc<Imports>,
+    current_type: Option<String>,
+    parent_type: Option<String>,
+    properties: Arc<HashMap<String, PropertyType>>,
+    variables: HashMap<String, ReceiverType>,
+}
+
 #[derive(Debug, Clone)]
 struct Context {
     prefix: Vec<String>,
@@ -91,6 +147,11 @@ struct Context {
     namespace_prefix: Vec<String>,
     namespace_container: Option<String>,
     namespace_parent: Option<usize>,
+    imports: Arc<Imports>,
+    current_type: Option<String>,
+    current_type_symbol: Option<usize>,
+    parent_type: Option<String>,
+    properties: Arc<HashMap<String, PropertyType>>,
 }
 
 #[derive(Debug)]
@@ -101,6 +162,7 @@ struct Extraction<'a> {
     symbols: Vec<SymbolDraft>,
     calls: Vec<CallDraft>,
     named_relations: Vec<NamedRelationDraft>,
+    type_relations: Vec<TypeRelationDraft>,
 }
 
 impl Extraction<'_> {
@@ -164,6 +226,78 @@ impl Extraction<'_> {
             path: self.path.clone(),
             message: error.to_string(),
         })
+    }
+
+    fn diagnostics(&self, root: Node<'_>) -> Result<(Vec<SyntaxDiagnostic>, u64), ParseError> {
+        if !root.has_error() {
+            return Ok((Vec::new(), 0));
+        }
+        let mut diagnostics = Vec::new();
+        let mut total = 0_u64;
+        let mut cursor = root.walk();
+        loop {
+            let node = cursor.node();
+            let kind = if node.is_error() {
+                Some(SyntaxDiagnosticKind::Error)
+            } else if node.is_missing() {
+                Some(SyntaxDiagnosticKind::Missing)
+            } else {
+                None
+            };
+            if let Some(kind) = kind {
+                total = total.saturating_add(1);
+                if diagnostics.len() < MAX_SYNTAX_DIAGNOSTICS_PER_FILE {
+                    diagnostics.push(SyntaxDiagnostic {
+                        language: Language::Php,
+                        range: self.range(node)?,
+                        kind,
+                        provenance: Provenance::TreeSitter,
+                        precision: Precision::Syntax,
+                        cause: self.diagnostic_cause(node, kind),
+                        node_kind: node.kind().to_owned(),
+                    });
+                }
+            }
+            if cursor.goto_first_child() {
+                continue;
+            }
+            while !cursor.goto_next_sibling() {
+                if !cursor.goto_parent() {
+                    if total == 0 {
+                        total = 1;
+                        diagnostics.push(SyntaxDiagnostic {
+                            language: Language::Php,
+                            range: self.range(root)?,
+                            kind: SyntaxDiagnosticKind::Error,
+                            provenance: Provenance::TreeSitter,
+                            precision: Precision::Syntax,
+                            cause: SyntaxDiagnosticCause::ParseRecovery,
+                            node_kind: "<unlocated-error>".to_owned(),
+                        });
+                    }
+                    return Ok((diagnostics, total));
+                }
+            }
+        }
+    }
+
+    fn diagnostic_cause(
+        &self,
+        node: Node<'_>,
+        kind: SyntaxDiagnosticKind,
+    ) -> SyntaxDiagnosticCause {
+        if kind == SyntaxDiagnosticKind::Error
+            && has_declaration_list_ancestor(node)
+            && self
+                .text(node)
+                .is_some_and(is_typed_class_constant_named_default)
+        {
+            SyntaxDiagnosticCause::KnownGrammarGap(
+                KnownSyntaxGrammarGap::PhpTypedClassConstantNamedDefault,
+            )
+        } else {
+            SyntaxDiagnosticCause::ParseRecovery
+        }
     }
 
     fn qualified(prefix: &[String], name: &str) -> String {
@@ -248,6 +382,8 @@ impl Extraction<'_> {
             if child.kind() == "namespace_definition" && child.child_by_field_name("body").is_none()
             {
                 current = self.visit_namespace(child, &current)?.unwrap_or(current);
+            } else if child.kind() == "namespace_use_declaration" {
+                self.visit_import(child, &mut current)?;
             } else {
                 self.visit(child, &current)?;
             }
@@ -267,7 +403,14 @@ impl Extraction<'_> {
                 self.visit_namespace(node, context)?;
                 Ok(())
             }
-            "namespace_use_declaration" => self.visit_import(node, context),
+            "namespace_use_declaration" => {
+                let mut context = context.clone();
+                self.visit_import(node, &mut context)
+            }
+            "use_declaration" if context.current_type_symbol.is_some() => {
+                self.collect_trait_uses(node, context);
+                Ok(())
+            }
             "property_declaration" => self.visit_properties(node, context),
             "const_declaration" => self.visit_constants(node, context),
             _ => self.visit_sequence(node, context),
@@ -298,6 +441,11 @@ impl Extraction<'_> {
             namespace_prefix: Vec::new(),
             namespace_container: None,
             namespace_parent: None,
+            imports: Arc::new(Imports::default()),
+            current_type: None,
+            current_type_symbol: None,
+            parent_type: None,
+            properties: Arc::new(HashMap::new()),
         };
         let parent = self.add_symbol(
             &root,
@@ -314,6 +462,11 @@ impl Extraction<'_> {
             namespace_prefix: segments,
             namespace_container: Some(display),
             namespace_parent: Some(parent),
+            imports: Arc::new(Imports::default()),
+            current_type: None,
+            current_type_symbol: None,
+            parent_type: None,
+            properties: Arc::new(HashMap::new()),
         };
         if let Some(body) = node.child_by_field_name("body") {
             self.visit_sequence(body, &child)?;
@@ -334,9 +487,15 @@ impl Extraction<'_> {
             return Ok(());
         };
         let parent = self.add_symbol(context, &name, kind, node, self.signature(node))?;
-        let namespace_prefix = context.prefix.clone();
-        self.collect_inheritance(node, parent, kind, &namespace_prefix);
+        let current_type = Self::qualified(&context.prefix, &name);
+        let parent_type = self.collect_inheritance(node, parent, kind, context);
         if let Some(body) = node.child_by_field_name("body") {
+            let properties = Arc::new(self.collect_property_types(
+                body,
+                context,
+                &current_type,
+                parent_type.as_deref(),
+            ));
             let mut prefix = context.prefix.clone();
             prefix.push(name.clone());
             self.visit_sequence(
@@ -349,6 +508,11 @@ impl Extraction<'_> {
                     namespace_prefix: context.namespace_prefix.clone(),
                     namespace_container: context.namespace_container.clone(),
                     namespace_parent: context.namespace_parent,
+                    imports: context.imports.clone(),
+                    current_type: Some(current_type),
+                    current_type_symbol: Some(parent),
+                    parent_type,
+                    properties,
                 },
             )?;
         }
@@ -360,32 +524,58 @@ impl Extraction<'_> {
         node: Node<'_>,
         from: usize,
         kind: SymbolKind,
-        namespace: &[String],
-    ) {
+        context: &Context,
+    ) -> Option<String> {
+        let mut parent_type = None;
         let mut cursor = node.walk();
         for clause in node.named_children(&mut cursor) {
-            let (relation, targets): (EdgeKind, &[SymbolKind]) = match clause.kind() {
-                "base_clause" if kind == SymbolKind::Interface => {
-                    (EdgeKind::Extends, &[SymbolKind::Interface])
-                }
-                "base_clause" => (EdgeKind::Extends, &[SymbolKind::Class]),
-                "class_interface_clause" => (EdgeKind::Implements, &[SymbolKind::Interface]),
-                _ => continue,
-            };
+            let (relation, type_relation, targets): (EdgeKind, TypeRelationKind, &[SymbolKind]) =
+                match clause.kind() {
+                    "base_clause" if kind == SymbolKind::Interface => (
+                        EdgeKind::Extends,
+                        TypeRelationKind::Extends,
+                        &[SymbolKind::Interface],
+                    ),
+                    "base_clause" => (
+                        EdgeKind::Extends,
+                        TypeRelationKind::Extends,
+                        &[SymbolKind::Class],
+                    ),
+                    "class_interface_clause" => (
+                        EdgeKind::Implements,
+                        TypeRelationKind::Implements,
+                        &[SymbolKind::Interface],
+                    ),
+                    _ => continue,
+                };
             let mut names = clause.walk();
             for target in clause.named_children(&mut names) {
                 let Some(raw) = self.text(target) else {
                     continue;
                 };
-                let normalized = qualified_reference(namespace, raw);
+                let Some(normalized) = resolve_type_name(raw, context) else {
+                    continue;
+                };
+                if relation == EdgeKind::Extends
+                    && kind == SymbolKind::Class
+                    && parent_type.is_none()
+                {
+                    parent_type = Some(normalized.clone());
+                }
                 self.named_relations.push(NamedRelationDraft {
                     from,
-                    target: normalized,
+                    target: normalized.clone(),
                     target_kinds: targets.to_vec(),
                     kind: relation,
                 });
+                self.type_relations.push(TypeRelationDraft {
+                    from,
+                    target: normalized,
+                    kind: type_relation,
+                });
             }
         }
+        parent_type
     }
 
     fn visit_callable(
@@ -407,7 +597,16 @@ impl Extraction<'_> {
         };
         let caller = self.add_symbol(context, &name, kind, node, self.signature(node))?;
         if let Some(body) = node.child_by_field_name("body") {
-            self.collect_calls(body, caller, context.container.as_deref())?;
+            let mut environment = ReceiverEnvironment {
+                namespace: context.namespace_prefix.clone(),
+                imports: context.imports.clone(),
+                current_type: context.current_type.clone(),
+                parent_type: context.parent_type.clone(),
+                properties: context.properties.clone(),
+                variables: HashMap::new(),
+            };
+            self.collect_parameter_types(node, &mut environment);
+            self.collect_calls(body, caller, &mut environment)?;
             // Named nested functions own their declarations and calls. Walk
             // the body a second time through the declaration visitor; it
             // does not collect ordinary expressions, so calls already
@@ -425,6 +624,11 @@ impl Extraction<'_> {
                     namespace_prefix: context.namespace_prefix.clone(),
                     namespace_container: context.namespace_container.clone(),
                     namespace_parent: context.namespace_parent,
+                    imports: context.imports.clone(),
+                    current_type: None,
+                    current_type_symbol: None,
+                    parent_type: None,
+                    properties: Arc::new(HashMap::new()),
                 },
             )?;
         }
@@ -440,13 +644,55 @@ impl Extraction<'_> {
             })
     }
 
-    fn visit_import(&mut self, node: Node<'_>, context: &Context) -> Result<(), ParseError> {
+    fn visit_import(&mut self, node: Node<'_>, context: &mut Context) -> Result<(), ParseError> {
         let Some(signature) = self.signature(node) else {
             return Ok(());
         };
         let name = signature.trim_end_matches(';').trim().to_owned();
         if !name.is_empty() {
             self.add_symbol(context, &name, SymbolKind::Import, node, Some(signature))?;
+        }
+        let declaration_kind = import_kind(node, self.source);
+        let group_prefix = node
+            .named_children(&mut node.walk())
+            .find(|child| child.kind() == "namespace_name")
+            .and_then(|child| self.text(child))
+            .map(normalize_name);
+        let mut clauses = Vec::new();
+        collect_nodes(node, "namespace_use_clause", &mut clauses);
+        for clause in clauses {
+            let kind = import_kind(clause, self.source).or(declaration_kind);
+            let Some(target_node) = clause
+                .named_children(&mut clause.walk())
+                .find(|child| matches!(child.kind(), "name" | "qualified_name" | "relative_name"))
+            else {
+                continue;
+            };
+            let Some(raw_target) = self.text(target_node) else {
+                continue;
+            };
+            let mut target = normalize_name(raw_target);
+            if let Some(prefix) = &group_prefix {
+                target = format!("{prefix}::{target}");
+            }
+            let alias = clause
+                .child_by_field_name("alias")
+                .and_then(|alias| self.text(alias))
+                .map(str::to_owned)
+                .or_else(|| target.rsplit("::").next().map(str::to_owned));
+            let Some(alias) = alias else {
+                continue;
+            };
+            let imports = Arc::make_mut(&mut context.imports);
+            match kind {
+                Some(ImportKind::Function) => {
+                    imports.functions.insert(alias, target);
+                }
+                Some(ImportKind::Constant) => {}
+                None => {
+                    imports.types.insert(alias, target);
+                }
+            }
         }
         Ok(())
     }
@@ -473,6 +719,185 @@ impl Extraction<'_> {
             )?;
         }
         Ok(())
+    }
+
+    fn collect_property_types(
+        &self,
+        body: Node<'_>,
+        context: &Context,
+        current_type: &str,
+        parent_type: Option<&str>,
+    ) -> HashMap<String, PropertyType> {
+        let mut properties = HashMap::new();
+        let mut cursor = body.walk();
+        for member in body.named_children(&mut cursor) {
+            match member.kind() {
+                "property_declaration" => {
+                    let Some(property_type) = member.child_by_field_name("type").and_then(|node| {
+                        self.type_name(node, context, Some(current_type), parent_type)
+                    }) else {
+                        continue;
+                    };
+                    let mut elements = member.walk();
+                    for element in member.named_children(&mut elements) {
+                        if element.kind() != "property_element" {
+                            continue;
+                        }
+                        if let Some(name) = element
+                            .child_by_field_name("name")
+                            .and_then(|name| self.text(name))
+                            .map(variable_name)
+                        {
+                            properties.insert(
+                                name,
+                                PropertyType {
+                                    name: property_type.clone(),
+                                    promoted: false,
+                                },
+                            );
+                        }
+                    }
+                }
+                "method_declaration" if self.node_name(member) == Some("__construct") => {
+                    let Some(parameters) = member.child_by_field_name("parameters") else {
+                        continue;
+                    };
+                    let mut parameter_cursor = parameters.walk();
+                    for parameter in parameters.named_children(&mut parameter_cursor) {
+                        if parameter.kind() != "property_promotion_parameter" {
+                            continue;
+                        }
+                        let Some(name) = parameter
+                            .child_by_field_name("name")
+                            .and_then(|name| self.text(name))
+                            .map(variable_name)
+                        else {
+                            continue;
+                        };
+                        let Some(property_type) =
+                            parameter.child_by_field_name("type").and_then(|node| {
+                                self.type_name(node, context, Some(current_type), parent_type)
+                            })
+                        else {
+                            continue;
+                        };
+                        properties.insert(
+                            name,
+                            PropertyType {
+                                name: property_type,
+                                promoted: true,
+                            },
+                        );
+                    }
+                }
+                _ => {}
+            }
+        }
+        properties
+    }
+
+    fn collect_parameter_types(&self, callable: Node<'_>, environment: &mut ReceiverEnvironment) {
+        let Some(parameters) = callable.child_by_field_name("parameters") else {
+            return;
+        };
+        let mut cursor = parameters.walk();
+        for parameter in parameters.named_children(&mut cursor) {
+            if !matches!(
+                parameter.kind(),
+                "simple_parameter" | "variadic_parameter" | "property_promotion_parameter"
+            ) {
+                continue;
+            }
+            let Some(name) = parameter
+                .child_by_field_name("name")
+                .and_then(|name| self.text(name))
+                .map(variable_name)
+            else {
+                continue;
+            };
+            let Some(type_name) = parameter
+                .child_by_field_name("type")
+                .and_then(|node| self.type_name_in_environment(node, environment))
+            else {
+                continue;
+            };
+            environment.variables.insert(
+                name,
+                ReceiverType {
+                    name: type_name,
+                    source: ReceiverTypeSource::Parameter,
+                },
+            );
+        }
+    }
+
+    fn type_name_in_environment(
+        &self,
+        node: Node<'_>,
+        environment: &ReceiverEnvironment,
+    ) -> Option<String> {
+        let mut named_types = Vec::new();
+        collect_nodes(node, "named_type", &mut named_types);
+        let mut resolved = Vec::new();
+        for named_type in named_types {
+            let raw = self.text(named_type)?;
+            let value = match raw.trim().to_ascii_lowercase().as_str() {
+                "self" | "static" => environment.current_type.clone(),
+                "parent" => environment.parent_type.clone(),
+                _ => resolve_type_name_in_environment(raw, environment),
+            }?;
+            if !resolved.contains(&value) {
+                resolved.push(value);
+            }
+        }
+        (resolved.len() == 1).then(|| resolved.remove(0))
+    }
+
+    fn type_name(
+        &self,
+        node: Node<'_>,
+        context: &Context,
+        current_type: Option<&str>,
+        parent_type: Option<&str>,
+    ) -> Option<String> {
+        let mut named_types = Vec::new();
+        collect_nodes(node, "named_type", &mut named_types);
+        let mut resolved = Vec::new();
+        for named_type in named_types {
+            let raw = self.text(named_type)?;
+            let value = match raw.trim().to_ascii_lowercase().as_str() {
+                "self" | "static" => current_type.map(str::to_owned),
+                "parent" => parent_type.map(str::to_owned),
+                _ => resolve_type_name(raw, context),
+            }?;
+            if !resolved.contains(&value) {
+                resolved.push(value);
+            }
+        }
+        (resolved.len() == 1).then(|| resolved.remove(0))
+    }
+
+    fn collect_trait_uses(&mut self, node: Node<'_>, context: &Context) {
+        let Some(from) = context.current_type_symbol else {
+            return;
+        };
+        let mut cursor = node.walk();
+        for target in node.named_children(&mut cursor) {
+            if !matches!(target.kind(), "name" | "qualified_name" | "relative_name") {
+                continue;
+            }
+            let Some(raw) = self.text(target) else {
+                continue;
+            };
+            let Some(target) = resolve_type_name(raw, context) else {
+                continue;
+            };
+            self.type_relations.push(TypeRelationDraft {
+                from,
+                target,
+                kind: TypeRelationKind::Trait,
+            });
+        }
     }
 
     fn visit_constants(&mut self, node: Node<'_>, context: &Context) -> Result<(), ParseError> {
@@ -504,33 +929,102 @@ impl Extraction<'_> {
         &mut self,
         node: Node<'_>,
         caller: usize,
-        current_container: Option<&str>,
+        environment: &mut ReceiverEnvironment,
     ) -> Result<(), ParseError> {
         if matches!(node.kind(), "function_definition" | "method_declaration") {
             return Ok(());
         }
-        if let Some(target) = self.call_target(node, current_container) {
+        if matches!(node.kind(), "anonymous_function" | "arrow_function") {
+            let mut closure = environment.clone();
+            self.collect_parameter_types(node, &mut closure);
+            if let Some(body) = node.child_by_field_name("body") {
+                self.collect_calls(body, caller, &mut closure)?;
+            }
+            return Ok(());
+        }
+        if node.kind() == "assignment_expression" {
+            if let Some(right) = node.child_by_field_name("right") {
+                self.collect_calls(right, caller, environment)?;
+                if let Some(left) = node
+                    .child_by_field_name("left")
+                    .filter(|left| left.kind() == "variable_name")
+                    .and_then(|left| self.text(left))
+                    .map(variable_name)
+                {
+                    let inferred = self
+                        .expression_receiver_type(right, environment)
+                        .or_else(|| self.fluent_reassignment_type(right, &left, environment));
+                    if let Some(inferred) = inferred {
+                        environment.variables.insert(left, inferred);
+                    } else {
+                        environment.variables.remove(&left);
+                    }
+                }
+            }
+            return Ok(());
+        }
+        if let Some(target) = self.call_target(node, environment) {
             self.calls.push(CallDraft {
                 caller,
                 form: target.form,
                 target_kind: target.target_kind,
                 name: target.name,
                 qualifier: target.qualifier,
+                receiver_type: target.receiver_type,
+                receiver_type_source: target.receiver_type_source,
                 receiver_hint: target.receiver_hint,
                 location: self.range(target.location)?,
             });
         }
+        if is_control_flow_boundary(node.kind()) {
+            let original = environment.variables.clone();
+            let mut branch_variables = Vec::new();
+            let mut cursor = node.walk();
+            for child in node.named_children(&mut cursor) {
+                let mut branch = environment.clone();
+                self.collect_calls(child, caller, &mut branch)?;
+                branch_variables.push(branch.variables);
+            }
+            environment.variables = original
+                .into_iter()
+                .filter(|(name, receiver)| {
+                    branch_variables
+                        .iter()
+                        .all(|variables| variables.get(name) == Some(receiver))
+                })
+                .collect();
+            return Ok(());
+        }
         let mut cursor = node.walk();
         for child in node.named_children(&mut cursor) {
-            self.collect_calls(child, caller, current_container)?;
+            self.collect_calls(child, caller, environment)?;
         }
         Ok(())
+    }
+
+    fn fluent_reassignment_type(
+        &self,
+        expression: Node<'_>,
+        variable: &str,
+        environment: &ReceiverEnvironment,
+    ) -> Option<ReceiverType> {
+        if !matches!(
+            expression.kind(),
+            "member_call_expression" | "nullsafe_member_call_expression"
+        ) {
+            return None;
+        }
+        let object = expression.child_by_field_name("object")?;
+        if object.kind() != "variable_name" || variable_name(self.text(object)?) != variable {
+            return None;
+        }
+        environment.variables.get(variable).cloned()
     }
 
     fn call_target<'a>(
         &self,
         node: Node<'a>,
-        current_container: Option<&str>,
+        environment: &ReceiverEnvironment,
     ) -> Option<CallTarget<'a>> {
         match node.kind() {
             "function_call_expression" => {
@@ -539,14 +1033,18 @@ impl Extraction<'_> {
                 if !matches!(target.kind(), "name" | "qualified_name" | "relative_name") {
                     return None;
                 }
-                let parts = name_segments(raw);
-                let name = parts.last()?.clone();
-                let qualifier = (parts.len() > 1).then(|| parts[..parts.len() - 1].join("::"));
+                let resolved = resolve_function_name(raw, environment);
+                let (qualifier, name) = resolved.rsplit_once("::").map_or_else(
+                    || (None, resolved.clone()),
+                    |(qualifier, name)| (Some(qualifier.to_owned()), name.to_owned()),
+                );
                 Some(CallTarget {
                     form: CallForm::Function,
                     target_kind: CallTargetKind::Function,
                     name,
                     qualifier,
+                    receiver_type: None,
+                    receiver_type_source: None,
                     receiver_hint: None,
                     location: target,
                 })
@@ -557,14 +1055,10 @@ impl Extraction<'_> {
                     return None;
                 }
                 let name = self.text(name_node)?.to_owned();
-                let object = node
-                    .child_by_field_name("object")
-                    .and_then(|object| self.text(object));
-                let receiver_hint = object.and_then(bounded_receiver_hint);
-                let qualifier = match object {
-                    Some("$this") => current_container.map(str::to_owned),
-                    _ => None,
-                };
+                let object_node = node.child_by_field_name("object")?;
+                let receiver_hint = self.text(object_node).and_then(bounded_receiver_hint);
+                let receiver = self.expression_receiver_type(object_node, environment);
+                let qualifier = receiver.as_ref().map(|receiver| receiver.name.clone());
                 Some(CallTarget {
                     form: if node.kind() == "nullsafe_member_call_expression" {
                         CallForm::NullsafeMember
@@ -574,6 +1068,8 @@ impl Extraction<'_> {
                     target_kind: CallTargetKind::Method,
                     name,
                     qualifier,
+                    receiver_type: receiver.as_ref().map(|receiver| receiver.name.clone()),
+                    receiver_type_source: receiver.map(|receiver| receiver.source),
                     receiver_hint,
                     location: name_node,
                 })
@@ -586,15 +1082,35 @@ impl Extraction<'_> {
                 let name = self.text(name_node)?.to_owned();
                 let scope = node.child_by_field_name("scope")?;
                 let raw_scope = self.text(scope)?;
-                let qualifier = match raw_scope {
-                    "self" | "static" => current_container.map(str::to_owned),
-                    _ => Some(normalize_name(raw_scope)),
+                let receiver = match raw_scope.to_ascii_lowercase().as_str() {
+                    "self" | "static" => {
+                        environment.current_type.as_ref().map(|name| ReceiverType {
+                            name: name.clone(),
+                            source: ReceiverTypeSource::SelfType,
+                        })
+                    }
+                    "parent" => environment.parent_type.as_ref().map(|name| ReceiverType {
+                        name: name.clone(),
+                        source: ReceiverTypeSource::ParentType,
+                    }),
+                    _ if matches!(scope.kind(), "name" | "qualified_name" | "relative_name") => {
+                        resolve_type_name_in_environment(raw_scope, environment).map(|name| {
+                            ReceiverType {
+                                name,
+                                source: ReceiverTypeSource::ScopedType,
+                            }
+                        })
+                    }
+                    _ => None,
                 };
+                let qualifier = receiver.as_ref().map(|receiver| receiver.name.clone());
                 Some(CallTarget {
                     form: CallForm::Scoped,
                     target_kind: CallTargetKind::Method,
                     name,
                     qualifier,
+                    receiver_type: receiver.as_ref().map(|receiver| receiver.name.clone()),
+                    receiver_type_source: receiver.map(|receiver| receiver.source),
                     receiver_hint: bounded_receiver_hint(raw_scope),
                     location: name_node,
                 })
@@ -602,6 +1118,130 @@ impl Extraction<'_> {
             _ => None,
         }
     }
+
+    fn expression_receiver_type(
+        &self,
+        node: Node<'_>,
+        environment: &ReceiverEnvironment,
+    ) -> Option<ReceiverType> {
+        match node.kind() {
+            "variable_name" => {
+                let name = variable_name(self.text(node)?);
+                if name == "this" {
+                    return environment.current_type.as_ref().map(|name| ReceiverType {
+                        name: name.clone(),
+                        source: ReceiverTypeSource::This,
+                    });
+                }
+                environment.variables.get(&name).cloned()
+            }
+            "member_access_expression" | "nullsafe_member_access_expression" => {
+                let object = node.child_by_field_name("object")?;
+                let property = node.child_by_field_name("name")?;
+                if self.text(object)? != "$this" || property.kind() != "name" {
+                    return None;
+                }
+                let property = environment.properties.get(self.text(property)?)?;
+                Some(ReceiverType {
+                    name: property.name.clone(),
+                    source: if property.promoted {
+                        ReceiverTypeSource::PromotedProperty
+                    } else {
+                        ReceiverTypeSource::Property
+                    },
+                })
+            }
+            "object_creation_expression" => {
+                let mut cursor = node.walk();
+                let class = node.named_children(&mut cursor).find(|child| {
+                    matches!(child.kind(), "name" | "qualified_name" | "relative_name")
+                })?;
+                let name = resolve_receiver_type_name(self.text(class)?, environment)?;
+                Some(ReceiverType {
+                    name,
+                    source: ReceiverTypeSource::LocalNew,
+                })
+            }
+            "function_call_expression" => self.service_locator_type(node, environment),
+            "parenthesized_expression" => {
+                let mut cursor = node.walk();
+                let expression = node.named_children(&mut cursor).next()?;
+                self.expression_receiver_type(expression, environment)
+            }
+            _ => None,
+        }
+    }
+
+    fn service_locator_type(
+        &self,
+        node: Node<'_>,
+        environment: &ReceiverEnvironment,
+    ) -> Option<ReceiverType> {
+        let function = node.child_by_field_name("function")?;
+        let function = self.text(function)?.trim_start_matches('\\');
+        if !matches!(function, "app" | "resolve") {
+            return None;
+        }
+        let arguments = node.child_by_field_name("arguments")?;
+        let mut arguments_cursor = arguments.walk();
+        let argument = arguments.named_children(&mut arguments_cursor).next()?;
+        let mut argument_cursor = argument.walk();
+        let expression = argument.named_children(&mut argument_cursor).next()?;
+        if expression.kind() != "class_constant_access_expression" {
+            return None;
+        }
+        let mut parts_cursor = expression.walk();
+        let parts: Vec<_> = expression.named_children(&mut parts_cursor).collect();
+        let (scope, constant) = match parts.as_slice() {
+            [scope, constant] => (*scope, *constant),
+            _ => return None,
+        };
+        if !self.text(constant)?.eq_ignore_ascii_case("class") {
+            return None;
+        }
+        if !matches!(
+            scope.kind(),
+            "name" | "qualified_name" | "relative_name" | "relative_scope"
+        ) {
+            return None;
+        }
+        let name = resolve_receiver_type_name(self.text(scope)?, environment)?;
+        Some(ReceiverType {
+            name,
+            source: ReceiverTypeSource::ServiceLocator,
+        })
+    }
+}
+
+fn has_declaration_list_ancestor(mut node: Node<'_>) -> bool {
+    for _ in 0..3 {
+        let Some(parent) = node.parent() else {
+            return false;
+        };
+        if parent.kind() == "declaration_list" {
+            return true;
+        }
+        node = parent;
+    }
+    false
+}
+
+fn is_typed_class_constant_named_default(source: &str) -> bool {
+    let Some((declaration, _)) = source.split_once('=') else {
+        return false;
+    };
+    let tokens = declaration.split_ascii_whitespace().collect::<Vec<_>>();
+    let Some(const_index) = tokens
+        .iter()
+        .position(|token| token.eq_ignore_ascii_case("const"))
+    else {
+        return false;
+    };
+    let declaration_tail = &tokens[const_index.saturating_add(1)..];
+    declaration_tail.len() == 2
+        && declaration_tail
+            .last()
+            .is_some_and(|name| name.eq_ignore_ascii_case("default"))
 }
 
 pub(crate) struct PhpParser {
@@ -641,6 +1281,7 @@ impl PhpParser {
             symbols: Vec::new(),
             calls: Vec::new(),
             named_relations: Vec::new(),
+            type_relations: Vec::new(),
         };
         extraction.visit_sequence(
             root,
@@ -652,14 +1293,23 @@ impl PhpParser {
                 namespace_prefix: Vec::new(),
                 namespace_container: None,
                 namespace_parent: None,
+                imports: Arc::new(Imports::default()),
+                current_type: None,
+                current_type_symbol: None,
+                parent_type: None,
+                properties: Arc::new(HashMap::new()),
             },
         )?;
+        let (diagnostics, diagnostic_count) = extraction.diagnostics(root)?;
         Ok(ParsedFile {
             source: source.clone(),
             symbols: extraction.symbols,
             calls: extraction.calls,
             named_relations: extraction.named_relations,
+            type_relations: extraction.type_relations,
             has_errors: root.has_error(),
+            diagnostics,
+            diagnostic_count,
         })
     }
 }
@@ -682,14 +1332,140 @@ fn bounded_receiver_hint(raw: &str) -> Option<String> {
     (!hint.is_empty() && hint.chars().count() <= MAX_RECEIVER_HINT_CHARS).then_some(hint)
 }
 
-fn qualified_reference(namespace: &[String], raw: &str) -> String {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ImportKind {
+    Function,
+    Constant,
+}
+
+fn import_kind(node: Node<'_>, source: &str) -> Option<ImportKind> {
+    let kind = node.child_by_field_name("type")?;
+    match source.get(kind.byte_range())? {
+        "function" => Some(ImportKind::Function),
+        "const" => Some(ImportKind::Constant),
+        _ => None,
+    }
+}
+
+fn collect_nodes<'tree>(node: Node<'tree>, kind: &str, result: &mut Vec<Node<'tree>>) {
+    if node.kind() == kind {
+        result.push(node);
+        return;
+    }
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        collect_nodes(child, kind, result);
+    }
+}
+
+fn variable_name(raw: &str) -> String {
+    raw.trim_start_matches('$').to_owned()
+}
+
+fn resolve_type_name(raw: &str, context: &Context) -> Option<String> {
+    resolve_reference(raw, &context.namespace_prefix, &context.imports.types)
+}
+
+fn resolve_type_name_in_environment(
+    raw: &str,
+    environment: &ReceiverEnvironment,
+) -> Option<String> {
+    resolve_reference(raw, &environment.namespace, &environment.imports.types)
+}
+
+fn resolve_receiver_type_name(raw: &str, environment: &ReceiverEnvironment) -> Option<String> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "self" | "static" => environment.current_type.clone(),
+        "parent" => environment.parent_type.clone(),
+        _ => resolve_type_name_in_environment(raw, environment),
+    }
+}
+
+fn resolve_reference(
+    raw: &str,
+    namespace: &[String],
+    aliases: &HashMap<String, String>,
+) -> Option<String> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return None;
+    }
     let absolute = raw.starts_with('\\');
+    let namespace_relative = raw.starts_with("namespace\\");
     let normalized = normalize_name(raw);
-    if absolute || normalized.contains("::") || namespace.is_empty() {
+    if normalized.is_empty() {
+        return None;
+    }
+    if absolute {
+        return Some(normalized);
+    }
+    if namespace_relative {
+        return Some(if namespace.is_empty() {
+            normalized
+        } else {
+            format!("{}::{normalized}", namespace.join("::"))
+        });
+    }
+    let mut segments = normalized.split("::");
+    let first = segments.next()?;
+    if let Some(imported) = aliases.get(first) {
+        let suffix = segments.collect::<Vec<_>>().join("::");
+        return Some(if suffix.is_empty() {
+            imported.clone()
+        } else {
+            format!("{imported}::{suffix}")
+        });
+    }
+    if namespace.is_empty() {
+        Some(normalized)
+    } else {
+        Some(format!("{}::{normalized}", namespace.join("::")))
+    }
+}
+
+fn resolve_function_name(raw: &str, environment: &ReceiverEnvironment) -> String {
+    let raw = raw.trim();
+    let normalized = normalize_name(raw);
+    if raw.starts_with('\\') {
+        return normalized;
+    }
+    if raw.starts_with("namespace\\") {
+        return if environment.namespace.is_empty() {
+            normalized
+        } else {
+            format!("{}::{normalized}", environment.namespace.join("::"))
+        };
+    }
+    let mut segments = normalized.split("::");
+    if let Some(first) = segments.next()
+        && let Some(imported) = environment.imports.functions.get(first)
+    {
+        let suffix = segments.collect::<Vec<_>>().join("::");
+        return if suffix.is_empty() {
+            imported.clone()
+        } else {
+            format!("{imported}::{suffix}")
+        };
+    }
+    if environment.namespace.is_empty() {
         normalized
     } else {
-        format!("{}::{normalized}", namespace.join("::"))
+        format!("{}::{normalized}", environment.namespace.join("::"))
     }
+}
+
+fn is_control_flow_boundary(kind: &str) -> bool {
+    matches!(
+        kind,
+        "if_statement"
+            | "switch_statement"
+            | "while_statement"
+            | "do_statement"
+            | "for_statement"
+            | "foreach_statement"
+            | "try_statement"
+            | "match_expression"
+    )
 }
 
 #[cfg(test)]
@@ -742,7 +1518,10 @@ function helper(): void {}
         assert_eq!(member_call.form, CallForm::Member);
         assert_eq!(member_call.target_kind, CallTargetKind::Method);
         assert_eq!(member_call.receiver_hint.as_deref(), Some("this"));
-        assert_eq!(member_call.qualifier.as_deref(), Some("PaymentService"));
+        assert_eq!(
+            member_call.qualifier.as_deref(),
+            Some("App::Service::PaymentService")
+        );
         let scoped_call = parsed
             .calls
             .iter()
@@ -751,7 +1530,10 @@ function helper(): void {}
         assert_eq!(scoped_call.form, CallForm::Scoped);
         assert_eq!(scoped_call.target_kind, CallTargetKind::Method);
         assert_eq!(scoped_call.receiver_hint.as_deref(), Some("Provider"));
-        assert_eq!(scoped_call.qualifier.as_deref(), Some("Provider"));
+        assert_eq!(
+            scoped_call.qualifier.as_deref(),
+            Some("App::Provider::Provider")
+        );
         let function_call = parsed
             .calls
             .iter()
@@ -770,11 +1552,60 @@ function helper(): void {}
             Arc::from("<?php function still_visible( { return helper(); }"),
         )?;
         assert!(parsed.has_errors);
+        assert!(parsed.diagnostic_count > 0);
+        assert!(!parsed.diagnostics.is_empty());
+        assert!(parsed.diagnostics.iter().all(|diagnostic| {
+            diagnostic.language == Language::Php
+                && diagnostic.range.file().as_str() == "broken.php"
+                && diagnostic.cause == SyntaxDiagnosticCause::ParseRecovery
+        }));
         assert!(
             parsed
                 .symbols
                 .iter()
                 .any(|symbol| symbol.key.qualified_name == "still_visible")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn accepts_modern_php_syntax_without_diagnostics() -> Result<(), Box<dyn std::error::Error>> {
+        let mut parser = PhpParser::new()?;
+        let parsed = parser.parse(
+            RepoRelativePath::new("src/Modern.php")?,
+            Arc::from(
+                r#"<?php
+#[Attribute]
+final class Marker {}
+
+enum Status: string { case Paid = 'paid'; }
+
+readonly class Payment {
+    public const string KIND = 'payment';
+    public function __construct(public string $id) {}
+}
+"#,
+            ),
+        )?;
+        assert!(!parsed.has_errors);
+        assert_eq!(parsed.diagnostic_count, 0);
+        assert!(parsed.diagnostics.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn classifies_keyword_named_typed_class_constant_as_known_grammar_gap()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let source = "<?php class Payment { public const string DEFAULT = 'default'; }";
+        let mut parser = PhpParser::new()?;
+        let parsed = parser.parse(RepoRelativePath::new("src/Payment.php")?, Arc::from(source))?;
+        assert!(parsed.has_errors);
+        assert_eq!(parsed.diagnostic_count, 1);
+        assert_eq!(
+            parsed.diagnostics[0].cause,
+            SyntaxDiagnosticCause::KnownGrammarGap(
+                KnownSyntaxGrammarGap::PhpTypedClassConstantNamedDefault,
+            )
         );
         Ok(())
     }
@@ -862,6 +1693,124 @@ function outer(): void {
                 .calls
                 .iter()
                 .any(|call| call.caller == outer && call.name == "inner")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn infers_bounded_receiver_types_from_supported_php_syntax()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let source = r#"<?php
+namespace App\Feature;
+use Vendor\Services\{First as One, Second};
+use Vendor\Policy as PolicyAlias;
+use function Vendor\Functions\run as invoke;
+trait SharedTrait { public function shared(): void {} }
+class Child extends PolicyAlias {
+    use SharedTrait;
+    private One $property;
+    public function __construct(private Second $promoted, PolicyAlias $parameter) {
+        $local = new PolicyAlias();
+        $resolved = app(PolicyAlias::class);
+        $this->own();
+        $this->property->run();
+        $this->promoted?->run();
+        $parameter->run();
+        $parameter = $parameter->configure();
+        $parameter->run();
+        $local->run();
+        $resolved->run();
+        resolve(PolicyAlias::class)->run();
+        self::own();
+        parent::run();
+        PolicyAlias::run();
+        $dynamic->run();
+        $class::run();
+        $callback = function (PolicyAlias $closureService): void {
+            $closureService->run();
+        };
+        invoke();
+    }
+    private function own(): void {}
+    public function branch(PolicyAlias $branch, bool $flag): void {
+        if ($flag) { $branch = app(One::class); }
+        $branch->run();
+    }
+}
+"#;
+        let mut parser = PhpParser::new()?;
+        let parsed = parser.parse(RepoRelativePath::new("src/Child.php")?, Arc::from(source))?;
+
+        let call = |hint: &str, source| {
+            parsed.calls.iter().find(|call| {
+                call.receiver_hint.as_deref() == Some(hint) && call.receiver_type_source == source
+            })
+        };
+        assert_eq!(
+            call("this->property", Some(ReceiverTypeSource::Property))
+                .and_then(|call| call.receiver_type.as_deref()),
+            Some("Vendor::Services::First")
+        );
+        assert_eq!(
+            call("this->promoted", Some(ReceiverTypeSource::PromotedProperty))
+                .and_then(|call| call.receiver_type.as_deref()),
+            Some("Vendor::Services::Second")
+        );
+        assert_eq!(
+            call("parameter", Some(ReceiverTypeSource::Parameter))
+                .and_then(|call| call.receiver_type.as_deref()),
+            Some("Vendor::Policy")
+        );
+        assert_eq!(
+            parsed
+                .calls
+                .iter()
+                .filter(|call| {
+                    call.receiver_hint.as_deref() == Some("parameter")
+                        && call.receiver_type_source == Some(ReceiverTypeSource::Parameter)
+                })
+                .count(),
+            3
+        );
+        assert_eq!(
+            call("closureService", Some(ReceiverTypeSource::Parameter))
+                .and_then(|call| call.receiver_type.as_deref()),
+            Some("Vendor::Policy")
+        );
+        assert_eq!(
+            call("local", Some(ReceiverTypeSource::LocalNew))
+                .and_then(|call| call.receiver_type.as_deref()),
+            Some("Vendor::Policy")
+        );
+        assert_eq!(
+            call("resolved", Some(ReceiverTypeSource::ServiceLocator))
+                .and_then(|call| call.receiver_type.as_deref()),
+            Some("Vendor::Policy")
+        );
+        assert_eq!(
+            call("parent", Some(ReceiverTypeSource::ParentType))
+                .and_then(|call| call.receiver_type.as_deref()),
+            Some("Vendor::Policy")
+        );
+        assert!(call("dynamic", None).is_some());
+        assert!(call("class", None).is_some());
+        assert!(call("branch", None).is_some());
+        assert!(parsed.calls.iter().any(|call| {
+            call.form == CallForm::Function
+                && call.name == "run"
+                && call.qualifier.as_deref() == Some("Vendor::Functions")
+        }));
+        assert!(
+            parsed
+                .type_relations
+                .iter()
+                .any(|relation| { relation.target == "Vendor::Policy" })
+        );
+        assert!(
+            parsed
+                .type_relations
+                .iter()
+                .any(|relation| { relation.target == "App::Feature::SharedTrait" })
         );
         Ok(())
     }

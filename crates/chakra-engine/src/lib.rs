@@ -12,8 +12,8 @@ mod precise;
 mod query;
 
 pub use diff::{
-    DiffDocument, DiffWorkspace, WorkspaceDiff, WorkspaceDiffError, WorkspaceDiffProvider,
-    WorkspaceFileChange,
+    DiffDocument, DiffInventoryTruncation, DiffWorkspace, WorkspaceDiff, WorkspaceDiffError,
+    WorkspaceDiffProvider, WorkspaceFileChange,
 };
 pub use engine::{
     BarrierAlreadyInstalled, DiffProviderAlreadyInstalled, FreshnessBarrier, FreshnessBarrierError,
@@ -21,7 +21,7 @@ pub use engine::{
 };
 pub use graph::{
     BoundedGraphBuilder, CallSiteInput, ConsistencyAudit, ConsistencyError, GraphBuildLimits,
-    GraphBuildReport, GraphError, SymbolGraph,
+    GraphBuildReport, GraphDiagnosticSummary, GraphError, GraphFileSummary, SymbolGraph,
 };
 pub use precise::{
     CallHierarchyDirections, PreciseProvider, PreciseQueryRequest, PreciseQueryResult,

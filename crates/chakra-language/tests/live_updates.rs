@@ -11,11 +11,12 @@ use chakra_domain::identity::WorkspaceIdentity;
 use chakra_domain::indexing::{IndexBudgetKind, IndexBudgets, IndexCancellation, IndexPhase};
 use chakra_domain::location::RepoRelativePath;
 use chakra_domain::query::{
-    ContextRequest, DiffContextRequest, QueryError, QueryService, RepoMapRequest, SymbolRef,
-    SymbolSearchRequest,
+    ContextRequest, DiffContextRequest, QueryError, QueryService, RepoMapRequest, StatusRequest,
+    SymbolRef, SymbolSearchRequest,
 };
+use chakra_domain::source::SourceClassification;
 use chakra_domain::state::{Freshness, FreshnessRequirement, WorkspaceStatus};
-use chakra_domain::symbol::{CallResolution, Language};
+use chakra_domain::symbol::{CallResolution, EdgeKind, Language};
 use chakra_engine::WorkspaceEngine;
 use chakra_language::{
     IndexOptions, LiveIndex, LiveIndexError, LiveIndexOptions, ReconciliationKind,
@@ -181,8 +182,10 @@ fn symbols(
 ) -> Result<Vec<String>, chakra_domain::query::QueryError> {
     let result = engine.symbol_search(SymbolSearchRequest {
         query: query.to_owned(),
+        source: Default::default(),
         limit: None,
         freshness: FreshnessRequirement::RequireFresh,
+        ..SymbolSearchRequest::default()
     })?;
     assert_eq!(result.freshness, Freshness::Fresh);
     Ok(result
@@ -415,11 +418,12 @@ fn declaration_edit_re_resolves_call_sites_without_recomputing_callers()
     })?;
     assert!(initial.data.callees.is_empty());
     assert_eq!(initial.data.syntax_call_candidates.len(), 2);
-    assert!(
-        initial.data.syntax_call_candidates.iter().all(|candidate| {
-            candidate.resolution == CallResolution::Ambiguous { candidates: 2 }
-        })
-    );
+    assert!(initial.data.syntax_call_candidates.iter().all(|candidate| {
+        candidate
+            .representative_evidence
+            .iter()
+            .all(|evidence| evidence.resolution == CallResolution::Ambiguous { candidates: 2 })
+    }));
     let baseline = live.metrics();
 
     write(
@@ -506,6 +510,14 @@ fn create_rename_and_delete_are_visible_without_sleeps() -> Result<(), Box<dyn E
         symbols(&engine, "created::appeared")?,
         ["created::appeared"]
     );
+    let before_rename = engine.repo_map(RepoMapRequest {
+        limit: Some(1),
+        ..RepoMapRequest::default()
+    })?;
+    let rename_cursor = before_rename
+        .data
+        .next_cursor
+        .ok_or("rename cursor missing")?;
 
     fs::rename(
         repository.path().join("src/created.rs"),
@@ -516,12 +528,36 @@ fn create_rename_and_delete_are_visible_without_sleeps() -> Result<(), Box<dyn E
         ["renamed::appeared"]
     );
     assert!(symbols(&engine, "created::appeared")?.is_empty());
+    assert!(matches!(
+        engine.repo_map(RepoMapRequest {
+            cursor: Some(rename_cursor),
+            ..RepoMapRequest::default()
+        }),
+        Err(QueryError::StaleCursor { .. })
+    ));
+    let before_delete = engine.repo_map(RepoMapRequest {
+        limit: Some(1),
+        ..RepoMapRequest::default()
+    })?;
+    let delete_cursor = before_delete
+        .data
+        .next_cursor
+        .ok_or("delete cursor missing")?;
 
     fs::remove_file(repository.path().join("src/renamed.rs"))?;
     assert!(symbols(&engine, "appeared")?.is_empty());
+    assert!(matches!(
+        engine.repo_map(RepoMapRequest {
+            cursor: Some(delete_cursor),
+            ..RepoMapRequest::default()
+        }),
+        Err(QueryError::StaleCursor { .. })
+    ));
     let map = engine.repo_map(RepoMapRequest {
+        source: Default::default(),
         limit: None,
         freshness: FreshnessRequirement::RequireFresh,
+        ..RepoMapRequest::default()
     })?;
     assert!(
         map.data
@@ -562,11 +598,37 @@ fn atomic_save_and_temporary_syntax_error_publish_complete_revisions() -> Result
     let broken_revision = engine.snapshot();
     broken_revision.graph().validate_consistency()?;
     assert_eq!(live.metrics().syntax_error_files, 1);
+    let broken_status = engine.status(StatusRequest)?;
+    assert_eq!(broken_status.revision, broken_revision.revision());
+    assert_eq!(
+        broken_status.data.syntax_diagnostics.files_with_diagnostics,
+        1
+    );
+    assert!(
+        broken_status
+            .data
+            .syntax_diagnostics
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.range.file().as_str() == "src/one.rs")
+    );
 
     write(repository.path(), "src/one.rs", "pub fn recovered() {}\n")?;
     assert_eq!(symbols(&engine, "recovered")?, ["one::recovered"]);
     assert_eq!(live.metrics().syntax_error_files, 0);
     assert!(engine.snapshot().revision() > broken_revision.revision());
+    let recovered_status = engine.status(StatusRequest)?;
+    assert_eq!(
+        recovered_status.data.syntax_diagnostics.total_diagnostics,
+        0
+    );
+    assert!(
+        recovered_status
+            .data
+            .syntax_diagnostics
+            .diagnostics
+            .is_empty()
+    );
     live.shutdown()?;
     Ok(())
 }
@@ -589,8 +651,10 @@ fn php_edit_is_immediately_fresh_and_does_not_reparse_rust() -> Result<(), Box<d
     )?;
     let response = engine.symbol_search(SymbolSearchRequest {
         query: "refundNow".to_owned(),
+        source: Default::default(),
         limit: None,
         freshness: FreshnessRequirement::RequireFresh,
+        ..SymbolSearchRequest::default()
     })?;
     assert_eq!(response.freshness, Freshness::Fresh);
     assert_eq!(response.data.candidates.len(), 1);
@@ -634,6 +698,7 @@ fn first_file_of_a_live_language_receives_budget_without_reparsing_other_files()
         query: "refund".to_owned(),
         limit: None,
         freshness: FreshnessRequirement::RequireFresh,
+        ..SymbolSearchRequest::default()
     })?;
 
     assert_eq!(response.data.candidates.len(), 1);
@@ -721,6 +786,7 @@ fn clean_diff_context_uses_two_lightweight_proofs_without_body_scans() -> Result
     let response = engine.diff_context(DiffContextRequest {
         limit: None,
         freshness: FreshnessRequirement::RequireFresh,
+        ..DiffContextRequest::default()
     })?;
 
     assert!(response.data.changed_files.is_empty());
@@ -817,5 +883,199 @@ fn same_size_timestamp_preserving_edit_is_read_immediately() -> Result<(), Box<d
         metrics.full_reconciliations - baseline.full_reconciliations,
         0
     );
+    Ok(())
+}
+
+#[test]
+fn laravel_edit_recomputes_one_framework_contribution_and_publishes_fresh_relations()
+-> Result<(), Box<dyn Error>> {
+    let repository = repository()?;
+    write(
+        repository.path(),
+        "composer.json",
+        r#"{"require":{"laravel/framework":"^13.0"}}"#,
+    )?;
+    let path = "app/Provider.php";
+    let source = r#"<?php
+namespace App;
+interface Reporter { public function report(): void; }
+final class DatabaseReporter implements Reporter { public function report(): void {} }
+final class Provider {
+    public function register(): void {
+        $this->app->bind(Reporter::class, DatabaseReporter::class);
+    }
+}
+"#;
+    write(repository.path(), path, source)?;
+    let (engine, live) = start(&repository)?;
+    let initial = engine.context(ContextRequest {
+        symbol: Some(SymbolRef::ByName("App::DatabaseReporter".to_owned())),
+        freshness: FreshnessRequirement::RequireFresh,
+        ..ContextRequest::default()
+    })?;
+    assert!(initial.data.related_relations.iter().any(|relation| {
+        relation.relation.edge_kind == EdgeKind::Binds
+            && relation.relation.symbol.qualified_name == "App::Reporter"
+    }));
+    let baseline = live.metrics();
+
+    write(
+        repository.path(),
+        path,
+        &source.replace("->bind(", "->singleton("),
+    )?;
+    let current = engine.context(ContextRequest {
+        symbol: Some(SymbolRef::ByName("App::DatabaseReporter".to_owned())),
+        freshness: FreshnessRequirement::RequireFresh,
+        ..ContextRequest::default()
+    })?;
+    assert_eq!(current.freshness, Freshness::Fresh);
+    assert!(current.data.related_relations.iter().any(|relation| {
+        relation.relation.edge_kind == EdgeKind::Binds
+            && relation.relation.provenance == chakra_domain::provenance::Provenance::Heuristic
+    }));
+
+    let metrics = live.metrics();
+    assert_eq!(metrics.files_reparsed - baseline.files_reparsed, 1);
+    assert_eq!(
+        metrics.framework_files_reparsed - baseline.framework_files_reparsed,
+        1
+    );
+    assert_eq!(
+        metrics.framework_relationship_files_recomputed
+            - baseline.framework_relationship_files_recomputed,
+        1
+    );
+    assert_eq!(metrics.framework_truncated_files, 0);
+    engine.snapshot().graph().validate_consistency()?;
+    live.shutdown()?;
+    Ok(())
+}
+
+#[test]
+fn cargo_manifest_change_refreshes_package_scope_without_reparsing() -> Result<(), Box<dyn Error>> {
+    let repository = repository()?;
+    write(
+        repository.path(),
+        "Cargo.toml",
+        "[package]\nname = \"before\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+    )?;
+    let lock = Command::new("cargo")
+        .current_dir(repository.path())
+        .args(["generate-lockfile", "--offline"])
+        .status()?;
+    if !lock.success() {
+        return Err("initial cargo generate-lockfile failed".into());
+    }
+    let (engine, live) = start(&repository)?;
+    let before = engine.symbol_search(SymbolSearchRequest {
+        query: "alpha".to_owned(),
+        ..SymbolSearchRequest::default()
+    })?;
+    assert_eq!(
+        before.data.candidates[0]
+            .package
+            .as_ref()
+            .map(|package| package.name.as_str()),
+        Some("before")
+    );
+    assert_eq!(
+        before.data.candidates[0].source_classification,
+        SourceClassification::CargoMetadata
+    );
+    let baseline_revision = before.revision;
+    let baseline_metrics = live.metrics();
+
+    write(
+        repository.path(),
+        "Cargo.toml",
+        "[package]\nname = \"after\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+    )?;
+    let lock = Command::new("cargo")
+        .current_dir(repository.path())
+        .args(["generate-lockfile", "--offline"])
+        .status()?;
+    if !lock.success() {
+        return Err("updated cargo generate-lockfile failed".into());
+    }
+    let after = engine.symbol_search(SymbolSearchRequest {
+        query: "alpha".to_owned(),
+        ..SymbolSearchRequest::default()
+    })?;
+    assert!(after.revision > baseline_revision);
+    assert_eq!(
+        after.data.candidates[0]
+            .package
+            .as_ref()
+            .map(|package| package.name.as_str()),
+        Some("after")
+    );
+    assert_eq!(
+        live.metrics().files_reparsed,
+        baseline_metrics.files_reparsed,
+        "metadata-only refresh must not reparse stable Rust source"
+    );
+    live.shutdown()?;
+    Ok(())
+}
+
+#[test]
+fn composer_manifest_change_refreshes_package_scope_without_reparsing() -> Result<(), Box<dyn Error>>
+{
+    let repository = repository()?;
+    write(
+        repository.path(),
+        "composer.json",
+        r#"{"name":"before/package","autoload":{"psr-4":{"App\\":"app/"}}}"#,
+    )?;
+    write(
+        repository.path(),
+        "app/Service.php",
+        "<?php namespace App; class Service {}\n",
+    )?;
+    let (engine, live) = start(&repository)?;
+    let before = engine.symbol_search(SymbolSearchRequest {
+        query: "Service".to_owned(),
+        include_languages: vec![Language::Php],
+        ..SymbolSearchRequest::default()
+    })?;
+    assert_eq!(
+        before.data.candidates[0]
+            .package
+            .as_ref()
+            .map(|package| package.name.as_str()),
+        Some("before/package")
+    );
+    assert_eq!(
+        before.data.candidates[0].source_classification,
+        SourceClassification::ComposerMetadata
+    );
+    let baseline_revision = before.revision;
+    let baseline_metrics = live.metrics();
+
+    write(
+        repository.path(),
+        "composer.json",
+        r#"{"name":"after/package","autoload":{"psr-4":{"App\\":"app/"}}}"#,
+    )?;
+    let after = engine.symbol_search(SymbolSearchRequest {
+        query: "Service".to_owned(),
+        include_languages: vec![Language::Php],
+        ..SymbolSearchRequest::default()
+    })?;
+    assert!(after.revision > baseline_revision);
+    assert_eq!(
+        after.data.candidates[0]
+            .package
+            .as_ref()
+            .map(|package| package.name.as_str()),
+        Some("after/package")
+    );
+    assert_eq!(
+        live.metrics().files_reparsed,
+        baseline_metrics.files_reparsed,
+        "metadata-only refresh must not reparse stable PHP source"
+    );
+    live.shutdown()?;
     Ok(())
 }

@@ -334,6 +334,7 @@ fn large_repository_warmed_noop_freshness_is_bounded() -> Result<(), Box<dyn Err
             query: query.clone(),
             limit: Some(1),
             freshness: FreshnessRequirement::RequireFresh,
+            ..SymbolSearchRequest::default()
         })?;
         samples.push(started.elapsed());
         assert_eq!(response.freshness, Freshness::Fresh);

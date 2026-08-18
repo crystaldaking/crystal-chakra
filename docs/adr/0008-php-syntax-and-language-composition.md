@@ -65,8 +65,8 @@ binding compatible with Chakra's Tree-sitter runtime:
   difference, not a hidden PHP precision claim.
 - Use the shared lazy call-site model from ADR-010. Unknown PHP receivers remain
   unresolved syntax evidence; they are not connected to every same-name method.
-  Future PHP type refinement can enrich the receiver/qualifier without changing
-  graph ownership.
+  ADR-015 subsequently adds bounded receiver/qualifier refinement without
+  changing graph ownership.
 
 ## Alternatives considered
 
@@ -95,8 +95,9 @@ binding compatible with Chakra's Tree-sitter runtime:
   partitions), not O(symbols + edges). Instrumentation and pointer-identity
   tests prove a one-file PHP edit does not copy the Rust partition.
 - PHP call, inheritance, and test relations are intentionally conservative and
-  carry heuristic precision where Tree-sitter cannot resolve runtime types,
-  aliases, traits, dynamic dispatch, magic methods, or framework metadata.
+  carry heuristic precision. ADR-015 resolves namespace aliases and a bounded
+  set of explicit receiver/inheritance forms, while runtime dispatch, magic
+  methods, docblock/generic types, and framework metadata remain unresolved.
 
 ## Validation / follow-up
 

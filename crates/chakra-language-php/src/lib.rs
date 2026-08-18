@@ -5,9 +5,11 @@
 //! and publishes only language-neutral Chakra graph types.
 
 mod indexer;
+mod laravel;
 mod parser;
 
 pub use indexer::{
-    IndexMetrics, IndexReport, LanguageBuildMetrics, PhpIndexError, PhpSyntaxIndex,
-    ReconcileMetrics, ReconcileReport, SyntaxFactCounts, index_repository, scan_repository_sources,
+    IndexMetrics, IndexReport, LanguageBuildMetrics, PhpIndexError, PhpSources, PhpSyntaxIndex,
+    ReconcileMetrics, ReconcileReport, SyntaxFactCounts, detect_laravel, index_repository,
+    scan_repository_sources,
 };
