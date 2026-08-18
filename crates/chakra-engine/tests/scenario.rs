@@ -512,6 +512,63 @@ fn symbol_search_matches_names_and_respects_budgets() -> Result<(), Box<dyn Erro
 }
 
 #[test]
+fn exact_symbol_search_reaches_later_partition_before_bounded_scan() -> Result<(), Box<dyn Error>> {
+    let identity = chakra_domain::identity::WorkspaceIdentity::for_primary_worktree(
+        std::path::Path::new("."),
+    )?;
+    let engine = chakra_engine::WorkspaceEngine::new(identity);
+    let mut rust = SymbolGraph::new();
+    for index in 0..1_025 {
+        let path = format!("src/noise_{index:04}.rs");
+        add_search_symbol(
+            &mut rust,
+            &path,
+            Language::Rust,
+            &format!("noise::item_{index:04}"),
+            SymbolKind::Function,
+            SourceMetadata::path_fallback(&RepoRelativePath::new(path.clone())?),
+        )?;
+    }
+    let mut php = SymbolGraph::new();
+    for index in 0..2 {
+        let path = format!("app/Service{index}.php");
+        add_search_symbol(
+            &mut php,
+            &path,
+            Language::Php,
+            &format!("App::Service{index}::run"),
+            SymbolKind::Method,
+            SourceMetadata::path_fallback(&RepoRelativePath::new(path.clone())?),
+        )?;
+    }
+    let graph = SymbolGraph::merge([rust, php])?;
+    let mut update = engine.begin_update();
+    update.replace_graph(graph);
+    update.set_status(WorkspaceStatus::Ready);
+    update.set_freshness(Freshness::Fresh);
+    engine.publish(update)?;
+
+    let found = engine.symbol_search(SymbolSearchRequest {
+        query: "RUN".to_owned(),
+        limit: Some(20),
+        ..SymbolSearchRequest::default()
+    })?;
+    assert_eq!(found.data.candidates.len(), 2);
+    assert!(
+        found
+            .data
+            .candidates
+            .iter()
+            .all(|candidate| candidate.language == Language::Php)
+    );
+    assert!(found.truncation.iter().any(|detail| {
+        detail.section == TruncationSection::SymbolSearchCandidates
+            && detail.cause == TruncationCause::ExaminedWorkLimit
+    }));
+    Ok(())
+}
+
+#[test]
 fn source_filters_scope_rust_and_php_without_hiding_default_results() -> Result<(), Box<dyn Error>>
 {
     let identity = chakra_domain::identity::WorkspaceIdentity::for_primary_worktree(

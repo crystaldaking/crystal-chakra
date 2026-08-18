@@ -368,6 +368,13 @@ cargo test --locked --manifest-path fixtures/rust/controller-service-provider/Ca
 RUSTDOCFLAGS='-D warnings' cargo doc --locked --workspace --no-deps
 cargo deny check
 
+# Release-only generated Rust/PHP scale regression used by CI:
+cargo build --locked --release --workspace
+cargo test --locked --release -p chakra-mcp \
+  --test large_repository_gate \
+  generated_multi_language_release_gate \
+  -- --ignored --exact --nocapture
+
 # Optional real-provider smoke when rust-analyzer is installed:
 cargo test -p chakra-provider-rust-analyzer --test real_provider -- --ignored --nocapture
 ```
@@ -382,6 +389,8 @@ The provider-readiness contract and Zed-scale transport measurements are in
 [docs/evaluation/v0.1.1-rust-analyzer-readiness.md](docs/evaluation/v0.1.1-rust-analyzer-readiness.md).
 The 1/2/8-worker Zed indexing matrix is in
 [docs/evaluation/v0.1.1-parallel-indexing.md](docs/evaluation/v0.1.1-parallel-indexing.md).
+The generated multi-language CI gate and pinned public Zed protocol are in
+[docs/evaluation/v0.1.1-large-repository-gate.md](docs/evaluation/v0.1.1-large-repository-gate.md).
 Use [docs/evaluation/v0.1-template.md](docs/evaluation/v0.1-template.md) for
 real agent comparisons before expanding scope.
 The reproducible v0.1.1 PHP provider comparison and decision are in

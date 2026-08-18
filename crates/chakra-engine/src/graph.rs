@@ -374,6 +374,8 @@ pub struct SymbolGraph {
     symbols: RedBlackTreeMapSync<EntityId, Arc<Symbol>>,
     /// Exact simple and qualified name lookup used before bounded traversal.
     symbols_by_exact_name: HashTrieMapSync<String, Arc<Vec<EntityId>>>,
+    /// Case-folded simple and qualified names used by case-insensitive search.
+    symbols_by_folded_name: HashTrieMapSync<String, Arc<Vec<EntityId>>>,
     /// File → captured source plus entities declared in it.
     files: RedBlackTreeMapSync<RepoRelativePath, Arc<IndexedFile>>,
     outgoing: HashTrieMapSync<EntityId, Arc<Vec<Edge>>>,
@@ -647,6 +649,19 @@ impl SymbolGraph {
                 break;
             }
         }
+        let folded_simple_name = simple_name.to_lowercase();
+        let folded_qualified_name = symbol.key.qualified_name.to_lowercase();
+        for name in [folded_simple_name.clone(), folded_qualified_name.clone()] {
+            let mut ids = self
+                .symbols_by_folded_name
+                .get(&name)
+                .map_or_else(Vec::new, |ids| ids.as_ref().clone());
+            ids.push(id);
+            self.symbols_by_folded_name.insert_mut(name, Arc::new(ids));
+            if folded_simple_name == folded_qualified_name {
+                break;
+            }
+        }
         self.symbols.insert_mut(id, Arc::new(symbol));
         Ok(id)
     }
@@ -801,6 +816,23 @@ impl SymbolGraph {
                     }
                 }
                 if simple_name == symbol.key.qualified_name {
+                    break;
+                }
+            }
+            let folded_simple_name = simple_name.to_lowercase();
+            let folded_qualified_name = symbol.key.qualified_name.to_lowercase();
+            for name in [folded_simple_name.clone(), folded_qualified_name.clone()] {
+                if let Some(existing) = self.symbols_by_folded_name.get(&name) {
+                    let mut ids = existing.as_ref().clone();
+                    ids.retain(|candidate| candidate != id);
+                    if ids.is_empty() {
+                        self.symbols_by_folded_name.remove_mut(&name);
+                    } else {
+                        self.symbols_by_folded_name
+                            .insert_mut(name.clone(), Arc::new(ids));
+                    }
+                }
+                if folded_simple_name == folded_qualified_name {
                     break;
                 }
             }
@@ -1514,18 +1546,48 @@ impl SymbolGraph {
         self.resolve_name_candidates(name)
     }
 
-    pub(crate) fn resolve_name_candidates(&self, name: &str) -> Vec<EntityId> {
+    pub(crate) fn exact_name_candidates_iter<'a>(
+        &'a self,
+        name: &'a str,
+    ) -> Box<dyn Iterator<Item = EntityId> + 'a> {
         if let Some(parts) = self.parts.as_ref() {
-            let mut candidates: Vec<_> = parts
-                .iter()
-                .flat_map(|part| part.resolve_name_candidates(name))
-                .collect();
-            candidates.sort_unstable();
-            return candidates;
+            return Box::new(
+                parts
+                    .iter()
+                    .flat_map(move |part| part.exact_name_candidates_iter(name)),
+            );
         }
-        self.symbols_by_exact_name
-            .get(name)
-            .map_or_else(Vec::new, |ids| ids.as_ref().clone())
+        Box::new(
+            self.symbols_by_exact_name
+                .get(name)
+                .into_iter()
+                .flat_map(|ids| ids.iter().copied()),
+        )
+    }
+
+    pub(crate) fn folded_name_candidates_iter<'a>(
+        &'a self,
+        folded_name: &'a str,
+    ) -> Box<dyn Iterator<Item = EntityId> + 'a> {
+        if let Some(parts) = self.parts.as_ref() {
+            return Box::new(
+                parts
+                    .iter()
+                    .flat_map(move |part| part.folded_name_candidates_iter(folded_name)),
+            );
+        }
+        Box::new(
+            self.symbols_by_folded_name
+                .get(folded_name)
+                .into_iter()
+                .flat_map(|ids| ids.iter().copied()),
+        )
+    }
+
+    pub(crate) fn resolve_name_candidates(&self, name: &str) -> Vec<EntityId> {
+        let mut candidates: Vec<_> = self.exact_name_candidates_iter(name).collect();
+        candidates.sort_unstable();
+        candidates
     }
 
     pub fn resolve_name_with_context(
@@ -1964,6 +2026,29 @@ impl SymbolGraph {
         if expected_by_name != actual_by_name {
             return Err(ConsistencyError::ExactNameIndexMismatch);
         }
+        let mut expected_by_folded_name: HashMap<String, Vec<EntityId>> = HashMap::new();
+        for (_, symbol) in self.symbols.iter() {
+            let simple_name = symbol.name().to_lowercase();
+            let qualified_name = symbol.key.qualified_name.to_lowercase();
+            expected_by_folded_name
+                .entry(simple_name.clone())
+                .or_default()
+                .push(symbol.id);
+            if qualified_name != simple_name {
+                expected_by_folded_name
+                    .entry(qualified_name)
+                    .or_default()
+                    .push(symbol.id);
+            }
+        }
+        let actual_by_folded_name: HashMap<_, _> = self
+            .symbols_by_folded_name
+            .iter()
+            .map(|(name, ids)| (name.clone(), ids.as_ref().clone()))
+            .collect();
+        if expected_by_folded_name != actual_by_folded_name {
+            return Err(ConsistencyError::FoldedNameIndexMismatch);
+        }
 
         // Count each outgoing edge once. The mirror count is consumed by the
         // incoming index below; the call-site count is consumed by resolved
@@ -2393,6 +2478,8 @@ pub enum ConsistencyError {
     FileIndexMismatch,
     #[error("exact-name index does not match the symbol arena")]
     ExactNameIndexMismatch,
+    #[error("case-folded name index does not match the symbol arena")]
+    FoldedNameIndexMismatch,
     #[error("callable lookup index does not match the symbol arena")]
     CallableIndexMismatch,
     #[error("call site at index {index} is not in its caller's file")]
@@ -3498,6 +3585,20 @@ mod tests {
         assert_eq!(
             graph.validate_consistency(),
             Err(ConsistencyError::ExactNameIndexMismatch)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn audit_catches_folded_name_index_drift() -> Result<(), Box<dyn std::error::Error>> {
+        let mut graph = SymbolGraph::new();
+        add_fn(&mut graph, "module::Target", "src/target.rs")?;
+
+        graph.symbols_by_folded_name = Default::default();
+
+        assert_eq!(
+            graph.validate_consistency(),
+            Err(ConsistencyError::FoldedNameIndexMismatch)
         );
         Ok(())
     }

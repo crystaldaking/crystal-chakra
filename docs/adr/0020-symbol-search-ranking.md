@@ -25,11 +25,15 @@ those facts during indexing.
   7. production before test, example, bench, fixture, generated and vendor;
   8. language, qualified name, path, source range, kind and revision-local id
      as deterministic tie-breakers.
-- Use a bounded binary-heap top-k selection. The scan retains at most the
-  caller's clamped result limit, replaces the current worst result when a
-  better later candidate appears, and marks the envelope truncated after the
-  first additional eligible match. It never allocates one response object per
-  graph symbol.
+- Use a bounded binary-heap top-k selection. A derived case-folded name index
+  seeds exact simple/qualified candidates from every language partition before
+  the bounded broad scan,
+  so an earlier large partition cannot hide an exact match in a later one.
+  The scan retains at most the caller's clamped result limit, replaces the
+  current worst result when a better later candidate appears, and marks the
+  envelope truncated after the first additional eligible match. Prefix and
+  substring ranking semantics remain unchanged. It never allocates one
+  response object per graph symbol.
 - Add bounded `include_languages`, `include_kinds`, `exclude_kinds` and
   case-sensitive segment-aware `namespace_prefix` request filters. Reuse the
   language-neutral source filter from ADR-010 for package, path and source

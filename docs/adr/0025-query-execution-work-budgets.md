@@ -36,9 +36,12 @@ symbol or large diff.
   Repeated retained relationships continue accumulating occurrence counts and
   up to three representative locations.
 - Exact simple and qualified-name resolution uses the graph's derived name
-  index before traversal. Precise-provider relationship matching scans only
-  symbols declared in the provider-reported file, avoiding repository-wide
-  symbol intermediates on the enrichment path.
+  index before traversal. `symbol_search` uses a separate case-folded index to
+  seed its bounded top-k with exact candidates across every language partition
+  before spending the remaining examined-symbol budget on the broad
+  prefix/substring scan. Precise-provider
+  relationship matching scans only symbols declared in the provider-reported
+  file, avoiding repository-wide symbol intermediates on the enrichment path.
 - Each language partition stores its file inventory in a persistent ordered
   map, allowing `repo_map` and text search to stream deterministic paths.
   `repo_map` retains only a bounded examined prefix, sorts that bounded set,

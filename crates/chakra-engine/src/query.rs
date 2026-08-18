@@ -1145,39 +1145,54 @@ fn ranked_symbol_matches(
     let mut best = BinaryHeap::with_capacity(limit.min(graph.symbol_count() as usize));
     let mut truncated = false;
     let mut poll = CancellationPoll::new();
-    for symbol in graph.symbols() {
-        poll.observe(operation)?;
-        if !work.record_examined(ExaminedKind::Symbol) {
-            break;
-        }
-        let Some(metadata) = graph.file_metadata(&symbol.key.path) else {
-            continue;
-        };
-        if !filter.matches(symbol, metadata) {
-            continue;
-        }
-        let Some(match_rank) = match_rank(symbol, &query_lower) else {
-            continue;
-        };
-        let candidate = RankedSymbol {
-            match_rank,
-            kind_rank: kind_rank(symbol.key.kind),
-            source_rank: source_rank(metadata.role),
-            symbol,
-        };
-        if best.len() < limit {
-            if !work.retain_intermediate() {
+    let mut work_exhausted = false;
+    let mut exact_candidates = graph.folded_name_candidates_iter(&query_lower).peekable();
+    if exact_candidates.peek().is_some() {
+        for id in exact_candidates {
+            let Some(symbol) = graph.symbol(id) else {
+                continue;
+            };
+            let match_rank = match_rank(symbol, &query_lower);
+            if !consider_ranked_symbol(
+                graph,
+                symbol,
+                match_rank,
+                filter,
+                limit,
+                operation,
+                work,
+                &mut poll,
+                &mut best,
+                &mut truncated,
+            )? {
+                work_exhausted = true;
                 break;
             }
-            best.push(candidate);
-        } else {
-            truncated = true;
-            if best
-                .peek()
-                .is_some_and(|worst| candidate.cmp(worst) == Ordering::Less)
-            {
-                best.pop();
-                best.push(candidate);
+        }
+    }
+    // Once more exact filtered matches exist than the response can retain,
+    // every prefix/substring match is strictly worse and cannot change the
+    // top-k result. Otherwise continue the bounded broad scan so ranking and
+    // truncation semantics remain unchanged.
+    if !work_exhausted && !truncated {
+        for symbol in graph.symbols() {
+            let match_rank = match_rank(symbol, &query_lower);
+            if match_rank == Some(0) {
+                continue;
+            }
+            if !consider_ranked_symbol(
+                graph,
+                symbol,
+                match_rank,
+                filter,
+                limit,
+                operation,
+                work,
+                &mut poll,
+                &mut best,
+                &mut truncated,
+            )? {
+                break;
             }
         }
     }
@@ -1190,6 +1205,56 @@ fn ranked_symbol_matches(
             .collect(),
         truncated,
     ))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn consider_ranked_symbol<'a>(
+    graph: &'a SymbolGraph,
+    symbol: &'a Symbol,
+    match_rank: Option<u8>,
+    filter: &PreparedSymbolFilter,
+    limit: usize,
+    operation: &OperationContext,
+    work: &mut SectionWorkBudget,
+    poll: &mut CancellationPoll,
+    best: &mut BinaryHeap<RankedSymbol<'a>>,
+    truncated: &mut bool,
+) -> Result<bool, QueryError> {
+    poll.observe(operation)?;
+    if !work.record_examined(ExaminedKind::Symbol) {
+        return Ok(false);
+    }
+    let Some(metadata) = graph.file_metadata(&symbol.key.path) else {
+        return Ok(true);
+    };
+    if !filter.matches(symbol, metadata) {
+        return Ok(true);
+    }
+    let Some(match_rank) = match_rank else {
+        return Ok(true);
+    };
+    let candidate = RankedSymbol {
+        match_rank,
+        kind_rank: kind_rank(symbol.key.kind),
+        source_rank: source_rank(metadata.role),
+        symbol,
+    };
+    if best.len() < limit {
+        if !work.retain_intermediate() {
+            return Ok(false);
+        }
+        best.push(candidate);
+    } else {
+        *truncated = true;
+        if best
+            .peek()
+            .is_some_and(|worst| candidate.cmp(worst) == Ordering::Less)
+        {
+            best.pop();
+            best.push(candidate);
+        }
+    }
+    Ok(true)
 }
 
 fn sort_related(items: &mut [RelatedSymbol]) {
