@@ -5,6 +5,8 @@ use std::fs;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::thread;
 use std::time::{Duration, Instant};
 
 use chakra_domain::indexing::{
@@ -20,10 +22,38 @@ use chakra_engine::{
 use thiserror::Error;
 use tracing::{info, info_span};
 
+#[cfg(unix)]
+use nix::sys::resource::{UsageWho, getrusage};
+#[cfg(unix)]
+use nix::sys::time::TimeValLike;
+
 use crate::parser::{ParsedFile, PhpParser};
 
 const MAX_SOURCE_FILE_BYTES: usize = 8 * 1024 * 1024;
 const MAX_REPOSITORY_SOURCE_BYTES: usize = 256 * 1024 * 1024;
+const PHASE_RESOURCE_SAMPLE_THRESHOLD: u64 = 32;
+
+#[derive(Debug, Clone, Copy)]
+struct PhaseTimer {
+    wall: Instant,
+    cpu_micros: Option<u64>,
+}
+
+impl PhaseTimer {
+    fn start() -> Self {
+        Self {
+            wall: Instant::now(),
+            cpu_micros: process_cpu_micros(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ParseSchedule {
+    effective_workers: u64,
+    peak_active_workers: u64,
+    peak_queue_depth: u64,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct IndexMetrics {
@@ -108,6 +138,10 @@ pub enum PhpIndexError {
     RepositoryTooLarge { limit: usize },
     #[error("failed to parse PHP source: {0}")]
     Parse(String),
+    #[error("failed to start a bounded PHP parser worker: {0}")]
+    WorkerSpawn(#[source] io::Error),
+    #[error("a bounded PHP parser worker panicked")]
+    WorkerPanicked,
     #[error("PHP syntax index update failed: {0}")]
     Update(String),
     #[error(transparent)]
@@ -224,24 +258,67 @@ impl PhpSyntaxIndex {
         graph_limits: GraphBuildLimits,
         cancellation: &IndexCancellation,
     ) -> Result<(Self, SymbolGraph, LanguageBuildMetrics), PhpIndexError> {
+        Self::from_sources_scheduled(sources, graph_limits, 1, usize::MAX, cancellation)
+    }
+
+    /// Builds an initial index with bounded parser workers. Each worker owns
+    /// one Tree-sitter parser; parsed files are reduced in lexical path order.
+    pub fn from_sources_scheduled(
+        sources: BTreeMap<RepoRelativePath, Arc<str>>,
+        graph_limits: GraphBuildLimits,
+        worker_limit: usize,
+        parallel_file_threshold: usize,
+        cancellation: &IndexCancellation,
+    ) -> Result<(Self, SymbolGraph, LanguageBuildMetrics), PhpIndexError> {
         check_cancelled(cancellation)?;
-        let mut parser = PhpParser::new().map_err(parse_error)?;
-        let mut files = BTreeMap::new();
-        let parse_started = Instant::now();
-        for (path, source) in sources {
-            check_cancelled(cancellation)?;
-            let parsed = parser.parse(path.clone(), source).map_err(parse_error)?;
-            files.insert(path, Arc::new(parsed));
-        }
-        let parse_elapsed = parse_started.elapsed();
+        let parse_started = PhaseTimer::start();
+        let (files, parse_schedule) = parse_sources_scheduled(
+            sources,
+            worker_limit.max(1),
+            parallel_file_threshold,
+            cancellation,
+        )?;
+        let parsed_source_bytes = files.values().fold(0_u64, |bytes, file| {
+            bytes.saturating_add(file.source.len() as u64)
+        });
+        let parse_phase = measured_phase(
+            IndexPhase::ParseExtraction,
+            parse_started,
+            files.len() as u64,
+            parsed_source_bytes,
+            parse_schedule.effective_workers,
+            parse_schedule.peak_active_workers,
+            parse_schedule.peak_queue_depth,
+        );
         check_cancelled(cancellation)?;
-        let catalog_started = Instant::now();
+        let catalog_started = PhaseTimer::start();
         let catalog = SymbolCatalog::new(&files);
-        let catalog_elapsed = catalog_started.elapsed();
-        let relationships_started = Instant::now();
+        let catalog_phase = measured_phase(
+            IndexPhase::SymbolCatalog,
+            catalog_started,
+            files.values().map(|file| file.symbols.len() as u64).sum(),
+            0,
+            1,
+            1,
+            0,
+        );
+        let relationships_started = PhaseTimer::start();
         let relationships =
             build_all_relationships(&files, &catalog, graph_limits.max_edges, cancellation)?;
-        let relationships_elapsed = relationships_started.elapsed();
+        let relationship_items = relationships.values().fold(0_u64, |count, contribution| {
+            count
+                .saturating_add(contribution.edges.len() as u64)
+                .saturating_add(contribution.omitted_edges)
+        });
+        let relationships_phase = measured_phase(
+            IndexPhase::Relationships,
+            relationships_started,
+            relationship_items,
+            0,
+            1,
+            1,
+            0,
+        );
         let mut index = Self {
             files,
             relationships,
@@ -250,36 +327,27 @@ impl PhpSyntaxIndex {
             graph_report: GraphBuildReport::default(),
         };
         let facts = index.fact_counts();
-        let materialize_started = Instant::now();
+        let materialize_started = PhaseTimer::start();
         let (graph, graph_report) = index.materialize_graph_bounded(cancellation)?;
         index.graph = graph.clone();
         index.graph_report = graph_report;
-        let materialize_elapsed = materialize_started.elapsed();
+        let materialize_phase = measured_phase(
+            IndexPhase::GraphMaterialization,
+            materialize_started,
+            graph_report
+                .retained_symbols
+                .saturating_add(graph_report.retained_edges)
+                .saturating_add(graph_report.retained_call_sites),
+            0,
+            1,
+            1,
+            0,
+        );
         let phases = vec![
-            phase(
-                IndexPhase::ParseExtraction,
-                parse_elapsed,
-                facts.files,
-                facts.source_bytes,
-            ),
-            phase(IndexPhase::SymbolCatalog, catalog_elapsed, facts.symbols, 0),
-            phase(
-                IndexPhase::Relationships,
-                relationships_elapsed,
-                facts
-                    .relationship_edges
-                    .saturating_add(facts.omitted_relationship_edges),
-                0,
-            ),
-            phase(
-                IndexPhase::GraphMaterialization,
-                materialize_elapsed,
-                graph_report
-                    .retained_symbols
-                    .saturating_add(graph_report.retained_edges)
-                    .saturating_add(graph_report.retained_call_sites),
-                0,
-            ),
+            parse_phase,
+            catalog_phase,
+            relationships_phase,
+            materialize_phase,
         ];
         Ok((
             index,
@@ -943,6 +1011,156 @@ impl PhpSyntaxIndex {
     }
 }
 
+#[derive(Debug)]
+struct ParseWorkerOutput {
+    parser_error: Option<String>,
+    parsed: Vec<(usize, Result<ParsedFile, String>)>,
+}
+
+fn parse_sources_scheduled(
+    sources: BTreeMap<RepoRelativePath, Arc<str>>,
+    worker_limit: usize,
+    parallel_file_threshold: usize,
+    cancellation: &IndexCancellation,
+) -> Result<(BTreeMap<RepoRelativePath, Arc<ParsedFile>>, ParseSchedule), PhpIndexError> {
+    let inputs: Vec<_> = sources.into_iter().collect();
+    if inputs.is_empty() {
+        return Ok((
+            BTreeMap::new(),
+            ParseSchedule {
+                effective_workers: 0,
+                peak_active_workers: 0,
+                peak_queue_depth: 0,
+            },
+        ));
+    }
+    let worker_count = worker_limit.min(inputs.len()).max(1);
+    if worker_count == 1 || inputs.len() < parallel_file_threshold {
+        let mut parser = PhpParser::new().map_err(parse_error)?;
+        let mut files = BTreeMap::new();
+        for (path, source) in inputs {
+            check_cancelled(cancellation)?;
+            let parsed = parser.parse(path.clone(), source).map_err(parse_error)?;
+            files.insert(path, Arc::new(parsed));
+        }
+        return Ok((
+            files,
+            ParseSchedule {
+                effective_workers: 1,
+                peak_active_workers: 1,
+                peak_queue_depth: 0,
+            },
+        ));
+    }
+
+    let cursor = AtomicUsize::new(0);
+    let active_workers = AtomicUsize::new(0);
+    let peak_active_workers = AtomicUsize::new(0);
+    let outputs = thread::scope(|scope| -> Result<Vec<ParseWorkerOutput>, PhpIndexError> {
+        let mut workers = Vec::with_capacity(worker_count);
+        let mut spawn_error = None;
+        for worker in 0..worker_count {
+            let name = format!("chakra-php-parser-{worker}");
+            match thread::Builder::new().name(name).spawn_scoped(scope, || {
+                let active = active_workers.fetch_add(1, Ordering::Relaxed) + 1;
+                peak_active_workers.fetch_max(active, Ordering::Relaxed);
+                let output = (|| {
+                    let mut parser = match PhpParser::new() {
+                        Ok(parser) => parser,
+                        Err(error) => {
+                            return ParseWorkerOutput {
+                                parser_error: Some(error.to_string()),
+                                parsed: Vec::new(),
+                            };
+                        }
+                    };
+                    let mut parsed = Vec::with_capacity(
+                        inputs.len().saturating_add(worker_count - 1) / worker_count,
+                    );
+                    loop {
+                        if cancellation.is_cancelled() {
+                            break;
+                        }
+                        let index = cursor.fetch_add(1, Ordering::Relaxed);
+                        let Some((path, source)) = inputs.get(index) else {
+                            break;
+                        };
+                        let result = parser
+                            .parse(path.clone(), source.clone())
+                            .map_err(|error| error.to_string());
+                        parsed.push((index, result));
+                    }
+                    ParseWorkerOutput {
+                        parser_error: None,
+                        parsed,
+                    }
+                })();
+                active_workers.fetch_sub(1, Ordering::Relaxed);
+                output
+            }) {
+                Ok(worker) => workers.push(worker),
+                Err(error) => {
+                    spawn_error = Some(error);
+                    break;
+                }
+            }
+        }
+        let mut outputs = Vec::with_capacity(workers.len());
+        let mut worker_panicked = false;
+        for worker in workers {
+            match worker.join() {
+                Ok(output) => outputs.push(output),
+                Err(_) => worker_panicked = true,
+            }
+        }
+        if worker_panicked {
+            return Err(PhpIndexError::WorkerPanicked);
+        }
+        if let Some(error) = spawn_error {
+            return Err(PhpIndexError::WorkerSpawn(error));
+        }
+        Ok(outputs)
+    })?;
+    check_cancelled(cancellation)?;
+    if let Some(error) = outputs
+        .iter()
+        .find_map(|output| output.parser_error.clone())
+    {
+        return Err(PhpIndexError::Parse(error));
+    }
+
+    let mut ordered: Vec<Option<Result<ParsedFile, String>>> =
+        std::iter::repeat_with(|| None).take(inputs.len()).collect();
+    for output in outputs {
+        for (index, parsed) in output.parsed {
+            let Some(slot) = ordered.get_mut(index) else {
+                return Err(PhpIndexError::Update(
+                    "parser worker returned an out-of-range source index".to_owned(),
+                ));
+            };
+            *slot = Some(parsed);
+        }
+    }
+    let mut files = BTreeMap::new();
+    for ((path, _), parsed) in inputs.into_iter().zip(ordered) {
+        let parsed = parsed.ok_or_else(|| {
+            PhpIndexError::Update("parser worker omitted an admitted source".to_owned())
+        })?;
+        let parsed = parsed.map_err(PhpIndexError::Parse)?;
+        files.insert(path, Arc::new(parsed));
+    }
+    Ok((
+        files,
+        ParseSchedule {
+            effective_workers: worker_count as u64,
+            peak_active_workers: peak_active_workers.load(Ordering::Relaxed) as u64,
+            // Work is claimed through an atomic cursor, so no retained task queue
+            // exists and its truthful observed depth is zero.
+            peak_queue_depth: 0,
+        },
+    ))
+}
+
 fn check_cancelled(cancellation: &IndexCancellation) -> Result<(), PhpIndexError> {
     if cancellation.is_cancelled() {
         Err(PhpIndexError::Cancelled)
@@ -961,9 +1179,127 @@ fn phase(
         phase,
         language: Some(Language::Php),
         elapsed_micros: elapsed.as_micros().min(u128::from(u64::MAX)) as u64,
+        cpu_micros: None,
+        cpu_utilization_per_mille: None,
         work_items,
         bytes,
+        effective_workers: u64::from(work_items > 0),
+        peak_active_workers: u64::from(work_items > 0),
+        peak_queue_depth: 0,
+        rss_bytes: None,
+        peak_rss_bytes: process_peak_rss_bytes(),
     }
+}
+
+fn measured_phase(
+    phase: IndexPhase,
+    started: PhaseTimer,
+    work_items: u64,
+    bytes: u64,
+    effective_workers: u64,
+    peak_active_workers: u64,
+    peak_queue_depth: u64,
+) -> IndexPhaseMeasurement {
+    let elapsed_micros = started.wall.elapsed().as_micros().min(u128::from(u64::MAX)) as u64;
+    let cpu_micros = process_cpu_micros()
+        .zip(started.cpu_micros)
+        .map(|(end, start)| end.saturating_sub(start));
+    let cpu_utilization_per_mille = cpu_micros.map(|cpu| {
+        cpu.saturating_mul(1_000)
+            .checked_div(elapsed_micros.max(1))
+            .unwrap_or(0)
+    });
+    IndexPhaseMeasurement {
+        phase,
+        language: Some(Language::Php),
+        elapsed_micros,
+        cpu_micros,
+        cpu_utilization_per_mille,
+        work_items,
+        bytes,
+        effective_workers: if work_items == 0 {
+            0
+        } else {
+            effective_workers
+        },
+        peak_active_workers: if work_items == 0 {
+            0
+        } else {
+            peak_active_workers
+        },
+        peak_queue_depth,
+        rss_bytes: (work_items >= PHASE_RESOURCE_SAMPLE_THRESHOLD)
+            .then(process_rss_bytes)
+            .flatten(),
+        peak_rss_bytes: process_peak_rss_bytes(),
+    }
+}
+
+#[cfg(unix)]
+fn process_cpu_micros() -> Option<u64> {
+    let usage = getrusage(UsageWho::RUSAGE_SELF).ok()?;
+    let total = usage
+        .user_time()
+        .num_microseconds()
+        .checked_add(usage.system_time().num_microseconds())?;
+    u64::try_from(total).ok()
+}
+
+#[cfg(not(unix))]
+fn process_cpu_micros() -> Option<u64> {
+    None
+}
+
+#[cfg(unix)]
+fn process_peak_rss_bytes() -> Option<u64> {
+    let rss = u64::try_from(getrusage(UsageWho::RUSAGE_SELF).ok()?.max_rss()).ok()?;
+    #[cfg(target_vendor = "apple")]
+    {
+        Some(rss)
+    }
+    #[cfg(not(target_vendor = "apple"))]
+    {
+        rss.checked_mul(1024)
+    }
+}
+
+#[cfg(not(unix))]
+fn process_peak_rss_bytes() -> Option<u64> {
+    None
+}
+
+#[cfg(target_os = "linux")]
+fn process_rss_bytes() -> Option<u64> {
+    let status = fs::read_to_string("/proc/self/status").ok()?;
+    let line = status.lines().find(|line| line.starts_with("VmRSS:"))?;
+    line.split_whitespace()
+        .nth(1)?
+        .parse::<u64>()
+        .ok()?
+        .checked_mul(1024)
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+fn process_rss_bytes() -> Option<u64> {
+    let output = std::process::Command::new("ps")
+        .args(["-o", "rss=", "-p"])
+        .arg(std::process::id().to_string())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    std::str::from_utf8(&output.stdout)
+        .ok()?
+        .trim()
+        .parse::<u64>()
+        .ok()?
+        .checked_mul(1024)
+}
+
+#[cfg(not(unix))]
+fn process_rss_bytes() -> Option<u64> {
+    None
 }
 
 fn build_all_relationships(
@@ -1211,6 +1547,63 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+
+    fn graph_snapshot(graph: &SymbolGraph) -> Vec<String> {
+        let mut snapshot = vec![format!("files:{:?}", graph.file_summaries())];
+        for symbol in graph.symbols() {
+            snapshot.push(format!("symbol:{symbol:?}"));
+            snapshot.push(format!("outgoing:{:?}", graph.outgoing_edges(symbol.id)));
+            snapshot.push(format!(
+                "calls:{:?}",
+                graph.call_sites_from(symbol.id).collect::<Vec<_>>()
+            ));
+        }
+        snapshot
+    }
+
+    #[test]
+    fn bounded_parallel_parsing_is_deterministic() -> Result<(), Box<dyn Error>> {
+        let mut sources = BTreeMap::new();
+        for index in 0..64 {
+            sources.insert(
+                RepoRelativePath::new(format!("src/Generated{index:03}.php"))?,
+                Arc::<str>::from(format!(
+                    "<?php namespace Generated\\N{index}; function caller_{index}(): void {{ helper_{index}(); }} function helper_{index}(): void {{}}\n"
+                )),
+            );
+        }
+        let cancellation = IndexCancellation::default();
+        let (_, sequential, sequential_metrics) = PhpSyntaxIndex::from_sources_scheduled(
+            sources.clone(),
+            GraphBuildLimits::UNLIMITED,
+            1,
+            1,
+            &cancellation,
+        )?;
+        let (_, parallel, parallel_metrics) = PhpSyntaxIndex::from_sources_scheduled(
+            sources,
+            GraphBuildLimits::UNLIMITED,
+            4,
+            1,
+            &cancellation,
+        )?;
+
+        assert_eq!(graph_snapshot(&sequential), graph_snapshot(&parallel));
+        assert_eq!(sequential_metrics.facts, parallel_metrics.facts);
+        assert_eq!(sequential_metrics.graph, parallel_metrics.graph);
+        let parallel_parse = parallel_metrics
+            .phases
+            .iter()
+            .find(|phase| phase.phase == IndexPhase::ParseExtraction)
+            .ok_or("parallel parse phase missing")?;
+        assert_eq!(parallel_parse.effective_workers, 4);
+        assert!(
+            (1..=parallel_parse.effective_workers).contains(&parallel_parse.peak_active_workers)
+        );
+        assert_eq!(parallel_parse.peak_queue_depth, 0);
+        assert_eq!(parallel_parse.work_items, 64);
+        Ok(())
+    }
 
     fn repository() -> Result<TempDir, Box<dyn Error>> {
         let repository = TempDir::new()?;

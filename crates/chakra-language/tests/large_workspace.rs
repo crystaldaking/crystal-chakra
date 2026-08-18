@@ -2,17 +2,33 @@
 
 use std::error::Error;
 use std::fs;
+use std::hash::Hasher;
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::Arc;
 use std::time::Instant;
 
-use chakra_domain::indexing::IndexPhase;
+use chakra_domain::indexing::{IndexBudgets, IndexCancellation, IndexPhase};
 use chakra_domain::query::{QueryService, RepoMapRequest, SymbolSearchRequest};
 use chakra_domain::state::{Freshness, FreshnessRequirement, WorkspaceStatus};
 use chakra_engine::WorkspaceEngine;
-use chakra_language::{index_repository, start_live_index};
+use chakra_language::{
+    IndexOptions, index_repository, index_repository_with_options, start_live_index,
+};
 use tempfile::TempDir;
+
+fn graph_fingerprint(graph: &chakra_engine::SymbolGraph) -> u64 {
+    let mut fingerprint = std::collections::hash_map::DefaultHasher::new();
+    fingerprint.write(format!("{:?}", graph.file_summaries()).as_bytes());
+    for symbol in graph.symbols() {
+        fingerprint.write(format!("{symbol:?}").as_bytes());
+        fingerprint.write(format!("{:?}", graph.outgoing_edges(symbol.id)).as_bytes());
+        fingerprint.write(
+            format!("{:?}", graph.call_sites_from(symbol.id).collect::<Vec<_>>()).as_bytes(),
+        );
+    }
+    fingerprint.finish()
+}
 
 #[test]
 #[ignore = "set CHAKRA_LARGE_REPOSITORY to an external Git worktree"]
@@ -21,7 +37,21 @@ fn large_repository_stays_within_published_budgets() -> Result<(), Box<dyn Error
         std::env::var_os("CHAKRA_LARGE_REPOSITORY")
             .ok_or("CHAKRA_LARGE_REPOSITORY must name an external Git worktree")?,
     );
-    let report = index_repository(&repository)?;
+    let configured_workers = std::env::var("CHAKRA_INDEX_WORKERS")
+        .ok()
+        .map(|workers| workers.parse::<u64>())
+        .transpose()?
+        .unwrap_or(IndexBudgets::default().max_workers);
+    let report = index_repository_with_options(
+        &repository,
+        IndexOptions::new(
+            IndexBudgets {
+                max_workers: configured_workers,
+                ..IndexBudgets::default()
+            },
+            IndexCancellation::default(),
+        )?,
+    )?;
     let status = &report.metrics.indexing;
 
     assert!(status.coverage.indexed_files <= status.budgets.max_files);
@@ -29,6 +59,8 @@ fn large_repository_stays_within_published_budgets() -> Result<(), Box<dyn Error
     assert!(report.graph.symbol_count() <= status.budgets.max_symbols);
     assert!(report.graph.edge_count() <= status.budgets.max_edges);
     assert!(report.graph.call_site_count() <= status.budgets.max_call_sites);
+    assert!(status.scheduling.peak_active_workers <= status.scheduling.effective_worker_limit);
+    assert!(status.scheduling.effective_worker_limit <= configured_workers);
     for required in [
         IndexPhase::GitInventory,
         IndexPhase::SourceRead,
@@ -44,9 +76,21 @@ fn large_repository_stays_within_published_budgets() -> Result<(), Box<dyn Error
             "missing phase measurement: {required:?}"
         );
     }
+    #[cfg(unix)]
+    for phase in status.phases.iter().filter(|phase| phase.work_items > 0) {
+        assert!(phase.cpu_micros.is_some(), "missing CPU time: {phase:?}");
+        assert!(
+            phase.cpu_utilization_per_mille.is_some(),
+            "missing CPU utilization: {phase:?}"
+        );
+        assert!(
+            phase.peak_rss_bytes.is_some(),
+            "missing peak RSS: {phase:?}"
+        );
+    }
     report.graph.validate_consistency()?;
     eprintln!(
-        "large_workspace_index: root={} elapsed_ms={} discovered_files={} indexed_files={} source_bytes={} symbols={}/{} edges={}/{} call_sites={}/{} degraded={} current_rss_bytes={:?} observed_phase_peak_rss_bytes={:?}",
+        "large_workspace_index: root={} elapsed_ms={} discovered_files={} indexed_files={} source_bytes={} symbols={}/{} edges={}/{} call_sites={}/{} degraded={} configured_workers={} available_parallelism={} effective_worker_limit={} peak_active_workers={} parallel_parse_files={} current_rss_bytes={:?} observed_phase_peak_rss_bytes={:?}",
         report.repository_root.display(),
         report.metrics.elapsed.as_millis(),
         status.coverage.discovered_files,
@@ -59,13 +103,29 @@ fn large_repository_stays_within_published_budgets() -> Result<(), Box<dyn Error
         status.coverage.retained_call_sites,
         status.budgets.max_call_sites,
         status.is_degraded(),
+        status.scheduling.configured_max_workers,
+        status.scheduling.available_parallelism,
+        status.scheduling.effective_worker_limit,
+        status.scheduling.peak_active_workers,
+        status.scheduling.parallel_parse_files,
         status.memory.current_rss_bytes,
         status.memory.observed_phase_peak_rss_bytes,
     );
     for phase in &status.phases {
         eprintln!(
-            "large_workspace_phase: phase={:?} language={:?} elapsed_us={} work_items={} bytes={}",
-            phase.phase, phase.language, phase.elapsed_micros, phase.work_items, phase.bytes,
+            "large_workspace_phase: phase={:?} language={:?} elapsed_us={} cpu_us={:?} cpu_per_mille={:?} workers={} peak_active_workers={} queue_depth={} work_items={} bytes={} rss_bytes={:?} peak_rss_bytes={:?}",
+            phase.phase,
+            phase.language,
+            phase.elapsed_micros,
+            phase.cpu_micros,
+            phase.cpu_utilization_per_mille,
+            phase.effective_workers,
+            phase.peak_active_workers,
+            phase.peak_queue_depth,
+            phase.work_items,
+            phase.bytes,
+            phase.rss_bytes,
+            phase.peak_rss_bytes,
         );
     }
     let first_symbol = report
@@ -101,6 +161,54 @@ fn large_repository_stays_within_published_budgets() -> Result<(), Box<dyn Error
         })?;
         assert_eq!(symbols.data.candidates.len(), 1);
         assert_eq!(symbols.indexing.coverage, map.indexing.coverage);
+    }
+    Ok(())
+}
+
+#[test]
+#[ignore = "set CHAKRA_LARGE_REPOSITORY to an external Git worktree"]
+fn large_repository_worker_matrix_is_deterministic() -> Result<(), Box<dyn Error>> {
+    let repository = PathBuf::from(
+        std::env::var_os("CHAKRA_LARGE_REPOSITORY")
+            .ok_or("CHAKRA_LARGE_REPOSITORY must name an external Git worktree")?,
+    );
+    let available = std::thread::available_parallelism()
+        .map(|value| value.get() as u64)
+        .unwrap_or(1);
+    let mut worker_counts = vec![1, 2, IndexBudgets::default().max_workers.min(available)];
+    worker_counts.sort_unstable();
+    worker_counts.dedup();
+    let mut baseline = None;
+
+    for workers in worker_counts {
+        let report = index_repository_with_options(
+            &repository,
+            IndexOptions::new(
+                IndexBudgets {
+                    max_workers: workers,
+                    ..IndexBudgets::default()
+                },
+                IndexCancellation::default(),
+            )?,
+        )?;
+        let fingerprint = graph_fingerprint(&report.graph);
+        let stable = (
+            fingerprint,
+            report.metrics.indexing.coverage.clone(),
+            report.metrics.indexing.capabilities.clone(),
+            report.metrics.indexing.degradations.clone(),
+        );
+        if let Some(expected) = baseline.as_ref() {
+            assert_eq!(&stable, expected);
+        } else {
+            baseline = Some(stable);
+        }
+        eprintln!(
+            "large_workspace_determinism: workers={} effective={} elapsed_ms={} fingerprint={fingerprint:016x}",
+            workers,
+            report.metrics.indexing.scheduling.effective_worker_limit,
+            report.metrics.elapsed.as_millis(),
+        );
     }
     Ok(())
 }

@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use chakra_domain::indexing::{
     IndexBudgetError, IndexBudgetKind, IndexBudgets, IndexCancellation, IndexCapability,
     IndexCapabilityCoverage, IndexCoverage, IndexDegradation, IndexMemoryMetrics, IndexPhase,
-    IndexPhaseMeasurement, IndexPublicationMetrics, IndexingStatus,
+    IndexPhaseMeasurement, IndexPublicationMetrics, IndexSchedulingMetrics, IndexingStatus,
 };
 use chakra_domain::location::RepoRelativePath;
 use chakra_domain::symbol::Language;
@@ -19,6 +19,14 @@ use chakra_engine::{
 };
 use thiserror::Error;
 use tracing::{info, warn};
+
+#[cfg(unix)]
+use nix::sys::resource::{UsageWho, getrusage};
+#[cfg(unix)]
+use nix::sys::time::TimeValLike;
+
+const PARALLEL_PARSE_FILE_THRESHOLD: u64 = 32;
+const INDEX_WORKER_MEMORY_RESERVE_BYTES: u64 = 64 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkspaceSources {
@@ -40,6 +48,116 @@ pub struct WorkspaceSourceScan {
 pub struct IndexOptions {
     pub budgets: IndexBudgets,
     pub cancellation: IndexCancellation,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct WorkerPolicy {
+    configured_max_workers: u64,
+    available_parallelism: u64,
+    source_memory_reserve_bytes: u64,
+    worker_memory_reserve_bytes: u64,
+    memory_limited_workers: u64,
+    effective_worker_limit: u64,
+}
+
+impl WorkerPolicy {
+    fn from_budgets(budgets: IndexBudgets) -> Self {
+        let available_parallelism = std::thread::available_parallelism()
+            .map(|value| value.get() as u64)
+            .unwrap_or(1);
+        let source_memory_reserve_bytes = budgets.max_workspace_source_bytes.min(
+            budgets
+                .memory_target_bytes
+                .saturating_sub(INDEX_WORKER_MEMORY_RESERVE_BYTES),
+        );
+        let schedulable_memory = budgets
+            .memory_target_bytes
+            .saturating_sub(source_memory_reserve_bytes);
+        let memory_limited_workers =
+            (schedulable_memory / INDEX_WORKER_MEMORY_RESERVE_BYTES).max(1);
+        let effective_worker_limit = budgets
+            .max_workers
+            .min(available_parallelism)
+            .min(memory_limited_workers)
+            .max(1);
+        Self {
+            configured_max_workers: budgets.max_workers,
+            available_parallelism,
+            source_memory_reserve_bytes,
+            worker_memory_reserve_bytes: INDEX_WORKER_MEMORY_RESERVE_BYTES,
+            memory_limited_workers,
+            effective_worker_limit,
+        }
+    }
+
+    fn scheduling(self, phases: &[IndexPhaseMeasurement]) -> IndexSchedulingMetrics {
+        let peak_active_workers = phases
+            .iter()
+            .map(|phase| phase.peak_active_workers)
+            .max()
+            .unwrap_or(0);
+        let peak_queue_depth = phases
+            .iter()
+            .map(|phase| phase.peak_queue_depth)
+            .max()
+            .unwrap_or(0);
+        let mut parallel_parse_files = 0_u64;
+        let mut sequential_parse_files = 0_u64;
+        for phase in phases
+            .iter()
+            .filter(|phase| phase.phase == IndexPhase::ParseExtraction)
+        {
+            if phase.effective_workers > 1 {
+                parallel_parse_files = parallel_parse_files.saturating_add(phase.work_items);
+            } else {
+                sequential_parse_files = sequential_parse_files.saturating_add(phase.work_items);
+            }
+        }
+        IndexSchedulingMetrics {
+            configured_max_workers: self.configured_max_workers,
+            available_parallelism: self.available_parallelism,
+            source_memory_reserve_bytes: self.source_memory_reserve_bytes,
+            worker_memory_reserve_bytes: self.worker_memory_reserve_bytes,
+            memory_limited_workers: self.memory_limited_workers,
+            effective_worker_limit: self.effective_worker_limit,
+            peak_active_workers,
+            peak_queue_depth,
+            parallel_parse_files,
+            sequential_parse_files,
+            parallel_parse_file_threshold: PARALLEL_PARSE_FILE_THRESHOLD,
+            low_resource_mode: self.effective_worker_limit == 1,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PhaseTimer {
+    wall: Instant,
+    cpu_micros: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PhaseConcurrency {
+    effective_workers: u64,
+    peak_active_workers: u64,
+    peak_queue_depth: u64,
+}
+
+impl PhaseConcurrency {
+    const SERIAL: Self = Self {
+        effective_workers: 1,
+        peak_active_workers: 1,
+        peak_queue_depth: 0,
+    };
+}
+
+impl PhaseTimer {
+    fn start() -> Self {
+        Self {
+            wall: Instant::now(),
+            cpu_micros: process_cpu_micros(),
+        }
+    }
 }
 
 impl IndexOptions {
@@ -176,7 +294,7 @@ impl WorkspaceSyntaxIndex {
         mut scan: WorkspaceSourceScan,
         cancellation: &IndexCancellation,
     ) -> Result<ReconcileReport, WorkspaceIndexError> {
-        let started = Instant::now();
+        let started = PhaseTimer::start();
         check_cancelled(cancellation)?;
         let (rust_limits, php_limits) = self.live_graph_limits(&scan.sources);
         let rust_sources = std::mem::take(&mut scan.sources.rust);
@@ -208,15 +326,16 @@ impl WorkspaceSyntaxIndex {
 
         let (graph, composition_phase) = if graph_changed {
             check_cancelled(cancellation)?;
-            let composition_started = Instant::now();
+            let composition_started = PhaseTimer::start();
             let graph =
                 SymbolGraph::merge([rust_index.graph().clone(), php_index.graph().clone()])?;
-            let composition_phase = phase(
+            let composition_phase = measured_phase(
                 IndexPhase::LanguageComposition,
                 None,
-                composition_started.elapsed(),
+                composition_started,
                 2,
                 0,
+                PhaseConcurrency::SERIAL,
             );
             (Some(graph), Some(composition_phase))
         } else {
@@ -236,15 +355,16 @@ impl WorkspaceSyntaxIndex {
         }
         phases.extend(composition_phase);
         if graph_changed {
-            phases.push(phase(
+            phases.push(measured_phase(
                 IndexPhase::LiveReconciliation,
                 None,
-                started.elapsed(),
+                started,
                 metrics
                     .scanned_files
                     .saturating_add(metrics.reparsed_files)
                     .saturating_add(metrics.relationship_files_recomputed),
                 scan.source_bytes,
+                PhaseConcurrency::SERIAL,
             ));
         }
 
@@ -376,6 +496,7 @@ pub fn index_repository_with_options(
 ) -> Result<IndexReport, WorkspaceIndexError> {
     let started = Instant::now();
     let budgets = options.budgets.validate()?;
+    let worker_policy = WorkerPolicy::from_budgets(budgets);
     check_cancelled(&options.cancellation)?;
     let repository_root = chakra_git::resolve_repository_root(root)?;
     let mut rss_peak = process_rss_bytes();
@@ -390,39 +511,46 @@ pub fn index_repository_with_options(
     let rust_sources = std::mem::take(&mut scan.sources.rust);
     let php_sources = std::mem::take(&mut scan.sources.php);
     let (rust, rust_graph, rust_metrics) =
-        chakra_language_rust::RustSyntaxIndex::from_sources_bounded(
+        chakra_language_rust::RustSyntaxIndex::from_sources_scheduled(
             rust_sources,
             rust_limits,
+            worker_policy.effective_worker_limit as usize,
+            PARALLEL_PARSE_FILE_THRESHOLD as usize,
             &options.cancellation,
         )?;
     rss_peak = max_option(rss_peak, process_rss_bytes());
-    let (php, php_graph, php_metrics) = chakra_language_php::PhpSyntaxIndex::from_sources_bounded(
-        php_sources,
-        php_limits,
-        &options.cancellation,
-    )?;
+    let (php, php_graph, php_metrics) =
+        chakra_language_php::PhpSyntaxIndex::from_sources_scheduled(
+            php_sources,
+            php_limits,
+            worker_policy.effective_worker_limit as usize,
+            PARALLEL_PARSE_FILE_THRESHOLD as usize,
+            &options.cancellation,
+        )?;
     rss_peak = max_option(rss_peak, process_rss_bytes());
     check_cancelled(&options.cancellation)?;
 
-    let composition_started = Instant::now();
+    let composition_started = PhaseTimer::start();
     let graph = SymbolGraph::merge([rust_graph, php_graph])?;
-    let composition_phase = phase(
+    let composition_phase = measured_phase(
         IndexPhase::LanguageComposition,
         None,
-        composition_started.elapsed(),
+        composition_started,
         2,
         0,
+        PhaseConcurrency::SERIAL,
     );
-    let validation_started = Instant::now();
+    let validation_started = PhaseTimer::start();
     let audit = graph.audit_consistency()?;
-    let validation_phase = phase(
+    let validation_phase = measured_phase(
         IndexPhase::GraphValidation,
         None,
-        validation_started.elapsed(),
+        validation_started,
         audit
             .symbols_audited
             .saturating_add(audit.adjacency_entries_examined),
         0,
+        PhaseConcurrency::SERIAL,
     );
     rss_peak = max_option(rss_peak, process_rss_bytes());
 
@@ -516,6 +644,9 @@ pub fn index_repository_with_options(
         edges = metrics.edges,
         call_sites = metrics.call_sites,
         degraded = metrics.indexing.is_degraded(),
+        configured_workers = metrics.indexing.scheduling.configured_max_workers,
+        effective_worker_limit = metrics.indexing.scheduling.effective_worker_limit,
+        peak_active_workers = metrics.indexing.scheduling.peak_active_workers,
         elapsed_micros = elapsed.as_micros(),
         "bounded Rust/PHP syntax index completed"
     );
@@ -539,14 +670,21 @@ pub fn scan_repository_sources_with_options(
     options: &IndexOptions,
 ) -> Result<WorkspaceSourceScan, WorkspaceIndexError> {
     check_cancelled(&options.cancellation)?;
-    let inventory_started = Instant::now();
+    let inventory_started = PhaseTimer::start();
     let paths = chakra_git::discover_source_files(repository_root)?;
-    let inventory_elapsed = inventory_started.elapsed();
-    scan_discovered_sources_with_options(
+    let inventory_phase = measured_phase(
+        IndexPhase::GitInventory,
+        None,
+        inventory_started,
+        paths.len() as u64,
+        0,
+        PhaseConcurrency::SERIAL,
+    );
+    scan_discovered_sources_with_inventory_phase(
         repository_root,
         options,
         &paths,
-        inventory_elapsed,
+        inventory_phase,
         &mut FilesystemSourceLoader,
     )
 }
@@ -597,10 +735,32 @@ pub(crate) fn scan_discovered_sources_with_options(
     inventory_elapsed: Duration,
     loader: &mut impl WorkspaceSourceLoader,
 ) -> Result<WorkspaceSourceScan, WorkspaceIndexError> {
+    scan_discovered_sources_with_inventory_phase(
+        repository_root,
+        options,
+        paths,
+        phase(
+            IndexPhase::GitInventory,
+            None,
+            inventory_elapsed,
+            paths.len() as u64,
+            0,
+        ),
+        loader,
+    )
+}
+
+fn scan_discovered_sources_with_inventory_phase(
+    repository_root: &Path,
+    options: &IndexOptions,
+    paths: &[RepoRelativePath],
+    inventory_phase: IndexPhaseMeasurement,
+    loader: &mut impl WorkspaceSourceLoader,
+) -> Result<WorkspaceSourceScan, WorkspaceIndexError> {
     let budgets = options.budgets.validate()?;
     check_cancelled(&options.cancellation)?;
     let discovered_files = paths.len() as u64;
-    let read_started = Instant::now();
+    let read_started = PhaseTimer::start();
     let mut rust = BTreeMap::new();
     let mut php = BTreeMap::new();
     let mut source_bytes = 0_u64;
@@ -691,19 +851,14 @@ pub(crate) fn scan_discovered_sources_with_options(
         });
     }
     let phases = vec![
-        phase(
-            IndexPhase::GitInventory,
-            None,
-            inventory_elapsed,
-            discovered_files,
-            0,
-        ),
-        phase(
+        inventory_phase,
+        measured_phase(
             IndexPhase::SourceRead,
             None,
-            read_started.elapsed(),
+            read_started,
             indexed_files,
             source_bytes,
+            PhaseConcurrency::SERIAL,
         ),
     ];
     Ok(WorkspaceSourceScan {
@@ -859,12 +1014,14 @@ fn build_indexing_status(
     memory.retained_graph_symbols = retained_symbols;
     memory.retained_graph_edges = retained_edges;
     memory.retained_graph_call_sites = retained_call_sites;
+    let scheduling = WorkerPolicy::from_budgets(budgets).scheduling(&phases);
     IndexingStatus {
         budgets,
         coverage,
         capabilities,
         degradations,
         phases,
+        scheduling,
         memory,
         publication,
     }
@@ -999,9 +1156,93 @@ fn phase(
         phase,
         language,
         elapsed_micros: elapsed.as_micros().min(u128::from(u64::MAX)) as u64,
+        cpu_micros: None,
+        cpu_utilization_per_mille: None,
         work_items,
         bytes,
+        effective_workers: u64::from(work_items > 0),
+        peak_active_workers: u64::from(work_items > 0),
+        peak_queue_depth: 0,
+        rss_bytes: None,
+        peak_rss_bytes: process_peak_rss_bytes(),
     }
+}
+
+fn measured_phase(
+    phase: IndexPhase,
+    language: Option<Language>,
+    started: PhaseTimer,
+    work_items: u64,
+    bytes: u64,
+    concurrency: PhaseConcurrency,
+) -> IndexPhaseMeasurement {
+    let elapsed = started.wall.elapsed();
+    let elapsed_micros = elapsed.as_micros().min(u128::from(u64::MAX)) as u64;
+    let cpu_micros = process_cpu_micros()
+        .zip(started.cpu_micros)
+        .map(|(end, start)| end.saturating_sub(start));
+    let cpu_utilization_per_mille = cpu_micros.map(|cpu| {
+        cpu.saturating_mul(1_000)
+            .checked_div(elapsed_micros.max(1))
+            .unwrap_or(0)
+    });
+    IndexPhaseMeasurement {
+        phase,
+        language,
+        elapsed_micros,
+        cpu_micros,
+        cpu_utilization_per_mille,
+        work_items,
+        bytes,
+        effective_workers: if work_items == 0 {
+            0
+        } else {
+            concurrency.effective_workers
+        },
+        peak_active_workers: if work_items == 0 {
+            0
+        } else {
+            concurrency.peak_active_workers
+        },
+        peak_queue_depth: concurrency.peak_queue_depth,
+        rss_bytes: (work_items >= PARALLEL_PARSE_FILE_THRESHOLD)
+            .then(process_rss_bytes)
+            .flatten(),
+        peak_rss_bytes: process_peak_rss_bytes(),
+    }
+}
+
+#[cfg(unix)]
+fn process_cpu_micros() -> Option<u64> {
+    let usage = getrusage(UsageWho::RUSAGE_SELF).ok()?;
+    let total = usage
+        .user_time()
+        .num_microseconds()
+        .checked_add(usage.system_time().num_microseconds())?;
+    u64::try_from(total).ok()
+}
+
+#[cfg(not(unix))]
+fn process_cpu_micros() -> Option<u64> {
+    None
+}
+
+#[cfg(unix)]
+fn process_peak_rss_bytes() -> Option<u64> {
+    let rss = u64::try_from(getrusage(UsageWho::RUSAGE_SELF).ok()?.max_rss()).ok()?;
+    #[cfg(target_vendor = "apple")]
+    {
+        Some(rss)
+    }
+    #[cfg(not(target_vendor = "apple"))]
+    {
+        rss.checked_mul(1024)
+    }
+}
+
+#[cfg(not(unix))]
+fn process_peak_rss_bytes() -> Option<u64> {
+    None
 }
 
 fn max_option(left: Option<u64>, right: Option<u64>) -> Option<u64> {
@@ -1091,7 +1332,69 @@ mod tests {
         assert_eq!(report.metrics.rust_files, 1);
         assert_eq!(report.metrics.php_files, 1);
         assert!(!report.metrics.indexing.is_degraded());
+        assert_eq!(report.metrics.indexing.scheduling.peak_active_workers, 1);
+        assert_eq!(report.metrics.indexing.scheduling.parallel_parse_files, 0);
         Ok(())
+    }
+
+    #[test]
+    fn shared_worker_policy_bounds_both_language_adapters() -> Result<(), Box<dyn Error>> {
+        let repository = repository()?;
+        for index in 0..40 {
+            fs::write(
+                repository.path().join(format!("generated_{index:03}.rs")),
+                format!("pub fn rust_{index}() {{}}\n"),
+            )?;
+            fs::write(
+                repository.path().join(format!("Generated{index:03}.php")),
+                format!("<?php function php_{index}(): void {{}}\n"),
+            )?;
+        }
+        let budgets = IndexBudgets {
+            max_workers: 2,
+            ..IndexBudgets::default()
+        };
+        let report = index_repository_with_options(
+            repository.path(),
+            IndexOptions::new(budgets, IndexCancellation::default())?,
+        )?;
+        let scheduling = &report.metrics.indexing.scheduling;
+        assert_eq!(scheduling.configured_max_workers, 2);
+        assert!(scheduling.effective_worker_limit <= 2);
+        assert!(scheduling.peak_active_workers <= scheduling.effective_worker_limit);
+        for phase in &report.metrics.indexing.phases {
+            assert!(phase.effective_workers <= scheduling.effective_worker_limit);
+            assert!(phase.peak_active_workers <= phase.effective_workers);
+        }
+        if scheduling.effective_worker_limit > 1 {
+            assert_eq!(scheduling.parallel_parse_files, 80);
+            assert!((1..=2).contains(&scheduling.peak_active_workers));
+        } else {
+            assert_eq!(scheduling.sequential_parse_files, 80);
+            assert!(scheduling.low_resource_mode);
+        }
+        assert_eq!(scheduling.peak_queue_depth, 0);
+        report.graph.validate_consistency()?;
+        Ok(())
+    }
+
+    #[test]
+    fn memory_policy_can_force_single_worker_mode() {
+        let budgets = IndexBudgets {
+            max_workers: 8,
+            memory_target_bytes: INDEX_WORKER_MEMORY_RESERVE_BYTES,
+            ..IndexBudgets::default()
+        };
+        let policy = WorkerPolicy::from_budgets(budgets);
+        assert_eq!(policy.source_memory_reserve_bytes, 0);
+        assert_eq!(
+            policy.worker_memory_reserve_bytes,
+            INDEX_WORKER_MEMORY_RESERVE_BYTES
+        );
+        assert_eq!(policy.memory_limited_workers, 1);
+        assert_eq!(policy.effective_worker_limit, 1);
+        let scheduling = policy.scheduling(&[]);
+        assert!(scheduling.low_resource_mode);
     }
 
     #[test]

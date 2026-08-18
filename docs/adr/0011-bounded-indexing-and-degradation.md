@@ -127,4 +127,5 @@ pathological files or repositories.
   reported 182,452,224 bytes maximum RSS. Atomic publication took 1 µs.
 - Issue #15 owns repeatable generated CI gates and the final v0.1.1 readiness
   record. Issue #16 owns structural publication, #17 freshness scan cost, #20
-  ADR-012 owns end-to-end query cancellation; #21 owns bounded parallelism.
+  ADR-012 owns end-to-end query cancellation; ADR-014 resolves #21 with bounded
+  worker-local parsing and resource-aware scheduling.

@@ -171,16 +171,22 @@ entering the expensive-query pool.
 Indexing defaults to 100,000 Git-discovered Rust/PHP files, 8 MiB per source,
 128 MiB total source, 500,000 symbols, 1,000,000 relationships, and 1,000,000
 compact call sites. Cold-start and phase-sampled resident-memory targets default
-to 120 seconds and 2 GiB. All limits are configurable with `chakra serve
---help`, validated against hard safety ceilings, and reused by live updates.
+to 120 seconds and 2 GiB. Initial parsing may use up to eight worker-local
+Tree-sitter parsers. The effective limit is the minimum of the configured
+`--max-index-workers`, available logical CPUs, and a 64 MiB-per-worker memory
+reserve after reserving the configured source budget; repositories with fewer
+than 32 files and ordinary live edits remain single-threaded. All limits are
+configurable with `chakra serve --help`, validated against hard safety
+ceilings, and reused by live updates.
 
 Count/byte limits are enforced before graph allocation. When one is reached,
 Chakra publishes an internally consistent fresh-but-`degraded` revision where
 possible: files, text search, and retained declarations remain queryable. Every
 query envelope reports exact indexing budgets, corpus coverage, capability
 completeness, affected capabilities, omission cause, phase measurements, and
-best-effort memory samples. Schema v3 also reports graph-publication facts
-reused, rebuilt, or copied in the current revision. Ordinary edits use
+best-effort CPU/RSS samples. Scheduling metadata reports configured, available,
+memory-limited, and effective workers plus queue depth. Schema v4 carries these
+facts together with v3 graph-publication reuse/copy metrics. Ordinary edits use
 persistent file-owned graph deltas and shallow Rust/PHP composition, so old
 snapshot readers remain immutable without a second complete combined-graph
 copy. Calls are never resolved against a truncated symbol catalog. Time/RSS
@@ -232,6 +238,8 @@ The warmed deterministic freshness measurements are in
 [docs/evaluation/v0.1.1-freshness-reconciliation.md](docs/evaluation/v0.1.1-freshness-reconciliation.md).
 The provider-readiness contract and Zed-scale transport measurements are in
 [docs/evaluation/v0.1.1-rust-analyzer-readiness.md](docs/evaluation/v0.1.1-rust-analyzer-readiness.md).
+The 1/2/8-worker Zed indexing matrix is in
+[docs/evaluation/v0.1.1-parallel-indexing.md](docs/evaluation/v0.1.1-parallel-indexing.md).
 Use [docs/evaluation/v0.1-template.md](docs/evaluation/v0.1-template.md) for
 real agent comparisons before expanding scope.
 

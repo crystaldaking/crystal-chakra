@@ -74,10 +74,11 @@ non-deferrable because retrofitting it would distort the engine.
   updates retain private construction and atomic pointer publication while
   sharing all unchanged graph payloads. The public query/domain API does not
   expose `rpds` types.
-- Query envelope schema v3 copies the pinned snapshot's `IndexingStatus`,
-  including v2 coverage/degradation and v3 structural-publication metrics, so
-  every query distinguishes complete/degraded revisions and copied versus
-  reused update work.
+- Query envelope schema v4 copies the pinned snapshot's `IndexingStatus`,
+  including v2 coverage/degradation, v3 structural-publication metrics, and v4
+  worker/CPU/RSS scheduling measurements. Every query distinguishes
+  complete/degraded revisions, copied versus reused update work, and the
+  effective resource policy used to construct that revision.
 - A lost update race surfaces as a typed `Conflict`. The live reconciliation
   publisher retries from a fresh base with a fixed attempt bound rather than
   overwriting a newer revision.

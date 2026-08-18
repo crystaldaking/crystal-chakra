@@ -19,6 +19,7 @@ pub const DEFAULT_MAX_INDEX_EDGES: u64 = 1_000_000;
 pub const DEFAULT_MAX_INDEX_CALL_SITES: u64 = 1_000_000;
 pub const DEFAULT_STARTUP_TARGET_MILLIS: u64 = 120_000;
 pub const DEFAULT_MEMORY_TARGET_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+pub const DEFAULT_MAX_INDEX_WORKERS: u64 = 8;
 
 pub const HARD_MAX_INDEX_FILES: u64 = 1_000_000;
 pub const HARD_MAX_SOURCE_FILE_BYTES: u64 = 64 * 1024 * 1024;
@@ -28,6 +29,7 @@ pub const HARD_MAX_INDEX_EDGES: u64 = 5_000_000;
 pub const HARD_MAX_INDEX_CALL_SITES: u64 = 5_000_000;
 pub const HARD_MAX_STARTUP_TARGET_MILLIS: u64 = 600_000;
 pub const HARD_MAX_MEMORY_TARGET_BYTES: u64 = 128 * 1024 * 1024 * 1024;
+pub const HARD_MAX_INDEX_WORKERS: u64 = 64;
 
 /// Deterministic work/resource limits for one syntax workspace revision.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -44,6 +46,10 @@ pub struct IndexBudgets {
     /// Observable current/phase-sampled RSS target. It is not used to mutate
     /// graph contents because allocator/OS observations are nondeterministic.
     pub memory_target_bytes: u64,
+    /// Upper bound for CPU workers. The effective value is additionally capped
+    /// by available parallelism, the memory policy, and phase thresholds.
+    #[serde(default = "default_max_index_workers")]
+    pub max_workers: u64,
 }
 
 impl Default for IndexBudgets {
@@ -57,6 +63,7 @@ impl Default for IndexBudgets {
             max_call_sites: DEFAULT_MAX_INDEX_CALL_SITES,
             startup_target_millis: DEFAULT_STARTUP_TARGET_MILLIS,
             memory_target_bytes: DEFAULT_MEMORY_TARGET_BYTES,
+            max_workers: DEFAULT_MAX_INDEX_WORKERS,
         }
     }
 }
@@ -91,11 +98,16 @@ impl IndexBudgets {
             self.memory_target_bytes,
             HARD_MAX_MEMORY_TARGET_BYTES,
         )?;
+        validate_limit("max_workers", self.max_workers, HARD_MAX_INDEX_WORKERS)?;
         if self.max_source_file_bytes > self.max_workspace_source_bytes {
             return Err(IndexBudgetError::FileExceedsWorkspace);
         }
         Ok(self)
     }
+}
+
+const fn default_max_index_workers() -> u64 {
+    DEFAULT_MAX_INDEX_WORKERS
 }
 
 fn validate_limit(name: &'static str, value: u64, hard_max: u64) -> Result<(), IndexBudgetError> {
@@ -164,8 +176,50 @@ pub struct IndexPhaseMeasurement {
     pub phase: IndexPhase,
     pub language: Option<Language>,
     pub elapsed_micros: u64,
+    /// Process CPU consumed during the phase when the platform exposes it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu_micros: Option<u64>,
+    /// CPU time divided by wall time, where 1,000 means one fully utilized
+    /// logical CPU and 2,000 means two.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu_utilization_per_mille: Option<u64>,
     pub work_items: u64,
     pub bytes: u64,
+    /// Effective workers selected for this phase after all caps/thresholds.
+    #[serde(default)]
+    pub effective_workers: u64,
+    /// Observed high-water count of workers executing this phase at once.
+    #[serde(default)]
+    pub peak_active_workers: u64,
+    /// Observed scheduler queue depth. Zero is truthful for cursor-based
+    /// scheduling that has no retained task queue.
+    #[serde(default)]
+    pub peak_queue_depth: u64,
+    /// Best-effort resident memory sample at the end of the phase.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rss_bytes: Option<u64>,
+    /// Best-effort process high-water RSS observed by the end of the phase.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub peak_rss_bytes: Option<u64>,
+}
+
+/// Resource-aware scheduling facts for one completed syntax revision.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct IndexSchedulingMetrics {
+    pub configured_max_workers: u64,
+    pub available_parallelism: u64,
+    /// Source bytes reserved before assigning memory to parser workers.
+    pub source_memory_reserve_bytes: u64,
+    /// Conservative private-memory allowance assigned to each parser worker.
+    pub worker_memory_reserve_bytes: u64,
+    pub memory_limited_workers: u64,
+    pub effective_worker_limit: u64,
+    pub peak_active_workers: u64,
+    pub peak_queue_depth: u64,
+    pub parallel_parse_files: u64,
+    pub sequential_parse_files: u64,
+    pub parallel_parse_file_threshold: u64,
+    pub low_resource_mode: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -259,6 +313,8 @@ pub struct IndexingStatus {
     pub capabilities: Vec<IndexCapabilityCoverage>,
     pub degradations: Vec<IndexDegradation>,
     pub phases: Vec<IndexPhaseMeasurement>,
+    #[serde(default)]
+    pub scheduling: IndexSchedulingMetrics,
     pub memory: IndexMemoryMetrics,
     pub publication: IndexPublicationMetrics,
 }
@@ -304,6 +360,18 @@ mod tests {
             inverted.validate(),
             Err(IndexBudgetError::FileExceedsWorkspace)
         );
+
+        let too_many_workers = IndexBudgets {
+            max_workers: HARD_MAX_INDEX_WORKERS + 1,
+            ..IndexBudgets::default()
+        };
+        assert!(matches!(
+            too_many_workers.validate(),
+            Err(IndexBudgetError::OutOfRange {
+                name: "max_workers",
+                ..
+            })
+        ));
     }
 
     #[test]

@@ -11,8 +11,9 @@ use std::time::Instant;
 
 use chakra_domain::indexing::{
     DEFAULT_MAX_INDEX_CALL_SITES, DEFAULT_MAX_INDEX_EDGES, DEFAULT_MAX_INDEX_FILES,
-    DEFAULT_MAX_INDEX_SYMBOLS, DEFAULT_MAX_SOURCE_FILE_BYTES, DEFAULT_MAX_WORKSPACE_SOURCE_BYTES,
-    DEFAULT_MEMORY_TARGET_BYTES, DEFAULT_STARTUP_TARGET_MILLIS, IndexBudgets, IndexCancellation,
+    DEFAULT_MAX_INDEX_SYMBOLS, DEFAULT_MAX_INDEX_WORKERS, DEFAULT_MAX_SOURCE_FILE_BYTES,
+    DEFAULT_MAX_WORKSPACE_SOURCE_BYTES, DEFAULT_MEMORY_TARGET_BYTES, DEFAULT_STARTUP_TARGET_MILLIS,
+    IndexBudgets, IndexCancellation,
 };
 use chakra_domain::state::{Freshness, WorkspaceStatus};
 use chakra_engine::WorkspaceEngine;
@@ -77,6 +78,10 @@ struct ServeArgs {
     /// Observable current/phase-sampled resident-memory target in bytes.
     #[arg(long, default_value_t = DEFAULT_MEMORY_TARGET_BYTES)]
     memory_target_bytes: u64,
+
+    /// Maximum syntax parser workers; effective use is CPU/memory/phase bounded.
+    #[arg(long, default_value_t = DEFAULT_MAX_INDEX_WORKERS)]
+    max_index_workers: u64,
 }
 
 #[tokio::main]
@@ -125,6 +130,7 @@ async fn serve(args: ServeArgs) -> ExitCode {
         max_index_call_sites,
         startup_target_millis,
         memory_target_bytes,
+        max_index_workers,
     } = args;
     let budgets = IndexBudgets {
         max_files: max_index_files,
@@ -135,6 +141,7 @@ async fn serve(args: ServeArgs) -> ExitCode {
         max_call_sites: max_index_call_sites,
         startup_target_millis,
         memory_target_bytes,
+        max_workers: max_index_workers,
     };
     let options = match chakra_language::IndexOptions::new(budgets, IndexCancellation::default()) {
         Ok(options) => options,
@@ -202,6 +209,9 @@ async fn serve(args: ServeArgs) -> ExitCode {
         call_sites = initial_metrics.call_sites,
         indexing_degraded = initial_metrics.indexing.is_degraded(),
         source_bytes = initial_metrics.indexing.coverage.source_bytes,
+        configured_index_workers = initial_metrics.indexing.scheduling.configured_max_workers,
+        effective_index_workers = initial_metrics.indexing.scheduling.effective_worker_limit,
+        peak_active_index_workers = initial_metrics.indexing.scheduling.peak_active_workers,
         current_rss_bytes = ?initial_metrics.indexing.memory.current_rss_bytes,
         observed_phase_peak_rss_bytes = ?initial_metrics.indexing.memory.observed_phase_peak_rss_bytes,
         elapsed_micros = initial_metrics.elapsed.as_micros(),
@@ -320,6 +330,7 @@ mod tests {
                 && args.rust_analyzer_path == "rust-analyzer"
                 && args.max_index_files == DEFAULT_MAX_INDEX_FILES
                 && args.max_index_symbols == DEFAULT_MAX_INDEX_SYMBOLS
+                && args.max_index_workers == DEFAULT_MAX_INDEX_WORKERS
         ));
     }
 
@@ -338,6 +349,17 @@ mod tests {
                 command: Some(Commands::Serve(ref args)),
             }) if args.no_rust_analyzer
                 && args.rust_analyzer_path == "/opt/bin/rust-analyzer"
+        ));
+    }
+
+    #[test]
+    fn serve_accepts_an_explicit_index_worker_limit() {
+        let cli = Cli::try_parse_from(["chakra", "serve", "--max-index-workers", "2"]);
+        assert!(matches!(
+            cli,
+            Ok(Cli {
+                command: Some(Commands::Serve(ref args)),
+            }) if args.max_index_workers == 2
         ));
     }
 
