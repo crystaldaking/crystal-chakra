@@ -157,6 +157,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "chakra-conformance"
+version = "0.1.1"
+dependencies = [
+ "chakra-domain",
+ "chakra-engine",
+ "chakra-git",
+ "chakra-language",
+ "clap",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "chakra-domain"
 version = "0.1.1"
 dependencies = [

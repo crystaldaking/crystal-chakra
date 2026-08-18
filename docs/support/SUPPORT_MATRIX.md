@@ -21,7 +21,7 @@ Target list reviewed: 2026-08 (GitHub Octoverse 2025 top languages plus pre-exis
 | AMBIG-01 | pass | query-layer ambiguity reporting |
 | BUDGET-01 | pass | query work budgets (ADR-0025) |
 | CANCEL-01 | pass | cooperative cancellation (ADR-0025) |
-| CONFORM-01 | missing | Shared conformance harness lands with #24. |
+| CONFORM-01 | pass | chakra-conformance harness |
 | CORPUS-01 | missing | Public corpus evaluation lands with #25. |
 | DEGRADE-01 | pass | bounded degradation (ADR-0011) |
 | DISC-01 | pass | chakra-git discovery |
@@ -55,7 +55,7 @@ Target list reviewed: 2026-08 (GitHub Octoverse 2025 top languages plus pre-exis
 | AMBIG-01 | pass | query-layer ambiguity reporting |
 | BUDGET-01 | pass | query work budgets (ADR-0025) |
 | CANCEL-01 | pass | cooperative cancellation (ADR-0012) |
-| CONFORM-01 | missing | Shared conformance harness lands with #24. |
+| CONFORM-01 | pass | chakra-conformance harness |
 | CORPUS-01 | missing | Public corpus evaluation lands with #25. |
 | DEGRADE-01 | pass | bounded degradation (ADR-0011) |
 | DISC-01 | pass | chakra-git discovery |

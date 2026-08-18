@@ -50,6 +50,21 @@ jobs:
           python-version: "3.x"
       - run: python3 tools/check_support_matrix.py --check
 
+  conformance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      # Keep the toolchain version in sync with rust-toolchain.toml.
+      - uses: dtolnay/rust-toolchain@1.97.1
+      # Scenario regression gate for every fixture language.
+      - run: cargo test --locked -p chakra-conformance
+      # The committed result files must match a fresh emission exactly.
+      - run: |
+          emitted="$(mktemp -d)"
+          cargo run --locked -p chakra-conformance -- emit "$emitted"
+          diff -r docs/support/conformance "$emitted"
+
   large-repository-gate:
     runs-on: ubuntu-latest
     timeout-minutes: 30
