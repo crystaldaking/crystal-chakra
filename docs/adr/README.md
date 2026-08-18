@@ -48,5 +48,6 @@ Accepted decisions:
 - ADR-023: query truncation contract
 - ADR-024: caller aggregation and byte-first response budgets
 - ADR-025: query execution work budgets
+- ADR-026: first-class language parity contract and generated support matrix
 
 Do not pre-create empty ADRs merely to satisfy a list.
