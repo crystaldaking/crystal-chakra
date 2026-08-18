@@ -146,13 +146,8 @@ pub(crate) fn item_declaration(
     workspace: &ProviderWorkspace,
 ) -> Option<(RepoRelativePath, SourceRange)> {
     let path = uri_to_path(&workspace.repository_root, &item.uri)?;
-    let source = workspace
-        .documents
-        .iter()
-        .find(|document| document.path == path)?
-        .source
-        .as_ref();
-    let range = convert_range(path.clone(), source, item.selection_range)?;
+    let document = workspace.document(&path)?;
+    let range = convert_range(path.clone(), &document.source, item.selection_range)?;
     Some((path, range))
 }
 
@@ -171,15 +166,11 @@ pub(crate) fn convert_incoming(
             *truncated = true;
             break;
         }
-        let source = workspace
-            .documents
-            .iter()
-            .find(|document| document.path == path)
-            .map(|document| document.source.as_ref());
-        let call_site = source.and_then(|source| {
+        let source = workspace.document(&path);
+        let call_site = source.as_ref().and_then(|document| {
             call.from_ranges
                 .first()
-                .and_then(|range| convert_range(path.clone(), source, *range))
+                .and_then(|range| convert_range(path.clone(), &document.source, *range))
         });
         result.push(PreciseRelation {
             name: call.from.name,
@@ -198,11 +189,7 @@ pub(crate) fn convert_outgoing(
     limit: usize,
     truncated: &mut bool,
 ) -> Vec<PreciseRelation> {
-    let caller_source = workspace
-        .documents
-        .iter()
-        .find(|document| document.path == *caller_path)
-        .map(|document| document.source.as_ref());
+    let caller_source = workspace.document(caller_path);
     let mut result = Vec::new();
     for call in calls {
         let Some((_, declaration)) = item_declaration(&call.to, workspace) else {
@@ -212,10 +199,10 @@ pub(crate) fn convert_outgoing(
             *truncated = true;
             break;
         }
-        let call_site = caller_source.and_then(|source| {
+        let call_site = caller_source.as_ref().and_then(|document| {
             call.from_ranges
                 .first()
-                .and_then(|range| convert_range(caller_path.clone(), source, *range))
+                .and_then(|range| convert_range(caller_path.clone(), &document.source, *range))
         });
         result.push(PreciseRelation {
             name: call.to.name,
@@ -257,15 +244,15 @@ mod tests {
     fn incoming_limit_is_applied_after_workspace_filtering() -> Result<(), Box<dyn Error>> {
         let repository = TempDir::new()?;
         let path = RepoRelativePath::new("src/lib.rs")?;
-        let workspace = ProviderWorkspace {
-            repository_root: repository.path().to_path_buf(),
-            revision: Revision(4),
-            documents: vec![ProviderDocument {
+        let workspace = ProviderWorkspace::from_documents(
+            repository.path().to_path_buf(),
+            Revision(4),
+            vec![ProviderDocument {
                 path: path.clone(),
                 source: Arc::<str>::from("fn inside() {}\n"),
                 language: chakra_domain::symbol::Language::Rust,
             }],
-        };
+        );
         let outside_root = TempDir::new()?;
         let outside = path_to_uri(outside_root.path(), &path)?;
         let inside = path_to_uri(repository.path(), &path)?;

@@ -1044,30 +1044,6 @@ impl SymbolGraph {
         Ok(files)
     }
 
-    /// Cheap owned views of captured source for outward adapters. Cloning the
-    /// `Arc<str>` never copies file contents.
-    pub(crate) fn snapshot_documents(&self) -> Vec<(RepoRelativePath, Arc<str>)> {
-        if let Some(parts) = self.parts.as_ref() {
-            let mut files: Vec<_> = parts
-                .iter()
-                .flat_map(SymbolGraph::snapshot_documents)
-                .collect();
-            files.sort_by(|a, b| a.0.cmp(&b.0));
-            return files;
-        }
-        let mut files: Vec<_> = self
-            .files
-            .iter()
-            .filter_map(|(path, file)| {
-                file.source
-                    .as_ref()
-                    .map(|source| (path.clone(), source.clone()))
-            })
-            .collect();
-        files.sort_by(|a, b| a.0.cmp(&b.0));
-        files
-    }
-
     pub(crate) fn snapshot_documents_with_context(
         &self,
         operation: &OperationContext,
@@ -1093,6 +1069,16 @@ impl SymbolGraph {
         files.sort_by(|a, b| a.0.cmp(&b.0));
         operation.check()?;
         Ok(files)
+    }
+
+    /// One captured source allocation from this immutable graph revision.
+    /// Provider adapters use this targeted lookup instead of materializing the
+    /// complete document catalog for every precise query.
+    pub(crate) fn snapshot_document(&self, path: &RepoRelativePath) -> Option<Arc<str>> {
+        if let Some(parts) = self.parts.as_ref() {
+            return parts.iter().find_map(|part| part.snapshot_document(path));
+        }
+        self.files.get(path)?.source.clone()
     }
 
     /// Symbols declared in one file, in deterministic arena order.

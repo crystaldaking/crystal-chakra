@@ -35,5 +35,6 @@ Accepted decisions:
 - ADR-010: lazy syntax call-site resolution
 - ADR-011: bounded indexing and deterministic degradation
 - ADR-012: cooperative query deadlines and cancellation
+- ADR-013: bounded rust-analyzer readiness and revision-delta synchronization
 
 Do not pre-create empty ADRs merely to satisfy a list.

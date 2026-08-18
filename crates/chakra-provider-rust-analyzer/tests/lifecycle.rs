@@ -4,7 +4,7 @@ use std::error::Error;
 use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
@@ -23,6 +23,7 @@ const FAKE_SERVER: &str = r#"
 use std::fs;
 use std::io::{self, BufRead, Read, Write};
 use std::path::PathBuf;
+use std::process::{Child, Command};
 
 fn request_id(body: &str) -> Option<&str> {
     let rest = body.split_once("\"id\":")?.1;
@@ -65,9 +66,23 @@ fn main() -> io::Result<()> {
         .file_stem()
         .and_then(|name| name.to_str())
         .is_some_and(|name| name.contains("record-open"));
+    let spawn_child = executable
+        .file_stem()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.contains("spawn-child"));
     let cancelled_path: PathBuf = executable.with_extension("cancelled");
     let opened_path: PathBuf = executable.with_extension("opened");
     let prepared_path: PathBuf = executable.with_extension("prepared");
+    let child_path: PathBuf = executable.with_extension("child");
+    let _child: Option<Child> = if spawn_child {
+        let child = Command::new("sh")
+            .args(["-c", "while :; do :; done"])
+            .spawn()?;
+        fs::write(&child_path, child.id().to_string())?;
+        Some(child)
+    } else {
+        None
+    };
     let stdin = io::stdin();
     let mut stdin = stdin.lock();
 
@@ -159,15 +174,15 @@ fn request(root: &Path, revision: Revision) -> Result<PreciseQueryRequest, Box<d
     fs::create_dir_all(root.join("src"))?;
     fs::write(root.join(path.as_str()), source.as_ref())?;
     Ok(PreciseQueryRequest {
-        workspace: ProviderWorkspace {
-            repository_root: fs::canonicalize(root)?,
+        workspace: ProviderWorkspace::from_documents(
+            fs::canonicalize(root)?,
             revision,
-            documents: vec![ProviderDocument {
+            vec![ProviderDocument {
                 path: path.clone(),
                 source,
                 language: chakra_domain::symbol::Language::Rust,
             }],
-        },
+        ),
         symbol: ProviderSymbol {
             name: "target".to_owned(),
             declaration: SourceRange::new(
@@ -185,12 +200,37 @@ fn request(root: &Path, revision: Revision) -> Result<PreciseQueryRequest, Box<d
     })
 }
 
+fn zed_scale_documents() -> Result<Vec<ProviderDocument>, Box<dyn Error>> {
+    let large_source: Arc<str> = Arc::from(format!("//{}\n", "x".repeat(28_688)));
+    let mut documents = vec![
+        ProviderDocument {
+            path: RepoRelativePath::new("src/lib.rs")?,
+            source: Arc::from("pub fn target() {}\n"),
+            language: chakra_domain::symbol::Language::Rust,
+        },
+        ProviderDocument {
+            path: RepoRelativePath::new("src/caller.rs")?,
+            source: large_source.clone(),
+            language: chakra_domain::symbol::Language::Rust,
+        },
+    ];
+    for index in 2..1_929 {
+        documents.push(ProviderDocument {
+            path: RepoRelativePath::new(format!("src/generated_{index}.rs"))?,
+            source: large_source.clone(),
+            language: chakra_domain::symbol::Language::Rust,
+        });
+    }
+    Ok(documents)
+}
+
 fn config(executable: &Path) -> RustAnalyzerConfig {
     RustAnalyzerConfig {
         executable: executable.as_os_str().to_owned(),
         startup_timeout: Duration::from_secs(5),
         request_timeout: Duration::from_secs(1),
         barrier_timeout: Duration::from_millis(250),
+        query_wait_timeout: Duration::from_secs(10),
         ..RustAnalyzerConfig::default()
     }
 }
@@ -199,10 +239,15 @@ fn config(executable: &Path) -> RustAnalyzerConfig {
 fn transport_crash_restarts_once_then_degrades() -> Result<(), Box<dyn Error>> {
     let repository = tempfile::tempdir()?;
     let executable = compile_fake_server(repository.path(), "fake-ra-crash")?;
-    let request = request(repository.path(), Revision(1))?;
+    let mut request = request(repository.path(), Revision(1))?;
+    request.workspace = ProviderWorkspace::from_documents(
+        fs::canonicalize(repository.path())?,
+        Revision(1),
+        zed_scale_documents()?,
+    );
     let provider = RustAnalyzerProvider::start(request.workspace.clone(), config(&executable))?;
 
-    let result = provider.enrich(request);
+    let result = provider.enrich(request.clone());
     let process_count = fs::read_to_string(executable.with_extension("count"))?;
     assert_eq!(
         result.state,
@@ -224,7 +269,7 @@ fn timed_out_request_is_cancelled_before_shutdown() -> Result<(), Box<dyn Error>
     let request = request(repository.path(), Revision(1))?;
     let provider = RustAnalyzerProvider::start(request.workspace.clone(), config(&executable))?;
 
-    let result = provider.enrich(request);
+    let result = provider.enrich(request.clone());
     assert_eq!(result.state, ProviderState::CatchingUp);
     provider.shutdown()?;
     let cancellation = fs::read_to_string(executable.with_extension("cancelled"))?;
@@ -234,10 +279,39 @@ fn timed_out_request_is_cancelled_before_shutdown() -> Result<(), Box<dyn Error>
 }
 
 #[test]
+fn per_query_wait_budget_returns_catching_up_before_request_timeout() -> Result<(), Box<dyn Error>>
+{
+    let repository = tempfile::tempdir()?;
+    let executable = compile_fake_server(repository.path(), "fake-ra-hang-wait-budget")?;
+    let request = request(repository.path(), Revision(1))?;
+    let mut bounded = config(&executable);
+    bounded.request_timeout = Duration::from_secs(2);
+    bounded.query_wait_timeout = Duration::from_millis(75);
+    let provider = RustAnalyzerProvider::start(request.workspace.clone(), bounded)?;
+
+    let started = Instant::now();
+    let result = provider.enrich(request);
+    let elapsed = started.elapsed();
+    assert_eq!(result.state, ProviderState::CatchingUp);
+    assert!(elapsed < Duration::from_millis(250), "elapsed={elapsed:?}");
+    assert_eq!(
+        provider.query_wait_budget(),
+        Some(Duration::from_millis(75))
+    );
+    provider.shutdown()?;
+    Ok(())
+}
+
+#[test]
 fn caller_cancellation_interrupts_an_in_flight_request() -> Result<(), Box<dyn Error>> {
     let repository = tempfile::tempdir()?;
     let executable = compile_fake_server(repository.path(), "fake-ra-hang-cancel")?;
-    let request = request(repository.path(), Revision(1))?;
+    let mut request = request(repository.path(), Revision(1))?;
+    request.workspace = ProviderWorkspace::from_documents(
+        fs::canonicalize(repository.path())?,
+        Revision(1),
+        zed_scale_documents()?,
+    );
     let provider = RustAnalyzerProvider::start(request.workspace.clone(), config(&executable))?;
     let operation = OperationContext::unbounded();
     let worker_operation = operation.clone();
@@ -278,7 +352,15 @@ fn blocked_provider_stdin_is_bounded_and_shutdown_completes() -> Result<(), Box<
         "x".repeat(2 * 1024 * 1024)
     ));
     fs::write(repository.path().join("src/lib.rs"), source.as_ref())?;
-    request.workspace.documents[0].source = source;
+    request.workspace = ProviderWorkspace::from_documents(
+        fs::canonicalize(repository.path())?,
+        Revision(1),
+        vec![ProviderDocument {
+            path: RepoRelativePath::new("src/lib.rs")?,
+            source,
+            language: chakra_domain::symbol::Language::Rust,
+        }],
+    );
     let provider = RustAnalyzerProvider::start(request.workspace.clone(), config(&executable))?;
 
     let result = provider.enrich(request);
@@ -297,25 +379,57 @@ fn blocked_provider_stdin_is_bounded_and_shutdown_completes() -> Result<(), Box<
     Ok(())
 }
 
+#[cfg(unix)]
 #[test]
-fn every_snapshot_document_is_opened_before_precise_queries() -> Result<(), Box<dyn Error>> {
+fn shutdown_reaps_provider_process_group_descendants() -> Result<(), Box<dyn Error>> {
+    let repository = tempfile::tempdir()?;
+    let executable = compile_fake_server(repository.path(), "fake-ra-record-open-spawn-child")?;
+    let request = request(repository.path(), Revision(1))?;
+    let provider = RustAnalyzerProvider::start(request.workspace.clone(), config(&executable))?;
+    let result = provider.enrich(request);
+    assert_eq!(result.state, ProviderState::Ready);
+    let child = fs::read_to_string(executable.with_extension("child"))?;
+    provider.shutdown()?;
+
+    let status = Command::new("kill")
+        .args(["-0", child.trim()])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()?;
+    assert!(
+        !status.success(),
+        "provider descendant {child} is still alive"
+    );
+    Ok(())
+}
+
+#[test]
+fn zed_scale_inventory_opens_only_target_and_measures_revision_delta() -> Result<(), Box<dyn Error>>
+{
     let repository = tempfile::tempdir()?;
     let executable = compile_fake_server(repository.path(), "fake-ra-record-open")?;
     let mut request = request(repository.path(), Revision(1))?;
     let second_path = RepoRelativePath::new("src/caller.rs")?;
-    let second_source: Arc<str> = Arc::from("pub fn caller() { crate::target(); }\n");
+    let documents = zed_scale_documents()?;
+    let caller_source = documents
+        .iter()
+        .find(|document| document.path == second_path)
+        .ok_or("caller document missing")?
+        .source
+        .clone();
     fs::write(
         repository.path().join(second_path.as_str()),
-        second_source.as_ref(),
+        caller_source.as_ref(),
     )?;
-    request.workspace.documents.push(ProviderDocument {
-        path: second_path,
-        source: second_source,
-        language: chakra_domain::symbol::Language::Rust,
-    });
+    let mut revision_two_documents = documents.clone();
+    request.workspace = ProviderWorkspace::from_documents(
+        fs::canonicalize(repository.path())?,
+        Revision(1),
+        documents,
+    );
     let provider = RustAnalyzerProvider::start(request.workspace.clone(), config(&executable))?;
 
-    let result = provider.enrich(request);
+    let result = provider.enrich(request.clone());
     assert_eq!(
         result.state,
         ProviderState::Ready,
@@ -324,8 +438,47 @@ fn every_snapshot_document_is_opened_before_precise_queries() -> Result<(), Box<
     );
     assert_eq!(
         fs::read_to_string(executable.with_extension("opened"))?,
-        "2"
+        "1"
     );
+    let metrics = provider.metrics().ok_or("provider metrics unavailable")?;
+    assert_eq!(metrics.document_sync.workspace_documents, 1_929);
+    assert_eq!(metrics.document_sync.workspace_source_bytes, 55_316_267);
+    assert_eq!(metrics.document_sync.text_documents_sent, 1);
+    assert_eq!(metrics.document_sync.text_bytes_sent, 19);
+
+    let changed_second: Arc<str> = Arc::from("pub fn caller() { crate::target(); } // changed\n");
+    fs::write(
+        repository.path().join("src/caller.rs"),
+        changed_second.as_ref(),
+    )?;
+    let caller = revision_two_documents
+        .iter_mut()
+        .find(|document| document.path.as_str() == "src/caller.rs")
+        .ok_or("caller document missing")?;
+    caller.source = changed_second;
+    let revision_two = PreciseQueryRequest {
+        workspace: ProviderWorkspace::from_documents(
+            fs::canonicalize(repository.path())?,
+            Revision(2),
+            revision_two_documents,
+        ),
+        ..request
+    };
+    let changed = provider.enrich(revision_two.clone());
+    assert_eq!(changed.state, ProviderState::Ready);
+    let metrics = provider.metrics().ok_or("provider metrics unavailable")?;
+    assert_eq!(metrics.document_sync.revision, Some(Revision(2)));
+    assert_eq!(metrics.document_sync.changed, 1);
+    assert_eq!(metrics.document_sync.text_documents_sent, 0);
+    assert_eq!(metrics.document_sync.watched_file_events, 1);
+    assert_eq!(metrics.document_sync.source_body_comparisons, 1);
+    assert_eq!(metrics.document_sync.total_text_documents_sent, 1);
+
+    let cached = provider.enrich(revision_two);
+    assert_eq!(cached.state, ProviderState::Ready);
+    let metrics = provider.metrics().ok_or("provider metrics unavailable")?;
+    assert_eq!(metrics.cache.hits, 1);
+    assert_eq!(metrics.document_sync.total_text_documents_sent, 1);
     provider.shutdown()?;
     Ok(())
 }

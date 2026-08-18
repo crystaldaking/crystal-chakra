@@ -2,7 +2,7 @@
 
 Status: accepted
 Date: 2026-08-15
-Last reviewed: 2026-08-16
+Last reviewed: 2026-08-18
 
 ## Context
 
@@ -53,13 +53,13 @@ background work is quiescent:
   the bounded command. Caller cancellation interrupts response waits and sends
   `$/cancelRequest`; the workspace-owned child remains under provider lifecycle
   ownership and is reaped on restart/shutdown.
-- Treat the atomically published syntax snapshot as canonical. A precise query
-  receives captured `Arc<str>` documents and the selected symbol from one
-  pinned snapshot. Every snapshot document is opened into the provider, not
-  only the selected file, so incoming callers cannot be read from newer disk
-  state. Exact changes use full-text `didChange`; removed paths use `didClose`.
-  Watched-file notifications are sent only for actual content changes, with a
-  rename represented as delete plus create.
+- Treat the atomically published syntax snapshot as canonical. ADR-013 replaces
+  the original eager all-document `didOpen` strategy with an immutable
+  snapshot-backed catalog, exact revision deltas, target-only `didOpen`, and a
+  final revision/freshness confirmation before precise facts are accepted.
+  Exact changes to opened documents use full-text `didChange`; unopened
+  documents stay disk-backed and receive watched-file events. Removed open
+  paths use `didClose`; rename remains delete plus create.
 - A prepare-call-hierarchy request sent after document notifications is the LSP
   FIFO barrier for that synchronization generation. A healthy, quiescent
   `experimental/serverStatus` may establish provider health, but it cannot be
@@ -113,13 +113,12 @@ background work is quiescent:
   `lsp-types` 0.97.0 (MIT), `crossbeam-channel` 0.5 (MIT OR Apache-2.0), and
   `url` 2.x (MIT OR Apache-2.0). URI correctness and mature protocol framing
   are accepted despite the additional compile/transitive cost.
-- The first precise request in a large workspace may return syntax with
-  `CatchingUp` when the bounded quiescence wait expires. A later request can
-  use the now-ready provider; callers never need to sleep for correctness.
-- Opening every captured Rust document makes the first precise request scale
-  with current indexed source size. The syntax index already enforces its file
-  and repository source budgets; eager precise graph enumeration remains out of
-  scope.
+- The first precise request in a large workspace returns syntax with
+  `CatchingUp` when ADR-013's one-second provider wait expires. A later request
+  can use the ready provider; callers never need to sleep for correctness.
+- First-request full-text traffic scales with the selected target, not the
+  complete captured workspace. Metadata delta construction remains linear in
+  the Rust file inventory for a changed revision and is directly measured.
 - Precise relations are bounded at the Chakra response boundary. The local
   provider protocol may still produce a larger single Call Hierarchy response;
   v0.1 trusts its owned local rust-analyzer process rather than adding a second
@@ -138,11 +137,11 @@ background work is quiescent:
   automatic process restart before honest degradation, and that a timed-out
   request sends `$/cancelRequest` before cooperative shutdown. These tests do
   not require a global rust-analyzer installation.
-- Hermetic peers also prove that all snapshot documents are opened before a
-  precise request and that a child which stops reading stdin reaches a bounded
-  write-timeout/degraded state and shuts down cleanly. A unit regression proves
-  a prior quiescent status cannot make a newer sync generation ready without
-  its request barrier.
+- Hermetic peers prove that only the selected target is opened on first use,
+  exact later deltas are measured, and a child which stops reading stdin reaches
+  a bounded write-timeout/degraded state and shuts down cleanly. A unit
+  regression proves a prior quiescent status cannot make a newer sync
+  generation ready without its request barrier.
 - A hermetic hanging peer proves caller cancellation returns before the local
   request deadline and receives `$/cancelRequest`.
 - An ignored real-provider smoke test exercises initialization, quiescence,

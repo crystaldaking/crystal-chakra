@@ -18,9 +18,9 @@ use chakra_domain::query::{
     CallSiteView, CallersData, CallersRequest, ChangedFile, ChangedSymbol, ChangedSymbolBasis,
     ContextData, ContextRequest, DEFAULT_QUERY_LIMIT, DiffCallSite, DiffContextData,
     DiffContextRequest, DiffRelatedSymbol, FileSummary, IndexCounts, MAX_QUERY_LIMIT,
-    ProviderCapability, ProviderInfo, QueryError, QueryService, RelatedSymbol, RepoMapData,
-    RepoMapRequest, SearchData, SearchRequest, SourceSnippet, StatusData, StatusRequest, SymbolRef,
-    SymbolSearchData, SymbolSearchRequest, SymbolView, TextMatch,
+    ProviderCapability, ProviderInfo, ProviderQueryInfo, QueryError, QueryService, RelatedSymbol,
+    RepoMapData, RepoMapRequest, SearchData, SearchRequest, SourceSnippet, StatusData,
+    StatusRequest, SymbolRef, SymbolSearchData, SymbolSearchRequest, SymbolView, TextMatch,
 };
 use chakra_domain::revision::Revision;
 use chakra_domain::state::{Freshness, FreshnessRequirement, ProviderState};
@@ -303,6 +303,54 @@ fn provider_state_for_language(
         .map_or(ProviderState::NotConfigured, |provider| {
             provider.state_for(snapshot.revision())
         })
+}
+
+fn provider_query_info(
+    engine: &WorkspaceEngine,
+    language: chakra_domain::symbol::Language,
+    state: ProviderState,
+) -> Option<ProviderQueryInfo> {
+    let provider = engine
+        .precise_provider()
+        .filter(|provider| provider.supports(language))?;
+    Some(ProviderQueryInfo {
+        name: "rust-analyzer".to_owned(),
+        state,
+        fallback_used: state != ProviderState::Ready,
+        fallback_reason: match state {
+            ProviderState::Ready => None,
+            ProviderState::CatchingUp | ProviderState::Initializing => Some(
+                "provider did not prove readiness for the pinned revision within the wait budget; syntax facts were retained"
+                    .to_owned(),
+            ),
+            ProviderState::Degraded => Some(
+                "provider is degraded; syntax facts were retained without claiming precision"
+                    .to_owned(),
+            ),
+            ProviderState::NotConfigured => Some(
+                "no precise provider is configured; syntax facts were retained".to_owned(),
+            ),
+        },
+        last_error: provider.last_error(),
+        progress: provider.progress(),
+        wait_budget_millis: provider
+            .query_wait_budget()
+            .map(|budget| u64::try_from(budget.as_millis()).unwrap_or(u64::MAX)),
+    })
+}
+
+fn precise_result_is_current(
+    engine: &WorkspaceEngine,
+    snapshot: &WorkspaceSnapshot,
+    result_revision: Revision,
+) -> bool {
+    if result_revision != snapshot.revision() {
+        return false;
+    }
+    let current = engine.snapshot();
+    current.revision() == snapshot.revision()
+        && current.freshness() == Freshness::Fresh
+        && snapshot.freshness() == Freshness::Fresh
 }
 
 fn precise_related(graph: &SymbolGraph, relation: PreciseRelation) -> Option<RelatedSymbol> {
@@ -593,6 +641,7 @@ impl QueryService for WorkspaceEngine {
             ambiguous_call_sites: snapshot.graph().ambiguous_call_site_count(),
             unresolved_call_sites: snapshot.graph().unresolved_call_site_count(),
         };
+        let provider = self.precise_provider();
         let providers = vec![ProviderInfo {
             name: "rust-analyzer".to_owned(),
             languages: vec![chakra_domain::symbol::Language::Rust],
@@ -600,11 +649,19 @@ impl QueryService for WorkspaceEngine {
                 ProviderCapability::IncomingCalls,
                 ProviderCapability::OutgoingCalls,
                 ProviderCapability::SynchronizationState,
+                ProviderCapability::ProgressReporting,
+                ProviderCapability::RevisionDeltaSynchronization,
+                ProviderCapability::CacheMetrics,
             ],
             state: provider_state,
-            last_error: self
-                .precise_provider()
-                .and_then(|provider| provider.last_error()),
+            last_error: provider.and_then(|provider| provider.last_error()),
+            progress: provider.and_then(|provider| provider.progress()),
+            metrics: provider.and_then(|provider| provider.metrics()),
+            query_wait_budget_millis: provider.and_then(|provider| {
+                provider
+                    .query_wait_budget()
+                    .map(|budget| u64::try_from(budget.as_millis()).unwrap_or(u64::MAX))
+            }),
         }];
         let data = StatusData {
             workspace: snapshot.identity().clone(),
@@ -829,7 +886,7 @@ impl QueryService for WorkspaceEngine {
                 operation,
             );
             operation.check()?;
-            provider_state = if result.revision == snapshot.revision() {
+            provider_state = if precise_result_is_current(self, &snapshot, result.revision) {
                 result.state
             } else {
                 ProviderState::CatchingUp
@@ -928,6 +985,7 @@ impl QueryService for WorkspaceEngine {
             tests,
             syntax_call_candidates,
             related_files,
+            provider: provider_query_info(self, symbol.key.language, provider_state),
         };
         Ok(envelope(&snapshot, provider_state, truncated, data))
     }
@@ -982,7 +1040,7 @@ impl QueryService for WorkspaceEngine {
                 operation,
             );
             operation.check()?;
-            provider_state = if result.revision == snapshot.revision() {
+            provider_state = if precise_result_is_current(self, &snapshot, result.revision) {
                 result.state
             } else {
                 ProviderState::CatchingUp
@@ -1001,6 +1059,7 @@ impl QueryService for WorkspaceEngine {
             target: SymbolView::from(target),
             callers,
             syntax_candidates,
+            provider: provider_query_info(self, target.key.language, provider_state),
         };
         Ok(envelope(
             &snapshot,

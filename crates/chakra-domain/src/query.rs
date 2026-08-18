@@ -124,6 +124,76 @@ pub enum ProviderCapability {
     IncomingCalls,
     OutgoingCalls,
     SynchronizationState,
+    ProgressReporting,
+    RevisionDeltaSynchronization,
+    CacheMetrics,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderProgressStage {
+    ProcessStartup,
+    Initialization,
+    CargoMetadata,
+    WorkspaceLoading,
+    DocumentSynchronization,
+    Indexing,
+    Ready,
+    Degraded,
+    Stopped,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderProgressSource {
+    /// Directly reported by the provider protocol.
+    Provider,
+    /// Inferred from a Chakra-owned lifecycle or synchronization step.
+    Chakra,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct ProviderProgress {
+    pub stage: ProviderProgressStage,
+    pub source: ProviderProgressSource,
+    pub message: Option<String>,
+    pub percentage: Option<u32>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct ProviderCacheMetrics {
+    pub entries: u64,
+    pub bytes: u64,
+    pub max_entries: u64,
+    pub max_bytes: u64,
+    pub hits: u64,
+    pub misses: u64,
+    pub evictions: u64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct ProviderDocumentSyncMetrics {
+    pub revision: Option<Revision>,
+    pub workspace_documents: u64,
+    pub workspace_source_bytes: u64,
+    pub opened_documents: u64,
+    pub created: u64,
+    pub changed: u64,
+    pub deleted: u64,
+    pub text_documents_sent: u64,
+    pub text_bytes_sent: u64,
+    pub watched_file_events: u64,
+    pub documents_examined: u64,
+    pub source_body_comparisons: u64,
+    pub total_text_documents_sent: u64,
+    pub total_text_bytes_sent: u64,
+    pub total_watched_file_events: u64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct ProviderMetrics {
+    pub cache: ProviderCacheMetrics,
+    pub document_sync: ProviderDocumentSyncMetrics,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -136,6 +206,23 @@ pub struct ProviderInfo {
     pub capabilities: Vec<ProviderCapability>,
     pub state: ProviderState,
     pub last_error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub progress: Option<ProviderProgress>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metrics: Option<ProviderMetrics>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub query_wait_budget_millis: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct ProviderQueryInfo {
+    pub name: String,
+    pub state: ProviderState,
+    pub fallback_used: bool,
+    pub fallback_reason: Option<String>,
+    pub last_error: Option<String>,
+    pub progress: Option<ProviderProgress>,
+    pub wait_budget_millis: Option<u64>,
 }
 
 /// Transport-neutral operational counters for the bounded query executor.
@@ -272,6 +359,8 @@ pub struct ContextData {
     pub tests: Vec<RelatedSymbol>,
     pub syntax_call_candidates: Vec<CallSiteView>,
     pub related_files: Vec<RepoRelativePath>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<ProviderQueryInfo>,
 }
 
 // --- callers ---
@@ -290,6 +379,8 @@ pub struct CallersData {
     pub target: SymbolView,
     pub callers: Vec<RelatedSymbol>,
     pub syntax_candidates: Vec<CallSiteView>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<ProviderQueryInfo>,
 }
 
 // --- diff_context ---

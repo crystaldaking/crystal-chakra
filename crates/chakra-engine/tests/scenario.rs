@@ -3,8 +3,8 @@
 mod common;
 
 use std::error::Error;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Weak};
 
 use chakra_domain::location::{RepoRelativePath, SourceRange, TextPosition};
 use chakra_domain::operation::OperationContext;
@@ -18,6 +18,7 @@ use chakra_domain::state::{Freshness, ProviderState, WorkspaceStatus};
 use chakra_domain::symbol::{Language, SymbolKey, SymbolKind};
 use chakra_engine::{
     PreciseProvider, PreciseQueryRequest, PreciseQueryResult, PreciseRelation, SymbolGraph,
+    WorkspaceEngine,
 };
 
 use common::{scenario_engine, scenario_graph};
@@ -31,6 +32,12 @@ struct FixedProvider {
 #[derive(Debug)]
 struct CountingRustProvider {
     calls: Arc<AtomicUsize>,
+}
+
+#[derive(Debug)]
+struct RevisionAdvancingProvider {
+    engine: Weak<WorkspaceEngine>,
+    result: PreciseQueryResult,
 }
 
 impl PreciseProvider for CountingRustProvider {
@@ -78,6 +85,30 @@ impl PreciseProvider for FixedProvider {
     }
 }
 
+impl PreciseProvider for RevisionAdvancingProvider {
+    fn supports(&self, language: Language) -> bool {
+        language == Language::Rust
+    }
+
+    fn state_for(&self, _revision: Revision) -> ProviderState {
+        ProviderState::Ready
+    }
+
+    fn enrich_with_context(
+        &self,
+        _request: PreciseQueryRequest,
+        _operation: &OperationContext,
+    ) -> PreciseQueryResult {
+        if let Some(engine) = self.engine.upgrade() {
+            let mut update = engine.begin_update();
+            update.set_status(WorkspaceStatus::Stale);
+            update.set_freshness(Freshness::Stale);
+            let _ = engine.publish(update);
+        }
+        self.result.clone()
+    }
+}
+
 #[test]
 fn status_reports_scenario_counts() -> Result<(), Box<dyn Error>> {
     let (engine, _) = scenario_engine()?;
@@ -106,6 +137,9 @@ fn status_reports_scenario_counts() -> Result<(), Box<dyn Error>> {
             chakra_domain::query::ProviderCapability::IncomingCalls,
             chakra_domain::query::ProviderCapability::OutgoingCalls,
             chakra_domain::query::ProviderCapability::SynchronizationState,
+            chakra_domain::query::ProviderCapability::ProgressReporting,
+            chakra_domain::query::ProviderCapability::RevisionDeltaSynchronization,
+            chakra_domain::query::ProviderCapability::CacheMetrics,
         ]
     );
     Ok(())
@@ -342,6 +376,55 @@ fn degraded_provider_preserves_useful_syntax_callers() -> Result<(), Box<dyn Err
     assert_eq!(
         status.data.providers[0].last_error.as_deref(),
         Some("provider process stopped")
+    );
+    Ok(())
+}
+
+#[test]
+fn precise_result_is_discarded_if_workspace_advances_during_provider_query()
+-> Result<(), Box<dyn Error>> {
+    let (engine, ids) = scenario_engine()?;
+    let engine = Arc::new(engine);
+    let revision = engine.snapshot().revision();
+    let caller = engine
+        .snapshot()
+        .graph()
+        .symbol(ids.service_refund)
+        .ok_or("service symbol missing")?
+        .clone();
+    engine.install_precise_provider(Arc::new(RevisionAdvancingProvider {
+        engine: Arc::downgrade(&engine),
+        result: PreciseQueryResult {
+            revision,
+            state: ProviderState::Ready,
+            incoming: vec![PreciseRelation {
+                name: caller.name().to_owned(),
+                declaration: caller.location,
+                call_site: None,
+                provenance: Provenance::RustAnalyzer,
+            }],
+            outgoing: Vec::new(),
+            truncated: false,
+        },
+    }))?;
+
+    let envelope = engine.callers(CallersRequest {
+        symbol: Some(SymbolRef::ById {
+            id: ids.provider_refund,
+            revision,
+        }),
+        ..CallersRequest::default()
+    })?;
+    assert_eq!(envelope.provider_state, ProviderState::CatchingUp);
+    assert_eq!(engine.snapshot().revision(), revision.next());
+    assert_eq!(envelope.data.callers.len(), 1);
+    assert_eq!(envelope.data.callers[0].precision, Precision::Syntax);
+    assert!(
+        envelope
+            .data
+            .provider
+            .as_ref()
+            .is_some_and(|provider| provider.fallback_used && provider.fallback_reason.is_some())
     );
     Ok(())
 }

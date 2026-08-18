@@ -23,6 +23,7 @@ lsp-types = "0.97"
 regex = "1"
 rpds = "1.2"
 notify = "8.2"
+nix = { version = "0.31", default-features = false, features = ["signal"] }
 tree-sitter = "0.26"
 tree-sitter-php = "0.24.2"
 tree-sitter-rust = "0.24"

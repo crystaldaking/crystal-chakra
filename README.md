@@ -138,6 +138,20 @@ revision is pinned for the complete response. rust-analyzer is queried only
 for Rust symbols and its data is accepted as precise only for that same
 revision; otherwise current syntax facts are
 returned with `catching_up` or `degraded` provider metadata.
+Optional precision has its own one-second wait budget inside the 30-second MCP
+deadline. `context.data.provider` and `callers.data.provider` explain whether a
+syntax fallback was used, the current provider stage, whether that stage came
+directly from rust-analyzer or was inferred by Chakra, and the wait budget.
+`status.data.providers[].metrics` reports document-delta traffic and the
+entry/byte-bounded precise cache.
+
+Provider startup no longer opens every Rust file. A precise query opens the
+selected target from its pinned snapshot; unchanged callers remain disk-backed.
+Later revisions send full text only for documents Chakra already opened and
+use watched-file events for other exact create/change/delete deltas. Provider
+quiescence, a post-sync request barrier, and a final workspace revision check
+must all hold before precise facts are accepted. A 1,929-file/55.3 MB contract
+test sends 19 bytes of target text on first use rather than the complete corpus.
 
 Collection limits default to 20 and are capped at 500. Search patterns are
 capped at 1,024 characters, returned match lines at 512 characters, and source
@@ -216,6 +230,8 @@ The Zed/`psp-app` bounded-indexing results are in
 [docs/evaluation/v0.1.1-indexing-budgets.md](docs/evaluation/v0.1.1-indexing-budgets.md).
 The warmed deterministic freshness measurements are in
 [docs/evaluation/v0.1.1-freshness-reconciliation.md](docs/evaluation/v0.1.1-freshness-reconciliation.md).
+The provider-readiness contract and Zed-scale transport measurements are in
+[docs/evaluation/v0.1.1-rust-analyzer-readiness.md](docs/evaluation/v0.1.1-rust-analyzer-readiness.md).
 Use [docs/evaluation/v0.1-template.md](docs/evaluation/v0.1-template.md) for
 real agent comparisons before expanding scope.
 

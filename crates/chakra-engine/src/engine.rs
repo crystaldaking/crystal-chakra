@@ -62,6 +62,10 @@ impl WorkspaceSnapshot {
     pub fn graph(&self) -> &SymbolGraph {
         self.graph.as_ref()
     }
+
+    pub(crate) fn graph_arc(&self) -> Arc<SymbolGraph> {
+        self.graph.clone()
+    }
 }
 
 /// Why an update was not published.
