@@ -26,13 +26,58 @@ use nix::sys::resource::{UsageWho, getrusage};
 #[cfg(unix)]
 use nix::sys::time::TimeValLike;
 
+use crate::adapter::{
+    AdapterFactCounts, AdapterFrameworkMetrics, AdapterReconcileMetrics, LanguageSources,
+    SyntaxLanguageAdapter, default_adapters, registered_languages,
+};
+
 const PARALLEL_PARSE_FILE_THRESHOLD: u64 = 32;
 const INDEX_WORKER_MEMORY_RESERVE_BYTES: u64 = 64 * 1024 * 1024;
 
+/// Classified sources of every registered adapter language, in composition
+/// (registry) order.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkspaceSources {
-    pub rust: chakra_language_rust::RustSources,
-    pub php: chakra_language_php::PhpSources,
+    languages: Vec<WorkspaceLanguageSources>,
+}
+
+/// Classified sources of one adapter language.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkspaceLanguageSources {
+    pub language: Language,
+    pub sources: LanguageSources,
+}
+
+impl WorkspaceSources {
+    pub fn languages(&self) -> &[WorkspaceLanguageSources] {
+        &self.languages
+    }
+
+    pub fn get(&self, language: Language) -> Option<&LanguageSources> {
+        self.languages
+            .iter()
+            .find(|entry| entry.language == language)
+            .map(|entry| &entry.sources)
+    }
+
+    pub fn file_count(&self, language: Language) -> usize {
+        self.get(language).map_or(0, LanguageSources::len)
+    }
+
+    fn take(&mut self, language: Language) -> LanguageSources {
+        self.languages
+            .iter_mut()
+            .find(|entry| entry.language == language)
+            .map(|entry| std::mem::take(&mut entry.sources))
+            .unwrap_or_default()
+    }
+
+    fn counts(&self) -> Vec<u64> {
+        self.languages
+            .iter()
+            .map(|entry| entry.sources.len() as u64)
+            .collect()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -259,19 +304,24 @@ pub enum WorkspaceIndexError {
 }
 
 #[derive(Debug, Clone)]
+struct WorkspaceAdapterState {
+    adapter: Box<dyn SyntaxLanguageAdapter>,
+    limits: GraphBuildLimits,
+}
+
+#[derive(Debug, Clone)]
 pub struct WorkspaceSyntaxIndex {
-    rust: chakra_language_rust::RustSyntaxIndex,
-    php: chakra_language_php::PhpSyntaxIndex,
-    rust_limits: GraphBuildLimits,
-    php_limits: GraphBuildLimits,
+    adapters: Vec<WorkspaceAdapterState>,
     budgets: IndexBudgets,
     indexing: IndexingStatus,
 }
 
 impl WorkspaceSyntaxIndex {
     pub fn paths(&self) -> Vec<RepoRelativePath> {
-        let mut paths = self.rust.paths();
-        paths.extend(self.php.paths());
+        let mut paths = Vec::new();
+        for state in &self.adapters {
+            paths.extend(state.adapter.paths());
+        }
         paths.sort();
         paths.dedup();
         paths
@@ -309,46 +359,56 @@ impl WorkspaceSyntaxIndex {
     ) -> Result<ReconcileReport, WorkspaceIndexError> {
         let started = PhaseTimer::start();
         check_cancelled(cancellation)?;
-        let (rust_limits, php_limits) = self.live_graph_limits(&scan.sources);
-        let rust_sources = std::mem::take(&mut scan.sources.rust);
-        let php_sources = std::mem::take(&mut scan.sources.php);
-        let rust = self.rust.reconcile_classified_sources_bounded(
-            rust_sources,
-            rust_limits,
-            cancellation,
-        )?;
-        check_cancelled(cancellation)?;
-        let php =
-            self.php
-                .reconcile_classified_sources_bounded(php_sources, php_limits, cancellation)?;
-        check_cancelled(cancellation)?;
-        let mut metrics = combine_reconcile_metrics(rust.metrics, php.metrics);
+        let limits = self.live_graph_limits(&scan.sources);
+        let mut reconciled = Vec::with_capacity(self.adapters.len());
+        for (state, limits) in self.adapters.iter().zip(limits.iter().copied()) {
+            let sources = scan.sources.take(state.adapter.language());
+            reconciled.push(state.adapter.reconcile(sources, limits, cancellation)?);
+            check_cancelled(cancellation)?;
+        }
+        let mut metrics = ReconcileMetrics::default();
+        metrics.publication.structurally_incremental = true;
+        for report in &reconciled {
+            accumulate_reconcile_metrics(&mut metrics, report.metrics);
+        }
 
-        let rust_build = rust
-            .build_metrics
-            .as_ref()
-            .map_or(self.rust.graph_report(), |metrics| metrics.graph);
-        let php_build = php
-            .build_metrics
-            .as_ref()
-            .map_or(self.php.graph_report(), |metrics| metrics.graph);
-        metrics.truncated_call_sites = rust_build
-            .omitted_call_sites
-            .saturating_add(php_build.omitted_call_sites);
-        let graph_changed = rust.next_index.is_some() || php.next_index.is_some();
-        let rust_index = rust.next_index.unwrap_or_else(|| self.rust.clone());
-        let php_index = php.next_index.unwrap_or_else(|| self.php.clone());
+        let graph_builds: Vec<GraphBuildReport> = self
+            .adapters
+            .iter()
+            .zip(reconciled.iter())
+            .map(|(state, report)| {
+                report
+                    .build_metrics
+                    .as_ref()
+                    .map_or_else(|| state.adapter.graph_report(), |metrics| metrics.graph)
+            })
+            .collect();
+        metrics.truncated_call_sites = graph_builds.iter().fold(0_u64, |total, build| {
+            total.saturating_add(build.omitted_call_sites)
+        });
+        let graph_changed = reconciled.iter().any(|report| report.next_index.is_some());
+        let next_adapters: Vec<Box<dyn SyntaxLanguageAdapter>> = self
+            .adapters
+            .iter()
+            .zip(reconciled.iter_mut())
+            .map(|(state, report)| {
+                report
+                    .next_index
+                    .take()
+                    .unwrap_or_else(|| state.adapter.clone_box())
+            })
+            .collect();
 
         let (graph, composition_phase) = if graph_changed {
             check_cancelled(cancellation)?;
             let composition_started = PhaseTimer::start();
             let graph =
-                SymbolGraph::merge([rust_index.graph().clone(), php_index.graph().clone()])?;
+                SymbolGraph::merge(next_adapters.iter().map(|adapter| adapter.graph().clone()))?;
             let composition_phase = measured_phase(
                 IndexPhase::LanguageComposition,
                 None,
                 composition_started,
-                2,
+                next_adapters.len() as u64,
                 0,
                 PhaseConcurrency::SERIAL,
             );
@@ -362,11 +422,23 @@ impl WorkspaceSyntaxIndex {
         } else {
             self.indexing.phases.clone()
         };
-        if let Some(build) = rust.build_metrics.as_ref() {
-            phases.extend(build.phases.clone());
+        for report in &reconciled {
+            if let Some(build) = report.build_metrics.as_ref() {
+                phases.extend(build.phases.clone());
+            }
         }
-        if let Some(build) = php.build_metrics.as_ref() {
-            phases.extend(build.phases.clone());
+        let mut language_facts = Vec::with_capacity(self.adapters.len());
+        for ((adapter, limits), build) in next_adapters
+            .iter()
+            .zip(limits.iter().copied())
+            .zip(graph_builds.iter().copied())
+        {
+            language_facts.push(LanguageIndexingFacts {
+                language: adapter.language(),
+                facts: adapter.fact_counts(),
+                graph: build,
+                limits,
+            });
         }
         phases.extend(composition_phase);
         if graph_changed {
@@ -388,12 +460,7 @@ impl WorkspaceSyntaxIndex {
             self.budgets,
             &scan,
             IndexingParts {
-                rust: rust_index.fact_counts(),
-                php: php_index.fact_counts(),
-                rust_graph: rust_build,
-                php_graph: php_build,
-                rust_limits,
-                php_limits,
+                languages: language_facts,
                 phases,
                 memory: IndexMemoryMetrics {
                     current_rss_bytes: current_rss,
@@ -418,10 +485,11 @@ impl WorkspaceSyntaxIndex {
         }
 
         let next = Self {
-            rust: rust_index,
-            php: php_index,
-            rust_limits,
-            php_limits,
+            adapters: next_adapters
+                .into_iter()
+                .zip(limits.iter().copied())
+                .map(|(adapter, limits)| WorkspaceAdapterState { adapter, limits })
+                .collect(),
             budgets: self.budgets,
             indexing: indexing.clone(),
         };
@@ -433,75 +501,86 @@ impl WorkspaceSyntaxIndex {
         })
     }
 
-    fn live_graph_limits(
-        &self,
-        sources: &WorkspaceSources,
-    ) -> (GraphBuildLimits, GraphBuildLimits) {
-        let rust_activated = self.rust.fact_counts().files == 0 && !sources.rust.is_empty();
-        let php_activated = self.php.fact_counts().files == 0 && !sources.php.is_empty();
-        if rust_activated || php_activated {
-            split_graph_limits(
-                self.budgets,
-                sources.rust.len() as u64,
-                sources.php.len() as u64,
-            )
+    fn live_graph_limits(&self, sources: &WorkspaceSources) -> Vec<GraphBuildLimits> {
+        let any_activated = self.adapters.iter().any(|state| {
+            state.adapter.fact_counts().files == 0
+                && sources
+                    .get(state.adapter.language())
+                    .is_some_and(|sources| !sources.is_empty())
+        });
+        if any_activated {
+            split_graph_limits(self.budgets, &sources.counts())
         } else {
-            (self.rust_limits, self.php_limits)
+            self.adapters.iter().map(|state| state.limits).collect()
         }
     }
 }
 
-fn combine_reconcile_metrics(
-    rust: chakra_language_rust::ReconcileMetrics,
-    php: chakra_language_php::ReconcileMetrics,
-) -> ReconcileMetrics {
-    ReconcileMetrics {
-        scanned_files: rust.scanned_files + php.scanned_files,
-        unchanged_files: rust.unchanged_files + php.unchanged_files,
-        reparsed_files: rust.reparsed_files + php.reparsed_files,
-        created_files: rust.created_files + php.created_files,
-        modified_files: rust.modified_files + php.modified_files,
-        deleted_files: rust.deleted_files + php.deleted_files,
-        relationship_files_recomputed: rust.relationship_files_recomputed
-            + php.relationship_files_recomputed,
-        framework_files_reparsed: php.framework_files_reparsed,
-        framework_relationship_files_recomputed: php.framework_relationship_files_recomputed,
-        framework_truncated_files: php.framework_truncated_files,
-        syntax_error_files: rust.syntax_error_files + php.syntax_error_files,
-        truncated_call_sites: rust.truncated_call_sites + php.truncated_call_sites,
-        publication: combine_publication(rust.publication, php.publication),
-    }
+fn accumulate_reconcile_metrics(combined: &mut ReconcileMetrics, metrics: AdapterReconcileMetrics) {
+    combined.scanned_files += metrics.scanned_files;
+    combined.unchanged_files += metrics.unchanged_files;
+    combined.reparsed_files += metrics.reparsed_files;
+    combined.created_files += metrics.created_files;
+    combined.modified_files += metrics.modified_files;
+    combined.deleted_files += metrics.deleted_files;
+    combined.relationship_files_recomputed += metrics.relationship_files_recomputed;
+    combined.framework_files_reparsed += metrics.framework_files_reparsed;
+    combined.framework_relationship_files_recomputed +=
+        metrics.framework_relationship_files_recomputed;
+    combined.framework_truncated_files += metrics.framework_truncated_files;
+    combined.syntax_error_files += metrics.syntax_error_files;
+    combined.truncated_call_sites += metrics.truncated_call_sites;
+    accumulate_publication(&mut combined.publication, metrics.publication);
 }
 
-fn combine_publication(
-    rust: IndexPublicationMetrics,
-    php: IndexPublicationMetrics,
-) -> IndexPublicationMetrics {
-    IndexPublicationMetrics {
-        structurally_incremental: rust.structurally_incremental && php.structurally_incremental,
-        reused_files: rust.reused_files.saturating_add(php.reused_files),
-        rebuilt_files: rust.rebuilt_files.saturating_add(php.rebuilt_files),
-        reused_source_bytes: rust
-            .reused_source_bytes
-            .saturating_add(php.reused_source_bytes),
-        rebuilt_source_bytes: rust
-            .rebuilt_source_bytes
-            .saturating_add(php.rebuilt_source_bytes),
-        copied_source_bytes: rust
-            .copied_source_bytes
-            .saturating_add(php.copied_source_bytes),
-        reused_symbols: rust.reused_symbols.saturating_add(php.reused_symbols),
-        rebuilt_symbols: rust.rebuilt_symbols.saturating_add(php.rebuilt_symbols),
-        copied_symbols: rust.copied_symbols.saturating_add(php.copied_symbols),
-        reused_edges: rust.reused_edges.saturating_add(php.reused_edges),
-        rebuilt_edges: rust.rebuilt_edges.saturating_add(php.rebuilt_edges),
-        copied_edges: rust.copied_edges.saturating_add(php.copied_edges),
-        reused_call_sites: rust.reused_call_sites.saturating_add(php.reused_call_sites),
-        rebuilt_call_sites: rust
-            .rebuilt_call_sites
-            .saturating_add(php.rebuilt_call_sites),
-        copied_call_sites: rust.copied_call_sites.saturating_add(php.copied_call_sites),
-    }
+fn accumulate_publication(
+    combined: &mut IndexPublicationMetrics,
+    publication: IndexPublicationMetrics,
+) {
+    combined.structurally_incremental =
+        combined.structurally_incremental && publication.structurally_incremental;
+    combined.reused_files = combined
+        .reused_files
+        .saturating_add(publication.reused_files);
+    combined.rebuilt_files = combined
+        .rebuilt_files
+        .saturating_add(publication.rebuilt_files);
+    combined.reused_source_bytes = combined
+        .reused_source_bytes
+        .saturating_add(publication.reused_source_bytes);
+    combined.rebuilt_source_bytes = combined
+        .rebuilt_source_bytes
+        .saturating_add(publication.rebuilt_source_bytes);
+    combined.copied_source_bytes = combined
+        .copied_source_bytes
+        .saturating_add(publication.copied_source_bytes);
+    combined.reused_symbols = combined
+        .reused_symbols
+        .saturating_add(publication.reused_symbols);
+    combined.rebuilt_symbols = combined
+        .rebuilt_symbols
+        .saturating_add(publication.rebuilt_symbols);
+    combined.copied_symbols = combined
+        .copied_symbols
+        .saturating_add(publication.copied_symbols);
+    combined.reused_edges = combined
+        .reused_edges
+        .saturating_add(publication.reused_edges);
+    combined.rebuilt_edges = combined
+        .rebuilt_edges
+        .saturating_add(publication.rebuilt_edges);
+    combined.copied_edges = combined
+        .copied_edges
+        .saturating_add(publication.copied_edges);
+    combined.reused_call_sites = combined
+        .reused_call_sites
+        .saturating_add(publication.reused_call_sites);
+    combined.rebuilt_call_sites = combined
+        .rebuilt_call_sites
+        .saturating_add(publication.rebuilt_call_sites);
+    combined.copied_call_sites = combined
+        .copied_call_sites
+        .saturating_add(publication.copied_call_sites);
 }
 
 pub fn index_repository(root: &Path) -> Result<IndexReport, WorkspaceIndexError> {
@@ -522,51 +601,39 @@ pub fn index_repository_with_options(
     let mut scan = scan_repository_sources_with_options(&repository_root, &options)?;
     rss_peak = max_option(rss_peak, process_rss_bytes());
 
-    let (rust_limits, php_limits) = split_graph_limits(
-        budgets,
-        scan.sources.rust.len() as u64,
-        scan.sources.php.len() as u64,
-    );
-    let rust_sources = std::mem::take(&mut scan.sources.rust);
-    let php_sources = std::mem::take(&mut scan.sources.php);
-    let (rust, rust_graph, rust_metrics) =
-        chakra_language_rust::RustSyntaxIndex::from_classified_sources_scheduled(
-            rust_sources,
-            rust_limits,
+    let prototypes = default_adapters();
+    let limits = split_graph_limits(budgets, &scan.sources.counts());
+    let mut builds = Vec::with_capacity(prototypes.len());
+    for (adapter, limits) in prototypes.iter().zip(limits.iter().copied()) {
+        let sources = scan.sources.take(adapter.language());
+        builds.push(adapter.cold_build(
+            sources,
+            limits,
             worker_policy.effective_worker_limit as usize,
             PARALLEL_PARSE_FILE_THRESHOLD as usize,
+            &repository_root,
             &options.cancellation,
-        )?;
-    rss_peak = max_option(rss_peak, process_rss_bytes());
-    let laravel_detected = match chakra_language_php::detect_laravel(&repository_root) {
-        Ok(detected) => detected,
-        Err(error) => {
-            warn!(
-                error = %error,
-                "Laravel enrichment disabled because Composer metadata is unavailable or invalid"
-            );
-            false
-        }
-    };
-    let (php, php_graph, php_metrics) =
-        chakra_language_php::PhpSyntaxIndex::from_classified_sources_scheduled(
-            php_sources,
-            php_limits,
-            worker_policy.effective_worker_limit as usize,
-            PARALLEL_PARSE_FILE_THRESHOLD as usize,
-            laravel_detected,
-            &options.cancellation,
-        )?;
-    rss_peak = max_option(rss_peak, process_rss_bytes());
+        )?);
+        rss_peak = max_option(rss_peak, process_rss_bytes());
+    }
     check_cancelled(&options.cancellation)?;
+    let adapter_count = builds.len() as u64;
+    let mut built_adapters = Vec::with_capacity(builds.len());
+    let mut built_graphs = Vec::with_capacity(builds.len());
+    let mut built_metrics = Vec::with_capacity(builds.len());
+    for build in builds {
+        built_adapters.push(build.index);
+        built_graphs.push(build.graph);
+        built_metrics.push(build.metrics);
+    }
 
     let composition_started = PhaseTimer::start();
-    let graph = SymbolGraph::merge([rust_graph, php_graph])?;
+    let graph = SymbolGraph::merge(built_graphs)?;
     let composition_phase = measured_phase(
         IndexPhase::LanguageComposition,
         None,
         composition_started,
-        2,
+        adapter_count,
         0,
         PhaseConcurrency::SERIAL,
     );
@@ -585,48 +652,54 @@ pub fn index_repository_with_options(
     rss_peak = max_option(rss_peak, process_rss_bytes());
 
     let mut phases = scan.phases.clone();
-    phases.extend(rust_metrics.phases.clone());
-    phases.extend(php_metrics.phases.clone());
+    for metrics in &built_metrics {
+        phases.extend(metrics.phases.clone());
+    }
     phases.push(composition_phase);
     phases.push(validation_phase);
     let current_rss = process_rss_bytes();
     rss_peak = max_option(rss_peak, current_rss);
+    let mut publication = IndexPublicationMetrics {
+        rebuilt_source_bytes: scan.source_bytes,
+        ..IndexPublicationMetrics::default()
+    };
+    let mut language_facts = Vec::with_capacity(built_metrics.len());
+    for ((adapter, metrics), limits) in built_adapters
+        .iter()
+        .zip(built_metrics.iter())
+        .zip(limits.iter().copied())
+    {
+        publication.rebuilt_files = publication
+            .rebuilt_files
+            .saturating_add(metrics.facts.files);
+        publication.rebuilt_symbols = publication
+            .rebuilt_symbols
+            .saturating_add(metrics.graph.retained_symbols);
+        publication.rebuilt_edges = publication
+            .rebuilt_edges
+            .saturating_add(metrics.graph.retained_edges);
+        publication.rebuilt_call_sites = publication
+            .rebuilt_call_sites
+            .saturating_add(metrics.graph.retained_call_sites);
+        language_facts.push(LanguageIndexingFacts {
+            language: adapter.language(),
+            facts: metrics.facts,
+            graph: metrics.graph,
+            limits,
+        });
+    }
     let indexing = build_indexing_status(
         budgets,
         &scan,
         IndexingParts {
-            rust: rust_metrics.facts,
-            php: php_metrics.facts,
-            rust_graph: rust_metrics.graph,
-            php_graph: php_metrics.graph,
-            rust_limits,
-            php_limits,
+            languages: language_facts,
             phases,
             memory: IndexMemoryMetrics {
                 current_rss_bytes: current_rss,
                 observed_phase_peak_rss_bytes: rss_peak,
                 ..IndexMemoryMetrics::default()
             },
-            publication: IndexPublicationMetrics {
-                rebuilt_files: rust_metrics
-                    .facts
-                    .files
-                    .saturating_add(php_metrics.facts.files),
-                rebuilt_source_bytes: scan.source_bytes,
-                rebuilt_symbols: rust_metrics
-                    .graph
-                    .retained_symbols
-                    .saturating_add(php_metrics.graph.retained_symbols),
-                rebuilt_edges: rust_metrics
-                    .graph
-                    .retained_edges
-                    .saturating_add(php_metrics.graph.retained_edges),
-                rebuilt_call_sites: rust_metrics
-                    .graph
-                    .retained_call_sites
-                    .saturating_add(php_metrics.graph.retained_call_sites),
-                ..IndexPublicationMetrics::default()
-            },
+            publication,
         },
     );
     let elapsed = started.elapsed();
@@ -644,11 +717,29 @@ pub fn index_repository_with_options(
             "syntax startup exceeded its observable memory target"
         );
     }
+    let language_files = |language: Language| {
+        built_adapters
+            .iter()
+            .find(|adapter| adapter.language() == language)
+            .map_or(0, |adapter| adapter.fact_counts().files)
+    };
+    let rust_files = language_files(Language::Rust);
+    let php_files = language_files(Language::Php);
+    let mut framework = AdapterFrameworkMetrics::default();
+    for metrics in &built_metrics {
+        framework.detected |= metrics.framework.detected;
+        framework.symbols = framework.symbols.saturating_add(metrics.framework.symbols);
+        framework.edges = framework.edges.saturating_add(metrics.framework.edges);
+        framework.truncated_files = framework
+            .truncated_files
+            .saturating_add(metrics.framework.truncated_files);
+    }
     let syntax_index = WorkspaceSyntaxIndex {
-        rust,
-        php,
-        rust_limits,
-        php_limits,
+        adapters: built_adapters
+            .into_iter()
+            .zip(limits.iter().copied())
+            .map(|(adapter, limits)| WorkspaceAdapterState { adapter, limits })
+            .collect(),
         budgets,
         indexing: indexing.clone(),
     };
@@ -662,12 +753,12 @@ pub fn index_repository_with_options(
         call_sites: graph.call_site_count(),
         ambiguous_call_sites: graph.ambiguous_call_site_count(),
         unresolved_call_sites: graph.unresolved_call_site_count(),
-        rust_files: rust_metrics.facts.files,
-        php_files: php_metrics.facts.files,
-        laravel_detected: php_metrics.laravel_detected,
-        framework_symbols: php_metrics.framework_symbols,
-        framework_edges: php_metrics.framework_edges,
-        framework_truncated_files: php_metrics.framework_truncated_files,
+        rust_files,
+        php_files,
+        laravel_detected: framework.detected,
+        framework_symbols: framework.symbols,
+        framework_edges: framework.edges,
+        framework_truncated_files: framework.truncated_files,
         elapsed,
         indexing,
     };
@@ -810,8 +901,8 @@ fn scan_discovered_sources_with_inventory_phase(
         .map_err(|_| WorkspaceIndexError::Cancelled)?;
     let discovered_files = inventory.sources.len() as u64;
     let read_started = PhaseTimer::start();
-    let mut rust = BTreeMap::new();
-    let mut php = BTreeMap::new();
+    let mut files_by_language: BTreeMap<Language, BTreeMap<RepoRelativePath, Arc<str>>> =
+        BTreeMap::new();
     let mut source_bytes = 0_u64;
     let mut oversized_files = 0_u64;
     let mut largest_file = 0_u64;
@@ -875,14 +966,11 @@ fn scan_discovered_sources_with_inventory_phase(
             continue;
         }
         source_bytes = source_bytes.saturating_add(actual_len);
-        match chakra_git::source_language(path.as_str()) {
-            Some(Language::Rust) => {
-                rust.insert(path.clone(), source);
-            }
-            Some(Language::Php) => {
-                php.insert(path.clone(), source);
-            }
-            None => {}
+        if let Some(language) = chakra_git::source_language(path.as_str()) {
+            files_by_language
+                .entry(language)
+                .or_default()
+                .insert(path.clone(), source);
         }
     }
 
@@ -907,37 +995,27 @@ fn scan_discovered_sources_with_inventory_phase(
         loader.observe_metadata(path, &metadata);
     }
 
-    let rust_metadata = chakra_git::classify_discovered_sources_with_context(
-        repository_root,
-        &inventory.sources,
-        &inventory.metadata_inputs,
-        Language::Rust,
-        operation,
-    )?
-    .into_iter()
-    .filter(|source| rust.contains_key(&source.path))
-    .map(|source| (source.path, source.metadata))
-    .collect();
-    let rust = chakra_language_rust::RustSources {
-        files: rust,
-        metadata: rust_metadata,
-    };
-    let php_metadata = chakra_git::classify_discovered_sources_with_context(
-        repository_root,
-        &inventory.sources,
-        &inventory.metadata_inputs,
-        Language::Php,
-        operation,
-    )?
-    .into_iter()
-    .filter(|source| php.contains_key(&source.path))
-    .map(|source| (source.path, source.metadata))
-    .collect();
-    let php = chakra_language_php::PhpSources {
-        files: php,
-        metadata: php_metadata,
-    };
-    let indexed_files = (rust.len() + php.len()) as u64;
+    let mut languages = Vec::new();
+    let mut indexed_files = 0_u64;
+    for language in registered_languages() {
+        let files = files_by_language.remove(&language).unwrap_or_default();
+        let metadata = chakra_git::classify_discovered_sources_with_context(
+            repository_root,
+            &inventory.sources,
+            &inventory.metadata_inputs,
+            language,
+            operation,
+        )?
+        .into_iter()
+        .filter(|source| files.contains_key(&source.path))
+        .map(|source| (source.path, source.metadata))
+        .collect();
+        indexed_files = indexed_files.saturating_add(files.len() as u64);
+        languages.push(WorkspaceLanguageSources {
+            language,
+            sources: LanguageSources { files, metadata },
+        });
+    }
     let mut degradations = Vec::new();
     if discovered_files > budgets.max_files {
         degradations.push(IndexDegradation {
@@ -984,7 +1062,7 @@ fn scan_discovered_sources_with_inventory_phase(
         ),
     ];
     Ok(WorkspaceSourceScan {
-        sources: WorkspaceSources { rust, php },
+        sources: WorkspaceSources { languages },
         discovered_files,
         indexed_files,
         source_bytes,
@@ -995,46 +1073,57 @@ fn scan_discovered_sources_with_inventory_phase(
     })
 }
 
-fn split_graph_limits(
-    budgets: IndexBudgets,
-    rust_files: u64,
-    php_files: u64,
-) -> (GraphBuildLimits, GraphBuildLimits) {
-    let weights = rust_files.saturating_add(php_files);
+/// Splits the graph budgets proportionally to each language's file count, in
+/// registry order. Each language receives `remaining * count / remaining
+/// total`, so the last nonzero language gets the remainder; for two languages
+/// this is exactly the historical Rust/PHP split.
+fn split_graph_limits(budgets: IndexBudgets, file_counts: &[u64]) -> Vec<GraphBuildLimits> {
     let split = |limit: u64| {
-        if rust_files == 0 {
-            (0, limit)
-        } else if php_files == 0 {
-            (limit, 0)
-        } else {
-            let rust = limit.saturating_mul(rust_files) / weights;
-            (rust, limit.saturating_sub(rust))
-        }
+        let mut remaining_limit = limit;
+        let mut remaining_total: u64 = file_counts
+            .iter()
+            .fold(0_u64, |total, count| total.saturating_add(*count));
+        file_counts
+            .iter()
+            .map(|count| {
+                if *count == 0 || remaining_total == 0 {
+                    return 0;
+                }
+                let share = remaining_limit.saturating_mul(*count) / remaining_total;
+                remaining_limit = remaining_limit.saturating_sub(share);
+                remaining_total = remaining_total.saturating_sub(*count);
+                share
+            })
+            .collect::<Vec<_>>()
     };
-    let (rust_symbols, php_symbols) = split(budgets.max_symbols);
-    let (rust_edges, php_edges) = split(budgets.max_edges);
-    let (rust_calls, php_calls) = split(budgets.max_call_sites);
-    (
-        GraphBuildLimits {
-            max_symbols: rust_symbols,
-            max_edges: rust_edges,
-            max_call_sites: rust_calls,
-        },
-        GraphBuildLimits {
-            max_symbols: php_symbols,
-            max_edges: php_edges,
-            max_call_sites: php_calls,
-        },
-    )
+    let symbols = split(budgets.max_symbols);
+    let edges = split(budgets.max_edges);
+    let calls = split(budgets.max_call_sites);
+    symbols
+        .into_iter()
+        .zip(edges)
+        .zip(calls)
+        .map(
+            |((max_symbols, max_edges), max_call_sites)| GraphBuildLimits {
+                max_symbols,
+                max_edges,
+                max_call_sites,
+            },
+        )
+        .collect()
+}
+
+/// One language's facts, graph report, and limits for the indexing status, in
+/// registry order.
+struct LanguageIndexingFacts {
+    language: Language,
+    facts: AdapterFactCounts,
+    graph: GraphBuildReport,
+    limits: GraphBuildLimits,
 }
 
 struct IndexingParts {
-    rust: chakra_language_rust::SyntaxFactCounts,
-    php: chakra_language_php::SyntaxFactCounts,
-    rust_graph: GraphBuildReport,
-    php_graph: GraphBuildReport,
-    rust_limits: GraphBuildLimits,
-    php_limits: GraphBuildLimits,
+    languages: Vec<LanguageIndexingFacts>,
     phases: Vec<IndexPhaseMeasurement>,
     memory: IndexMemoryMetrics,
     publication: IndexPublicationMetrics,
@@ -1046,36 +1135,38 @@ fn build_indexing_status(
     parts: IndexingParts,
 ) -> IndexingStatus {
     let IndexingParts {
-        rust,
-        php,
-        rust_graph,
-        php_graph,
-        rust_limits,
-        php_limits,
+        languages,
         phases,
         mut memory,
         publication,
     } = parts;
-    let extracted_symbols = rust.symbols.saturating_add(php.symbols);
-    let extracted_call_sites = rust.call_sites.saturating_add(php.call_sites);
-    let retained_symbols = rust_graph
-        .retained_symbols
-        .saturating_add(php_graph.retained_symbols);
-    let retained_edges = rust_graph
-        .retained_edges
-        .saturating_add(php_graph.retained_edges);
-    let omitted_edges = rust_graph
-        .omitted_edges
-        .saturating_add(php_graph.omitted_edges);
-    let retained_call_sites = rust_graph
-        .retained_call_sites
-        .saturating_add(php_graph.retained_call_sites);
-    let omitted_call_sites = rust_graph
-        .omitted_call_sites
-        .saturating_add(php_graph.omitted_call_sites);
-    let unknown_relationship_omissions = rust_graph
-        .call_sites_omitted_by_symbol_budget
-        .saturating_add(php_graph.call_sites_omitted_by_symbol_budget);
+    let mut extracted_symbols = 0_u64;
+    let mut extracted_call_sites = 0_u64;
+    let mut extracted_relationship_edges = 0_u64;
+    let mut parsed_files = 0_u64;
+    let mut syntax_error_files = 0_u64;
+    let mut retained_symbols = 0_u64;
+    let mut retained_edges = 0_u64;
+    let mut omitted_edges = 0_u64;
+    let mut retained_call_sites = 0_u64;
+    let mut omitted_call_sites = 0_u64;
+    let mut unknown_relationship_omissions = 0_u64;
+    for language in &languages {
+        extracted_symbols = extracted_symbols.saturating_add(language.facts.symbols);
+        extracted_call_sites = extracted_call_sites.saturating_add(language.facts.call_sites);
+        extracted_relationship_edges =
+            extracted_relationship_edges.saturating_add(language.facts.relationship_edges);
+        parsed_files = parsed_files.saturating_add(language.facts.files);
+        syntax_error_files = syntax_error_files.saturating_add(language.facts.syntax_error_files);
+        retained_symbols = retained_symbols.saturating_add(language.graph.retained_symbols);
+        retained_edges = retained_edges.saturating_add(language.graph.retained_edges);
+        omitted_edges = omitted_edges.saturating_add(language.graph.omitted_edges);
+        retained_call_sites =
+            retained_call_sites.saturating_add(language.graph.retained_call_sites);
+        omitted_call_sites = omitted_call_sites.saturating_add(language.graph.omitted_call_sites);
+        unknown_relationship_omissions = unknown_relationship_omissions
+            .saturating_add(language.graph.call_sites_omitted_by_symbol_budget);
+    }
     let skipped_files = scan.discovered_files.saturating_sub(scan.indexed_files);
     let coverage = IndexCoverage {
         discovered_files: scan.discovered_files,
@@ -1083,10 +1174,8 @@ fn build_indexing_status(
         skipped_files,
         unreadable_files: scan.unreadable_files,
         source_bytes: scan.source_bytes,
-        parsed_files: rust.files.saturating_add(php.files),
-        syntax_error_files: rust
-            .syntax_error_files
-            .saturating_add(php.syntax_error_files),
+        parsed_files,
+        syntax_error_files,
         extracted_symbols,
         retained_symbols,
         retained_edges,
@@ -1096,8 +1185,14 @@ fn build_indexing_status(
         omitted_call_sites,
     };
     let mut degradations = scan.degradations.clone();
-    append_graph_degradations(&mut degradations, Language::Rust, rust_limits, rust_graph);
-    append_graph_degradations(&mut degradations, Language::Php, php_limits, php_graph);
+    for language in &languages {
+        append_graph_degradations(
+            &mut degradations,
+            language.language,
+            language.limits,
+            language.graph,
+        );
+    }
     let capabilities = vec![
         capability(
             IndexCapability::FileInventory,
@@ -1132,9 +1227,7 @@ fn build_indexing_status(
     ];
     memory.retained_source_bytes = scan.source_bytes;
     memory.retained_parsed_symbols = extracted_symbols;
-    memory.retained_parsed_relationship_edges = rust
-        .relationship_edges
-        .saturating_add(php.relationship_edges);
+    memory.retained_parsed_relationship_edges = extracted_relationship_edges;
     memory.retained_parsed_call_sites = extracted_call_sites;
     memory.retained_graph_symbols = retained_symbols;
     memory.retained_graph_edges = retained_edges;
@@ -1772,7 +1865,7 @@ mod tests {
                 RepoRelativePath::new("missing/Cargo.toml")?,
             ]
         );
-        assert_eq!(scan.sources.rust.len(), 1);
+        assert_eq!(scan.sources.file_count(Language::Rust), 1);
         Ok(())
     }
 

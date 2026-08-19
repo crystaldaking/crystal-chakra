@@ -4,13 +4,19 @@
 //! them into one atomically published workspace revision and owns the single
 //! watcher/freshness barrier for that revision.
 
+mod adapter;
 mod indexer;
 mod live;
 
+pub use adapter::{
+    AdapterBuildMetrics, AdapterColdBuild, AdapterFactCounts, AdapterFrameworkMetrics,
+    AdapterReconcile, AdapterReconcileMetrics, LanguageSources, SyntaxLanguageAdapter,
+    default_adapters, registered_languages,
+};
 pub use indexer::{
     IndexMetrics, IndexOptions, IndexReport, ReconcileMetrics, ReconcileReport,
-    WorkspaceIndexError, WorkspaceSourceScan, WorkspaceSources, WorkspaceSyntaxIndex,
-    index_repository, index_repository_with_options, scan_repository_sources,
+    WorkspaceIndexError, WorkspaceLanguageSources, WorkspaceSourceScan, WorkspaceSources,
+    WorkspaceSyntaxIndex, index_repository, index_repository_with_options, scan_repository_sources,
     scan_repository_sources_with_options,
 };
 pub use live::{
