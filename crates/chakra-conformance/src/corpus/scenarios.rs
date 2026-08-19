@@ -57,7 +57,10 @@ pub fn evaluate_language(
             "language `{language}` is not in the corpus manifest"
         ))
     })?;
-    if !supported_languages().contains(&language) {
+    if !supported_languages()
+        .iter()
+        .any(|supported| supported == language)
+    {
         return Ok(entry
             .repositories
             .iter()

@@ -43,11 +43,19 @@ pub const SCENARIO_IDS: &[&str] = &[
     "cache-restore",
 ];
 
-/// Languages with a `chakra-language` adapter. Repositories of any other
-/// manifest language are recorded as `skipped` with an
-/// "unsupported language" reason until their language issue lands.
-pub fn supported_languages() -> &'static [&'static str] {
-    &["php", "rust"]
+/// Languages with a registered `chakra-language` adapter (ADR-0031).
+/// Repositories of any other manifest language are recorded as `skipped` with
+/// an "unsupported language" reason until their language issue lands.
+pub fn supported_languages() -> Vec<String> {
+    chakra_language::registered_languages()
+        .iter()
+        .filter_map(|language| {
+            serde_json::to_value(language)
+                .ok()?
+                .as_str()
+                .map(str::to_owned)
+        })
+        .collect()
 }
 
 /// Absolute path of the repository/workspace root.
