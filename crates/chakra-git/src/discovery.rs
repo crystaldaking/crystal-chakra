@@ -484,6 +484,9 @@ pub fn source_language(path: &str) -> Option<Language> {
     match path.extension() {
         Some(extension) if extension == OsStr::new("rs") => Some(Language::Rust),
         Some(extension) if extension == OsStr::new("php") => Some(Language::Php),
+        Some(extension) if matches!(extension.to_str(), Some("ts" | "tsx" | "mts" | "cts")) => {
+            Some(Language::TypeScript)
+        }
         _ => None,
     }
 }
@@ -578,7 +581,12 @@ fn workspace_inventory_from_git_output(
         if raw.is_empty() {
             continue;
         }
-        let source = raw.ends_with(b".rs") || raw.ends_with(b".php");
+        let source = raw.ends_with(b".rs")
+            || raw.ends_with(b".php")
+            || raw.ends_with(b".ts")
+            || raw.ends_with(b".tsx")
+            || raw.ends_with(b".mts")
+            || raw.ends_with(b".cts");
         let metadata_input = raw_is_metadata_input(raw);
         if !source && !metadata_input {
             continue;
@@ -612,6 +620,8 @@ fn raw_is_metadata_input(raw: &[u8]) -> bool {
         b"Cargo.toml".as_slice(),
         b"Cargo.lock".as_slice(),
         b"composer.json".as_slice(),
+        b"package.json".as_slice(),
+        b"tsconfig.json".as_slice(),
         b".cargo/config".as_slice(),
         b".cargo/config.toml".as_slice(),
         b"rust-toolchain".as_slice(),
@@ -828,6 +838,36 @@ mod tests {
         assert_eq!(php[0].as_str(), "src/service.php");
         let all = discover_source_files(repository.path())?;
         assert_eq!(all.len(), 2);
+        Ok(())
+    }
+
+    #[test]
+    fn discovers_typescript_extensions_without_mixing_languages() -> Result<(), Box<dyn Error>> {
+        let repository = repository()?;
+        for (path, source) in [
+            ("src/service.ts", "export function pay(): void {}\n"),
+            ("src/view.tsx", "export function View() { return null; }\n"),
+            ("src/entry.mts", "export function entry(): void {}\n"),
+            ("src/legacy.cts", "export function legacy(): void {}\n"),
+        ] {
+            fs::write(repository.path().join(path), source)?;
+        }
+
+        let typescript = discover_language_files(repository.path(), Language::TypeScript)?;
+        let paths: Vec<&str> = typescript.iter().map(RepoRelativePath::as_str).collect();
+        assert_eq!(
+            paths,
+            [
+                "src/entry.mts",
+                "src/legacy.cts",
+                "src/service.ts",
+                "src/view.tsx"
+            ]
+        );
+        let rust = discover_language_files(repository.path(), Language::Rust)?;
+        assert_eq!(rust.len(), 1);
+        let all = discover_source_files(repository.path())?;
+        assert_eq!(all.len(), 5);
         Ok(())
     }
 }

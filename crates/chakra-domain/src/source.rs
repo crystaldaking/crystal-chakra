@@ -52,6 +52,10 @@ pub enum SourceClassification {
     /// Package ownership and source root came from a Git-visible Composer
     /// `autoload.psr-4` or `autoload-dev.psr-4` declaration.
     ComposerMetadata,
+    /// Package ownership came from a Git-visible `package.json` (npm-style
+    /// package or workspace root); test conventions still come from
+    /// deterministic TypeScript path rules.
+    PackageJsonMetadata,
     /// No applicable package metadata was available; deterministic path
     /// conventions supplied the role.
     PathFallback,
@@ -94,6 +98,7 @@ pub struct SourceMetadataCoverage {
     pub total_files: u64,
     pub cargo_metadata_files: u64,
     pub composer_metadata_files: u64,
+    pub package_json_metadata_files: u64,
     pub path_fallback_files: u64,
 }
 

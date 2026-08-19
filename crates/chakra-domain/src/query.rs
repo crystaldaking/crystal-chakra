@@ -386,6 +386,7 @@ pub enum RepoMapGroupKind {
     TopLevelDirectory,
     CargoPackage,
     ComposerPsr4,
+    NpmPackage,
 }
 
 /// Overlapping structural aggregation used by the first repository-map page.

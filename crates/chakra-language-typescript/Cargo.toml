@@ -1,6 +1,6 @@
 [package]
-name = "chakra-language"
-description = "Multi-language syntax index composition and live reconciliation for Chakra"
+name = "chakra-language-typescript"
+description = "Git-aware Tree-sitter TypeScript/TSX syntax index adapter for Chakra"
 version = "0.1.1"
 edition.workspace = true
 rust-version.workspace = true
@@ -12,12 +12,10 @@ publish = false
 chakra-domain = { path = "../chakra-domain", version = "0.1.1" }
 chakra-engine = { path = "../chakra-engine", version = "0.1.1" }
 chakra-git = { path = "../chakra-git", version = "0.1.1" }
-chakra-language-php = { path = "../chakra-language-php", version = "0.1.1" }
-chakra-language-rust = { path = "../chakra-language-rust", version = "0.1.1" }
-chakra-language-typescript = { path = "../chakra-language-typescript", version = "0.1.1" }
-notify.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
+tree-sitter.workspace = true
+tree-sitter-typescript.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 nix = { workspace = true, features = ["resource"] }

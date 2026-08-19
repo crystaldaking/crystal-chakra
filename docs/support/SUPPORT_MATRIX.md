@@ -11,6 +11,7 @@ Target list reviewed: 2026-08 (GitHub Octoverse 2025 top languages plus pre-exis
 |----------|------|-----------|---------|------------------|
 | php | first-class | yes | tree-sitter-php 0.24.2 | none (deferred) |
 | rust | first-class | yes | tree-sitter-rust 0.24 | rust-analyzer (integrated) |
+| typescript | in-progress | no | tree-sitter-typescript 0.23.2 | vtsls (selected-not-integrated) |
 
 ## Capability detail
 
@@ -81,3 +82,37 @@ Target list reviewed: 2026-08 (GitHub Octoverse 2025 top languages plus pre-exis
 | SYNTAX-06 | pass | tree-sitter |
 | SYNTAX-07 | pass | tree-sitter diagnostics (ADR-0022) |
 | SYNTAX-08 | pass | lazy syntax call sites (ADR-0010) |
+
+### typescript
+
+| Capability | Status | Mechanism |
+|------------|--------|-----------|
+| AMBIG-01 | pass | query-layer ambiguity reporting |
+| BUDGET-01 | pass | query work budgets (ADR-0025) |
+| CANCEL-01 | pass | cooperative cancellation (ADR-0025) |
+| CONFORM-01 | pass | chakra-conformance harness |
+| CORPUS-01 | pass | pinned public corpus evaluation (ADR-0029) |
+| DEGRADE-01 | pass | bounded degradation (ADR-0011) |
+| DISC-01 | pass | chakra-git discovery (.ts/.tsx/.mts/.cts) |
+| DISC-02 | pass | package.json scopes (workspaces) and tsconfig.json project boundaries |
+| DISC-03 | pass | language-neutral source roles plus *.test.*/*.spec.* and __tests__/ conventions (ADR-0019) |
+| DOCS-01 | pass | per-language documentation |
+| FRESH-01 | pass | atomic revision publication (ADR-0001) |
+| FRESH-02 | pass | live freshness barrier (ADR-0005) |
+| PRECISE-01 | pass | recorded provider selection: vtsls (@vtsls/language-server 0.3.x) |
+| PRECISE-02 | missing | vtsls integration lands in Part B of #27. |
+| PRECISE-03 | not-applicable | No provider integrated yet (Part B of #27). |
+| PRECISE-04 | not-applicable | No provider integrated yet (Part B of #27). |
+| PRECISE-05 | not-applicable | No provider integrated yet (Part B of #27). |
+| PROV-01 | pass | domain provenance model |
+| QUERY-01 | pass | chakra-engine QueryService |
+| QUERY-02 | pass | chakra-mcp |
+| QUERY-03 | pass | chakra-git diff provider |
+| SYNTAX-01 | pass | tree-sitter-typescript 0.23.2 (TypeScript + TSX grammars) |
+| SYNTAX-02 | pass | tree-sitter |
+| SYNTAX-03 | pass | tree-sitter (namespaces/classes/interfaces) |
+| SYNTAX-04 | pass | tree-sitter (ES module imports/exports and aliases) |
+| SYNTAX-05 | pass | tree-sitter (byte-accurate ranges) |
+| SYNTAX-06 | pass | tree-sitter + jest/vitest/mocha describe/it/test conventions |
+| SYNTAX-07 | pass | tree-sitter diagnostics (ADR-0022) |
+| SYNTAX-08 | pass | bounded lazy syntax call candidates with import-alias resolution (ADR-0010) |

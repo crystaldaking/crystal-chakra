@@ -15,6 +15,8 @@ Each language has its own directory:
 
 - `rust/` — a small Rust project (`src/` plus `tests/`).
 - `php/` — a small PHP project (`src/` plus `tests/`).
+- `typescript/` — a small TypeScript project (`src/` plus `tests/`, with
+  `package.json` and `tsconfig.json` project metadata).
 
 Inside each language directory:
 
@@ -29,14 +31,14 @@ The fixtures deliberately contain the hard cases the scenarios assert:
 
 | Fixture element | Scenario |
 |-----------------|----------|
-| `dup_a`/`dup_b` (rust), `DupA`/`DupB` (php): same function name in two scopes | `ambiguity` |
-| `nested.rs` (`outer::inner`), `Nested.php` (`Conf\Nested\Inner`) | `declarations-containers` |
-| `use ... as audit_event`, `use ... as FormatHelperAlias` | `imports-aliases` |
+| `dup_a`/`dup_b` (rust), `DupA`/`DupB` (php), `dup_a`/`dup_b` (typescript): same function name in two scopes | `ambiguity` |
+| `nested.rs` (`outer::inner`), `Nested.php` (`Conf\Nested\Inner`), `nested.ts` (`outer::inner` namespaces) | `declarations-containers` |
+| `use ... as audit_event`, `use ... as FormatHelperAlias`, `import { ... as audit_event }` | `imports-aliases` |
 | `src/` vs `tests/` trees | `source-roles`, `test-hints` |
 | `dispatch_conformance_request` → `shared_unique_target` | `syntax-callers`, `provider-*` |
-| `#[test] fn` / `test*` method | `test-hints` |
+| `#[test] fn` / `test*` method / `it("...")` block | `test-hints` |
 | `CONFORMANCE_TEXT_NEEDLE` comment in the service file | `text-search` |
-| `fan_in.rs` / `FanIn.php`: 55 callers of one function | `high-degree-callers` |
+| `fan_in.rs` / `FanIn.php` / `fan_in.ts`: 55 callers of one function (typescript: 55 plus one import-aliased call) | `high-degree-callers` |
 | service file (broken and repaired at runtime) | `syntax-error-recovery` |
 | files created/renamed/deleted at runtime | `file-lifecycle`, `diff-context-scopes` |
 

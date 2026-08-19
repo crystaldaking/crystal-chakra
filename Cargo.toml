@@ -27,6 +27,7 @@ nix = { version = "0.31", default-features = false, features = ["signal"] }
 tree-sitter = "0.26"
 tree-sitter-php = "0.24.2"
 tree-sitter-rust = "0.24"
+tree-sitter-typescript = "0.23.2"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter", "std"] }

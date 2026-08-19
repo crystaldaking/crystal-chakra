@@ -5,6 +5,21 @@ version tags prefixed with `v`.
 
 ## [Unreleased]
 
+### Added
+
+- First-class TypeScript/TSX syntax support (issue #27, Part A): a
+  `chakra-language-typescript` adapter crate (tree-sitter-typescript 0.23.2,
+  TypeScript grammar for `.ts`/`.mts`/`.cts`, TSX grammar for `.tsx`)
+  registered in the ADR-0031 adapter registry after PHP; ES module
+  import/export and alias facts, namespace/class containers, heritage
+  relations, jest/vitest/mocha test hints, bounded lazy call candidates with
+  relative-import resolution, and actionable syntax diagnostics.
+  package.json/tsconfig.json project scopes plus `*.test.*`/`*.spec.*`/
+  `__tests__/` source roles; conformance fixture (14/14 scenarios) and the
+  pinned microsoft/vscode corpus evaluation (11/11, degraded as designed by
+  the workspace source-byte and symbol budgets). The vtsls precise provider
+  lands in Part B; TypeScript is not yet advertised.
+
 ## [0.1.1] - 2026-08-18
 
 ### Added

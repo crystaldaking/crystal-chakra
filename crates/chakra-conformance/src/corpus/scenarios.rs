@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 use serde_json::Value;
 
 use chakra_domain::envelope::TruncationSection;
-use chakra_domain::indexing::{IndexBudgets, IndexCancellation};
+use chakra_domain::indexing::{IndexBudgetKind, IndexBudgets, IndexCancellation};
 use chakra_domain::operation::OperationContext;
 use chakra_domain::query::{
     CallersRequest, ChangeKind, ContextRequest, DiffContextRequest, QueryError, QueryService,
@@ -309,6 +309,7 @@ impl ProbePlan {
         let extension = match language {
             "rust" => "rs",
             "php" => "php",
+            "typescript" => "ts",
             other => return Err(failure(format!("no probe plan for language `{other}`")).into()),
         };
         let mut paths: Vec<String> = cold
@@ -356,6 +357,11 @@ impl ProbePlan {
                 "\nfunction chakra_corpus_probe_one(): void {}\n".to_owned(),
                 "\nfunction chakra_corpus_probe_two(): void {}\n".to_owned(),
                 "\nfunction chakra_corpus_broken( {\n".to_owned(),
+            ),
+            "typescript" => (
+                "\nexport function chakra_corpus_probe_one(): void {}\n".to_owned(),
+                "\nexport function chakra_corpus_probe_two(): void {}\n".to_owned(),
+                "\nexport function chakra_corpus_broken( {\n".to_owned(),
             ),
             other => return Err(failure(format!("no probe plan for language `{other}`")).into()),
         };
@@ -651,6 +657,7 @@ fn record_cold_index(
     builder.measure("unresolved_call_sites", cold.metrics.unresolved_call_sites);
     builder.measure("rust_files", cold.metrics.rust_files);
     builder.measure("php_files", cold.metrics.php_files);
+    builder.measure("typescript_files", cold.metrics.typescript_files);
     builder.measure("source_bytes", cold.metrics.indexing.coverage.source_bytes);
     builder.measure("degraded", cold.metrics.indexing.is_degraded());
     builder.measure(
@@ -933,6 +940,19 @@ fn run_mutation_scenarios(
     let clean = workspace.engine.diff_context(DiffContextRequest::default());
     let clean_wall = clean_started.elapsed();
 
+    // When the workspace source-byte budget is degraded, the indexed set is a
+    // greedy fill at the budget boundary: appending bytes shifts which small
+    // boundary files fit, so a one-file edit can legitimately reparse the
+    // edited file plus a few (de)materialized boundary files. The strict
+    // "exactly N reparsed" assertion only holds for non-degraded indexes.
+    let source_budget_degraded = workspace
+        .engine
+        .snapshot()
+        .indexing()
+        .degradations
+        .iter()
+        .any(|degradation| degradation.cause == IndexBudgetKind::WorkspaceSourceBytes);
+
     slots.run("one-file-edit", |scenario| {
         let original = fs::read_to_string(checkout.join(&plan.edit_file))?;
         fs::write(
@@ -947,7 +967,13 @@ fn run_mutation_scenarios(
         )?;
         scenario.phase("edit_and_barrier", started);
         scenario.measure("wall_micros", micros(started.elapsed()));
-        record_incremental(scenario, &before, &workspace.live.metrics(), 1)?;
+        record_incremental(
+            scenario,
+            &before,
+            &workspace.live.metrics(),
+            1,
+            source_budget_degraded,
+        )?;
         scenario.note("one-file edit: targeted reconcile, fresh query sees the change");
         Ok(())
     });
@@ -974,7 +1000,13 @@ fn run_mutation_scenarios(
         )?;
         scenario.phase("replace_and_barrier", started);
         scenario.measure("wall_micros", micros(started.elapsed()));
-        record_incremental(scenario, &before, &workspace.live.metrics(), 1)?;
+        record_incremental(
+            scenario,
+            &before,
+            &workspace.live.metrics(),
+            1,
+            source_budget_degraded,
+        )?;
         scenario.note("write-temp-then-rename: targeted reconcile, fresh query sees the change");
         Ok(())
     });
@@ -1098,12 +1130,19 @@ fn run_mutation_scenarios(
 }
 
 /// Asserts a targeted, incremental reconcile happened between the two live
-/// metric snapshots (never a full reindex).
+/// metric snapshots (never a full reindex). `source_budget_degraded` relaxes
+/// the exact reparse count: with the workspace source-byte budget degraded,
+/// the greedy fill at the budget boundary (de)materializes small boundary
+/// files when an edit changes total source bytes, so the edited file's
+/// reparse may be joined by boundary files. Read-your-writes still requires
+/// at least the edited file to be reparsed, and a full reconciliation stays
+/// forbidden either way.
 fn record_incremental(
     scenario: &mut ScenarioBuilder,
     before: &LiveIndexMetrics,
     after: &LiveIndexMetrics,
     expected_reparsed: u64,
+    source_budget_degraded: bool,
 ) -> Check<()> {
     let reparsed = after.files_reparsed.saturating_sub(before.files_reparsed);
     scenario.measure("files_reparsed", reparsed);
@@ -1113,10 +1152,23 @@ fn record_incremental(
             .full_reconciliations
             .saturating_sub(before.full_reconciliations),
     );
-    reject(
-        reparsed == expected_reparsed,
-        format!("expected {expected_reparsed} reparsed file(s), observed {reparsed}"),
-    )?;
+    if source_budget_degraded {
+        reject(
+            reparsed >= expected_reparsed,
+            format!("expected at least {expected_reparsed} reparsed file(s), observed {reparsed}"),
+        )?;
+        if reparsed > expected_reparsed {
+            scenario.note(format!(
+                "source-byte budget degraded: {} extra reparsed file(s) are budget-boundary churn",
+                reparsed - expected_reparsed
+            ));
+        }
+    } else {
+        reject(
+            reparsed == expected_reparsed,
+            format!("expected {expected_reparsed} reparsed file(s), observed {reparsed}"),
+        )?;
+    }
     reject(
         after.full_reconciliations == before.full_reconciliations,
         "edit triggered a full reconciliation instead of incremental work",

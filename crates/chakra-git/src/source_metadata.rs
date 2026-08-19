@@ -25,6 +25,8 @@ const COMMAND_POLL_INTERVAL: Duration = Duration::from_millis(1);
 const MAX_CARGO_METADATA_INVOCATIONS: usize = 64;
 const MAX_COMPOSER_MANIFESTS: usize = 64;
 const MAX_COMPOSER_MANIFEST_BYTES: usize = 1024 * 1024;
+const MAX_PACKAGE_JSON_MANIFESTS: usize = 256;
+const MAX_PACKAGE_JSON_MANIFEST_BYTES: usize = 1024 * 1024;
 
 /// One discovered source plus deterministic query metadata.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -75,6 +77,13 @@ struct CargoPackage {
 struct ComposerRoot {
     package: SourcePackage,
     role: SourceRole,
+}
+
+/// npm-style package scope from a `package.json` (or a `tsconfig.json`
+/// project boundary without a sibling `package.json`).
+#[derive(Debug, Clone)]
+struct PackageJsonRoot {
+    package: SourcePackage,
 }
 
 fn read_bounded(mut reader: impl Read, limit: usize) -> io::Result<BoundedRead> {
@@ -506,6 +515,139 @@ fn is_inside(path: &RepoRelativePath, root: Option<&RepoRelativePath>) -> bool {
             .is_some_and(|suffix| suffix.starts_with('/'))
 }
 
+fn read_json_manifest(root: &Path, manifest: &RepoRelativePath) -> Option<serde_json::Value> {
+    let manifest_path = root.join(manifest.as_str());
+    let file = fs::File::open(&manifest_path).ok()?;
+    let mut bytes = Vec::new();
+    if file
+        .take((MAX_PACKAGE_JSON_MANIFEST_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)
+        .is_err()
+        || bytes.len() > MAX_PACKAGE_JSON_MANIFEST_BYTES
+    {
+        return None;
+    }
+    serde_json::from_slice::<serde_json::Value>(&bytes).ok()
+}
+
+fn manifest_directory(manifest: &RepoRelativePath, file_name: &str) -> Option<RepoRelativePath> {
+    let suffix = format!("/{file_name}");
+    let directory = manifest.as_str().strip_suffix(suffix.as_str())?;
+    RepoRelativePath::new(directory).ok()
+}
+
+/// Collects npm-style package scopes. Every `package.json` is a package
+/// root (workspaces are covered because each workspace member carries its
+/// own manifest); a `tsconfig.json` without a sibling `package.json` is a
+/// project boundary named after its directory.
+fn package_json_packages(
+    root: &Path,
+    metadata_inputs: &[RepoRelativePath],
+    operation: &OperationContext,
+) -> Result<Vec<PackageJsonRoot>, OperationAbort> {
+    let package_manifests = manifests_named(metadata_inputs, "package.json");
+    let mut packages = Vec::new();
+    let mut covered = BTreeSet::new();
+    for manifest in package_manifests.iter().take(MAX_PACKAGE_JSON_MANIFESTS) {
+        operation.check()?;
+        let directory = manifest_directory(manifest, "package.json");
+        if let Some(directory) = &directory {
+            covered.insert(directory.clone());
+        }
+        let metadata = read_json_manifest(root, manifest);
+        let fallback_name = manifest
+            .as_str()
+            .strip_suffix("/package.json")
+            .unwrap_or("repository");
+        let name = metadata
+            .as_ref()
+            .and_then(|metadata| metadata.get("name"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .unwrap_or(fallback_name);
+        packages.push(PackageJsonRoot {
+            package: SourcePackage {
+                name: name.to_owned(),
+                root: directory,
+            },
+        });
+    }
+    for tsconfig in manifests_named(metadata_inputs, "tsconfig.json")
+        .iter()
+        .take(MAX_PACKAGE_JSON_MANIFESTS)
+    {
+        operation.check()?;
+        let Some(directory) = manifest_directory(tsconfig, "tsconfig.json") else {
+            continue;
+        };
+        if covered.contains(&directory) {
+            continue;
+        }
+        covered.insert(directory.clone());
+        packages.push(PackageJsonRoot {
+            package: SourcePackage {
+                name: directory.as_str().to_owned(),
+                root: Some(directory),
+            },
+        });
+    }
+    operation.check()?;
+    Ok(packages)
+}
+
+/// TypeScript test conventions beyond the language-neutral path fallback:
+/// `__tests__/` directories and `*.test.*` / `*.spec.*` file stems.
+fn typescript_path_role(path: &RepoRelativePath) -> SourceRole {
+    let fallback = SourceMetadata::path_fallback(path);
+    if fallback.role != SourceRole::Production {
+        return fallback.role;
+    }
+    if path
+        .as_str()
+        .split('/')
+        .any(|component| component.eq_ignore_ascii_case("__tests__"))
+    {
+        return SourceRole::Test;
+    }
+    let is_test_stem = path
+        .as_str()
+        .rsplit('/')
+        .next()
+        .is_some_and(|file| file.contains(".test.") || file.contains(".spec."));
+    if is_test_stem {
+        SourceRole::Test
+    } else {
+        SourceRole::Production
+    }
+}
+
+fn classify_typescript(path: &RepoRelativePath, packages: &[PackageJsonRoot]) -> SourceMetadata {
+    let role = typescript_path_role(path);
+    let package = packages
+        .iter()
+        .filter(|package| is_inside(path, package.package.root.as_ref()))
+        .max_by_key(|package| {
+            package
+                .package
+                .root
+                .as_ref()
+                .map_or(0, |root| root.as_str().len())
+        });
+    let Some(package) = package else {
+        return SourceMetadata {
+            role,
+            classification: SourceClassification::PathFallback,
+            package: None,
+        };
+    };
+    SourceMetadata {
+        role,
+        classification: SourceClassification::PackageJsonMetadata,
+        package: Some(package.package.clone()),
+    }
+}
+
 fn classify_rust(path: &RepoRelativePath, packages: &[CargoPackage]) -> SourceMetadata {
     let fallback = SourceMetadata::path_fallback(path);
     let package = packages
@@ -605,6 +747,11 @@ pub fn classify_discovered_sources_with_context(
     } else {
         None
     };
+    let package_json = if language == Language::TypeScript {
+        Some(package_json_packages(root, metadata_inputs, operation)?)
+    } else {
+        None
+    };
     let mut classified = Vec::with_capacity(files.len());
     for path in files {
         operation.check()?;
@@ -612,6 +759,9 @@ pub fn classify_discovered_sources_with_context(
             metadata: match language {
                 Language::Rust => classify_rust(&path, cargo.as_deref().unwrap_or_default()),
                 Language::Php => classify_php(&path, composer.as_deref().unwrap_or_default()),
+                Language::TypeScript => {
+                    classify_typescript(&path, package_json.as_deref().unwrap_or_default())
+                }
             },
             path,
             language,
@@ -844,6 +994,135 @@ mod tests {
             by_path[&RepoRelativePath::new("legacy/Legacy.php")?].classification,
             SourceClassification::PathFallback
         );
+        Ok(())
+    }
+
+    #[test]
+    fn package_json_scopes_and_typescript_test_conventions() -> Result<(), Box<dyn Error>> {
+        let repository = repository()?;
+        let root = repository.path();
+        write(
+            root,
+            "package.json",
+            r#"{"name": "chakra/monorepo", "workspaces": ["packages/*"]}"#,
+        )?;
+        write(
+            root,
+            "packages/web/package.json",
+            r#"{"name": "@chakra/web"}"#,
+        )?;
+        write(root, "packages/web/tsconfig.json", "{}\n")?;
+        write(
+            root,
+            "packages/cli/tsconfig.json",
+            "{\"compilerOptions\": {}}\n",
+        )?;
+        for (path, source) in [
+            (
+                "packages/web/src/app.ts",
+                "export function app(): void {}\n",
+            ),
+            (
+                "packages/web/src/view.tsx",
+                "export function View() { return null; }\n",
+            ),
+            (
+                "packages/web/src/app.test.ts",
+                "export function appTest(): void {}\n",
+            ),
+            (
+                "packages/web/src/__tests__/hook.ts",
+                "export function hook(): void {}\n",
+            ),
+            (
+                "packages/cli/src/main.ts",
+                "export function cliMain(): void {}\n",
+            ),
+            ("scripts/tool.ts", "export function tool(): void {}\n"),
+        ] {
+            write(root, path, source)?;
+        }
+
+        let classified = discover_classified_sources(root, Language::TypeScript)?;
+        let by_path: BTreeMap<_, _> = classified
+            .into_iter()
+            .map(|source| (source.path, source.metadata))
+            .collect();
+        let app = &by_path[&RepoRelativePath::new("packages/web/src/app.ts")?];
+        assert_eq!(
+            app.classification,
+            SourceClassification::PackageJsonMetadata
+        );
+        assert_eq!(app.role, SourceRole::Production);
+        assert_eq!(
+            app.package.as_ref().map(|package| (
+                package.name.as_str(),
+                package.root.as_ref().map(RepoRelativePath::as_str)
+            )),
+            Some(("@chakra/web", Some("packages/web")))
+        );
+        let view = &by_path[&RepoRelativePath::new("packages/web/src/view.tsx")?];
+        assert_eq!(view.role, SourceRole::Production);
+        for path in [
+            "packages/web/src/app.test.ts",
+            "packages/web/src/__tests__/hook.ts",
+        ] {
+            let source = &by_path[&RepoRelativePath::new(path)?];
+            assert_eq!(
+                source.classification,
+                SourceClassification::PackageJsonMetadata
+            );
+            assert_eq!(source.role, SourceRole::Test, "{path} must be a test role");
+        }
+        let cli = &by_path[&RepoRelativePath::new("packages/cli/src/main.ts")?];
+        assert_eq!(
+            cli.classification,
+            SourceClassification::PackageJsonMetadata,
+            "tsconfig.json without a sibling package.json is a project boundary"
+        );
+        assert_eq!(
+            cli.package.as_ref().map(|package| package.name.as_str()),
+            Some("packages/cli")
+        );
+        let tool = &by_path[&RepoRelativePath::new("scripts/tool.ts")?];
+        assert_eq!(
+            tool.classification,
+            SourceClassification::PackageJsonMetadata
+        );
+        assert_eq!(
+            tool.package.as_ref().map(|package| (
+                package.name.as_str(),
+                package.root.as_ref().map(RepoRelativePath::as_str)
+            )),
+            Some(("chakra/monorepo", None)),
+            "the workspace root package.json scopes files without a nearer package"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn typescript_without_manifests_uses_test_conventions_and_fallback()
+    -> Result<(), Box<dyn Error>> {
+        let repository = repository()?;
+        let root = repository.path();
+        write(root, "src/util.ts", "export function util(): void {}\n")?;
+        write(
+            root,
+            "src/util.spec.ts",
+            "export function utilSpec(): void {}\n",
+        )?;
+
+        let classified = discover_classified_sources(root, Language::TypeScript)?;
+        let by_path: BTreeMap<_, _> = classified
+            .into_iter()
+            .map(|source| (source.path, source.metadata))
+            .collect();
+        let util = &by_path[&RepoRelativePath::new("src/util.ts")?];
+        assert_eq!(util.classification, SourceClassification::PathFallback);
+        assert_eq!(util.role, SourceRole::Production);
+        let spec = &by_path[&RepoRelativePath::new("src/util.spec.ts")?];
+        assert_eq!(spec.classification, SourceClassification::PathFallback);
+        assert_eq!(spec.role, SourceRole::Test);
         Ok(())
     }
 

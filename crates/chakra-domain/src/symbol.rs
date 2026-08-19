@@ -35,6 +35,8 @@ pub const MAX_RECEIVER_HINT_CHARS: usize = 128;
 pub enum Language {
     Rust,
     Php,
+    #[serde(rename = "typescript")]
+    TypeScript,
 }
 
 /// Kind of a code entity (SPEC §8 plus the impl-block/import facts v0.1 §7
@@ -53,6 +55,8 @@ pub enum SymbolKind {
     Constant,
     Field,
     Property,
+    /// A type-level alias declaration (e.g. TypeScript `type X = ...`).
+    TypeAlias,
     /// An `impl` block entity (container for methods).
     ImplBlock,
     /// A `use` declaration.

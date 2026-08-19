@@ -1,0 +1,333 @@
+{
+  "schema_version": 1,
+  "language": "typescript",
+  "repository": "microsoft/vscode",
+  "sha": "4d9c292ee3e255ad0185c3228416c231d773d364",
+  "status": "evaluated",
+  "skip_reason": "",
+  "provider_phase": "not-configured",
+  "scenario_count": 11,
+  "passed": 11,
+  "failed": 0,
+  "skipped": 0,
+  "scenarios": [
+    {
+      "id": "cold-index",
+      "status": "pass",
+      "details": "full index from scratch; coverage counts recorded",
+      "phases": [
+        {
+          "name": "GitInventory",
+          "wall_micros": 118922
+        },
+        {
+          "name": "SourceRead",
+          "wall_micros": 1211086
+        },
+        {
+          "name": "ParseExtraction/Rust",
+          "wall_micros": 20247
+        },
+        {
+          "name": "SymbolCatalog/Rust",
+          "wall_micros": 520
+        },
+        {
+          "name": "Relationships/Rust",
+          "wall_micros": 435
+        },
+        {
+          "name": "GraphMaterialization/Rust",
+          "wall_micros": 17084
+        },
+        {
+          "name": "ParseExtraction/Php",
+          "wall_micros": 269
+        },
+        {
+          "name": "SymbolCatalog/Php",
+          "wall_micros": 2
+        },
+        {
+          "name": "Relationships/Php",
+          "wall_micros": 1
+        },
+        {
+          "name": "GraphMaterialization/Php",
+          "wall_micros": 11
+        },
+        {
+          "name": "ParseExtraction/TypeScript",
+          "wall_micros": 1873675
+        },
+        {
+          "name": "SymbolCatalog/TypeScript",
+          "wall_micros": 183643
+        },
+        {
+          "name": "Relationships/TypeScript",
+          "wall_micros": 29926
+        },
+        {
+          "name": "GraphMaterialization/TypeScript",
+          "wall_micros": 1950612
+        },
+        {
+          "name": "LanguageComposition",
+          "wall_micros": 7
+        },
+        {
+          "name": "GraphValidation",
+          "wall_micros": 2138673
+        },
+        {
+          "name": "total",
+          "wall_micros": 7651512
+        }
+      ],
+      "measurements": {
+        "ambiguous_call_sites": 86,
+        "call_sites": 7619,
+        "degradations": 7,
+        "degraded": true,
+        "discovered_files": 12835,
+        "edges": 315023,
+        "parsed_files": 11549,
+        "peak_rss_bytes": 2758033408,
+        "php_files": 3,
+        "rust_files": 88,
+        "source_bytes": 134217696,
+        "symbols": 499484,
+        "syntax_error_files": 44,
+        "typescript_files": 11458,
+        "unresolved_call_sites": 6244,
+        "wall_micros": 7651512
+      },
+      "budget_verdicts": [
+        {
+          "budget": "cold_index_peak_rss_bytes",
+          "observed": 2758033408,
+          "limit": 8589934592,
+          "status": "pass"
+        },
+        {
+          "budget": "cold_index_wall_micros",
+          "observed": 7651512,
+          "limit": 250000000,
+          "status": "pass"
+        }
+      ]
+    },
+    {
+      "id": "warm-noop",
+      "status": "pass",
+      "details": "unchanged checkout: no reindex work behind the freshness barrier",
+      "phases": [
+        {
+          "name": "fresh_barrier",
+          "wall_micros": 321061
+        }
+      ],
+      "measurements": {
+        "files_inspected": 25670,
+        "git_subprocesses": 2,
+        "no_op_reconciliations": 1,
+        "wall_micros": 321061
+      },
+      "budget_verdicts": [
+        {
+          "budget": "warm_noop_wall_micros",
+          "observed": 321062,
+          "limit": 30000000,
+          "status": "pass"
+        }
+      ]
+    },
+    {
+      "id": "fingerprint",
+      "status": "pass",
+      "details": "two cold indexes produce identical fingerprints and counts",
+      "phases": [
+        {
+          "name": "reindex",
+          "wall_micros": 6915968
+        }
+      ],
+      "measurements": {
+        "fingerprint": "d5241583207dcaa0",
+        "rerun_edges": 315023,
+        "rerun_symbols": 499484
+      },
+      "budget_verdicts": []
+    },
+    {
+      "id": "one-file-edit",
+      "status": "pass",
+      "details": "source-byte budget degraded: 1 extra reparsed file(s) are budget-boundary churn; one-file edit: targeted reconcile, fresh query sees the change",
+      "phases": [
+        {
+          "name": "edit_and_barrier",
+          "wall_micros": 4038378
+        }
+      ],
+      "measurements": {
+        "files_reparsed": 2,
+        "full_reconciliations": 0,
+        "wall_micros": 4038378
+      },
+      "budget_verdicts": []
+    },
+    {
+      "id": "atomic-replace",
+      "status": "pass",
+      "details": "source-byte budget degraded: 1 extra reparsed file(s) are budget-boundary churn; write-temp-then-rename: targeted reconcile, fresh query sees the change",
+      "phases": [
+        {
+          "name": "replace_and_barrier",
+          "wall_micros": 4323798
+        }
+      ],
+      "measurements": {
+        "files_reparsed": 2,
+        "full_reconciliations": 0,
+        "wall_micros": 4323799
+      },
+      "budget_verdicts": []
+    },
+    {
+      "id": "rename-delete",
+      "status": "pass",
+      "details": "rename + delete: inventory correct after the freshness barrier",
+      "phases": [
+        {
+          "name": "rename_delete_and_barrier",
+          "wall_micros": 4162849
+        }
+      ],
+      "measurements": {
+        "created_files": 3,
+        "deleted_files": 6,
+        "wall_micros": 4162849
+      },
+      "budget_verdicts": []
+    },
+    {
+      "id": "syntax-error",
+      "status": "pass",
+      "details": "last-good revision: `publish_agent_host_endpoint` stays queryable; temporary syntax error: attributed diagnostics; restore returns to baseline on a newer revision",
+      "phases": [
+        {
+          "name": "break_and_barrier",
+          "wall_micros": 3969545
+        }
+      ],
+      "measurements": {
+        "baseline_total_diagnostics": 484
+      },
+      "budget_verdicts": []
+    },
+    {
+      "id": "diff-context",
+      "status": "pass",
+      "details": "clean tree: empty diff; after edits: correct changed-file attribution",
+      "phases": [
+        {
+          "name": "clean_diff",
+          "wall_micros": 13412684
+        },
+        {
+          "name": "dirty_diff",
+          "wall_micros": 921812
+        }
+      ],
+      "measurements": {
+        "changed_files": [
+          {
+            "change": "Deleted",
+            "path": ".eslint-plugin-local/code-amd-node-module.ts",
+            "previous_path": null
+          },
+          {
+            "change": "Deleted",
+            "path": ".eslint-plugin-local/code-declare-service-brand.ts",
+            "previous_path": null
+          },
+          {
+            "change": "Added",
+            "path": ".eslint-plugin-local/code-declare-service-brand__chakra_moved.ts",
+            "previous_path": null
+          }
+        ],
+        "clean_diff_wall_micros": 886729
+      },
+      "budget_verdicts": []
+    },
+    {
+      "id": "queries",
+      "status": "pass",
+      "details": "high-degree targets chosen from the index; bounded responses with explicit truncation",
+      "phases": [
+        {
+          "name": "symbol_search",
+          "wall_micros": 130
+        },
+        {
+          "name": "callers",
+          "wall_micros": 123
+        },
+        {
+          "name": "context",
+          "wall_micros": 127
+        }
+      ],
+      "measurements": {
+        "callers_returned": 5,
+        "target": "cli::src::tunnels::agent_host_registry::publish_agent_host_endpoint",
+        "target_incoming_calls": 49,
+        "target_precision": "TreeSitter/Syntax",
+        "targets": [
+          {
+            "incoming_calls": 49,
+            "qualified_name": "cli::src::tunnels::agent_host_registry::publish_agent_host_endpoint"
+          },
+          {
+            "incoming_calls": 17,
+            "qualified_name": "cli::src::tunnels::agent_host_registry::read_registry"
+          },
+          {
+            "incoming_calls": 17,
+            "qualified_name": "cli::src::tunnels::control_server::ensure_auth"
+          }
+        ]
+      },
+      "budget_verdicts": []
+    },
+    {
+      "id": "cancellation",
+      "status": "pass",
+      "details": "cancelled index and query stop promptly; no partial publication",
+      "phases": [
+        {
+          "name": "cancelled_cold_index",
+          "wall_micros": 8
+        },
+        {
+          "name": "cancelled_query",
+          "wall_micros": 0
+        }
+      ],
+      "measurements": {
+        "cancelled_index_wall_micros": 8
+      },
+      "budget_verdicts": []
+    },
+    {
+      "id": "cache-restore",
+      "status": "pass",
+      "details": "checkout restored to the pinned SHA with a clean worktree",
+      "phases": [],
+      "measurements": {},
+      "budget_verdicts": []
+    }
+  ]
+}
