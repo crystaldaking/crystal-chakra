@@ -103,6 +103,14 @@ struct ServeArgs {
     #[arg(long, value_name = "PATH")]
     clangd_path: Option<OsString>,
 
+    /// Run without the optional terraform-ls HCL provider.
+    #[arg(long)]
+    no_terraform_ls: bool,
+
+    /// Explicit terraform-ls executable; omit for side-effect-free PATH discovery.
+    #[arg(long, value_name = "PATH")]
+    terraform_ls_path: Option<OsString>,
+
     /// Maximum simultaneously active precise providers.
     #[arg(long, default_value_t = 3)]
     max_active_providers: usize,
@@ -214,6 +222,8 @@ async fn serve(args: ServeArgs) -> ExitCode {
         bash_language_server_path,
         no_clangd,
         clangd_path,
+        no_terraform_ls,
+        terraform_ls_path,
         max_active_providers,
         max_provider_reserved_memory_bytes,
         max_concurrent_provider_queries,
@@ -594,6 +604,42 @@ async fn serve(args: ServeArgs) -> ExitCode {
     } else {
         tracing::info!("clangd precise enrichment is disabled");
     }
+    if should_register_provider(no_terraform_ls) {
+        let command: OnceLock<chakra_provider_terraform_ls::TerraformLsCommand> = OnceLock::new();
+        let query_wait_budget = chakra_provider_terraform_ls::DEFAULT_QUERY_WAIT_TIMEOUT;
+        registrations.push(
+            ProviderRegistration::new(
+                "terraform-ls",
+                vec![Language::Hcl],
+                512 * 1024 * 1024,
+                move |workspace,
+                      operation|
+                      -> Result<Arc<dyn PreciseProvider>, ProviderStartError> {
+                    let resolved_command = if let Some(command) = command.get() {
+                        command.clone()
+                    } else {
+                        let resolved = chakra_provider_terraform_ls::resolve_command_with_context(
+                            terraform_ls_path.as_deref(),
+                            operation,
+                        )
+                        .map_err(ProviderStartError::from)?;
+                        let _ = command.set(resolved.clone());
+                        resolved
+                    };
+                    let config = chakra_provider_terraform_ls::TerraformLsConfig {
+                        command: resolved_command,
+                        ..chakra_provider_terraform_ls::TerraformLsConfig::default()
+                    };
+                    chakra_provider_terraform_ls::TerraformLsProvider::start(workspace, config)
+                        .map(|provider| provider as Arc<dyn PreciseProvider>)
+                        .map_err(|error| ProviderStartError::new(error.to_string()))
+                },
+            )
+            .with_additional_wait_budget(query_wait_budget),
+        );
+    } else {
+        tracing::info!("terraform-ls precise enrichment is disabled");
+    }
     let provider_pool = match ProviderPool::start(
         ProviderPoolConfig {
             max_active_providers,
@@ -705,6 +751,8 @@ mod tests {
                 && args.bash_language_server_path.is_none()
                 && !args.no_clangd
                 && args.clangd_path.is_none()
+                && !args.no_terraform_ls
+                && args.terraform_ls_path.is_none()
                 && args.max_active_providers == 3
                 && args.max_index_files == DEFAULT_MAX_INDEX_FILES
                 && args.max_index_symbols == DEFAULT_MAX_INDEX_SYMBOLS
@@ -740,6 +788,9 @@ mod tests {
             "--no-clangd",
             "--clangd-path",
             "/opt/bin/clangd",
+            "--no-terraform-ls",
+            "--terraform-ls-path",
+            "/opt/bin/terraform-ls",
         ]);
         assert!(matches!(
             cli,
@@ -765,6 +816,9 @@ mod tests {
                 && args.no_clangd
                 && args.clangd_path.as_deref()
                     == Some(std::ffi::OsStr::new("/opt/bin/clangd"))
+                && args.no_terraform_ls
+                && args.terraform_ls_path.as_deref()
+                    == Some(std::ffi::OsStr::new("/opt/bin/terraform-ls"))
         ));
     }
 

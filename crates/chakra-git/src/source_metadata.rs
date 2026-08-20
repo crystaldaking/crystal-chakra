@@ -35,6 +35,7 @@ const MAX_DOTNET_PROJECT_MANIFESTS: usize = 512;
 const MAX_DOTNET_PROJECT_MANIFEST_BYTES: usize = 1024 * 1024;
 const MAX_SHELL_PROJECT_MANIFESTS: usize = 256;
 const MAX_CPP_PROJECT_MANIFESTS: usize = 256;
+const MAX_TERRAFORM_MODULES: usize = 512;
 
 /// One discovered source plus deterministic query metadata.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -133,6 +134,13 @@ struct ShellRoot {
 /// C/C++ project scope from a compilation database or common build boundary.
 #[derive(Debug, Clone)]
 struct CppRoot {
+    package: SourcePackage,
+}
+
+/// Terraform/OpenTofu module scope derived from a directory containing a
+/// Git-visible `.tf` configuration file.
+#[derive(Debug, Clone)]
+struct TerraformRoot {
     package: SourcePackage,
 }
 
@@ -1383,6 +1391,84 @@ fn classify_cpp(path: &RepoRelativePath, projects: &[CppRoot]) -> SourceMetadata
     }
 }
 
+fn terraform_modules(
+    sources: &[RepoRelativePath],
+    operation: &OperationContext,
+) -> Result<Vec<TerraformRoot>, OperationAbort> {
+    let mut roots = BTreeSet::new();
+    for path in sources {
+        operation.check()?;
+        let raw = path.as_str();
+        if !raw.ends_with(".tf") {
+            continue;
+        }
+        let directory = raw
+            .rsplit_once('/')
+            .and_then(|(directory, _)| RepoRelativePath::new(directory).ok());
+        roots.insert(directory);
+        if roots.len() == MAX_TERRAFORM_MODULES {
+            break;
+        }
+    }
+    operation.check()?;
+    Ok(roots
+        .into_iter()
+        .map(|root| {
+            let name = root
+                .as_ref()
+                .map_or_else(|| "repository".to_owned(), |path| path.as_str().to_owned());
+            TerraformRoot {
+                package: SourcePackage { name, root },
+            }
+        })
+        .collect())
+}
+
+fn hcl_path_role(path: &RepoRelativePath) -> SourceRole {
+    if path
+        .as_str()
+        .split('/')
+        .any(|component| matches!(component, ".terraform" | ".terragrunt-cache"))
+    {
+        return SourceRole::Vendor;
+    }
+    let fallback = SourceMetadata::path_fallback(path);
+    if fallback.role != SourceRole::Production {
+        return fallback.role;
+    }
+    if path.as_str().ends_with(".tftest.hcl") {
+        SourceRole::Test
+    } else {
+        SourceRole::Production
+    }
+}
+
+fn classify_hcl(path: &RepoRelativePath, modules: &[TerraformRoot]) -> SourceMetadata {
+    let role = hcl_path_role(path);
+    let module = modules
+        .iter()
+        .filter(|module| is_inside(path, module.package.root.as_ref()))
+        .max_by_key(|module| {
+            module
+                .package
+                .root
+                .as_ref()
+                .map_or(0, |root| root.as_str().len())
+        });
+    let Some(module) = module else {
+        return SourceMetadata {
+            role,
+            classification: SourceClassification::PathFallback,
+            package: None,
+        };
+    };
+    SourceMetadata {
+        role,
+        classification: SourceClassification::TerraformModuleMetadata,
+        package: Some(module.package.clone()),
+    }
+}
+
 fn classify_rust(path: &RepoRelativePath, packages: &[CargoPackage]) -> SourceMetadata {
     let fallback = SourceMetadata::path_fallback(path);
     let package = packages
@@ -1512,6 +1598,11 @@ pub fn classify_discovered_sources_with_context(
     } else {
         None
     };
+    let hcl = if language == Language::Hcl {
+        Some(terraform_modules(sources, operation)?)
+    } else {
+        None
+    };
     let mut classified = Vec::with_capacity(files.len());
     for path in files {
         operation.check()?;
@@ -1529,6 +1620,7 @@ pub fn classify_discovered_sources_with_context(
                 Language::CSharp => classify_csharp(&path, dotnet.as_deref().unwrap_or_default()),
                 Language::Shell => classify_shell(&path, shell.as_deref().unwrap_or_default()),
                 Language::Cpp => classify_cpp(&path, cpp.as_deref().unwrap_or_default()),
+                Language::Hcl => classify_hcl(&path, hcl.as_deref().unwrap_or_default()),
             },
             path,
             language,
@@ -2481,6 +2573,57 @@ mod tests {
                     package.root.as_ref().map(RepoRelativePath::as_str)
                 )),
                 Some(("native", Some("native")))
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn terraform_module_boundaries_scope_hcl_roles_and_packages() -> Result<(), Box<dyn Error>> {
+        let repository = repository()?;
+        let root = repository.path();
+        for (path, source) in [
+            ("main.tf", "terraform {}\n"),
+            ("production.tfvars", "region = \"eu-west-1\"\n"),
+            ("tests/flow.tftest.hcl", "run \"flow\" {}\n"),
+            ("modules/shared/main.tf", "terraform {}\n"),
+            ("modules/shared/variables.tf", "variable \"name\" {}\n"),
+            ("vendor/external/main.tf", "terraform {}\n"),
+            ("generated/schema.tf", "resource \"test\" \"schema\" {}\n"),
+        ] {
+            write(root, path, source)?;
+        }
+
+        let classified = discover_classified_sources(root, Language::Hcl)?;
+        let by_path: BTreeMap<_, _> = classified
+            .into_iter()
+            .map(|source| (source.path, source.metadata))
+            .collect();
+        for (path, role, package) in [
+            ("main.tf", SourceRole::Production, "repository"),
+            ("production.tfvars", SourceRole::Production, "repository"),
+            ("tests/flow.tftest.hcl", SourceRole::Test, "repository"),
+            (
+                "modules/shared/variables.tf",
+                SourceRole::Production,
+                "modules/shared",
+            ),
+            (
+                "vendor/external/main.tf",
+                SourceRole::Vendor,
+                "vendor/external",
+            ),
+            ("generated/schema.tf", SourceRole::Generated, "generated"),
+        ] {
+            let source = &by_path[&RepoRelativePath::new(path)?];
+            assert_eq!(
+                source.classification,
+                SourceClassification::TerraformModuleMetadata
+            );
+            assert_eq!(source.role, role);
+            assert_eq!(
+                source.package.as_ref().map(|package| package.name.as_str()),
+                Some(package)
             );
         }
         Ok(())

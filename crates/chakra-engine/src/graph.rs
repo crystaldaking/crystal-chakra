@@ -48,6 +48,7 @@ const ENTITY_SLOT_LANGUAGES: &[Language] = &[
     Language::CSharp,
     Language::Shell,
     Language::Cpp,
+    Language::Hcl,
 ];
 
 /// The entity-id slot a language owns; see the slot registry above.
@@ -62,6 +63,7 @@ fn language_entity_slot(language: Language) -> usize {
         Language::CSharp => 6,
         Language::Shell => 7,
         Language::Cpp => 8,
+        Language::Hcl => 9,
     }
 }
 
@@ -1256,6 +1258,9 @@ impl SymbolGraph {
                     coverage.cpp_project_metadata_files = coverage
                         .cpp_project_metadata_files
                         .saturating_add(part.cpp_project_metadata_files);
+                    coverage.terraform_module_metadata_files = coverage
+                        .terraform_module_metadata_files
+                        .saturating_add(part.terraform_module_metadata_files);
                     coverage.path_fallback_files = coverage
                         .path_fallback_files
                         .saturating_add(part.path_fallback_files);
@@ -1290,6 +1295,9 @@ impl SymbolGraph {
                 }
                 SourceClassification::CppProjectMetadata => {
                     coverage.cpp_project_metadata_files += 1;
+                }
+                SourceClassification::TerraformModuleMetadata => {
+                    coverage.terraform_module_metadata_files += 1;
                 }
                 SourceClassification::PathFallback => coverage.path_fallback_files += 1,
             }
@@ -2380,6 +2388,9 @@ fn call_target_kind(kind: SymbolKind) -> Option<CallTargetKind> {
         SymbolKind::Function => Some(CallTargetKind::Function),
         SymbolKind::Method => Some(CallTargetKind::Method),
         SymbolKind::Test => Some(CallTargetKind::Test),
+        SymbolKind::Module | SymbolKind::Property | SymbolKind::Configuration => {
+            Some(CallTargetKind::Configuration)
+        }
         _ => None,
     }
 }
@@ -2537,6 +2548,7 @@ fn provenance_rank(provenance: Provenance) -> u8 {
         Provenance::CsharpLs => 0,
         Provenance::BashLanguageServer => 0,
         Provenance::Clangd => 0,
+        Provenance::TerraformLs => 0,
         Provenance::ChakraResolver => 0,
         Provenance::TreeSitter => 1,
         Provenance::Git => 2,

@@ -568,7 +568,10 @@ fn raw_is_supported_source(raw: &[u8]) -> Result<bool, WorkspaceDiffError> {
         || raw.ends_with(b".hxx")
         || raw.ends_with(b".ipp")
         || raw.ends_with(b".tpp")
-        || raw.ends_with(b".inc");
+        || raw.ends_with(b".inc")
+        || raw.ends_with(b".tf")
+        || raw.ends_with(b".tfvars")
+        || raw.ends_with(b".hcl");
     if !looks_supported {
         return Ok(false);
     }
@@ -1680,6 +1683,38 @@ mod tests {
         assert_eq!(changes["src/service.cpp"], ChangeKind::Modified);
         assert_eq!(changes["include/deleted.hpp"], ChangeKind::Deleted);
         assert_eq!(changes["src/untracked.cc"], ChangeKind::Added);
+        Ok(())
+    }
+
+    #[test]
+    fn hcl_modify_untracked_and_delete_use_the_same_diff_scope() -> Result<(), Box<dyn Error>> {
+        let repository = TempDir::new()?;
+        let root = repository.path();
+        git(root, &["init", "--quiet"])?;
+        git(root, &["config", "user.email", "tests@example.invalid"])?;
+        git(root, &["config", "user.name", "Chakra Tests"])?;
+        write(root, "main.tf", "terraform {}\n")?;
+        write(root, "deleted.tfvars", "region = \"eu-west-1\"\n")?;
+        git(root, &["add", "main.tf", "deleted.tfvars"])?;
+        git(root, &["commit", "--quiet", "-m", "base"])?;
+
+        write(
+            root,
+            "main.tf",
+            "terraform { required_version = \">= 1.9\" }\n",
+        )?;
+        fs::remove_file(root.join("deleted.tfvars"))?;
+        write(root, "flow.tftest.hcl", "run \"flow\" {}\n")?;
+        let workspace = workspace(root, &["main.tf", "flow.tftest.hcl"])?;
+        let diff = GitWorkspaceDiff.diff(workspace)?;
+        let changes: BTreeMap<_, _> = diff
+            .files
+            .iter()
+            .map(|change| (change.path.as_str(), change.change))
+            .collect();
+        assert_eq!(changes["main.tf"], ChangeKind::Modified);
+        assert_eq!(changes["deleted.tfvars"], ChangeKind::Deleted);
+        assert_eq!(changes["flow.tftest.hcl"], ChangeKind::Added);
         Ok(())
     }
 }

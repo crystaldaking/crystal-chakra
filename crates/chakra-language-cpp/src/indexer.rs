@@ -1579,6 +1579,7 @@ fn callable_dependency(kind: chakra_domain::symbol::CallTargetKind, name: &str) 
         CallTargetKind::Function => 0,
         CallTargetKind::Method => 1,
         CallTargetKind::Test => 2,
+        CallTargetKind::Configuration => 3,
     };
     (kind, name.to_owned())
 }

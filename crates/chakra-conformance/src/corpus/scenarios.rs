@@ -322,6 +322,7 @@ impl ProbePlan {
             "cpp" => &[
                 "c", "h", "cc", "cpp", "cxx", "hh", "hpp", "hxx", "ipp", "tpp", "inc",
             ],
+            "hcl" => &["tf", "hcl"],
             other => return Err(failure(format!("no probe plan for language `{other}`")).into()),
         };
         let mut paths: Vec<RepoRelativePath> = cold
@@ -449,6 +450,14 @@ impl ProbePlan {
                     "\nvoid chakra_corpus_probe_one() {}\n".to_owned(),
                     "\nvoid chakra_corpus_probe_two() {}\n".to_owned(),
                     "\nclass chakra_corpus_broken {\n".to_owned(),
+                ),
+                "hcl" => (
+                    "chakra_corpus_probe",
+                    "chakra_corpus_probe_one",
+                    "chakra_corpus_probe_two",
+                    "\nresource \"null_resource\" \"chakra_corpus_probe_one\" {}\n".to_owned(),
+                    "\nresource \"null_resource\" \"chakra_corpus_probe_two\" {}\n".to_owned(),
+                    "\nresource \"null_resource\" \"chakra_corpus_broken\" {\n".to_owned(),
                 ),
                 other => {
                     return Err(failure(format!("no probe plan for language `{other}`")).into());
@@ -773,6 +782,7 @@ fn record_cold_index(
     builder.measure("csharp_files", cold.metrics.csharp_files);
     builder.measure("shell_files", cold.metrics.shell_files);
     builder.measure("cpp_files", cold.metrics.cpp_files);
+    builder.measure("hcl_files", cold.metrics.hcl_files);
     builder.measure("source_bytes", cold.metrics.indexing.coverage.source_bytes);
     builder.measure("degraded", cold.metrics.indexing.is_degraded());
     builder.measure(
@@ -890,7 +900,16 @@ fn high_degree_targets(graph: &SymbolGraph, count: usize) -> Vec<(String, u64)> 
     let mut scored: Vec<(u64, String)> = graph
         .symbols()
         .iter()
-        .filter(|symbol| matches!(symbol.key.kind, SymbolKind::Function | SymbolKind::Method))
+        .filter(|symbol| {
+            matches!(
+                symbol.key.kind,
+                SymbolKind::Function
+                    | SymbolKind::Method
+                    | SymbolKind::Configuration
+                    | SymbolKind::Module
+                    | SymbolKind::Property
+            )
+        })
         .map(|symbol| {
             let callers = graph
                 .incoming_edges(symbol.id)
@@ -927,7 +946,7 @@ fn run_query_scenario(
 ) -> Check<()> {
     reject(
         !facts.targets.is_empty(),
-        "index contains no called function or method symbols",
+        "index contains no uniquely named called symbols",
     )?;
     let chosen: Vec<Value> = facts
         .targets

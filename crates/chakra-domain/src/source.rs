@@ -78,6 +78,9 @@ pub enum SourceClassification {
     /// Project ownership came from the nearest Git-visible C/C++ compilation
     /// database or build-system boundary.
     CppProjectMetadata,
+    /// Module ownership came from the nearest directory containing a
+    /// Git-visible Terraform/OpenTofu configuration file.
+    TerraformModuleMetadata,
     /// No applicable package metadata was available; deterministic path
     /// conventions supplied the role.
     PathFallback,
@@ -127,6 +130,7 @@ pub struct SourceMetadataCoverage {
     pub dotnet_project_metadata_files: u64,
     pub shell_project_metadata_files: u64,
     pub cpp_project_metadata_files: u64,
+    pub terraform_module_metadata_files: u64,
     pub path_fallback_files: u64,
 }
 

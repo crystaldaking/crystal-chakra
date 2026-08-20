@@ -62,5 +62,6 @@ Accepted decisions:
 - ADR-037: csharp-ls workspace-only enrichment
 - ADR-038: bash-language-server reference enrichment
 - ADR-039: clangd workspace enrichment
+- ADR-040: terraform-ls reference enrichment
 
 Do not pre-create empty ADRs merely to satisfy a list.

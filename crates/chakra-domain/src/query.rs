@@ -435,6 +435,7 @@ pub enum RepoMapGroupKind {
     DotnetProject,
     ShellProject,
     CppProject,
+    TerraformModule,
 }
 
 /// Overlapping structural aggregation used by the first repository-map page.

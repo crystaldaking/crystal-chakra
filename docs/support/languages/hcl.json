@@ -1,0 +1,230 @@
+{
+  "language": "hcl",
+  "advertised": true,
+  "tier": "first-class",
+  "grammar": {
+    "name": "tree-sitter-hcl",
+    "version": "1.1.0",
+    "adr": "docs/adr/0027-grammar-and-provider-selection.md"
+  },
+  "precise_provider": {
+    "name": "terraform-ls",
+    "adr": "docs/adr/0040-terraform-ls-reference-enrichment.md",
+    "status": "integrated"
+  },
+  "capabilities": {
+    "DISC-01": {
+      "status": "pass",
+      "mechanism": "chakra-git discovery for Terraform/OpenTofu and generic HCL sources",
+      "evidence": [
+        "crates/chakra-language-hcl/tests/fixture_index.rs",
+        "crates/chakra-git/src/discovery.rs"
+      ]
+    },
+    "DISC-02": {
+      "status": "pass",
+      "mechanism": "nearest Git-visible .tf Terraform module scope with path fallback",
+      "evidence": [
+        "crates/chakra-git/src/source_metadata.rs",
+        "docs/support/conformance/hcl.json"
+      ]
+    },
+    "DISC-03": {
+      "status": "pass",
+      "mechanism": "Terraform test and generated/vendor path roles with module metadata provenance",
+      "evidence": [
+        "crates/chakra-language-hcl/tests/fixture_index.rs",
+        "docs/support/conformance/hcl.json"
+      ]
+    },
+    "SYNTAX-01": {
+      "status": "pass",
+      "mechanism": "tree-sitter-hcl 1.1.0",
+      "evidence": ["Cargo.toml"]
+    },
+    "SYNTAX-02": {
+      "status": "pass",
+      "mechanism": "tree-sitter Terraform resources, data, modules, variables, outputs, locals, providers, tests, and generic HCL blocks",
+      "evidence": ["crates/chakra-language-hcl/tests/fixture_index.rs"]
+    },
+    "SYNTAX-03": {
+      "status": "pass",
+      "mechanism": "tree-sitter file modules and nested configuration block containers",
+      "evidence": [
+        "crates/chakra-language-hcl/tests/fixture_index.rs",
+        "docs/support/conformance/hcl.json"
+      ]
+    },
+    "SYNTAX-04": {
+      "status": "pass",
+      "mechanism": "tree-sitter module/provider source and required-provider import facts",
+      "evidence": [
+        "crates/chakra-language-hcl/tests/fixture_index.rs",
+        "docs/support/conformance/hcl.json"
+      ]
+    },
+    "SYNTAX-05": {
+      "status": "pass",
+      "mechanism": "tree-sitter byte-accurate declaration and traversal ranges",
+      "evidence": ["crates/chakra-language-hcl/tests/fixture_index.rs"]
+    },
+    "SYNTAX-06": {
+      "status": "pass",
+      "mechanism": "Terraform .tftest.hcl run-block hints",
+      "evidence": [
+        "crates/chakra-language-hcl/tests/fixture_index.rs",
+        "docs/support/conformance/hcl.json"
+      ]
+    },
+    "SYNTAX-07": {
+      "status": "pass",
+      "mechanism": "tree-sitter diagnostics with retained valid declarations",
+      "evidence": [
+        "crates/chakra-language-hcl/tests/fixture_index.rs",
+        "docs/support/conformance/hcl.json"
+      ]
+    },
+    "SYNTAX-08": {
+      "status": "pass",
+      "mechanism": "bounded configuration traversals with explicit Configuration target kind and local resolution",
+      "evidence": [
+        "crates/chakra-language-hcl/tests/fixture_index.rs",
+        "docs/adr/0040-terraform-ls-reference-enrichment.md",
+        "docs/support/conformance/hcl.json"
+      ]
+    },
+    "PRECISE-01": {
+      "status": "pass",
+      "mechanism": "recorded terraform-ls 0.39.x selection plus Chakra-owned outgoing configuration-reference equivalent",
+      "evidence": [
+        "docs/adr/0027-grammar-and-provider-selection.md",
+        "docs/adr/0040-terraform-ls-reference-enrichment.md"
+      ]
+    },
+    "PRECISE-02": {
+      "status": "pass",
+      "mechanism": "terraform-ls references/document symbols over the shared chakra-lsp client",
+      "evidence": [
+        "crates/chakra-provider-terraform-ls/tests/lifecycle.rs",
+        "crates/chakra-provider-terraform-ls/tests/real_provider.rs"
+      ]
+    },
+    "PRECISE-03": {
+      "status": "pass",
+      "mechanism": "owned lifecycle, revision-scoped HCL document synchronization, restart, cancellation, and orphan-free shutdown",
+      "evidence": [
+        "crates/chakra-provider-terraform-ls/tests/lifecycle.rs",
+        "crates/chakra-lsp/tests/lifecycle.rs",
+        "docs/adr/0040-terraform-ls-reference-enrichment.md"
+      ]
+    },
+    "PRECISE-04": {
+      "status": "pass",
+      "mechanism": "definition/reference/document-symbol capability gate; outgoing remains syntax-derived",
+      "evidence": [
+        "crates/chakra-provider-terraform-ls/tests/lifecycle.rs",
+        "crates/chakra-provider-terraform-ls/tests/real_provider.rs"
+      ]
+    },
+    "PRECISE-05": {
+      "status": "pass",
+      "mechanism": "graceful absence, missing-capability, crash, timeout, and cancellation degradation",
+      "evidence": [
+        "crates/chakra-provider-terraform-ls/tests/lifecycle.rs",
+        "docs/support/conformance/hcl.json"
+      ]
+    },
+    "QUERY-01": {
+      "status": "pass",
+      "mechanism": "chakra-engine QueryService with configuration-reference relations",
+      "evidence": [
+        "crates/chakra-language-hcl/tests/fixture_index.rs",
+        "docs/support/conformance/hcl.json"
+      ]
+    },
+    "QUERY-02": {
+      "status": "pass",
+      "mechanism": "chakra-mcp structured tools",
+      "evidence": ["crates/chakra-mcp/tests/contract.rs"]
+    },
+    "QUERY-03": {
+      "status": "pass",
+      "mechanism": "chakra-git worktree/base-ref diff provider for HCL files",
+      "evidence": [
+        "docs/support/conformance/hcl.json",
+        "crates/chakra-git/src/lib.rs"
+      ]
+    },
+    "FRESH-01": {
+      "status": "pass",
+      "mechanism": "atomic revision publication and targeted language partitions",
+      "evidence": [
+        "crates/chakra-engine/tests/atomic_revisions.rs",
+        "docs/support/conformance/hcl.json"
+      ]
+    },
+    "FRESH-02": {
+      "status": "pass",
+      "mechanism": "HCL live freshness barrier and one-file incremental reconciliation",
+      "evidence": ["crates/chakra-language/tests/live_updates.rs"]
+    },
+    "PROV-01": {
+      "status": "pass",
+      "mechanism": "domain provenance model including TreeSitter, Git, and TerraformLs",
+      "evidence": [
+        "crates/chakra-language-hcl/tests/fixture_index.rs",
+        "crates/chakra-provider-terraform-ls/tests/lifecycle.rs"
+      ]
+    },
+    "AMBIG-01": {
+      "status": "pass",
+      "mechanism": "query-layer typed ambiguity for duplicate configuration names",
+      "evidence": ["docs/support/conformance/hcl.json"]
+    },
+    "BUDGET-01": {
+      "status": "pass",
+      "mechanism": "query/index work budgets and calibrated public-corpus limits",
+      "evidence": [
+        "docs/support/conformance/hcl.json",
+        "docs/support/corpus/results/hcl-terraform-aws-modules__terraform-aws-vpc.json"
+      ]
+    },
+    "CANCEL-01": {
+      "status": "pass",
+      "mechanism": "cooperative syntax and provider cancellation",
+      "evidence": [
+        "crates/chakra-language-hcl/src/indexer.rs",
+        "crates/chakra-provider-terraform-ls/tests/lifecycle.rs"
+      ]
+    },
+    "DEGRADE-01": {
+      "status": "pass",
+      "mechanism": "bounded degradation with syntax fallback",
+      "evidence": [
+        "docs/support/conformance/hcl.json",
+        "docs/adr/0040-terraform-ls-reference-enrichment.md"
+      ]
+    },
+    "CONFORM-01": {
+      "status": "pass",
+      "mechanism": "chakra-conformance shared scenario harness",
+      "evidence": ["docs/support/conformance/hcl.json"]
+    },
+    "CORPUS-01": {
+      "status": "pass",
+      "mechanism": "pinned terraform-aws-vpc and terraform-aws-eks public-corpus evaluation",
+      "evidence": [
+        "docs/support/corpus/results/hcl-terraform-aws-modules__terraform-aws-vpc.json",
+        "docs/support/corpus/results/hcl-terraform-aws-modules__terraform-aws-eks.json"
+      ]
+    },
+    "DOCS-01": {
+      "status": "pass",
+      "mechanism": "per-language install requirements and measured limitations",
+      "evidence": ["docs/languages/hcl.md"]
+    }
+  },
+  "conformance_results": "docs/support/conformance/hcl.json",
+  "corpus_results": "docs/support/corpus/results/hcl-terraform-aws-modules__terraform-aws-vpc.json",
+  "docs": "docs/languages/hcl.md"
+}

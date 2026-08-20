@@ -477,9 +477,17 @@ fn is_excluded(path: &Path) -> bool {
 /// output as source. Git administration is resolved separately through Git
 /// and is never inferred from a literal worktree path.
 pub fn source_language(path: &str) -> Option<Language> {
+    let raw_path = path;
     let path = Path::new(path);
     if is_excluded(path) {
         return None;
+    }
+    let file_name = path.file_name().and_then(OsStr::to_str).unwrap_or_default();
+    if matches!(file_name, ".terraform.lock.hcl" | ".opentofu.lock.hcl") {
+        return None;
+    }
+    if raw_path.ends_with(".tf") || raw_path.ends_with(".tfvars") || raw_path.ends_with(".hcl") {
+        return Some(Language::Hcl);
     }
     match path.extension() {
         Some(extension) if extension == OsStr::new("rs") => Some(Language::Rust),
@@ -630,7 +638,10 @@ fn workspace_inventory_from_git_output(
             || raw.ends_with(b".hxx")
             || raw.ends_with(b".ipp")
             || raw.ends_with(b".tpp")
-            || raw.ends_with(b".inc");
+            || raw.ends_with(b".inc")
+            || raw.ends_with(b".tf")
+            || raw.ends_with(b".tfvars")
+            || raw.ends_with(b".hcl");
         let metadata_input = raw_is_metadata_input(raw);
         if !source && !metadata_input {
             continue;
@@ -708,6 +719,13 @@ fn raw_is_metadata_input(raw: &[u8]) -> bool {
         b"BUILD".as_slice(),
         b"BUILD.bazel".as_slice(),
         b".clangd".as_slice(),
+        b".terraform.lock.hcl".as_slice(),
+        b".opentofu.lock.hcl".as_slice(),
+        b".terraform-version".as_slice(),
+        b".opentofu-version".as_slice(),
+        b".terraformrc".as_slice(),
+        b"terraform.rc".as_slice(),
+        b"tofu.rc".as_slice(),
         b".cargo/config".as_slice(),
         b".cargo/config.toml".as_slice(),
         b"rust-toolchain".as_slice(),
@@ -1172,6 +1190,52 @@ mod tests {
             .filter(|path| *path == "CMakeLists.txt" || *path == "compile_commands.json")
             .collect();
         assert_eq!(metadata, ["CMakeLists.txt", "compile_commands.json"]);
+        Ok(())
+    }
+
+    #[test]
+    fn discovers_hcl_and_terraform_sources_without_lock_files() -> Result<(), Box<dyn Error>> {
+        let repository = repository()?;
+        let root = repository.path();
+        fs::create_dir_all(root.join("tests"))?;
+        for (path, source) in [
+            ("main.tf", "terraform {}\n"),
+            ("production.tfvars", "region = \"eu-west-1\"\n"),
+            ("terragrunt.hcl", "inputs = {}\n"),
+            ("tests/flow.tftest.hcl", "run \"flow\" {}\n"),
+            // Terraform JSON needs a JSON-capable syntax adapter and is not
+            // accepted by the native-HCL grammar.
+            ("variables.tf.json", "{}\n"),
+            ("production.tfvars.json", "{}\n"),
+            ("tests/flow.tftest.json", "{}\n"),
+        ] {
+            fs::write(root.join(path), source)?;
+        }
+        fs::write(root.join(".terraform.lock.hcl"), "provider lock\n")?;
+        fs::write(root.join(".opentofu.lock.hcl"), "provider lock\n")?;
+
+        let hcl = discover_language_files(root, Language::Hcl)?;
+        let paths: Vec<&str> = hcl.iter().map(RepoRelativePath::as_str).collect();
+        assert_eq!(
+            paths,
+            [
+                "main.tf",
+                "production.tfvars",
+                "terragrunt.hcl",
+                "tests/flow.tftest.hcl",
+            ]
+        );
+        let inventory = discover_workspace_inventory_in_worktree_with_context(
+            root,
+            &OperationContext::unbounded(),
+        )?;
+        let metadata: Vec<&str> = inventory
+            .metadata_inputs
+            .iter()
+            .map(RepoRelativePath::as_str)
+            .filter(|path| path.contains("lock.hcl"))
+            .collect();
+        assert_eq!(metadata, [".opentofu.lock.hcl", ".terraform.lock.hcl"]);
         Ok(())
     }
 }

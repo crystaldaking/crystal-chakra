@@ -7,11 +7,11 @@ language, syntax call candidates, source context, related tests, and current
 Git diff state.
 
 Status: **v0.1.2 development candidate**. The implemented slice supports Rust,
-PHP, TypeScript/TSX, Python, JavaScript/JSX, Java, C#, Shell, and C/C++ syntax
+PHP, TypeScript/TSX, Python, JavaScript/JSX, Java, C#, Shell, C/C++, and HCL/Terraform syntax
 intelligence and provides Git-aware discovery, Tree-sitter indexing, bounded live
 filesystem reconciliation, deterministic fresh-query barriers, atomic
 in-memory revisions, optional lazy precise enrichment through rust-analyzer,
-vtsls, pyright, jdtls, csharp-ls, bash-language-server, and clangd, and all
+vtsls, pyright, jdtls, csharp-ls, bash-language-server, clangd, and terraform-ls, and all
 seven v0.1 MCP tools:
 
 - `status`
@@ -29,7 +29,8 @@ seven v0.1 MCP tools:
   Rust `1.97.1` and Edition 2024 in `rust-toolchain.toml`.
 - Optional precise providers: `rust-analyzer`; vtsls, pyright, and
   bash-language-server executables (or their Node/npm installations); jdtls
-  with JDK 21+; csharp-ls 0.26.x with the .NET 10 SDK; and clangd 21+. If any
+  with JDK 21+; csharp-ls 0.26.x with the .NET 10 SDK; clangd 21+; and
+  terraform-ls 0.39.x. If any
   provider is unavailable or unhealthy, Chakra
   continues serving current syntax facts and reports that provider as degraded
   instead of inventing precise results.
@@ -77,12 +78,13 @@ chakra serve --repo /absolute/path/to/a/git-worktree
 Logging goes to stderr (`RUST_LOG=debug` for more detail). Stdout is reserved
 for the MCP protocol stream. rust-analyzer, vtsls (TypeScript/JavaScript),
 pyright (Python), jdtls (Java), csharp-ls (C#), bash-language-server
-(Shell), and clangd (C/C++) are registered as dormant routes by default and
+(Shell), clangd (C/C++), and terraform-ls (HCL/Terraform) are registered as dormant routes by default and
 start lazily on the first precise query, including for a language added after
 server startup. Explicit executable controls are
 `--rust-analyzer-path`, `--vtsls-path`, `--pyright-path`, `--jdtls-path`, and
-`--csharp-ls-path`, `--bash-language-server-path`, and `--clangd-path`. Use the
-corresponding seven `--no-*` flags for deterministic syntax-only operation. `chakra serve
+`--csharp-ls-path`, `--bash-language-server-path`, `--clangd-path`, and
+`--terraform-ls-path`. Use the corresponding eight `--no-*` flags for
+deterministic syntax-only operation. `chakra serve
 --help` lists the bounded active-provider,
 memory-reservation, concurrent-query, queue, idle-timeout, and jdtls readiness
 controls.
@@ -449,6 +451,7 @@ release, or hotfix branches and pull requests. Direct post-v0.1.0 commits to
 - `crates/chakra-language-csharp` — Tree-sitter C# syntax adapter.
 - `crates/chakra-language-shell` — Tree-sitter Shell syntax adapter.
 - `crates/chakra-language-cpp` — Tree-sitter C/C++ syntax adapter.
+- `crates/chakra-language-hcl` — Tree-sitter HCL/Terraform syntax adapter.
 - `crates/chakra-mcp` — thin stdio MCP adapter.
 - `crates/chakra-provider-pool` — bounded lazy provider orchestration.
 - `crates/chakra-provider-rust-analyzer` — optional precise provider adapter.
@@ -459,10 +462,12 @@ release, or hotfix branches and pull requests. Direct post-v0.1.0 commits to
 - `crates/chakra-provider-bash-language-server` — optional Shell
   reference-enrichment provider adapter.
 - `crates/chakra-provider-clangd` — optional C/C++ precise provider adapter.
+- `crates/chakra-provider-terraform-ls` — optional HCL/Terraform reference-enrichment provider adapter.
 - `fixtures/rust/controller-service-provider` — integration fixture/test oracle.
 - `fixtures/php/controller-service-provider` — PHP integration fixture/test oracle.
 - `fixtures/shell/controller-service-provider` — Shell integration fixture/test oracle.
 - `fixtures/cpp/controller-service-provider` — C++ integration fixture/test oracle.
+- `fixtures/hcl/controller-service-provider` — HCL/Terraform integration fixture/test oracle.
 - `docs/SPEC.md` — architectural source of truth.
 - `docs/roadmap/v0.1.md` — v0.1 scope authority.
 - `docs/adr/` — accepted architectural decisions.
@@ -474,7 +479,7 @@ identity of Git's reported common administrative directory.
 
 ## Known v0.1 limits
 
-v0.1 supports one repository, one active materialized worktree, the nine syntax
+v0.1 supports one repository, one active materialized worktree, the ten syntax
 languages listed above, and an in-memory index rebuilt at startup. It
 intentionally has no historical commit materialization, persistent graph
 snapshots, eager precise call graph, semantic/vector search, precise PHP

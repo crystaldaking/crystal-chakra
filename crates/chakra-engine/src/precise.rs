@@ -439,6 +439,9 @@ impl ProviderShutdownError {
 }
 
 fn language_from_path(path: &str) -> Option<Language> {
+    if path.ends_with(".tf") || path.ends_with(".tfvars") || path.ends_with(".hcl") {
+        return Some(Language::Hcl);
+    }
     match std::path::Path::new(path)
         .extension()
         .and_then(std::ffi::OsStr::to_str)
@@ -468,7 +471,7 @@ mod tests {
     use crate::WorkspaceEngine;
 
     #[test]
-    fn snapshot_backed_workspaces_retain_csharp_shell_and_cpp_documents()
+    fn snapshot_backed_workspaces_retain_csharp_shell_cpp_and_hcl_documents()
     -> Result<(), Box<dyn Error>> {
         let root = std::env::current_dir()?;
         let engine = WorkspaceEngine::new(WorkspaceIdentity::for_primary_worktree(&root)?);
@@ -485,12 +488,16 @@ mod tests {
             RepoRelativePath::new("src/payment.cpp")?,
             "int payment() { return 1; }\n",
         )?;
+        update
+            .graph_mut()
+            .add_file(RepoRelativePath::new("infra/main.tf")?, "terraform {}\n")?;
         engine.publish(update)?;
 
         let workspace = ProviderWorkspace::from_snapshot(&engine.snapshot());
         assert_eq!(workspace.document_count(Language::CSharp), 1);
         assert_eq!(workspace.document_count(Language::Shell), 1);
         assert_eq!(workspace.document_count(Language::Cpp), 1);
+        assert_eq!(workspace.document_count(Language::Hcl), 1);
         assert!(
             workspace
                 .document(&RepoRelativePath::new("src/Program.cs")?)
@@ -504,6 +511,11 @@ mod tests {
         assert!(
             workspace
                 .document(&RepoRelativePath::new("src/payment.cpp")?)
+                .is_some()
+        );
+        assert!(
+            workspace
+                .document(&RepoRelativePath::new("infra/main.tf")?)
                 .is_some()
         );
         Ok(())

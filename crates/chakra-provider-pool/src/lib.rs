@@ -1235,6 +1235,7 @@ mod tests {
             Language::CSharp => "src/Program.cs",
             Language::Shell => "src/main.sh",
             Language::Cpp => "src/main.cpp",
+            Language::Hcl => "main.tf",
         };
         Ok(PreciseQueryRequest {
             workspace: ProviderWorkspace::from_documents(

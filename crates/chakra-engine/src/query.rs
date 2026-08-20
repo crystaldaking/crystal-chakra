@@ -1090,6 +1090,8 @@ fn file_language(path: &RepoRelativePath) -> Option<Language> {
         || value.ends_with(".inc")
     {
         Some(Language::Cpp)
+    } else if value.ends_with(".tf") || value.ends_with(".tfvars") || value.ends_with(".hcl") {
+        Some(Language::Hcl)
     } else {
         None
     }
@@ -1142,6 +1144,9 @@ fn repo_map_overview(files: &[(GraphFileSummary, Language)]) -> Vec<RepoMapGroup
             SourceClassification::DotnetProjectMetadata => Some(RepoMapGroupKind::DotnetProject),
             SourceClassification::ShellProjectMetadata => Some(RepoMapGroupKind::ShellProject),
             SourceClassification::CppProjectMetadata => Some(RepoMapGroupKind::CppProject),
+            SourceClassification::TerraformModuleMetadata => {
+                Some(RepoMapGroupKind::TerraformModule)
+            }
             SourceClassification::PathFallback => None,
         };
         if let (Some(kind), Some(package)) = (kind, &file.metadata.package) {

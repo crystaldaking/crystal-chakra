@@ -117,6 +117,9 @@ requirements documented per language issue, never bundled into the core.
 
 ## Validation / follow-up
 
-- Probe tool executed successfully against two real servers in this worktree.
+- Probe tool executed successfully against rust-analyzer, clangd, and
+  terraform-ls 0.39.0 in this worktree. terraform-ls advertised definition,
+  references, document/workspace symbols, and text synchronization, but no
+  call hierarchy or type hierarchy, matching ADR-0040.
 - Language issues #27–#37 implement the selections; #24's conformance harness
   re-verifies provider capabilities as contract tests.

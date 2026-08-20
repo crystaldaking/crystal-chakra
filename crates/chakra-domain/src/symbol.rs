@@ -49,11 +49,13 @@ pub enum Language {
     Shell,
     #[serde(rename = "cpp")]
     Cpp,
+    #[serde(rename = "hcl")]
+    Hcl,
 }
 
 impl Language {
     /// Languages understood by the current Chakra build, in stable display order.
-    pub const ALL: [Self; 9] = [
+    pub const ALL: [Self; 10] = [
         Self::Rust,
         Self::Php,
         Self::TypeScript,
@@ -63,6 +65,7 @@ impl Language {
         Self::CSharp,
         Self::Shell,
         Self::Cpp,
+        Self::Hcl,
     ];
 }
 
@@ -232,6 +235,9 @@ pub enum CallTargetKind {
     Function,
     Method,
     Test,
+    /// A declarative configuration entity referenced from another entity,
+    /// such as a Terraform resource, module, variable, or output.
+    Configuration,
 }
 
 /// Syntax fact that justified an inferred receiver type for a call site.
