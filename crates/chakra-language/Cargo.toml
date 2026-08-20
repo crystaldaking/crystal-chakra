@@ -14,6 +14,7 @@ chakra-engine = { path = "../chakra-engine", version = "0.1.1" }
 chakra-git = { path = "../chakra-git", version = "0.1.1" }
 chakra-language-php = { path = "../chakra-language-php", version = "0.1.1" }
 chakra-language-rust = { path = "../chakra-language-rust", version = "0.1.1" }
+chakra-language-typescript = { path = "../chakra-language-typescript", version = "0.1.1" }
 notify.workspace = true
 thiserror.workspace = true
 tracing.workspace = true

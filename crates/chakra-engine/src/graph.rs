@@ -22,6 +22,7 @@ use chakra_domain::symbol::{
 use rpds::{HashTrieMapSync, RedBlackTreeMapSync};
 use thiserror::Error;
 
+const TYPESCRIPT_ENTITY_ID_BASE: u64 = 1_u64 << 62;
 const PHP_ENTITY_ID_BASE: u64 = 1_u64 << 63;
 const CANCELLATION_POLL_ITEMS: usize = 256;
 
@@ -396,9 +397,11 @@ pub struct SymbolGraph {
     truncated_call_sites: u64,
     next_rust_entity_id: u64,
     next_php_entity_id: u64,
+    next_typescript_entity_id: u64,
     next_call_site_id: u64,
     rust_symbol_count: u64,
     php_symbol_count: u64,
+    typescript_symbol_count: u64,
     adjacency_entries_copied: u64,
 }
 
@@ -453,12 +456,15 @@ impl SymbolGraph {
             }
             return languages;
         }
-        let mut languages = Vec::with_capacity(2);
+        let mut languages = Vec::with_capacity(3);
         if self.rust_symbol_count != 0 {
             languages.push(Language::Rust);
         }
         if self.php_symbol_count != 0 {
             languages.push(Language::Php);
+        }
+        if self.typescript_symbol_count != 0 {
+            languages.push(Language::TypeScript);
         }
         languages
     }
@@ -582,7 +588,7 @@ impl SymbolGraph {
         }
         let id = match key.language {
             Language::Rust => {
-                if self.next_rust_entity_id >= PHP_ENTITY_ID_BASE {
+                if self.next_rust_entity_id >= TYPESCRIPT_ENTITY_ID_BASE {
                     return Err(GraphError::EntityIdSpaceExhausted(Language::Rust));
                 }
                 let id = EntityId(self.next_rust_entity_id);
@@ -600,10 +606,27 @@ impl SymbolGraph {
                     .ok_or(GraphError::EntityIdSpaceExhausted(Language::Php))?;
                 id
             }
+            Language::TypeScript => {
+                let Some(raw) = TYPESCRIPT_ENTITY_ID_BASE
+                    .checked_add(self.next_typescript_entity_id)
+                    .filter(|raw| *raw < PHP_ENTITY_ID_BASE)
+                else {
+                    return Err(GraphError::EntityIdSpaceExhausted(Language::TypeScript));
+                };
+                let id = EntityId(raw);
+                self.next_typescript_entity_id = self
+                    .next_typescript_entity_id
+                    .checked_add(1)
+                    .ok_or(GraphError::EntityIdSpaceExhausted(Language::TypeScript))?;
+                id
+            }
         };
         match key.language {
             Language::Rust => self.rust_symbol_count = self.rust_symbol_count.saturating_add(1),
             Language::Php => self.php_symbol_count = self.php_symbol_count.saturating_add(1),
+            Language::TypeScript => {
+                self.typescript_symbol_count = self.typescript_symbol_count.saturating_add(1);
+            }
         }
         let symbol = Symbol {
             id,
@@ -839,6 +862,9 @@ impl SymbolGraph {
             match symbol.key.language {
                 Language::Rust => self.rust_symbol_count = self.rust_symbol_count.saturating_sub(1),
                 Language::Php => self.php_symbol_count = self.php_symbol_count.saturating_sub(1),
+                Language::TypeScript => {
+                    self.typescript_symbol_count = self.typescript_symbol_count.saturating_sub(1);
+                }
             }
             self.symbols.remove_mut(id);
         }
@@ -1212,6 +1238,9 @@ impl SymbolGraph {
                     coverage.composer_metadata_files = coverage
                         .composer_metadata_files
                         .saturating_add(part.composer_metadata_files);
+                    coverage.package_json_metadata_files = coverage
+                        .package_json_metadata_files
+                        .saturating_add(part.package_json_metadata_files);
                     coverage.path_fallback_files = coverage
                         .path_fallback_files
                         .saturating_add(part.path_fallback_files);
@@ -1226,6 +1255,9 @@ impl SymbolGraph {
             match file.metadata.classification {
                 SourceClassification::CargoMetadata => coverage.cargo_metadata_files += 1,
                 SourceClassification::ComposerMetadata => coverage.composer_metadata_files += 1,
+                SourceClassification::PackageJsonMetadata => {
+                    coverage.package_json_metadata_files += 1;
+                }
                 SourceClassification::PathFallback => coverage.path_fallback_files += 1,
             }
         }
@@ -2456,6 +2488,7 @@ fn diagnostic_cmp(left: &SyntaxDiagnostic, right: &SyntaxDiagnostic) -> Ordering
 fn provenance_rank(provenance: Provenance) -> u8 {
     match provenance {
         Provenance::RustAnalyzer => 0,
+        Provenance::Vtsls => 0,
         Provenance::ChakraResolver => 0,
         Provenance::TreeSitter => 1,
         Provenance::Git => 2,

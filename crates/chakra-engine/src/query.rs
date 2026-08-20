@@ -1027,6 +1027,7 @@ fn kind_order(kind: SymbolKind) -> u8 {
         SymbolKind::Constant => 8,
         SymbolKind::Field => 9,
         SymbolKind::Property => 10,
+        SymbolKind::TypeAlias => 15,
         SymbolKind::ImplBlock => 11,
         SymbolKind::Import => 12,
         SymbolKind::Configuration => 13,
@@ -1047,10 +1048,17 @@ fn source_rank(role: SourceRole) -> u8 {
 }
 
 fn file_language(path: &RepoRelativePath) -> Option<Language> {
-    if path.as_str().ends_with(".rs") {
+    let value = path.as_str();
+    if value.ends_with(".rs") {
         Some(Language::Rust)
-    } else if path.as_str().ends_with(".php") {
+    } else if value.ends_with(".php") {
         Some(Language::Php)
+    } else if value.ends_with(".ts")
+        || value.ends_with(".tsx")
+        || value.ends_with(".mts")
+        || value.ends_with(".cts")
+    {
+        Some(Language::TypeScript)
     } else {
         None
     }
@@ -1096,6 +1104,7 @@ fn repo_map_overview(files: &[(GraphFileSummary, Language)]) -> Vec<RepoMapGroup
         let kind = match file.metadata.classification {
             SourceClassification::CargoMetadata => Some(RepoMapGroupKind::CargoPackage),
             SourceClassification::ComposerMetadata => Some(RepoMapGroupKind::ComposerPsr4),
+            SourceClassification::PackageJsonMetadata => Some(RepoMapGroupKind::NpmPackage),
             SourceClassification::PathFallback => None,
         };
         if let (Some(kind), Some(package)) = (kind, &file.metadata.package) {

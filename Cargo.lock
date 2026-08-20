@@ -214,6 +214,7 @@ dependencies = [
  "chakra-git",
  "chakra-language-php",
  "chakra-language-rust",
+ "chakra-language-typescript",
  "nix",
  "notify",
  "tempfile",
@@ -253,6 +254,35 @@ dependencies = [
 ]
 
 [[package]]
+name = "chakra-language-typescript"
+version = "0.1.1"
+dependencies = [
+ "chakra-domain",
+ "chakra-engine",
+ "chakra-git",
+ "nix",
+ "tempfile",
+ "thiserror",
+ "tracing",
+ "tree-sitter",
+ "tree-sitter-typescript",
+]
+
+[[package]]
+name = "chakra-lsp"
+version = "0.1.1"
+dependencies = [
+ "crossbeam-channel",
+ "lsp-server",
+ "nix",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tracing",
+]
+
+[[package]]
 name = "chakra-mcp"
 version = "0.1.1"
 dependencies = [
@@ -281,6 +311,23 @@ dependencies = [
  "lsp-server",
  "lsp-types",
  "nix",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tracing",
+ "url",
+]
+
+[[package]]
+name = "chakra-provider-vtsls"
+version = "0.1.1"
+dependencies = [
+ "chakra-domain",
+ "chakra-engine",
+ "chakra-lsp",
+ "crossbeam-channel",
+ "lsp-types",
  "serde",
  "serde_json",
  "tempfile",
@@ -1482,6 +1529,16 @@ name = "tree-sitter-rust"
 version = "0.24.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "439e577dbe07423ec2582ac62c7531120dbfccfa6e5f92406f93dd271a120e45"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-typescript"
+version = "0.23.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6c5f76ed8d947a75cc446d5fccd8b602ebf0cde64ccf2ffa434d873d7a575eff"
 dependencies = [
  "cc",
  "tree-sitter-language",

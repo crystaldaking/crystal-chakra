@@ -39,6 +39,8 @@ pub enum Precision {
 pub enum Provenance {
     /// rust-analyzer (live precise provider).
     RustAnalyzer,
+    /// vtsls (live precise provider for TypeScript, ADR-0027/0032).
+    Vtsls,
     /// Chakra-owned static resolver producing precise-tier facts from an
     /// explicit, deterministic evidence rule (ADR-0030).
     ChakraResolver,
@@ -77,6 +79,11 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<Provenance>("\"chakra_resolver\"")?,
             Provenance::ChakraResolver
+        );
+        assert_eq!(serde_json::to_string(&Provenance::Vtsls)?, "\"vtsls\"");
+        assert_eq!(
+            serde_json::from_str::<Provenance>("\"vtsls\"")?,
+            Provenance::Vtsls
         );
         Ok(())
     }

@@ -65,6 +65,7 @@ impl QueryService for StubService {
                     total_files: 1,
                     cargo_metadata_files: 0,
                     composer_metadata_files: 0,
+                    package_json_metadata_files: 0,
                     path_fallback_files: 1,
                 },
                 syntax_diagnostics: Default::default(),
