@@ -1609,27 +1609,6 @@ fn desired_watch_directories(
     repository_root: &Path,
     indexed_paths: &[RepoRelativePath],
 ) -> (BTreeSet<PathBuf>, bool) {
-    // FSEvents observes directory trees natively. Register one recursive
-    // watch per indexed top-level source root plus a non-recursive repository
-    // watch. This avoids both redundant ancestor streams and broad recursive
-    // observation of unrelated generated/vendor trees.
-    if cfg!(target_os = "macos") {
-        let mut desired = BTreeSet::from([repository_root.to_path_buf()]);
-        for path in indexed_paths {
-            let Some(top_level) = Path::new(path.as_str()).components().next() else {
-                continue;
-            };
-            let directory = repository_root.join(top_level);
-            if directory.is_dir() {
-                desired.insert(directory);
-            }
-        }
-        let truncated = desired.len() > MAX_WATCHED_DIRECTORIES;
-        if truncated {
-            desired = desired.into_iter().take(MAX_WATCHED_DIRECTORIES).collect();
-        }
-        return (desired, truncated);
-    }
     let mut desired = BTreeSet::from([repository_root.to_path_buf()]);
     for path in indexed_paths {
         if let Some(parent) = Path::new(path.as_str()).parent() {
@@ -1684,12 +1663,7 @@ fn refresh_watches(
         watched.remove(&directory);
     }
     for directory in desired.difference(watched).cloned().collect::<Vec<_>>() {
-        let recursive_mode = if cfg!(target_os = "macos") && directory != repository_root {
-            RecursiveMode::Recursive
-        } else {
-            RecursiveMode::NonRecursive
-        };
-        match watcher.watch(&directory, recursive_mode) {
+        match watcher.watch(&directory, RecursiveMode::NonRecursive) {
             Ok(()) => {
                 watched.insert(directory);
             }
@@ -1912,11 +1886,18 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn fsevents_coalesces_nested_sources_into_top_level_watches()
+    fn macos_recommended_watcher_is_kqueue() {
+        assert_eq!(RecommendedWatcher::kind(), notify::WatcherKind::Kqueue);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn kqueue_uses_bounded_non_recursive_source_directories()
     -> Result<(), Box<dyn std::error::Error>> {
         let workspace = tempfile::tempdir()?;
         let root = workspace.path();
-        std::fs::create_dir(root.join("src"))?;
+        std::fs::create_dir_all(root.join("src/main/java/example"))?;
+        std::fs::create_dir_all(root.join("src/test/java/example"))?;
         let paths = [
             RepoRelativePath::new("src/main/java/example/Main.java")?,
             RepoRelativePath::new("src/test/java/example/MainTest.java")?,
@@ -1926,7 +1907,16 @@ mod tests {
 
         assert_eq!(
             desired,
-            BTreeSet::from([root.to_path_buf(), root.join("src")])
+            BTreeSet::from([
+                root.to_path_buf(),
+                root.join("src"),
+                root.join("src/main"),
+                root.join("src/main/java"),
+                root.join("src/main/java/example"),
+                root.join("src/test"),
+                root.join("src/test/java"),
+                root.join("src/test/java/example"),
+            ])
         );
         assert!(!truncated);
         Ok(())

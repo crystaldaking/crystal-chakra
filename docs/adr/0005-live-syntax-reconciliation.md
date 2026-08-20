@@ -2,7 +2,7 @@
 
 Status: accepted
 Date: 2026-08-15
-Last reviewed: 2026-08-18
+Last reviewed: 2026-08-21
 
 ## Context
 
@@ -22,10 +22,14 @@ over native filesystem mechanisms:
 ## Decision
 
 - Use workspace-managed `notify` 8.2.0 and `recommended_watcher`, selecting
-  the current stable release rather than a release candidate. Watch only the
-  repository root and the existing ancestor directories of indexed source
-  files, non-recursively. This avoids recursive watches inside `.git`,
-  `target`, ignored, and generated trees. The directory set is capped at
+  the current stable release rather than a release candidate. On macOS,
+  compile the documented `macos_kqueue` backend instead of the default
+  FSEvents backend: repeated `FSEventStreamStart` calls can block indefinitely
+  during watcher registration, while kqueue avoids that API and reports
+  registration errors through the existing typed startup/degradation paths.
+  Watch only the repository root and the existing ancestor directories of
+  indexed source files, non-recursively. This avoids recursive watches inside
+  `.git`, `target`, ignored, and generated trees. The directory set is capped at
   4,096; exceeding the cap degrades watcher health but does not disable exact
   freshness reconciliation.
 - Treat mutation-capable watcher events as wake-up hints. Pure access/open/read
@@ -160,12 +164,12 @@ over native filesystem mechanisms:
 
 ## Consequences
 
-- Production dependency added: `notify` 8.2.0 (CC0-1.0). On macOS it adds the
-  native FSEvents adapter; the lockfile also carries target-specific native
-  adapters for supported platforms. The stable crate declares Rust 1.77 as
-  its minimum, below Chakra's pinned Rust 1.97.1. Compile and transitive cost
-  are accepted for a mature native watcher rather than reimplementing
-  platform APIs.
+- Production dependency added: `notify` 8.2.0 (CC0-1.0). On macOS Chakra
+  enables its documented kqueue feature (with the target-specific `kqueue`
+  and `mio` dependencies) instead of FSEvents; other supported platforms keep
+  their native adapters. The stable crate declares Rust 1.77 as its minimum,
+  below Chakra's pinned Rust 1.97.1. Compile and transitive cost are accepted
+  for a mature native watcher rather than reimplementing platform APIs.
 - A warmed no-op fresh barrier performs two shared Git inventory checkpoints
   and two filesystem identity passes but reads zero source bodies. Both
   identity passes cover sources and classification inputs and are required to
@@ -207,6 +211,9 @@ over native filesystem mechanisms:
   source bodies or bytes read.
 - A pure unit test checks both quiet and absolute debounce deadlines using
   synthetic instants.
+- A macOS-only unit test pins `RecommendedWatcher` to kqueue, and the parallel
+  conformance suite exercises repeated owned watcher startup and shutdown
+  without the former FSEvents registration stall (issue #65).
 - The pinned Java Spring Boot corpus exceeds the non-recursive watch-directory
   cap. Its freshness scenarios prove that stable partial notification coverage
   remains bounded and degraded while fresh barriers complete through

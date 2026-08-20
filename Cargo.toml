@@ -22,7 +22,7 @@ lsp-server = "0.10"
 lsp-types = "0.97"
 regex = "1"
 rpds = "1.2"
-notify = "8.2"
+notify = { version = "8.2", default-features = false, features = ["macos_kqueue"] }
 nix = { version = "0.31", default-features = false, features = ["signal"] }
 tree-sitter = "0.26"
 tree-sitter-bash = "0.25.1"
