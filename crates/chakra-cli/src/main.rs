@@ -79,6 +79,14 @@ struct ServeArgs {
     #[arg(long, default_value_t = 3 * 60 * 1_000_u64)]
     jdtls_readiness_timeout_millis: u64,
 
+    /// Run without the optional csharp-ls C# provider.
+    #[arg(long)]
+    no_csharp_ls: bool,
+
+    /// Explicit csharp-ls executable; omit for side-effect-free PATH discovery.
+    #[arg(long, value_name = "PATH")]
+    csharp_ls_path: Option<OsString>,
+
     /// Maximum simultaneously active precise providers.
     #[arg(long, default_value_t = 3)]
     max_active_providers: usize,
@@ -184,6 +192,8 @@ async fn serve(args: ServeArgs) -> ExitCode {
         no_jdtls,
         jdtls_path,
         jdtls_readiness_timeout_millis,
+        no_csharp_ls,
+        csharp_ls_path,
         max_active_providers,
         max_provider_reserved_memory_bytes,
         max_concurrent_provider_queries,
@@ -451,6 +461,42 @@ async fn serve(args: ServeArgs) -> ExitCode {
     } else {
         tracing::info!("jdtls precise enrichment is disabled");
     }
+    if should_register_provider(no_csharp_ls) {
+        let command: OnceLock<chakra_provider_csharp_ls::CsharpLsCommand> = OnceLock::new();
+        let query_wait_budget = chakra_provider_csharp_ls::DEFAULT_QUERY_WAIT_TIMEOUT;
+        registrations.push(
+            ProviderRegistration::new(
+                "csharp-ls",
+                vec![Language::CSharp],
+                1024 * 1024 * 1024,
+                move |workspace,
+                      operation|
+                      -> Result<Arc<dyn PreciseProvider>, ProviderStartError> {
+                    let resolved_command = if let Some(command) = command.get() {
+                        command.clone()
+                    } else {
+                        let resolved = chakra_provider_csharp_ls::resolve_command_with_context(
+                            csharp_ls_path.as_deref(),
+                            operation,
+                        )
+                        .map_err(ProviderStartError::from)?;
+                        let _ = command.set(resolved.clone());
+                        resolved
+                    };
+                    let config = chakra_provider_csharp_ls::CsharpLsConfig {
+                        command: resolved_command,
+                        ..chakra_provider_csharp_ls::CsharpLsConfig::default()
+                    };
+                    chakra_provider_csharp_ls::CsharpLsProvider::start(workspace, config)
+                        .map(|provider| provider as Arc<dyn PreciseProvider>)
+                        .map_err(|error| ProviderStartError::new(error.to_string()))
+                },
+            )
+            .with_additional_wait_budget(query_wait_budget),
+        );
+    } else {
+        tracing::info!("csharp-ls precise enrichment is disabled");
+    }
     let provider_pool = match ProviderPool::start(
         ProviderPoolConfig {
             max_active_providers,
@@ -556,6 +602,8 @@ mod tests {
                 && !args.no_jdtls
                 && args.jdtls_path.is_none()
                 && args.jdtls_readiness_timeout_millis == 180_000
+                && !args.no_csharp_ls
+                && args.csharp_ls_path.is_none()
                 && args.max_active_providers == 3
                 && args.max_index_files == DEFAULT_MAX_INDEX_FILES
                 && args.max_index_symbols == DEFAULT_MAX_INDEX_SYMBOLS
@@ -582,6 +630,9 @@ mod tests {
             "/opt/bin/jdtls",
             "--jdtls-readiness-timeout-millis",
             "240000",
+            "--no-csharp-ls",
+            "--csharp-ls-path",
+            "/opt/bin/csharp-ls",
         ]);
         assert!(matches!(
             cli,
@@ -598,6 +649,9 @@ mod tests {
                 && args.jdtls_path.as_deref()
                     == Some(std::ffi::OsStr::new("/opt/bin/jdtls"))
                 && args.jdtls_readiness_timeout_millis == 240_000
+                && args.no_csharp_ls
+                && args.csharp_ls_path.as_deref()
+                    == Some(std::ffi::OsStr::new("/opt/bin/csharp-ls"))
         ));
     }
 

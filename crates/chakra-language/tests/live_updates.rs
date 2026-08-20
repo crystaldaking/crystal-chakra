@@ -376,10 +376,10 @@ fn source_only_edit_reuses_every_graph_fact() -> Result<(), Box<dyn Error>> {
         .iter()
         .find(|phase| phase.phase == IndexPhase::LanguageComposition)
         .ok_or("live update must report shallow language composition")?;
-    // Six registered adapters (Rust, PHP, TypeScript, Python, JavaScript,
-    // Java) compose shallowly; the empty TypeScript/Python/JavaScript/Java
-    // partitions cost no graph facts.
-    assert_eq!(composition.work_items, 6);
+    // Every registered adapter composes shallowly; empty language partitions
+    // cost no graph facts. Keep the invariant tied to the domain catalog so
+    // append-only language additions cannot stale this assertion.
+    assert_eq!(composition.work_items, u64::try_from(Language::ALL.len())?);
     let materialization = current
         .indexing()
         .phases
@@ -920,6 +920,55 @@ fn java_edit_is_immediately_fresh_and_does_not_reparse_rust() -> Result<(), Box<
             .snapshot()
             .graph()
             .resolve_name("chakra::PaymentService::refund")
+            .is_empty()
+    );
+
+    let metrics = live.metrics();
+    assert_eq!(metrics.files_reparsed - baseline.files_reparsed, 1);
+    assert_eq!(
+        metrics.relationship_files_recomputed - baseline.relationship_files_recomputed,
+        1
+    );
+    engine.snapshot().graph().validate_consistency()?;
+    live.shutdown()?;
+    Ok(())
+}
+
+#[test]
+fn csharp_edit_is_immediately_fresh_and_does_not_reparse_rust() -> Result<(), Box<dyn Error>> {
+    let repository = repository()?;
+    write(
+        repository.path(),
+        "src/main/csharp/Chakra/PaymentService.cs",
+        "namespace Chakra;\npublic class PaymentService {\n    void Refund() {}\n}\n",
+    )?;
+    let (engine, live) = start(&repository)?;
+    let baseline = live.metrics();
+
+    write(
+        repository.path(),
+        "src/main/csharp/Chakra/PaymentService.cs",
+        "namespace Chakra;\npublic class PaymentService {\n    void RefundNow() {}\n}\n",
+    )?;
+    let response = engine.symbol_search(SymbolSearchRequest {
+        query: "RefundNow".to_owned(),
+        source: Default::default(),
+        limit: None,
+        freshness: FreshnessRequirement::RequireFresh,
+        ..SymbolSearchRequest::default()
+    })?;
+    assert_eq!(response.freshness, Freshness::Fresh);
+    assert_eq!(response.data.candidates.len(), 1);
+    assert_eq!(response.data.candidates[0].language, Language::CSharp);
+    assert_eq!(
+        response.data.candidates[0].qualified_name,
+        "Chakra::PaymentService::RefundNow"
+    );
+    assert!(
+        engine
+            .snapshot()
+            .graph()
+            .resolve_name("Chakra::PaymentService::Refund")
             .is_empty()
     );
 

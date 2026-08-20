@@ -46,6 +46,8 @@ pub enum Provenance {
     Pyright,
     /// jdtls (live precise provider for Java, ADR-0027/0036).
     Jdtls,
+    /// csharp-ls (live precise provider for C#, ADR-0027/0037).
+    CsharpLs,
     /// Chakra-owned static resolver producing precise-tier facts from an
     /// explicit, deterministic evidence rule (ADR-0030).
     ChakraResolver,
@@ -99,6 +101,14 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<Provenance>("\"jdtls\"")?,
             Provenance::Jdtls
+        );
+        assert_eq!(
+            serde_json::to_string(&Provenance::CsharpLs)?,
+            "\"csharp_ls\""
+        );
+        assert_eq!(
+            serde_json::from_str::<Provenance>("\"csharp_ls\"")?,
+            Provenance::CsharpLs
         );
         Ok(())
     }

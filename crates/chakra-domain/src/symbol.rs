@@ -43,17 +43,20 @@ pub enum Language {
     JavaScript,
     #[serde(rename = "java")]
     Java,
+    #[serde(rename = "csharp")]
+    CSharp,
 }
 
 impl Language {
     /// Languages understood by the current Chakra build, in stable display order.
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 7] = [
         Self::Rust,
         Self::Php,
         Self::TypeScript,
         Self::Python,
         Self::JavaScript,
         Self::Java,
+        Self::CSharp,
     ];
 }
 

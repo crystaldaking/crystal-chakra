@@ -552,7 +552,8 @@ fn raw_is_supported_source(raw: &[u8]) -> Result<bool, WorkspaceDiffError> {
         || raw.ends_with(b".jsx")
         || raw.ends_with(b".mjs")
         || raw.ends_with(b".cjs")
-        || raw.ends_with(b".java");
+        || raw.ends_with(b".java")
+        || raw.ends_with(b".cs");
     if !looks_supported {
         return Ok(false);
     }

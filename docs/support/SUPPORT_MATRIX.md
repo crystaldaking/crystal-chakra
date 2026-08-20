@@ -9,6 +9,7 @@ Target list reviewed: 2026-08 (GitHub Octoverse 2025 top languages plus pre-exis
 
 | Language | Tier | Advertised | Grammar | Precise provider |
 |----------|------|-----------|---------|------------------|
+| csharp | first-class | yes | tree-sitter-c-sharp 0.23.5 | csharp-ls (integrated) |
 | java | first-class | yes | tree-sitter-java 0.23.5 | jdtls (integrated) |
 | javascript | first-class | yes | tree-sitter-javascript 0.25.0 | vtsls (integrated) |
 | php | first-class | yes | tree-sitter-php 0.24.2 | none (deferred) |
@@ -17,6 +18,40 @@ Target list reviewed: 2026-08 (GitHub Octoverse 2025 top languages plus pre-exis
 | typescript | first-class | yes | tree-sitter-typescript 0.23.2 | vtsls (integrated) |
 
 ## Capability detail
+
+### csharp
+
+| Capability | Status | Mechanism |
+|------------|--------|-----------|
+| AMBIG-01 | pass | query-layer ambiguity reporting |
+| BUDGET-01 | pass | query work budgets (ADR-0025) |
+| CANCEL-01 | pass | cooperative cancellation (ADR-0025) |
+| CONFORM-01 | pass | chakra-conformance harness |
+| CORPUS-01 | pass | pinned public corpus evaluation (ADR-0029) |
+| DEGRADE-01 | pass | bounded degradation (ADR-0011) |
+| DISC-01 | pass | chakra-git discovery (.cs) |
+| DISC-02 | pass | nearest unambiguous *.csproj project scopes with .sln/.slnx and Directory.Build/Packages/global.json freshness inputs |
+| DISC-03 | pass | language-neutral source roles plus IsTestProject, test-project/file conventions, and bin/obj generated-source conventions (ADR-0019) |
+| DOCS-01 | pass | per-language documentation |
+| FRESH-01 | pass | atomic revision publication (ADR-0001) |
+| FRESH-02 | pass | live freshness barrier (ADR-0005) |
+| PRECISE-01 | pass | recorded provider selection: csharp-ls 0.26.x with .NET 10 SDK |
+| PRECISE-02 | pass | csharp-ls over shared chakra-lsp client (csharp language id) |
+| PRECISE-03 | pass | owned lifecycle, source-document synchronization, restart, orphan-free shutdown, and workspace-only result boundary (ADR-0037; non-source delta limitation #71) |
+| PRECISE-04 | pass | capability-gated enrichment through PreciseProvider |
+| PRECISE-05 | pass | graceful absence/crash degradation to syntax tier |
+| PROV-01 | pass | domain provenance model |
+| QUERY-01 | pass | chakra-engine QueryService |
+| QUERY-02 | pass | chakra-mcp |
+| QUERY-03 | pass | chakra-git diff provider |
+| SYNTAX-01 | pass | tree-sitter-c-sharp 0.23.5 |
+| SYNTAX-02 | pass | tree-sitter |
+| SYNTAX-03 | pass | tree-sitter (namespaces; classes/structs/interfaces/records/enums/delegates; nested types and members) |
+| SYNTAX-04 | pass | tree-sitter (using, aliases, and using static import facts) |
+| SYNTAX-05 | pass | tree-sitter (byte-accurate ranges) |
+| SYNTAX-06 | pass | tree-sitter + xUnit/NUnit/MSTest attribute hints |
+| SYNTAX-07 | pass | tree-sitter diagnostics (ADR-0022) |
+| SYNTAX-08 | pass | bounded lazy syntax call candidates with using/alias, receiver hints, and scope-checked local extension methods (ADR-0010) |
 
 ### java
 

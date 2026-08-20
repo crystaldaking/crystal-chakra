@@ -18,6 +18,239 @@
   ],
   "languages": [
     {
+      "language": "csharp",
+      "advertised": true,
+      "tier": "first-class",
+      "grammar": {
+        "name": "tree-sitter-c-sharp",
+        "version": "0.23.5",
+        "adr": "docs/adr/0027-grammar-and-provider-selection.md"
+      },
+      "precise_provider": {
+        "name": "csharp-ls",
+        "adr": "docs/adr/0037-csharp-ls-workspace-only-enrichment.md",
+        "status": "integrated"
+      },
+      "capabilities": {
+        "DISC-01": {
+          "status": "pass",
+          "mechanism": "chakra-git discovery (.cs)",
+          "evidence": [
+            "crates/chakra-language-csharp/tests/fixture_index.rs",
+            "crates/chakra-git/src/discovery.rs"
+          ]
+        },
+        "DISC-02": {
+          "status": "pass",
+          "mechanism": "nearest unambiguous *.csproj project scopes with .sln/.slnx and Directory.Build/Packages/global.json freshness inputs",
+          "evidence": [
+            "crates/chakra-git/src/source_metadata.rs",
+            "docs/support/conformance/csharp.json"
+          ]
+        },
+        "DISC-03": {
+          "status": "pass",
+          "mechanism": "language-neutral source roles plus IsTestProject, test-project/file conventions, and bin/obj generated-source conventions (ADR-0019)",
+          "evidence": [
+            "crates/chakra-git/src/source_metadata.rs",
+            "docs/support/conformance/csharp.json"
+          ]
+        },
+        "SYNTAX-01": {
+          "status": "pass",
+          "mechanism": "tree-sitter-c-sharp 0.23.5",
+          "evidence": [
+            "Cargo.toml"
+          ]
+        },
+        "SYNTAX-02": {
+          "status": "pass",
+          "mechanism": "tree-sitter",
+          "evidence": [
+            "crates/chakra-language-csharp/tests/fixture_index.rs"
+          ]
+        },
+        "SYNTAX-03": {
+          "status": "pass",
+          "mechanism": "tree-sitter (namespaces; classes/structs/interfaces/records/enums/delegates; nested types and members)",
+          "evidence": [
+            "crates/chakra-language-csharp/tests/fixture_index.rs"
+          ]
+        },
+        "SYNTAX-04": {
+          "status": "pass",
+          "mechanism": "tree-sitter (using, aliases, and using static import facts)",
+          "evidence": [
+            "crates/chakra-language-csharp/tests/fixture_index.rs",
+            "docs/support/conformance/csharp.json"
+          ]
+        },
+        "SYNTAX-05": {
+          "status": "pass",
+          "mechanism": "tree-sitter (byte-accurate ranges)",
+          "evidence": [
+            "crates/chakra-language-csharp/tests/fixture_index.rs"
+          ]
+        },
+        "SYNTAX-06": {
+          "status": "pass",
+          "mechanism": "tree-sitter + xUnit/NUnit/MSTest attribute hints",
+          "evidence": [
+            "crates/chakra-language-csharp/tests/fixture_index.rs",
+            "docs/support/conformance/csharp.json"
+          ]
+        },
+        "SYNTAX-07": {
+          "status": "pass",
+          "mechanism": "tree-sitter diagnostics (ADR-0022)",
+          "evidence": [
+            "crates/chakra-language-csharp/tests/fixture_index.rs"
+          ]
+        },
+        "SYNTAX-08": {
+          "status": "pass",
+          "mechanism": "bounded lazy syntax call candidates with using/alias, receiver hints, and scope-checked local extension methods (ADR-0010)",
+          "evidence": [
+            "crates/chakra-language-csharp/tests/fixture_index.rs"
+          ]
+        },
+        "PRECISE-01": {
+          "status": "pass",
+          "mechanism": "recorded provider selection: csharp-ls 0.26.x with .NET 10 SDK",
+          "evidence": [
+            "docs/adr/0027-grammar-and-provider-selection.md",
+            "docs/adr/0037-csharp-ls-workspace-only-enrichment.md"
+          ]
+        },
+        "PRECISE-02": {
+          "status": "pass",
+          "mechanism": "csharp-ls over shared chakra-lsp client (csharp language id)",
+          "evidence": [
+            "crates/chakra-provider-csharp-ls/tests/lifecycle.rs"
+          ]
+        },
+        "PRECISE-03": {
+          "status": "pass",
+          "mechanism": "owned lifecycle, source-document synchronization, restart, orphan-free shutdown, and workspace-only result boundary (ADR-0037; non-source delta limitation #71)",
+          "evidence": [
+            "crates/chakra-provider-csharp-ls/tests/lifecycle.rs",
+            "crates/chakra-lsp/tests/lifecycle.rs",
+            "docs/adr/0037-csharp-ls-workspace-only-enrichment.md"
+          ]
+        },
+        "PRECISE-04": {
+          "status": "pass",
+          "mechanism": "capability-gated enrichment through PreciseProvider",
+          "evidence": [
+            "crates/chakra-provider-csharp-ls/tests/lifecycle.rs"
+          ]
+        },
+        "PRECISE-05": {
+          "status": "pass",
+          "mechanism": "graceful absence/crash degradation to syntax tier",
+          "evidence": [
+            "crates/chakra-provider-csharp-ls/tests/lifecycle.rs",
+            "docs/support/conformance/csharp.json"
+          ]
+        },
+        "QUERY-01": {
+          "status": "pass",
+          "mechanism": "chakra-engine QueryService",
+          "evidence": [
+            "crates/chakra-language-csharp/tests/fixture_index.rs"
+          ]
+        },
+        "QUERY-02": {
+          "status": "pass",
+          "mechanism": "chakra-mcp",
+          "evidence": [
+            "crates/chakra-mcp/tests/contract.rs"
+          ]
+        },
+        "QUERY-03": {
+          "status": "pass",
+          "mechanism": "chakra-git diff provider",
+          "evidence": [
+            "docs/support/conformance/csharp.json"
+          ]
+        },
+        "FRESH-01": {
+          "status": "pass",
+          "mechanism": "atomic revision publication (ADR-0001)",
+          "evidence": [
+            "crates/chakra-engine/tests/atomic_revisions.rs"
+          ]
+        },
+        "FRESH-02": {
+          "status": "pass",
+          "mechanism": "live freshness barrier (ADR-0005)",
+          "evidence": [
+            "crates/chakra-language/tests/live_updates.rs"
+          ]
+        },
+        "PROV-01": {
+          "status": "pass",
+          "mechanism": "domain provenance model",
+          "evidence": [
+            "crates/chakra-language-csharp/tests/fixture_index.rs"
+          ]
+        },
+        "AMBIG-01": {
+          "status": "pass",
+          "mechanism": "query-layer ambiguity reporting",
+          "evidence": [
+            "docs/support/conformance/csharp.json"
+          ]
+        },
+        "BUDGET-01": {
+          "status": "pass",
+          "mechanism": "query work budgets (ADR-0025)",
+          "evidence": [
+            "docs/support/conformance/csharp.json"
+          ]
+        },
+        "CANCEL-01": {
+          "status": "pass",
+          "mechanism": "cooperative cancellation (ADR-0025)",
+          "evidence": [
+            "crates/chakra-language-csharp/src/indexer.rs",
+            "crates/chakra-provider-csharp-ls/tests/lifecycle.rs"
+          ]
+        },
+        "DEGRADE-01": {
+          "status": "pass",
+          "mechanism": "bounded degradation (ADR-0011)",
+          "evidence": [
+            "docs/support/conformance/csharp.json"
+          ]
+        },
+        "CONFORM-01": {
+          "status": "pass",
+          "mechanism": "chakra-conformance harness",
+          "evidence": [
+            "docs/support/conformance/csharp.json"
+          ]
+        },
+        "CORPUS-01": {
+          "status": "pass",
+          "mechanism": "pinned public corpus evaluation (ADR-0029)",
+          "evidence": [
+            "docs/support/corpus/results/csharp-dotnet__runtime.json"
+          ]
+        },
+        "DOCS-01": {
+          "status": "pass",
+          "mechanism": "per-language documentation",
+          "evidence": [
+            "docs/languages/csharp.md"
+          ]
+        }
+      },
+      "conformance_results": "docs/support/conformance/csharp.json",
+      "corpus_results": "docs/support/corpus/results/csharp-dotnet__runtime.json",
+      "docs": "docs/languages/csharp.md"
+    },
+    {
       "language": "java",
       "advertised": true,
       "tier": "first-class",

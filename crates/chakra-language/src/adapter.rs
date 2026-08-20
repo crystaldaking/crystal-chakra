@@ -92,6 +92,15 @@ impl From<LanguageSources> for chakra_language_java::JavaSources {
     }
 }
 
+impl From<LanguageSources> for chakra_language_csharp::CSharpSources {
+    fn from(sources: LanguageSources) -> Self {
+        Self {
+            files: sources.files,
+            metadata: sources.metadata,
+        }
+    }
+}
+
 /// Per-language syntax fact counts, identical in shape across adapters.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct AdapterFactCounts {
@@ -176,6 +185,20 @@ impl From<chakra_language_javascript::SyntaxFactCounts> for AdapterFactCounts {
 
 impl From<chakra_language_java::SyntaxFactCounts> for AdapterFactCounts {
     fn from(facts: chakra_language_java::SyntaxFactCounts) -> Self {
+        Self {
+            files: facts.files,
+            source_bytes: facts.source_bytes,
+            syntax_error_files: facts.syntax_error_files,
+            symbols: facts.symbols,
+            relationship_edges: facts.relationship_edges,
+            omitted_relationship_edges: facts.omitted_relationship_edges,
+            call_sites: facts.call_sites,
+        }
+    }
+}
+
+impl From<chakra_language_csharp::SyntaxFactCounts> for AdapterFactCounts {
+    fn from(facts: chakra_language_csharp::SyntaxFactCounts) -> Self {
         Self {
             files: facts.files,
             source_bytes: facts.source_bytes,
@@ -347,6 +370,26 @@ impl From<chakra_language_java::ReconcileMetrics> for AdapterReconcileMetrics {
     }
 }
 
+impl From<chakra_language_csharp::ReconcileMetrics> for AdapterReconcileMetrics {
+    fn from(metrics: chakra_language_csharp::ReconcileMetrics) -> Self {
+        Self {
+            scanned_files: metrics.scanned_files,
+            unchanged_files: metrics.unchanged_files,
+            reparsed_files: metrics.reparsed_files,
+            created_files: metrics.created_files,
+            modified_files: metrics.modified_files,
+            deleted_files: metrics.deleted_files,
+            relationship_files_recomputed: metrics.relationship_files_recomputed,
+            framework_files_reparsed: 0,
+            framework_relationship_files_recomputed: 0,
+            framework_truncated_files: 0,
+            syntax_error_files: metrics.syntax_error_files,
+            truncated_call_sites: metrics.truncated_call_sites,
+            publication: metrics.publication,
+        }
+    }
+}
+
 /// Result of one adapter's bounded cold build.
 #[derive(Debug)]
 pub struct AdapterColdBuild {
@@ -418,8 +461,8 @@ impl Clone for Box<dyn SyntaxLanguageAdapter> {
 /// Graph merge, degradation records, and budget splitting all follow this
 /// order, so a new language crate appends its adapter here. TypeScript comes
 /// after PHP, Python after TypeScript, JavaScript after Python, and Java
-/// after JavaScript: appending keeps the existing
-/// Rust/PHP/TypeScript/Python/JavaScript budget shares, merge order, and
+/// after JavaScript, and C# after Java: appending keeps the existing
+/// Rust/PHP/TypeScript/Python/JavaScript/Java budget shares, merge order, and
 /// entity-id ranges untouched in repositories without the appended
 /// languages' sources (ADR-0031).
 pub fn default_adapters() -> Vec<Box<dyn SyntaxLanguageAdapter>> {
@@ -430,6 +473,7 @@ pub fn default_adapters() -> Vec<Box<dyn SyntaxLanguageAdapter>> {
         Box::new(chakra_language_python::PythonSyntaxIndex::default()),
         Box::new(chakra_language_javascript::JavaScriptSyntaxIndex::default()),
         Box::new(chakra_language_java::JavaSyntaxIndex::default()),
+        Box::new(chakra_language_csharp::CSharpSyntaxIndex::default()),
     ]
 }
 
@@ -921,5 +965,92 @@ impl SyntaxLanguageAdapter for chakra_language_java::JavaSyntaxIndex {
 
     fn fact_counts(&self) -> AdapterFactCounts {
         self.fact_counts().into()
+    }
+}
+
+impl SyntaxLanguageAdapter for chakra_language_csharp::CSharpSyntaxIndex {
+    fn language(&self) -> Language {
+        Language::CSharp
+    }
+
+    fn clone_box(&self) -> Box<dyn SyntaxLanguageAdapter> {
+        Box::new(self.clone())
+    }
+
+    fn cold_build(
+        &self,
+        sources: LanguageSources,
+        graph_limits: GraphBuildLimits,
+        worker_limit: usize,
+        parallel_file_threshold: usize,
+        _repository_root: &Path,
+        cancellation: &IndexCancellation,
+    ) -> Result<AdapterColdBuild, WorkspaceIndexError> {
+        let (index, graph, metrics) = Self::from_classified_sources_scheduled(
+            sources.into(),
+            graph_limits,
+            worker_limit,
+            parallel_file_threshold,
+            cancellation,
+        )?;
+        Ok(AdapterColdBuild {
+            index: Box::new(index),
+            graph,
+            metrics: AdapterBuildMetrics {
+                facts: metrics.facts.into(),
+                graph: metrics.graph,
+                framework: AdapterFrameworkMetrics::default(),
+                phases: metrics.phases,
+            },
+        })
+    }
+
+    fn reconcile(
+        &self,
+        sources: LanguageSources,
+        graph_limits: GraphBuildLimits,
+        cancellation: &IndexCancellation,
+    ) -> Result<AdapterReconcile, WorkspaceIndexError> {
+        let report =
+            self.reconcile_classified_sources_bounded(sources.into(), graph_limits, cancellation)?;
+        Ok(AdapterReconcile {
+            graph: report.graph,
+            metrics: report.metrics.into(),
+            next_index: report
+                .next_index
+                .map(|index| Box::new(index) as Box<dyn SyntaxLanguageAdapter>),
+            build_metrics: report.build_metrics.map(|metrics| AdapterBuildMetrics {
+                facts: metrics.facts.into(),
+                graph: metrics.graph,
+                framework: AdapterFrameworkMetrics::default(),
+                phases: metrics.phases,
+            }),
+        })
+    }
+
+    fn paths(&self) -> Vec<RepoRelativePath> {
+        self.paths()
+    }
+
+    fn graph(&self) -> &SymbolGraph {
+        self.graph()
+    }
+
+    fn graph_report(&self) -> GraphBuildReport {
+        self.graph_report()
+    }
+
+    fn fact_counts(&self) -> AdapterFactCounts {
+        self.fact_counts().into()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn adapter_registry_matches_the_domain_language_catalog() {
+        assert_eq!(registered_languages(), Language::ALL);
     }
 }

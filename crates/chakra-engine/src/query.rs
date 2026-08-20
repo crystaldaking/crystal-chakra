@@ -1069,6 +1069,8 @@ fn file_language(path: &RepoRelativePath) -> Option<Language> {
         Some(Language::JavaScript)
     } else if value.ends_with(".java") {
         Some(Language::Java)
+    } else if value.ends_with(".cs") {
+        Some(Language::CSharp)
     } else {
         None
     }
@@ -1118,6 +1120,7 @@ fn repo_map_overview(files: &[(GraphFileSummary, Language)]) -> Vec<RepoMapGroup
             SourceClassification::PyprojectMetadata => Some(RepoMapGroupKind::PyprojectPackage),
             SourceClassification::MavenMetadata => Some(RepoMapGroupKind::MavenModule),
             SourceClassification::GradleMetadata => Some(RepoMapGroupKind::GradleProject),
+            SourceClassification::DotnetProjectMetadata => Some(RepoMapGroupKind::DotnetProject),
             SourceClassification::PathFallback => None,
         };
         if let (Some(kind), Some(package)) = (kind, &file.metadata.package) {

@@ -7,11 +7,12 @@ language, syntax call candidates, source context, related tests, and current
 Git diff state.
 
 Status: **v0.1.2 development candidate**. The implemented slice supports Rust,
-PHP, TypeScript/TSX, Python, JavaScript/JSX, and Java syntax intelligence and
-provides Git-aware discovery, Tree-sitter indexing, bounded live
+PHP, TypeScript/TSX, Python, JavaScript/JSX, Java, and C# syntax intelligence
+and provides Git-aware discovery, Tree-sitter indexing, bounded live
 filesystem reconciliation, deterministic fresh-query barriers, atomic
 in-memory revisions, optional lazy precise call-hierarchy enrichment through
-rust-analyzer, vtsls, pyright, and jdtls, and all seven v0.1 MCP tools:
+rust-analyzer, vtsls, pyright, jdtls, and csharp-ls, and all seven v0.1 MCP
+tools:
 
 - `status`
 - `repo_map`
@@ -27,9 +28,10 @@ rust-analyzer, vtsls, pyright, and jdtls, and all seven v0.1 MCP tools:
 - [rustup](https://rustup.rs/) for building from source. The repository pins
   Rust `1.97.1` and Edition 2024 in `rust-toolchain.toml`.
 - Optional precise providers: `rust-analyzer`; vtsls and pyright executables
-  (or their Node/npm installations); and jdtls with JDK 21+. If any provider
-  is unavailable or unhealthy, Chakra continues serving current syntax facts
-  and reports that provider as degraded instead of inventing precise results.
+  (or their Node/npm installations); jdtls with JDK 21+; and csharp-ls 0.26.x
+  with the .NET 10 SDK. If any provider is unavailable or unhealthy, Chakra
+  continues serving current syntax facts and reports that provider as degraded
+  instead of inventing precise results.
 
 A PHP runtime or Composer installation is not required for indexing. PHP v0.1
 facts are syntax-derived through the official Tree-sitter PHP grammar.
@@ -73,12 +75,12 @@ chakra serve --repo /absolute/path/to/a/git-worktree
 
 Logging goes to stderr (`RUST_LOG=debug` for more detail). Stdout is reserved
 for the MCP protocol stream. rust-analyzer, vtsls (TypeScript/JavaScript),
-pyright (Python), and jdtls (Java) are registered as dormant routes by default
-and start lazily on the first precise query, including for a language added
-after server startup. Explicit executable controls are
-`--rust-analyzer-path`, `--vtsls-path`, `--pyright-path`, and `--jdtls-path`.
-Use the corresponding four `--no-*` flags for deterministic syntax-only
-operation. `chakra serve --help` lists the bounded active-provider,
+pyright (Python), jdtls (Java), and csharp-ls (C#) are registered as dormant
+routes by default and start lazily on the first precise query, including for a
+language added after server startup. Explicit executable controls are
+`--rust-analyzer-path`, `--vtsls-path`, `--pyright-path`, `--jdtls-path`, and
+`--csharp-ls-path`. Use the corresponding five `--no-*` flags for deterministic
+syntax-only operation. `chakra serve --help` lists the bounded active-provider,
 memory-reservation, concurrent-query, queue, idle-timeout, and jdtls readiness
 controls.
 
@@ -441,12 +443,14 @@ release, or hotfix branches and pull requests. Direct post-v0.1.0 commits to
 - `crates/chakra-language-python` — Tree-sitter Python syntax adapter.
 - `crates/chakra-language-javascript` — Tree-sitter JavaScript/JSX syntax adapter.
 - `crates/chakra-language-java` — Tree-sitter Java syntax adapter.
+- `crates/chakra-language-csharp` — Tree-sitter C# syntax adapter.
 - `crates/chakra-mcp` — thin stdio MCP adapter.
 - `crates/chakra-provider-pool` — bounded lazy provider orchestration.
 - `crates/chakra-provider-rust-analyzer` — optional precise provider adapter.
 - `crates/chakra-provider-vtsls` — optional TypeScript/JavaScript precise provider adapter.
 - `crates/chakra-provider-pyright` — optional Python precise provider adapter.
 - `crates/chakra-provider-jdtls` — optional Java precise provider adapter.
+- `crates/chakra-provider-csharp-ls` — optional C# precise provider adapter.
 - `fixtures/rust/controller-service-provider` — integration fixture/test oracle.
 - `fixtures/php/controller-service-provider` — PHP integration fixture/test oracle.
 - `docs/SPEC.md` — architectural source of truth.
@@ -460,11 +464,11 @@ identity of Git's reported common administrative directory.
 
 ## Known v0.1 limits
 
-v0.1 supports one repository, one active materialized worktree, the six syntax
+v0.1 supports one repository, one active materialized worktree, the seven syntax
 languages listed above, and an in-memory index rebuilt at startup. It
 intentionally has no historical commit materialization, persistent graph
-snapshots, provider pool, eager
-precise call graph, semantic/vector search, precise PHP provider, or web UI.
+snapshots, eager precise call graph, semantic/vector search, precise PHP
+provider, or web UI.
 Rust module qualification follows conventional `src/foo.rs`, `foo/mod.rs`,
 and inline-module layouts; custom external module remapping through `#[path]`
 is not modeled in v0.1.
@@ -476,9 +480,9 @@ generic inference, arbitrary factory return inference, dynamic properties, or
 runtime container state. Deterministic Laravel class-constant bindings and
 framework relationships are heuristic facts; PHP call and test relations
 remain explicitly syntax/heuristic facts.
-Provider activation is decided at startup; after adding the first Rust file to
-an already running non-Rust workspace, restart Chakra to enable precise Rust
-enrichment. Live Rust syntax intelligence does not require that restart.
+Configured precise-provider routes remain available when live reconciliation
+adds the first file for a language after startup; the provider still starts
+only when a precise query needs it.
 
 ## License
 

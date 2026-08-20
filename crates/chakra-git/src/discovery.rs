@@ -22,9 +22,9 @@ const MAX_REPOSITORY_ROOTS: usize = 64;
 /// Git-visible inputs that can affect one syntax revision.
 ///
 /// Source files are parsed into the graph. Metadata inputs are not indexed as
-/// source, but Cargo/Composer classification can change query-visible package
-/// and source-role facts, so freshness reconciliation must pin them in the
-/// same pre/post inventory proof.
+/// source, but ecosystem metadata can change query-visible package and
+/// source-role facts, so freshness reconciliation must pin it in the same
+/// pre/post inventory proof.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct WorkspaceInventory {
     pub sources: Vec<RepoRelativePath>,
@@ -494,6 +494,7 @@ pub fn source_language(path: &str) -> Option<Language> {
             Some(Language::JavaScript)
         }
         Some(extension) if extension == OsStr::new("java") => Some(Language::Java),
+        Some(extension) if extension == OsStr::new("cs") => Some(Language::CSharp),
         _ => None,
     }
 }
@@ -600,7 +601,8 @@ fn workspace_inventory_from_git_output(
             || raw.ends_with(b".jsx")
             || raw.ends_with(b".mjs")
             || raw.ends_with(b".cjs")
-            || raw.ends_with(b".java");
+            || raw.ends_with(b".java")
+            || raw.ends_with(b".cs");
         let metadata_input = raw_is_metadata_input(raw);
         if !source && !metadata_input {
             continue;
@@ -640,6 +642,16 @@ fn workspace_inventory_from_git_output(
 }
 
 fn raw_is_metadata_input(raw: &[u8]) -> bool {
+    if [
+        b".csproj".as_slice(),
+        b".sln".as_slice(),
+        b".slnx".as_slice(),
+    ]
+    .into_iter()
+    .any(|suffix| raw.ends_with(suffix))
+    {
+        return true;
+    }
     [
         b"Cargo.toml".as_slice(),
         b"Cargo.lock".as_slice(),
@@ -655,6 +667,10 @@ fn raw_is_metadata_input(raw: &[u8]) -> bool {
         b"build.gradle.kts".as_slice(),
         b"settings.gradle".as_slice(),
         b"settings.gradle.kts".as_slice(),
+        b"Directory.Build.props".as_slice(),
+        b"Directory.Build.targets".as_slice(),
+        b"Directory.Packages.props".as_slice(),
+        b"global.json".as_slice(),
         b".cargo/config".as_slice(),
         b".cargo/config.toml".as_slice(),
         b"rust-toolchain".as_slice(),
@@ -989,6 +1005,49 @@ mod tests {
         assert_eq!(
             setup.metadata.classification,
             chakra_domain::source::SourceClassification::PyprojectMetadata
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn discovers_csharp_without_mixing_dotnet_metadata() -> Result<(), Box<dyn Error>> {
+        let repository = repository()?;
+        let root = repository.path();
+        fs::create_dir_all(root.join("src/Payments"))?;
+        fs::write(
+            root.join("src/Payments/Service.cs"),
+            "namespace Payments; class Service {}\n",
+        )?;
+        fs::write(
+            root.join("src/Payments/Payments.csproj"),
+            "<Project Sdk=\"Microsoft.NET.Sdk\" />\n",
+        )?;
+        fs::write(
+            root.join("Payments.sln"),
+            "Microsoft Visual Studio Solution File\n",
+        )?;
+        fs::write(root.join("Directory.Build.props"), "<Project />\n")?;
+
+        let csharp = discover_language_files(root, Language::CSharp)?;
+        let paths: Vec<&str> = csharp.iter().map(RepoRelativePath::as_str).collect();
+        assert_eq!(paths, ["src/Payments/Service.cs"]);
+        let inventory = discover_workspace_inventory_in_worktree_with_context(
+            root,
+            &OperationContext::unbounded(),
+        )?;
+        let metadata: Vec<&str> = inventory
+            .metadata_inputs
+            .iter()
+            .map(RepoRelativePath::as_str)
+            .filter(|path| path.contains("Payments") || *path == "Directory.Build.props")
+            .collect();
+        assert_eq!(
+            metadata,
+            [
+                "Directory.Build.props",
+                "Payments.sln",
+                "src/Payments/Payments.csproj"
+            ]
         );
         Ok(())
     }

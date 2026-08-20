@@ -28,7 +28,7 @@ use thiserror::Error;
 /// in-memory only — no id is ever persisted — so the slot layout may change
 /// between releases as long as it is consistent within one process.
 /// Explicit slot assignment: Rust = 0, Php = 1, TypeScript = 2, Python = 3,
-/// JavaScript = 4, Java = 5; 10 slots remain. Adding a language means
+/// JavaScript = 4, Java = 5, C# = 6; 9 slots remain. Adding a language means
 /// assigning it the next free slot
 /// in `language_entity_slot` and appending it to `ENTITY_SLOT_LANGUAGES` —
 /// nothing else in the id machinery changes.
@@ -45,6 +45,7 @@ const ENTITY_SLOT_LANGUAGES: &[Language] = &[
     Language::Python,
     Language::JavaScript,
     Language::Java,
+    Language::CSharp,
 ];
 
 /// The entity-id slot a language owns; see the slot registry above.
@@ -56,6 +57,7 @@ fn language_entity_slot(language: Language) -> usize {
         Language::Python => 3,
         Language::JavaScript => 4,
         Language::Java => 5,
+        Language::CSharp => 6,
     }
 }
 
@@ -1241,6 +1243,9 @@ impl SymbolGraph {
                     coverage.gradle_metadata_files = coverage
                         .gradle_metadata_files
                         .saturating_add(part.gradle_metadata_files);
+                    coverage.dotnet_project_metadata_files = coverage
+                        .dotnet_project_metadata_files
+                        .saturating_add(part.dotnet_project_metadata_files);
                     coverage.path_fallback_files = coverage
                         .path_fallback_files
                         .saturating_add(part.path_fallback_files);
@@ -1266,6 +1271,9 @@ impl SymbolGraph {
                 }
                 SourceClassification::GradleMetadata => {
                     coverage.gradle_metadata_files += 1;
+                }
+                SourceClassification::DotnetProjectMetadata => {
+                    coverage.dotnet_project_metadata_files += 1;
                 }
                 SourceClassification::PathFallback => coverage.path_fallback_files += 1,
             }
@@ -2500,6 +2508,7 @@ fn provenance_rank(provenance: Provenance) -> u8 {
         Provenance::Vtsls => 0,
         Provenance::Pyright => 0,
         Provenance::Jdtls => 0,
+        Provenance::CsharpLs => 0,
         Provenance::ChakraResolver => 0,
         Provenance::TreeSitter => 1,
         Provenance::Git => 2,

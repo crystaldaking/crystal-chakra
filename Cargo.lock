@@ -149,6 +149,7 @@ dependencies = [
  "chakra-git",
  "chakra-language",
  "chakra-mcp",
+ "chakra-provider-csharp-ls",
  "chakra-provider-jdtls",
  "chakra-provider-pool",
  "chakra-provider-pyright",
@@ -216,6 +217,7 @@ dependencies = [
  "chakra-domain",
  "chakra-engine",
  "chakra-git",
+ "chakra-language-csharp",
  "chakra-language-java",
  "chakra-language-javascript",
  "chakra-language-php",
@@ -227,6 +229,21 @@ dependencies = [
  "tempfile",
  "thiserror",
  "tracing",
+]
+
+[[package]]
+name = "chakra-language-csharp"
+version = "0.1.1"
+dependencies = [
+ "chakra-domain",
+ "chakra-engine",
+ "chakra-git",
+ "nix",
+ "tempfile",
+ "thiserror",
+ "tracing",
+ "tree-sitter",
+ "tree-sitter-c-sharp",
 ]
 
 [[package]]
@@ -351,6 +368,23 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "chakra-provider-csharp-ls"
+version = "0.1.1"
+dependencies = [
+ "chakra-domain",
+ "chakra-engine",
+ "chakra-lsp",
+ "crossbeam-channel",
+ "lsp-types",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tracing",
+ "url",
 ]
 
 [[package]]
@@ -1601,6 +1635,16 @@ dependencies = [
  "regex-syntax",
  "serde_json",
  "streaming-iterator",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-c-sharp"
+version = "0.23.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c1aac67f1ad71de1d6d39708d34811081c26dfa495658de6c14c34200849357c"
+dependencies = [
+ "cc",
  "tree-sitter-language",
 ]
 

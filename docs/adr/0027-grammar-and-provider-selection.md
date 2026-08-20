@@ -47,7 +47,7 @@ supply-chain observation to revisit during corpus evaluation.
 | TypeScript/JavaScript | vtsls (`@vtsls/language-server` 0.3.x) | MIT | npm, exact-version pinnable; needs Node.js | none |
 | Python | pyright (1.1.4xx) | MIT | npm or pip, pinnable; needs Node.js | none |
 | Java | jdtls (1.60.x milestone) | EPL-2.0 | milestone tarball from download.eclipse.org; needs JDK 21+ | slow startup, JVM heap 1–2 GB; budgets must reflect this |
-| C# | csharp-ls (0.26.x) | MIT | `dotnet tool install csharp-ls --version …`; needs .NET SDK | decompiled-source definition needs opt-in metadata-uris |
+| C# | csharp-ls (0.26.x) | MIT | `dotnet tool install --global csharp-ls --version …`; needs .NET 10 SDK+ | decompiled-source definition needs opt-in metadata-uris; Chakra keeps these disabled (ADR-0037) |
 | Shell | bash-language-server (5.6.x) | MIT | npm, pinnable; needs Node.js | **no callHierarchy anywhere** → Chakra-owned equivalent (Tree-sitter-derived function-call edges); explainshell hover needs network — keep disabled offline |
 | C++ | clangd (LLVM 21+/22.x) | Apache-2.0 w/ LLVM exception | OS package / brew / llvm.org installer | needs `compile_commands.json`; degrade gracefully without it; large-tree indexing uses GBs RAM |
 | HCL | terraform-ls (0.39.x) | MPL-2.0 | GitHub releases / brew | **no callHierarchy/typeHierarchy** → Chakra-owned reference graph; HCL "callers" are resource references, derivable from Tree-sitter facts |

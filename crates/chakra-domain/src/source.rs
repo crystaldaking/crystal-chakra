@@ -69,6 +69,9 @@ pub enum SourceClassification {
     /// still come from deterministic Maven/Gradle layout and file-name
     /// conventions.
     GradleMetadata,
+    /// Project ownership came from a Git-visible .NET `*.csproj`; related
+    /// solution and build files remain freshness inputs for the revision.
+    DotnetProjectMetadata,
     /// No applicable package metadata was available; deterministic path
     /// conventions supplied the role.
     PathFallback,
@@ -115,6 +118,7 @@ pub struct SourceMetadataCoverage {
     pub pyproject_metadata_files: u64,
     pub maven_metadata_files: u64,
     pub gradle_metadata_files: u64,
+    pub dotnet_project_metadata_files: u64,
     pub path_fallback_files: u64,
 }
 

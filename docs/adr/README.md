@@ -59,5 +59,6 @@ Accepted decisions:
 - ADR-034: CommonJS facts in the JavaScript syntax model
 - ADR-035: bounded multi-provider orchestration
 - ADR-036: jdtls workspace data directory and readiness bound
+- ADR-037: csharp-ls workspace-only enrichment
 
 Do not pre-create empty ADRs merely to satisfy a list.

@@ -18,6 +18,7 @@ chakra-engine = { path = "../chakra-engine", version = "0.1.1" }
 chakra-git = { path = "../chakra-git", version = "0.1.1" }
 chakra-language = { path = "../chakra-language", version = "0.1.1" }
 chakra-mcp = { path = "../chakra-mcp", version = "0.1.1" }
+chakra-provider-csharp-ls = { path = "../chakra-provider-csharp-ls", version = "0.1.1" }
 chakra-provider-jdtls = { path = "../chakra-provider-jdtls", version = "0.1.1" }
 chakra-provider-pool = { path = "../chakra-provider-pool", version = "0.1.1" }
 chakra-provider-pyright = { path = "../chakra-provider-pyright", version = "0.1.1" }

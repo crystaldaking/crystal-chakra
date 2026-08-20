@@ -432,6 +432,7 @@ pub enum RepoMapGroupKind {
     PyprojectPackage,
     MavenModule,
     GradleProject,
+    DotnetProject,
 }
 
 /// Overlapping structural aggregation used by the first repository-map page.

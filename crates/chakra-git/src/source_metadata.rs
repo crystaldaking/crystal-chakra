@@ -1,4 +1,4 @@
-//! Bounded Cargo/Composer-aware source classification with path fallback.
+//! Bounded ecosystem-aware source classification with path fallback.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
@@ -31,6 +31,8 @@ const MAX_PYPROJECT_MANIFESTS: usize = 256;
 const MAX_PYPROJECT_MANIFEST_BYTES: usize = 1024 * 1024;
 const MAX_JAVA_BUILD_MANIFESTS: usize = 512;
 const MAX_JAVA_BUILD_MANIFEST_BYTES: usize = 1024 * 1024;
+const MAX_DOTNET_PROJECT_MANIFESTS: usize = 512;
+const MAX_DOTNET_PROJECT_MANIFEST_BYTES: usize = 1024 * 1024;
 
 /// One discovered source plus deterministic query metadata.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -111,6 +113,13 @@ enum JavaBuildKind {
 struct JavaRoot {
     package: SourcePackage,
     build: JavaBuildKind,
+}
+
+/// C# project scope from a Git-visible `*.csproj`.
+#[derive(Debug, Clone)]
+struct DotnetRoot {
+    package: SourcePackage,
+    is_test: bool,
 }
 
 fn read_bounded(mut reader: impl Read, limit: usize) -> io::Result<BoundedRead> {
@@ -1061,6 +1070,169 @@ fn classify_java(path: &RepoRelativePath, packages: &[JavaRoot]) -> SourceMetada
     }
 }
 
+fn metadata_inputs_with_suffix(
+    metadata_inputs: &[RepoRelativePath],
+    suffix: &str,
+) -> Vec<RepoRelativePath> {
+    let mut manifests: Vec<_> = metadata_inputs
+        .iter()
+        .filter(|path| path.as_str().ends_with(suffix))
+        .cloned()
+        .collect();
+    manifests.sort_by(|a, b| {
+        a.as_str()
+            .matches('/')
+            .count()
+            .cmp(&b.as_str().matches('/').count())
+            .then(a.cmp(b))
+    });
+    manifests.dedup();
+    manifests
+}
+
+fn dotnet_project_property<'a>(text: &'a str, name: &str) -> Option<&'a str> {
+    let opening = format!("<{name}>");
+    let closing = format!("</{name}>");
+    let start = text.find(&opening)?.saturating_add(opening.len());
+    let end = text.get(start..)?.find(&closing)?.saturating_add(start);
+    let value = text.get(start..end)?.trim();
+    (!value.is_empty()).then_some(value)
+}
+
+fn read_dotnet_project_manifest(root: &Path, manifest: &RepoRelativePath) -> Option<String> {
+    let file = fs::File::open(root.join(manifest.as_str())).ok()?;
+    let mut bytes = Vec::new();
+    if file
+        .take((MAX_DOTNET_PROJECT_MANIFEST_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)
+        .is_err()
+        || bytes.len() > MAX_DOTNET_PROJECT_MANIFEST_BYTES
+    {
+        return None;
+    }
+    String::from_utf8(bytes).ok()
+}
+
+/// Collects bounded .NET project scopes. Every Git-visible `*.csproj` is a
+/// project boundary; `AssemblyName` and `IsTestProject` enrich deterministic
+/// file-name fallbacks without requiring an XML dependency.
+fn dotnet_packages(
+    root: &Path,
+    metadata_inputs: &[RepoRelativePath],
+    operation: &OperationContext,
+) -> Result<Vec<DotnetRoot>, OperationAbort> {
+    let mut packages = Vec::new();
+    for manifest in metadata_inputs_with_suffix(metadata_inputs, ".csproj")
+        .iter()
+        .take(MAX_DOTNET_PROJECT_MANIFESTS)
+    {
+        operation.check()?;
+        let path = manifest.as_str();
+        let file_name = path.rsplit('/').next().unwrap_or(path);
+        let fallback_name = file_name.strip_suffix(".csproj").unwrap_or(file_name);
+        let project_root = path
+            .rsplit_once('/')
+            .and_then(|(directory, _)| RepoRelativePath::new(directory).ok());
+        let text = read_dotnet_project_manifest(root, manifest);
+        let name = text
+            .as_deref()
+            .and_then(|text| dotnet_project_property(text, "AssemblyName"))
+            .unwrap_or(fallback_name);
+        let declared_test = text
+            .as_deref()
+            .and_then(|text| dotnet_project_property(text, "IsTestProject"))
+            .is_some_and(|value| value.eq_ignore_ascii_case("true"));
+        let lower_name = fallback_name.to_ascii_lowercase();
+        packages.push(DotnetRoot {
+            package: SourcePackage {
+                name: name.to_owned(),
+                root: project_root,
+            },
+            is_test: declared_test
+                || lower_name.ends_with(".test")
+                || lower_name.ends_with(".tests"),
+        });
+    }
+    operation.check()?;
+    Ok(packages)
+}
+
+fn dotnet_path_role(path: &RepoRelativePath) -> SourceRole {
+    if path.as_str().split('/').any(|component| {
+        component.eq_ignore_ascii_case("bin") || component.eq_ignore_ascii_case("obj")
+    }) {
+        return SourceRole::Generated;
+    }
+    let fallback = SourceMetadata::path_fallback(path);
+    if fallback.role != SourceRole::Production {
+        return fallback.role;
+    }
+    let is_test_stem = path
+        .as_str()
+        .rsplit('/')
+        .next()
+        .and_then(|file| file.strip_suffix(".cs"))
+        .is_some_and(|stem| stem.ends_with("Test") || stem.ends_with("Tests"));
+    if is_test_stem {
+        SourceRole::Test
+    } else {
+        SourceRole::Production
+    }
+}
+
+fn classify_csharp(path: &RepoRelativePath, packages: &[DotnetRoot]) -> SourceMetadata {
+    let mut role = dotnet_path_role(path);
+    let nearest_root_length = packages
+        .iter()
+        .filter(|project| is_inside(path, project.package.root.as_ref()))
+        .map(|project| {
+            project
+                .package
+                .root
+                .as_ref()
+                .map_or(0, |root| root.as_str().len())
+        })
+        .max();
+    let Some(nearest_root_length) = nearest_root_length else {
+        return SourceMetadata {
+            role,
+            classification: SourceClassification::PathFallback,
+            package: None,
+        };
+    };
+    let mut nearest = packages.iter().filter(|project| {
+        is_inside(path, project.package.root.as_ref())
+            && project
+                .package
+                .root
+                .as_ref()
+                .map_or(0, |root| root.as_str().len())
+                == nearest_root_length
+    });
+    let Some(project) = nearest.next() else {
+        return SourceMetadata {
+            role,
+            classification: SourceClassification::PathFallback,
+            package: None,
+        };
+    };
+    if nearest.next().is_some() {
+        return SourceMetadata {
+            role,
+            classification: SourceClassification::PathFallback,
+            package: None,
+        };
+    }
+    if role == SourceRole::Production && project.is_test {
+        role = SourceRole::Test;
+    }
+    SourceMetadata {
+        role,
+        classification: SourceClassification::DotnetProjectMetadata,
+        package: Some(project.package.clone()),
+    }
+}
+
 fn classify_rust(path: &RepoRelativePath, packages: &[CargoPackage]) -> SourceMetadata {
     let fallback = SourceMetadata::path_fallback(path);
     let package = packages
@@ -1112,8 +1284,8 @@ fn classify_php(path: &RepoRelativePath, roots: &[ComposerRoot]) -> SourceMetada
     }
 }
 
-/// Discovers one language and attaches bounded Cargo/Composer/path metadata
-/// without excluding any source role.
+/// Discovers one language and attaches bounded ecosystem/path metadata without
+/// excluding any source role.
 pub fn discover_classified_sources(
     candidate: &Path,
     language: Language,
@@ -1175,6 +1347,11 @@ pub fn classify_discovered_sources_with_context(
     } else {
         None
     };
+    let dotnet = if language == Language::CSharp {
+        Some(dotnet_packages(root, metadata_inputs, operation)?)
+    } else {
+        None
+    };
     let mut classified = Vec::with_capacity(files.len());
     for path in files {
         operation.check()?;
@@ -1189,6 +1366,7 @@ pub fn classify_discovered_sources_with_context(
                     classify_python(&path, pyproject.as_deref().unwrap_or_default())
                 }
                 Language::Java => classify_java(&path, java.as_deref().unwrap_or_default()),
+                Language::CSharp => classify_csharp(&path, dotnet.as_deref().unwrap_or_default()),
             },
             path,
             language,
@@ -1971,6 +2149,80 @@ mod tests {
             Some("unlocked")
         );
         assert!(!root.join("Cargo.lock").exists());
+        Ok(())
+    }
+
+    #[test]
+    fn csproj_scopes_csharp_and_classifies_tests_and_generated_sources()
+    -> Result<(), Box<dyn Error>> {
+        let repository = repository()?;
+        let root = repository.path();
+        write(
+            root,
+            "src/Core/Core.csproj",
+            "<Project><PropertyGroup><AssemblyName>Chakra.Core</AssemblyName></PropertyGroup></Project>\n",
+        )?;
+        write(
+            root,
+            "src/Core/Service.cs",
+            "namespace Chakra; class Service {}\n",
+        )?;
+        write(root, "src/Core/obj/Generated.cs", "class Generated {}\n")?;
+        write(
+            root,
+            "tests/Core.Tests/Core.Tests.csproj",
+            "<Project><PropertyGroup><IsTestProject>true</IsTestProject></PropertyGroup><ItemGroup><ProjectReference Include=\"../../src/Core/Core.csproj\" /></ItemGroup></Project>\n",
+        )?;
+        write(root, "tests/Core.Tests/Flow.cs", "class Flow {}\n")?;
+
+        let classified = discover_classified_sources(root, Language::CSharp)?;
+        let by_path: BTreeMap<_, _> = classified
+            .into_iter()
+            .map(|source| (source.path, source.metadata))
+            .collect();
+        let service = &by_path[&RepoRelativePath::new("src/Core/Service.cs")?];
+        assert_eq!(
+            service.classification,
+            SourceClassification::DotnetProjectMetadata
+        );
+        assert_eq!(service.role, SourceRole::Production);
+        assert_eq!(
+            service
+                .package
+                .as_ref()
+                .map(|package| package.name.as_str()),
+            Some("Chakra.Core")
+        );
+        let generated = &by_path[&RepoRelativePath::new("src/Core/obj/Generated.cs")?];
+        assert_eq!(generated.role, SourceRole::Generated);
+        let test = &by_path[&RepoRelativePath::new("tests/Core.Tests/Flow.cs")?];
+        assert_eq!(test.role, SourceRole::Test);
+        assert_eq!(
+            test.package.as_ref().map(|package| package.name.as_str()),
+            Some("Core.Tests")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn duplicate_csproj_roots_do_not_choose_an_arbitrary_project() -> Result<(), Box<dyn Error>> {
+        let repository = repository()?;
+        let root = repository.path();
+        write(root, "src/App/App.csproj", "<Project />\n")?;
+        write(root, "src/App/App.Tests.csproj", "<Project />\n")?;
+        write(root, "src/App/Service.cs", "class Service {}\n")?;
+
+        let classified = discover_classified_sources(root, Language::CSharp)?;
+        let service = classified
+            .iter()
+            .find(|source| source.path.as_str() == "src/App/Service.cs")
+            .ok_or("Service.cs was not discovered")?;
+        assert_eq!(
+            service.metadata.classification,
+            SourceClassification::PathFallback
+        );
+        assert_eq!(service.metadata.role, SourceRole::Production);
+        assert!(service.metadata.package.is_none());
         Ok(())
     }
 

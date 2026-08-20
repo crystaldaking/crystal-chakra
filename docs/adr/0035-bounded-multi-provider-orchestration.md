@@ -5,9 +5,9 @@ Date: 2026-08-20
 
 ## Context
 
-Chakra has independent rust-analyzer, vtsls, pyright, and jdtls adapters, but
-the workspace engine could install only one provider. Starting every
-configured provider eagerly would also make polyglot workspaces consume
+Chakra has independent rust-analyzer, vtsls, pyright, jdtls, and csharp-ls
+adapters, but the workspace engine could install only one provider. Starting
+every configured provider eagerly would also make polyglot workspaces consume
 processes and memory without a query needing precise enrichment. Issue #26
 requires at least three simultaneous providers while retaining deterministic
 resource bounds, exact-revision routing, syntax fallback, cancellation, and
@@ -56,8 +56,9 @@ owned shutdown.
 
 ## Consequences
 
-- Rust, TypeScript/JavaScript, Python, and Java precise providers can coexist
-  in one materialized polyglot workspace without cross-language routing.
+- Rust, TypeScript/JavaScript, Python, Java, and C# precise providers can
+  coexist in one materialized polyglot workspace without cross-language
+  routing.
 - A first precise query may pay command discovery and provider startup cost;
   syntax results remain available while the provider is dormant, catching
   up, saturated, or degraded.
