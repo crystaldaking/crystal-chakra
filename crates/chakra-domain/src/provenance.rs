@@ -39,7 +39,8 @@ pub enum Precision {
 pub enum Provenance {
     /// rust-analyzer (live precise provider).
     RustAnalyzer,
-    /// vtsls (live precise provider for TypeScript, ADR-0027/0032).
+    /// vtsls (live precise provider for TypeScript and JavaScript,
+    /// ADR-0027/0032).
     Vtsls,
     /// pyright (live precise provider for Python, ADR-0027).
     Pyright,

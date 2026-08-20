@@ -7,6 +7,21 @@ version tags prefixed with `v`.
 
 ### Added
 
+- First-class JavaScript/JSX support (issue #29): a
+  `chakra-language-javascript` adapter crate (tree-sitter-javascript
+  0.25.0, `.js`/`.jsx`/`.mjs`/`.cjs`; the single grammar parses JSX
+  natively) registered in the ADR-0031 adapter registry after Python; ES
+  module import/export and alias facts, CommonJS `require()` and
+  `module.exports`/`exports` facts (ADR-0034), class/nested-function
+  containers, `extends` relations, jest/vitest/mocha test hints, bounded
+  lazy call candidates with relative-import and require-alias resolution,
+  and actionable syntax diagnostics. package.json project scopes plus
+  jsconfig.json boundaries and `__tests__/`/`*.test.*`/`*.spec.*` source
+  roles; the existing `chakra-provider-vtsls` precise provider now also
+  serves JavaScript documents (`javascript`/`javascriptreact` language
+  ids, shared `Provenance::Vtsls`, no new provider crate). Conformance
+  fixture (14/14 scenarios) and the pinned react/react corpus evaluation
+  (11/11, no degradations). JavaScript is advertised first-class.
 - First-class Python support (issue #28): a `chakra-language-python`
   adapter crate (tree-sitter-python 0.25.0, `.py`/`.pyi`) registered in the
   ADR-0031 adapter registry after TypeScript; `import`/`from ... import`

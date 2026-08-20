@@ -364,9 +364,10 @@ fn source_only_edit_reuses_every_graph_fact() -> Result<(), Box<dyn Error>> {
         .iter()
         .find(|phase| phase.phase == IndexPhase::LanguageComposition)
         .ok_or("live update must report shallow language composition")?;
-    // Four registered adapters (Rust, PHP, TypeScript, Python) compose
-    // shallowly; the empty TypeScript/Python partitions cost no graph facts.
-    assert_eq!(composition.work_items, 4);
+    // Five registered adapters (Rust, PHP, TypeScript, Python, JavaScript)
+    // compose shallowly; the empty TypeScript/Python/JavaScript partitions
+    // cost no graph facts.
+    assert_eq!(composition.work_items, 5);
     let materialization = current
         .indexing()
         .phases
@@ -803,6 +804,55 @@ fn python_edit_is_immediately_fresh_and_does_not_reparse_rust() -> Result<(), Bo
     assert_eq!(
         response.data.candidates[0].qualified_name,
         "payment_service::PaymentService::refund_now"
+    );
+    assert!(
+        engine
+            .snapshot()
+            .graph()
+            .resolve_name("payment_service::PaymentService::refund")
+            .is_empty()
+    );
+
+    let metrics = live.metrics();
+    assert_eq!(metrics.files_reparsed - baseline.files_reparsed, 1);
+    assert_eq!(
+        metrics.relationship_files_recomputed - baseline.relationship_files_recomputed,
+        1
+    );
+    engine.snapshot().graph().validate_consistency()?;
+    live.shutdown()?;
+    Ok(())
+}
+
+#[test]
+fn javascript_edit_is_immediately_fresh_and_does_not_reparse_rust() -> Result<(), Box<dyn Error>> {
+    let repository = repository()?;
+    write(
+        repository.path(),
+        "src/payment_service.js",
+        "class PaymentService {\n    refund() {}\n}\nmodule.exports = { PaymentService };\n",
+    )?;
+    let (engine, live) = start(&repository)?;
+    let baseline = live.metrics();
+
+    write(
+        repository.path(),
+        "src/payment_service.js",
+        "class PaymentService {\n    refundNow() {}\n}\nmodule.exports = { PaymentService };\n",
+    )?;
+    let response = engine.symbol_search(SymbolSearchRequest {
+        query: "refundNow".to_owned(),
+        source: Default::default(),
+        limit: None,
+        freshness: FreshnessRequirement::RequireFresh,
+        ..SymbolSearchRequest::default()
+    })?;
+    assert_eq!(response.freshness, Freshness::Fresh);
+    assert_eq!(response.data.candidates.len(), 1);
+    assert_eq!(response.data.candidates[0].language, Language::JavaScript);
+    assert_eq!(
+        response.data.candidates[0].qualified_name,
+        "payment_service::PaymentService::refundNow"
     );
     assert!(
         engine

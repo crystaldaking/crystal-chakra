@@ -56,5 +56,6 @@ Accepted decisions:
 - ADR-031: object-safe syntax language adapter trait and registry
 - ADR-032: shared LSP client crate and vtsls precise provider
 - ADR-033: slot-keyed revision-local entity-id partitions
+- ADR-034: CommonJS facts in the JavaScript syntax model
 
 Do not pre-create empty ADRs merely to satisfy a list.

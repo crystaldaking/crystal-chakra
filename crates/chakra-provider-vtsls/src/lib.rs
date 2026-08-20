@@ -1,4 +1,6 @@
-//! Live, optional vtsls adapter for TypeScript precise enrichment (ADR-0032).
+//! Live, optional vtsls adapter for TypeScript and JavaScript precise
+//! enrichment (ADR-0032). One vtsls session serves both languages natively;
+//! JavaScript precise facts carry the same `Provenance::Vtsls` provenance.
 //!
 //! Only the v0.1 call-hierarchy operations cross this adapter internally.
 //! Public contracts are Chakra-native, so LSP URIs, UTF-16 positions, and
@@ -347,7 +349,7 @@ impl PreciseProvider for VtslsProvider {
     }
 
     fn supports(&self, language: Language) -> bool {
-        language == Language::TypeScript
+        matches!(language, Language::TypeScript | Language::JavaScript)
     }
 
     fn state_for(&self, revision: Revision) -> ProviderState {
@@ -494,6 +496,7 @@ mod tests {
         assert_eq!(result.state, ProviderState::Degraded);
         assert_eq!(provider.name(), "vtsls");
         assert!(provider.supports(Language::TypeScript));
+        assert!(provider.supports(Language::JavaScript));
         assert!(!provider.supports(Language::Rust));
         provider.shutdown()?;
         Ok(())

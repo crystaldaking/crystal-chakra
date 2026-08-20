@@ -9,12 +9,47 @@ Target list reviewed: 2026-08 (GitHub Octoverse 2025 top languages plus pre-exis
 
 | Language | Tier | Advertised | Grammar | Precise provider |
 |----------|------|-----------|---------|------------------|
+| javascript | first-class | yes | tree-sitter-javascript 0.25.0 | vtsls (integrated) |
 | php | first-class | yes | tree-sitter-php 0.24.2 | none (deferred) |
 | python | first-class | yes | tree-sitter-python 0.25.0 | pyright (integrated) |
 | rust | first-class | yes | tree-sitter-rust 0.24 | rust-analyzer (integrated) |
 | typescript | first-class | yes | tree-sitter-typescript 0.23.2 | vtsls (integrated) |
 
 ## Capability detail
+
+### javascript
+
+| Capability | Status | Mechanism |
+|------------|--------|-----------|
+| AMBIG-01 | pass | query-layer ambiguity reporting |
+| BUDGET-01 | pass | query work budgets (ADR-0025) |
+| CANCEL-01 | pass | cooperative cancellation (ADR-0025) |
+| CONFORM-01 | pass | chakra-conformance harness |
+| CORPUS-01 | pass | pinned public corpus evaluation (ADR-0029) |
+| DEGRADE-01 | pass | bounded degradation (ADR-0011) |
+| DISC-01 | pass | chakra-git discovery (.js/.jsx/.mjs/.cjs) |
+| DISC-02 | pass | package.json scopes (workspaces) and jsconfig.json project boundaries |
+| DISC-03 | pass | language-neutral source roles plus *.test.*/*.spec.* and __tests__/ conventions (ADR-0019) |
+| DOCS-01 | pass | per-language documentation |
+| FRESH-01 | pass | atomic revision publication (ADR-0001) |
+| FRESH-02 | pass | live freshness barrier (ADR-0005) |
+| PRECISE-01 | pass | recorded provider selection: vtsls (@vtsls/language-server 0.3.x, shared with TypeScript) |
+| PRECISE-02 | pass | vtsls over shared chakra-lsp client (javascript/javascriptreact language ids) |
+| PRECISE-03 | pass | owned lifecycle, restart, orphan-free shutdown (ADR-0032) |
+| PRECISE-04 | pass | capability-gated enrichment through PreciseProvider |
+| PRECISE-05 | pass | graceful absence/crash degradation to syntax tier |
+| PROV-01 | pass | domain provenance model |
+| QUERY-01 | pass | chakra-engine QueryService |
+| QUERY-02 | pass | chakra-mcp |
+| QUERY-03 | pass | chakra-git diff provider |
+| SYNTAX-01 | pass | tree-sitter-javascript 0.25.0 (single grammar, native JSX) |
+| SYNTAX-02 | pass | tree-sitter |
+| SYNTAX-03 | pass | tree-sitter (classes/nested functions) |
+| SYNTAX-04 | pass | tree-sitter (ES module imports/exports and aliases; CommonJS require()/module.exports facts, ADR-0034) |
+| SYNTAX-05 | pass | tree-sitter (byte-accurate ranges) |
+| SYNTAX-06 | pass | tree-sitter + jest/vitest/mocha describe/it/test conventions |
+| SYNTAX-07 | pass | tree-sitter diagnostics (ADR-0022) |
+| SYNTAX-08 | pass | bounded lazy syntax call candidates with import/require-alias resolution (ADR-0010) |
 
 ### php
 

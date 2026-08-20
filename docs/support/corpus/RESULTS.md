@@ -6,6 +6,7 @@ Measured values vary by machine and run; these artifacts are committed deliberat
 
 | Language | Repository | SHA | Status | Cold index (s) | Peak RSS (MiB) | Symbols | Edges | Warm no-op (ms) | Scenarios failed |
 |---|---|---|---|---|---|---|---|---|---|
+| javascript | react/react | `eb8feb71096e` | pass | 2.07 | 522 | 82629 | 66023 | 105 | 0 |
 | php | laravel/framework | `faf45dd2b154` | pass | 1.83 | 549 | 56067 | 118717 | 59 | 0 |
 | php | symfony/symfony | `add4ddb9867b` | pass | 5.22 | 1230 | 121822 | 245502 | 212 | 0 |
 | python | apache/airflow | `f8b8461e8191` | pass | 5.14 | 1626 | 278038 | 248193 | 239 | 0 |

@@ -490,6 +490,9 @@ pub fn source_language(path: &str) -> Option<Language> {
         Some(extension) if matches!(extension.to_str(), Some("py" | "pyi")) => {
             Some(Language::Python)
         }
+        Some(extension) if matches!(extension.to_str(), Some("js" | "jsx" | "mjs" | "cjs")) => {
+            Some(Language::JavaScript)
+        }
         _ => None,
     }
 }
@@ -591,7 +594,11 @@ fn workspace_inventory_from_git_output(
             || raw.ends_with(b".mts")
             || raw.ends_with(b".cts")
             || raw.ends_with(b".py")
-            || raw.ends_with(b".pyi");
+            || raw.ends_with(b".pyi")
+            || raw.ends_with(b".js")
+            || raw.ends_with(b".jsx")
+            || raw.ends_with(b".mjs")
+            || raw.ends_with(b".cjs");
         let metadata_input = raw_is_metadata_input(raw);
         if !source && !metadata_input {
             continue;
@@ -637,6 +644,7 @@ fn raw_is_metadata_input(raw: &[u8]) -> bool {
         b"composer.json".as_slice(),
         b"package.json".as_slice(),
         b"tsconfig.json".as_slice(),
+        b"jsconfig.json".as_slice(),
         b"pyproject.toml".as_slice(),
         b"setup.py".as_slice(),
         b"setup.cfg".as_slice(),
@@ -886,6 +894,39 @@ mod tests {
         assert_eq!(rust.len(), 1);
         let all = discover_source_files(repository.path())?;
         assert_eq!(all.len(), 5);
+        Ok(())
+    }
+
+    #[test]
+    fn discovers_javascript_extensions_without_mixing_metadata() -> Result<(), Box<dyn Error>> {
+        let repository = repository()?;
+        for (path, source) in [
+            ("src/service.js", "export function pay() {}\n"),
+            (
+                "src/view.jsx",
+                "export function Panel() { return <section/>; }\n",
+            ),
+            ("src/modern.mjs", "export function modern() {}\n"),
+            ("src/legacy.cjs", "module.exports = {};\n"),
+        ] {
+            fs::write(repository.path().join(path), source)?;
+        }
+        fs::write(repository.path().join("jsconfig.json"), "{}\n")?;
+
+        let javascript = discover_language_files(repository.path(), Language::JavaScript)?;
+        let paths: Vec<&str> = javascript.iter().map(RepoRelativePath::as_str).collect();
+        assert_eq!(
+            paths,
+            [
+                "src/legacy.cjs",
+                "src/modern.mjs",
+                "src/service.js",
+                "src/view.jsx"
+            ],
+            "jsconfig.json is a metadata input, never a JavaScript source"
+        );
+        let rust = discover_language_files(repository.path(), Language::Rust)?;
+        assert_eq!(rust.len(), 1);
         Ok(())
     }
 

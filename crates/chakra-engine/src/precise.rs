@@ -112,15 +112,32 @@ impl ProviderWorkspace {
             .unwrap_or((0, 0))
     }
 
+    /// Unbounded [`Self::document_stats_with_context_matching`].
+    pub fn document_stats_matching(&self, include: impl Fn(Language) -> bool) -> (usize, u64) {
+        self.document_stats_with_context_matching(include, &OperationContext::unbounded())
+            .unwrap_or((0, 0))
+    }
+
     pub fn document_stats_with_context(
         &self,
         language: Language,
         operation: &OperationContext,
     ) -> Result<(usize, u64), OperationAbort> {
+        self.document_stats_with_context_matching(|candidate| candidate == language, operation)
+    }
+
+    /// Same statistics as [`Self::document_stats_with_context`] for a
+    /// provider that natively covers more than one language (vtsls serves
+    /// TypeScript and JavaScript through one session).
+    pub fn document_stats_with_context_matching(
+        &self,
+        include: impl Fn(Language) -> bool,
+        operation: &OperationContext,
+    ) -> Result<(usize, u64), OperationAbort> {
         Ok(self
             .document_catalog(operation)?
             .into_iter()
-            .filter(|document| document.language == language)
+            .filter(|document| include(document.language))
             .fold((0_usize, 0_u64), |(count, bytes), document| {
                 (
                     count.saturating_add(1),
@@ -140,6 +157,18 @@ impl ProviderWorkspace {
         language: Language,
         operation: &OperationContext,
     ) -> Result<ProviderWorkspaceDelta, OperationAbort> {
+        self.delta_since_matching(previous, |candidate| candidate == language, operation)
+    }
+
+    /// Same delta as [`Self::delta_since`] for a provider that natively
+    /// covers more than one language (vtsls serves TypeScript and
+    /// JavaScript through one session).
+    pub fn delta_since_matching(
+        &self,
+        previous: &Self,
+        include: impl Fn(Language) -> bool,
+        operation: &OperationContext,
+    ) -> Result<ProviderWorkspaceDelta, OperationAbort> {
         if self.shares_document_catalog_with(previous) {
             operation.check()?;
             return Ok(ProviderWorkspaceDelta::default());
@@ -148,11 +177,11 @@ impl ProviderWorkspace {
         let previous = previous.document_catalog(operation)?;
         let mut current = current
             .into_iter()
-            .filter(|document| document.language == language)
+            .filter(|document| include(document.language))
             .peekable();
         let mut previous = previous
             .into_iter()
-            .filter(|document| document.language == language)
+            .filter(|document| include(document.language))
             .peekable();
         let mut delta = ProviderWorkspaceDelta::default();
         loop {
@@ -374,6 +403,7 @@ fn language_from_path(path: &str) -> Option<Language> {
         Some("php") => Some(Language::Php),
         Some("ts" | "tsx" | "mts" | "cts") => Some(Language::TypeScript),
         Some("py" | "pyi") => Some(Language::Python),
+        Some("js" | "jsx" | "mjs" | "cjs") => Some(Language::JavaScript),
         _ => None,
     }
 }
