@@ -7,6 +7,25 @@ version tags prefixed with `v`.
 
 ### Added
 
+- First-class Java support (issue #30): a `chakra-language-java` adapter
+  crate (tree-sitter-java 0.23.5, `.java`) registered in the ADR-0031
+  adapter registry after JavaScript; class/interface/enum/record/annotation
+  declarations with methods, fields, and constructors (recorded as methods
+  named `constructor`), package and nested-class containers, single-type /
+  static / wildcard import facts, `extends`/`implements` relations, JUnit
+  4/5 `@Test` test hints, bounded lazy call candidates (bare simple-name,
+  `this.`, static-style `Type.`, `new X()` constructors, static-import
+  aliases), and actionable syntax diagnostics. Maven `pom.xml` module
+  scopes and Gradle `settings.gradle(.kts)`/`build.gradle(.kts)` project
+  boundaries plus `src/main/java` vs `src/test/java` and
+  `Test*.java`/`*Test.java`/`*Tests.java` source roles. The new
+  `chakra-provider-jdtls` precise provider over chakra-lsp (additive
+  `Provenance::Jdtls`) owns the jdtls lifecycle: per-workspace data
+  directory under the OS tempdir (workspace-bound defaults and validation
+  reject relative/repository-contained cache paths) and a configurable
+  readiness bound for the slow first project import (ADR-0035). Conformance fixture (14/14
+  scenarios) and the pinned spring-projects/spring-boot plus apache/kafka
+  corpus evaluations. Java is advertised first-class.
 - First-class JavaScript/JSX support (issue #29): a
   `chakra-language-javascript` adapter crate (tree-sitter-javascript
   0.25.0, `.js`/`.jsx`/`.mjs`/`.cjs`; the single grammar parses JSX

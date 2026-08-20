@@ -296,6 +296,9 @@ struct ProbePlan {
     renamed_file: String,
     syntax_file: String,
     swap_file: String,
+    symbol_prefix: &'static str,
+    symbol_one: &'static str,
+    symbol_two: &'static str,
     declaration_one: String,
     declaration_two: String,
     broken: String,
@@ -312,6 +315,7 @@ impl ProbePlan {
             "typescript" => "ts",
             "python" => "py",
             "javascript" => "js",
+            "java" => "java",
             other => return Err(failure(format!("no probe plan for language `{other}`")).into()),
         };
         let mut paths: Vec<String> = cold
@@ -349,40 +353,69 @@ impl ProbePlan {
             Some((directory, name)) => format!("{directory}/.{name}.chakra-swap"),
             None => format!(".{edit_file}.chakra-swap"),
         };
-        let (declaration_one, declaration_two, broken) = match language {
-            "rust" => (
-                "\npub fn chakra_corpus_probe_one() {}\n".to_owned(),
-                "\npub fn chakra_corpus_probe_two() {}\n".to_owned(),
-                "\npub fn chakra_corpus_broken( {\n".to_owned(),
-            ),
-            "php" => (
-                "\nfunction chakra_corpus_probe_one(): void {}\n".to_owned(),
-                "\nfunction chakra_corpus_probe_two(): void {}\n".to_owned(),
-                "\nfunction chakra_corpus_broken( {\n".to_owned(),
-            ),
-            "typescript" => (
-                "\nexport function chakra_corpus_probe_one(): void {}\n".to_owned(),
-                "\nexport function chakra_corpus_probe_two(): void {}\n".to_owned(),
-                "\nexport function chakra_corpus_broken( {\n".to_owned(),
-            ),
-            "python" => (
-                "\ndef chakra_corpus_probe_one():\n    pass\n".to_owned(),
-                "\ndef chakra_corpus_probe_two():\n    pass\n".to_owned(),
-                "\ndef chakra_corpus_broken(:\n".to_owned(),
-            ),
-            "javascript" => (
-                "\nexport function chakra_corpus_probe_one() {}\n".to_owned(),
-                "\nexport function chakra_corpus_probe_two() {}\n".to_owned(),
-                "\nexport function chakra_corpus_broken( {\n".to_owned(),
-            ),
-            other => return Err(failure(format!("no probe plan for language `{other}`")).into()),
-        };
+        let (symbol_prefix, symbol_one, symbol_two, declaration_one, declaration_two, broken) =
+            match language {
+                "rust" => (
+                    "chakra_corpus_probe",
+                    "chakra_corpus_probe_one",
+                    "chakra_corpus_probe_two",
+                    "\npub fn chakra_corpus_probe_one() {}\n".to_owned(),
+                    "\npub fn chakra_corpus_probe_two() {}\n".to_owned(),
+                    "\npub fn chakra_corpus_broken( {\n".to_owned(),
+                ),
+                "php" => (
+                    "chakra_corpus_probe",
+                    "chakra_corpus_probe_one",
+                    "chakra_corpus_probe_two",
+                    "\nfunction chakra_corpus_probe_one(): void {}\n".to_owned(),
+                    "\nfunction chakra_corpus_probe_two(): void {}\n".to_owned(),
+                    "\nfunction chakra_corpus_broken( {\n".to_owned(),
+                ),
+                "typescript" => (
+                    "chakra_corpus_probe",
+                    "chakra_corpus_probe_one",
+                    "chakra_corpus_probe_two",
+                    "\nexport function chakra_corpus_probe_one(): void {}\n".to_owned(),
+                    "\nexport function chakra_corpus_probe_two(): void {}\n".to_owned(),
+                    "\nexport function chakra_corpus_broken( {\n".to_owned(),
+                ),
+                "python" => (
+                    "chakra_corpus_probe",
+                    "chakra_corpus_probe_one",
+                    "chakra_corpus_probe_two",
+                    "\ndef chakra_corpus_probe_one():\n    pass\n".to_owned(),
+                    "\ndef chakra_corpus_probe_two():\n    pass\n".to_owned(),
+                    "\ndef chakra_corpus_broken(:\n".to_owned(),
+                ),
+                "javascript" => (
+                    "chakra_corpus_probe",
+                    "chakra_corpus_probe_one",
+                    "chakra_corpus_probe_two",
+                    "\nexport function chakra_corpus_probe_one() {}\n".to_owned(),
+                    "\nexport function chakra_corpus_probe_two() {}\n".to_owned(),
+                    "\nexport function chakra_corpus_broken( {\n".to_owned(),
+                ),
+                "java" => (
+                    "ChakraCorpusProbe",
+                    "ChakraCorpusProbeOne",
+                    "ChakraCorpusProbeTwo",
+                    "\nclass ChakraCorpusProbeOne {}\n".to_owned(),
+                    "\nclass ChakraCorpusProbeTwo {}\n".to_owned(),
+                    "\nclass ChakraCorpusBroken { void broken() { int x = ; } }\n".to_owned(),
+                ),
+                other => {
+                    return Err(failure(format!("no probe plan for language `{other}`")).into());
+                }
+            };
         Ok(Self {
             edit_file,
             rename_file,
             renamed_file,
             syntax_file,
             swap_file,
+            symbol_prefix,
+            symbol_one,
+            symbol_two,
             declaration_one,
             declaration_two,
             broken,
@@ -672,6 +705,7 @@ fn record_cold_index(
     builder.measure("typescript_files", cold.metrics.typescript_files);
     builder.measure("python_files", cold.metrics.python_files);
     builder.measure("javascript_files", cold.metrics.javascript_files);
+    builder.measure("java_files", cold.metrics.java_files);
     builder.measure("source_bytes", cold.metrics.indexing.coverage.source_bytes);
     builder.measure("degraded", cold.metrics.indexing.is_degraded());
     builder.measure(
@@ -976,8 +1010,8 @@ fn run_mutation_scenarios(
         let before = workspace.live.metrics();
         let started = Instant::now();
         reject(
-            workspace.find_symbol("chakra_corpus_probe_one")?,
-            "appended probe function is not queryable (read-your-writes broken)",
+            workspace.find_symbol(plan.symbol_one)?,
+            "appended probe declaration is not queryable (read-your-writes broken)",
         )?;
         scenario.phase("edit_and_barrier", started);
         scenario.measure("wall_micros", micros(started.elapsed()));
@@ -1005,11 +1039,11 @@ fn run_mutation_scenarios(
         let before = workspace.live.metrics();
         let started = Instant::now();
         reject(
-            workspace.find_symbol("chakra_corpus_probe_two")?,
+            workspace.find_symbol(plan.symbol_two)?,
             "atomically replaced content is not queryable",
         )?;
         reject(
-            workspace.find_symbol("chakra_corpus_probe_one")?,
+            workspace.find_symbol(plan.symbol_one)?,
             "atomically replaced file lost the earlier probe",
         )?;
         scenario.phase("replace_and_barrier", started);
@@ -1035,7 +1069,7 @@ fn run_mutation_scenarios(
         let before = workspace.live.metrics();
         let started = Instant::now();
         reject(
-            !workspace.find_symbol("chakra_corpus_probe_two")?,
+            !workspace.find_symbol(plan.symbol_two)?,
             "deleted file content survived the delete",
         )?;
         scenario.phase("rename_delete_and_barrier", started);
@@ -1134,9 +1168,9 @@ fn run_mutation_scenarios(
             }
         }
         git(checkout, &["checkout", "--", "."])?;
-        workspace.barrier_search("chakra_corpus_probe")?;
+        workspace.barrier_search(plan.symbol_prefix)?;
         reject(
-            !workspace.find_symbol("chakra_corpus_probe_one")?,
+            !workspace.find_symbol(plan.symbol_one)?,
             "probe survived the cache restore",
         )?;
         verify_clean_cache(checkout, repo, scenario)

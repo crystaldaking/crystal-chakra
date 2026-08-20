@@ -493,6 +493,7 @@ pub fn source_language(path: &str) -> Option<Language> {
         Some(extension) if matches!(extension.to_str(), Some("js" | "jsx" | "mjs" | "cjs")) => {
             Some(Language::JavaScript)
         }
+        Some(extension) if extension == OsStr::new("java") => Some(Language::Java),
         _ => None,
     }
 }
@@ -598,7 +599,8 @@ fn workspace_inventory_from_git_output(
             || raw.ends_with(b".js")
             || raw.ends_with(b".jsx")
             || raw.ends_with(b".mjs")
-            || raw.ends_with(b".cjs");
+            || raw.ends_with(b".cjs")
+            || raw.ends_with(b".java");
         let metadata_input = raw_is_metadata_input(raw);
         if !source && !metadata_input {
             continue;
@@ -648,6 +650,11 @@ fn raw_is_metadata_input(raw: &[u8]) -> bool {
         b"pyproject.toml".as_slice(),
         b"setup.py".as_slice(),
         b"setup.cfg".as_slice(),
+        b"pom.xml".as_slice(),
+        b"build.gradle".as_slice(),
+        b"build.gradle.kts".as_slice(),
+        b"settings.gradle".as_slice(),
+        b"settings.gradle.kts".as_slice(),
         b".cargo/config".as_slice(),
         b".cargo/config.toml".as_slice(),
         b"rust-toolchain".as_slice(),
@@ -926,6 +933,33 @@ mod tests {
             "jsconfig.json is a metadata input, never a JavaScript source"
         );
         let rust = discover_language_files(repository.path(), Language::Rust)?;
+        assert_eq!(rust.len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn discovers_java_extension_without_mixing_metadata() -> Result<(), Box<dyn Error>> {
+        let repository = repository()?;
+        let root = repository.path();
+        fs::create_dir_all(root.join("src/main/java/chakra"))?;
+        fs::write(
+            root.join("src/main/java/chakra/Service.java"),
+            "package chakra;\nclass Service {}\n",
+        )?;
+        fs::write(
+            root.join("pom.xml"),
+            "<project><artifactId>app</artifactId></project>\n",
+        )?;
+        fs::write(root.join("build.gradle"), "plugins { id 'java' }\n")?;
+
+        let java = discover_language_files(root, Language::Java)?;
+        let paths: Vec<&str> = java.iter().map(RepoRelativePath::as_str).collect();
+        assert_eq!(
+            paths,
+            ["src/main/java/chakra/Service.java"],
+            "pom.xml and build.gradle are metadata inputs, never Java sources"
+        );
+        let rust = discover_language_files(root, Language::Rust)?;
         assert_eq!(rust.len(), 1);
         Ok(())
     }

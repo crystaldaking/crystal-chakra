@@ -1,0 +1,384 @@
+{
+  "schema_version": 1,
+  "language": "java",
+  "repository": "apache/kafka",
+  "sha": "aa502fb153d9915283cf911d8efa1aa2c0d5f3cd",
+  "status": "evaluated",
+  "skip_reason": "",
+  "provider_phase": "not-configured",
+  "scenario_count": 11,
+  "passed": 11,
+  "failed": 0,
+  "skipped": 0,
+  "scenarios": [
+    {
+      "id": "cold-index",
+      "status": "pass",
+      "details": "full index from scratch; coverage counts recorded",
+      "phases": [
+        {
+          "name": "GitInventory",
+          "wall_micros": 134646
+        },
+        {
+          "name": "SourceRead",
+          "wall_micros": 523323
+        },
+        {
+          "name": "ParseExtraction/Rust",
+          "wall_micros": 1
+        },
+        {
+          "name": "SymbolCatalog/Rust",
+          "wall_micros": 2
+        },
+        {
+          "name": "Relationships/Rust",
+          "wall_micros": 0
+        },
+        {
+          "name": "GraphMaterialization/Rust",
+          "wall_micros": 4
+        },
+        {
+          "name": "ParseExtraction/Php",
+          "wall_micros": 1
+        },
+        {
+          "name": "SymbolCatalog/Php",
+          "wall_micros": 6
+        },
+        {
+          "name": "Relationships/Php",
+          "wall_micros": 0
+        },
+        {
+          "name": "GraphMaterialization/Php",
+          "wall_micros": 2
+        },
+        {
+          "name": "ParseExtraction/TypeScript",
+          "wall_micros": 1
+        },
+        {
+          "name": "SymbolCatalog/TypeScript",
+          "wall_micros": 0
+        },
+        {
+          "name": "Relationships/TypeScript",
+          "wall_micros": 0
+        },
+        {
+          "name": "GraphMaterialization/TypeScript",
+          "wall_micros": 2
+        },
+        {
+          "name": "ParseExtraction/Python",
+          "wall_micros": 24636
+        },
+        {
+          "name": "SymbolCatalog/Python",
+          "wall_micros": 1094
+        },
+        {
+          "name": "Relationships/Python",
+          "wall_micros": 817
+        },
+        {
+          "name": "GraphMaterialization/Python",
+          "wall_micros": 25404
+        },
+        {
+          "name": "ParseExtraction/JavaScript",
+          "wall_micros": 1
+        },
+        {
+          "name": "SymbolCatalog/JavaScript",
+          "wall_micros": 0
+        },
+        {
+          "name": "Relationships/JavaScript",
+          "wall_micros": 0
+        },
+        {
+          "name": "GraphMaterialization/JavaScript",
+          "wall_micros": 4
+        },
+        {
+          "name": "ParseExtraction/Java",
+          "wall_micros": 1101271
+        },
+        {
+          "name": "SymbolCatalog/Java",
+          "wall_micros": 53146
+        },
+        {
+          "name": "Relationships/Java",
+          "wall_micros": 12127
+        },
+        {
+          "name": "GraphMaterialization/Java",
+          "wall_micros": 2718004
+        },
+        {
+          "name": "LanguageComposition",
+          "wall_micros": 5
+        },
+        {
+          "name": "GraphValidation",
+          "wall_micros": 1272258
+        },
+        {
+          "name": "total",
+          "wall_micros": 5937958
+        }
+      ],
+      "measurements": {
+        "ambiguous_call_sites": 81018,
+        "call_sites": 754230,
+        "degradations": 0,
+        "degraded": false,
+        "discovered_files": 6349,
+        "edges": 241836,
+        "java_files": 6165,
+        "javascript_files": 0,
+        "parsed_files": 6349,
+        "peak_rss_bytes": 2092892160,
+        "php_files": 0,
+        "python_files": 184,
+        "rust_files": 0,
+        "source_bytes": 72552697,
+        "symbols": 216644,
+        "syntax_error_files": 3,
+        "typescript_files": 0,
+        "unresolved_call_sites": 580711,
+        "wall_micros": 5937958
+      },
+      "budget_verdicts": [
+        {
+          "budget": "cold_index_peak_rss_bytes",
+          "observed": 2092892160,
+          "limit": 8589934592,
+          "status": "pass"
+        },
+        {
+          "budget": "cold_index_wall_micros",
+          "observed": 5937958,
+          "limit": 250000000,
+          "status": "pass"
+        }
+      ]
+    },
+    {
+      "id": "warm-noop",
+      "status": "pass",
+      "details": "unchanged checkout: no reindex work behind the freshness barrier",
+      "phases": [
+        {
+          "name": "fresh_barrier",
+          "wall_micros": 155997
+        }
+      ],
+      "measurements": {
+        "files_inspected": 12697,
+        "git_subprocesses": 2,
+        "no_op_reconciliations": 1,
+        "wall_micros": 155997
+      },
+      "budget_verdicts": [
+        {
+          "budget": "warm_noop_wall_micros",
+          "observed": 155998,
+          "limit": 30000000,
+          "status": "pass"
+        }
+      ]
+    },
+    {
+      "id": "fingerprint",
+      "status": "pass",
+      "details": "two cold indexes produce identical fingerprints and counts",
+      "phases": [
+        {
+          "name": "reindex",
+          "wall_micros": 5874987
+        }
+      ],
+      "measurements": {
+        "fingerprint": "10aa68b32e979ad4",
+        "rerun_edges": 241836,
+        "rerun_symbols": 216644
+      },
+      "budget_verdicts": []
+    },
+    {
+      "id": "one-file-edit",
+      "status": "pass",
+      "details": "one-file edit: targeted reconcile, fresh query sees the change",
+      "phases": [
+        {
+          "name": "edit_and_barrier",
+          "wall_micros": 4474049
+        }
+      ],
+      "measurements": {
+        "files_reparsed": 1,
+        "full_reconciliations": 0,
+        "wall_micros": 4474050
+      },
+      "budget_verdicts": []
+    },
+    {
+      "id": "atomic-replace",
+      "status": "pass",
+      "details": "write-temp-then-rename: targeted reconcile, fresh query sees the change",
+      "phases": [
+        {
+          "name": "replace_and_barrier",
+          "wall_micros": 4438494
+        }
+      ],
+      "measurements": {
+        "files_reparsed": 1,
+        "full_reconciliations": 0,
+        "wall_micros": 4438495
+      },
+      "budget_verdicts": []
+    },
+    {
+      "id": "rename-delete",
+      "status": "pass",
+      "details": "rename + delete: inventory correct after the freshness barrier",
+      "phases": [
+        {
+          "name": "rename_delete_and_barrier",
+          "wall_micros": 3550728
+        }
+      ],
+      "measurements": {
+        "created_files": 1,
+        "deleted_files": 2,
+        "wall_micros": 3550729
+      },
+      "budget_verdicts": []
+    },
+    {
+      "id": "syntax-error",
+      "status": "pass",
+      "details": "last-good revision: `randomUuid` stays queryable; temporary syntax error: attributed diagnostics; restore returns to baseline on a newer revision",
+      "phases": [
+        {
+          "name": "break_and_barrier",
+          "wall_micros": 4198107
+        }
+      ],
+      "measurements": {
+        "baseline_total_diagnostics": 6
+      },
+      "budget_verdicts": []
+    },
+    {
+      "id": "diff-context",
+      "status": "pass",
+      "details": "clean tree: empty diff; after edits: correct changed-file attribution",
+      "phases": [
+        {
+          "name": "clean_diff",
+          "wall_micros": 12952282
+        },
+        {
+          "name": "dirty_diff",
+          "wall_micros": 428329
+        }
+      ],
+      "measurements": {
+        "changed_files": [
+          {
+            "change": "Deleted",
+            "path": "api-checker/core/src/main/java/org/apache/kafka/apicheck/ApiSurface.java",
+            "previous_path": null
+          },
+          {
+            "change": "Deleted",
+            "path": "api-checker/core/src/main/java/org/apache/kafka/apicheck/ApiSurfaceScanner.java",
+            "previous_path": null
+          },
+          {
+            "change": "Added",
+            "path": "api-checker/core/src/main/java/org/apache/kafka/apicheck/ApiSurfaceScanner__chakra_moved.java",
+            "previous_path": null
+          }
+        ],
+        "clean_diff_wall_micros": 487723
+      },
+      "budget_verdicts": []
+    },
+    {
+      "id": "queries",
+      "status": "pass",
+      "details": "high-degree targets chosen from the index; bounded responses with explicit truncation",
+      "phases": [
+        {
+          "name": "symbol_search",
+          "wall_micros": 186
+        },
+        {
+          "name": "callers",
+          "wall_micros": 7833
+        },
+        {
+          "name": "context",
+          "wall_micros": 4632
+        }
+      ],
+      "measurements": {
+        "callers_returned": 5,
+        "target": "org::apache::kafka::common::Uuid::randomUuid",
+        "target_incoming_calls": 2202,
+        "target_precision": "TreeSitter/Syntax",
+        "targets": [
+          {
+            "incoming_calls": 2202,
+            "qualified_name": "org::apache::kafka::common::Uuid::randomUuid"
+          },
+          {
+            "incoming_calls": 2188,
+            "qualified_name": "org::apache::kafka::common::serialization::Serdes::String"
+          },
+          {
+            "incoming_calls": 2104,
+            "qualified_name": "org::apache::kafka::common::utils::Utils::mkEntry"
+          }
+        ]
+      },
+      "budget_verdicts": []
+    },
+    {
+      "id": "cancellation",
+      "status": "pass",
+      "details": "cancelled index and query stop promptly; no partial publication",
+      "phases": [
+        {
+          "name": "cancelled_cold_index",
+          "wall_micros": 6
+        },
+        {
+          "name": "cancelled_query",
+          "wall_micros": 0
+        }
+      ],
+      "measurements": {
+        "cancelled_index_wall_micros": 6
+      },
+      "budget_verdicts": []
+    },
+    {
+      "id": "cache-restore",
+      "status": "pass",
+      "details": "checkout restored to the pinned SHA with a clean worktree",
+      "phases": [],
+      "measurements": {},
+      "budget_verdicts": []
+    }
+  ]
+}

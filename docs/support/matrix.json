@@ -18,6 +18,237 @@
   ],
   "languages": [
     {
+      "language": "java",
+      "advertised": true,
+      "tier": "first-class",
+      "grammar": {
+        "name": "tree-sitter-java",
+        "version": "0.23.5",
+        "adr": "docs/adr/0027-grammar-and-provider-selection.md"
+      },
+      "precise_provider": {
+        "name": "jdtls",
+        "adr": "docs/adr/0035-jdtls-workspace-data-dir-and-readiness-bound.md",
+        "status": "deferred"
+      },
+      "capabilities": {
+        "DISC-01": {
+          "status": "pass",
+          "mechanism": "chakra-git discovery (.java)",
+          "evidence": [
+            "crates/chakra-language-java/tests/fixture_index.rs",
+            "crates/chakra-git/src/discovery.rs"
+          ]
+        },
+        "DISC-02": {
+          "status": "pass",
+          "mechanism": "Maven pom.xml module scopes and Gradle settings.gradle(.kts)/build.gradle(.kts) project boundaries",
+          "evidence": [
+            "crates/chakra-git/src/source_metadata.rs",
+            "docs/support/conformance/java.json"
+          ]
+        },
+        "DISC-03": {
+          "status": "pass",
+          "mechanism": "language-neutral source roles plus src/main/java vs src/test/java and Test*.java/*Test.java/*Tests.java conventions (ADR-0019)",
+          "evidence": [
+            "crates/chakra-git/src/source_metadata.rs",
+            "docs/support/conformance/java.json"
+          ]
+        },
+        "SYNTAX-01": {
+          "status": "pass",
+          "mechanism": "tree-sitter-java 0.23.5",
+          "evidence": [
+            "Cargo.toml"
+          ]
+        },
+        "SYNTAX-02": {
+          "status": "pass",
+          "mechanism": "tree-sitter",
+          "evidence": [
+            "crates/chakra-language-java/tests/fixture_index.rs"
+          ]
+        },
+        "SYNTAX-03": {
+          "status": "pass",
+          "mechanism": "tree-sitter (classes/interfaces/enums/records/annotation types, nested-class containers)",
+          "evidence": [
+            "crates/chakra-language-java/tests/fixture_index.rs"
+          ]
+        },
+        "SYNTAX-04": {
+          "status": "pass",
+          "mechanism": "tree-sitter (single-type, static, and wildcard import facts; static-import member aliases)",
+          "evidence": [
+            "crates/chakra-language-java/tests/fixture_index.rs",
+            "docs/support/conformance/java.json"
+          ]
+        },
+        "SYNTAX-05": {
+          "status": "pass",
+          "mechanism": "tree-sitter (byte-accurate ranges)",
+          "evidence": [
+            "crates/chakra-language-java/tests/fixture_index.rs"
+          ]
+        },
+        "SYNTAX-06": {
+          "status": "pass",
+          "mechanism": "tree-sitter + JUnit 4/5 @Test annotation hint",
+          "evidence": [
+            "crates/chakra-language-java/tests/fixture_index.rs",
+            "docs/support/conformance/java.json"
+          ]
+        },
+        "SYNTAX-07": {
+          "status": "pass",
+          "mechanism": "tree-sitter diagnostics (ADR-0022)",
+          "evidence": [
+            "crates/chakra-language-java/tests/fixture_index.rs"
+          ]
+        },
+        "SYNTAX-08": {
+          "status": "pass",
+          "mechanism": "bounded lazy syntax call candidates with import/static-import alias resolution (ADR-0010)",
+          "evidence": [
+            "crates/chakra-language-java/tests/fixture_index.rs"
+          ]
+        },
+        "PRECISE-01": {
+          "status": "pass",
+          "mechanism": "recorded provider selection: jdtls (1.60.x milestone, JDK 21+)",
+          "evidence": [
+            "docs/adr/0027-grammar-and-provider-selection.md",
+            "docs/adr/0035-jdtls-workspace-data-dir-and-readiness-bound.md"
+          ]
+        },
+        "PRECISE-02": {
+          "status": "pass",
+          "mechanism": "jdtls over shared chakra-lsp client (java language id)",
+          "evidence": [
+            "crates/chakra-provider-jdtls/tests/lifecycle.rs"
+          ]
+        },
+        "PRECISE-03": {
+          "status": "pass",
+          "mechanism": "owned lifecycle, restart, orphan-free shutdown; per-workspace data dir and configurable readiness bound (ADR-0035)",
+          "evidence": [
+            "crates/chakra-provider-jdtls/tests/lifecycle.rs",
+            "crates/chakra-lsp/tests/lifecycle.rs"
+          ]
+        },
+        "PRECISE-04": {
+          "status": "pass",
+          "mechanism": "capability-gated enrichment through PreciseProvider",
+          "evidence": [
+            "crates/chakra-provider-jdtls/tests/lifecycle.rs"
+          ]
+        },
+        "PRECISE-05": {
+          "status": "pass",
+          "mechanism": "graceful absence/crash degradation to syntax tier",
+          "evidence": [
+            "crates/chakra-provider-jdtls/tests/lifecycle.rs",
+            "docs/support/conformance/java.json"
+          ]
+        },
+        "QUERY-01": {
+          "status": "pass",
+          "mechanism": "chakra-engine QueryService",
+          "evidence": [
+            "crates/chakra-engine/tests/scenario.rs"
+          ]
+        },
+        "QUERY-02": {
+          "status": "pass",
+          "mechanism": "chakra-mcp",
+          "evidence": [
+            "crates/chakra-mcp/tests/contract.rs"
+          ]
+        },
+        "QUERY-03": {
+          "status": "pass",
+          "mechanism": "chakra-git diff provider",
+          "evidence": [
+            "docs/support/conformance/java.json"
+          ]
+        },
+        "FRESH-01": {
+          "status": "pass",
+          "mechanism": "atomic revision publication (ADR-0001)",
+          "evidence": [
+            "crates/chakra-engine/tests/atomic_revisions.rs"
+          ]
+        },
+        "FRESH-02": {
+          "status": "pass",
+          "mechanism": "live freshness barrier (ADR-0005)",
+          "evidence": [
+            "crates/chakra-engine/tests/freshness.rs"
+          ]
+        },
+        "PROV-01": {
+          "status": "pass",
+          "mechanism": "domain provenance model",
+          "evidence": [
+            "crates/chakra-engine/tests/scenario.rs"
+          ]
+        },
+        "AMBIG-01": {
+          "status": "pass",
+          "mechanism": "query-layer ambiguity reporting",
+          "evidence": [
+            "crates/chakra-engine/tests/scenario.rs"
+          ]
+        },
+        "BUDGET-01": {
+          "status": "pass",
+          "mechanism": "query work budgets (ADR-0025)",
+          "evidence": [
+            "crates/chakra-engine/tests/query_work_budgets.rs"
+          ]
+        },
+        "CANCEL-01": {
+          "status": "pass",
+          "mechanism": "cooperative cancellation (ADR-0025)",
+          "evidence": [
+            "crates/chakra-engine/tests/query_work_budgets.rs"
+          ]
+        },
+        "DEGRADE-01": {
+          "status": "pass",
+          "mechanism": "bounded degradation (ADR-0011)",
+          "evidence": [
+            "crates/chakra-engine/tests/query_work_budgets.rs"
+          ]
+        },
+        "CONFORM-01": {
+          "status": "pass",
+          "mechanism": "chakra-conformance harness",
+          "evidence": [
+            "docs/support/conformance/java.json"
+          ]
+        },
+        "CORPUS-01": {
+          "status": "pass",
+          "mechanism": "pinned public corpus evaluation (ADR-0029)",
+          "evidence": [
+            "docs/support/corpus/results/java-spring-projects__spring-boot.json"
+          ]
+        },
+        "DOCS-01": {
+          "status": "pass",
+          "mechanism": "per-language documentation",
+          "evidence": [
+            "docs/languages/java.md"
+          ]
+        }
+      },
+      "conformance_results": "docs/support/conformance/java.json",
+      "corpus_results": "docs/support/corpus/results/java-spring-projects__spring-boot.json",
+      "docs": "docs/languages/java.md"
+    },
+    {
       "language": "javascript",
       "advertised": true,
       "tier": "first-class",

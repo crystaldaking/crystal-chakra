@@ -37,6 +37,11 @@ fn php_conformance_suite_passes() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
+fn java_conformance_suite_passes() -> Result<(), Box<dyn Error>> {
+    assert_language_passes("java")
+}
+
+#[test]
 fn every_fixture_language_declares_the_implemented_catalog() -> Result<(), Box<dyn Error>> {
     let discovered = languages()?;
     assert!(discovered.contains(&"rust".to_owned()));

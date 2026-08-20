@@ -67,6 +67,8 @@ impl QueryService for StubService {
                     composer_metadata_files: 0,
                     package_json_metadata_files: 0,
                     pyproject_metadata_files: 0,
+                    maven_metadata_files: 0,
+                    gradle_metadata_files: 0,
                     path_fallback_files: 1,
                 },
                 syntax_diagnostics: Default::default(),
@@ -144,7 +146,8 @@ async fn status_tool_is_listed_and_callable() -> Result<(), Box<dyn Error + Send
         .instructions
         .as_deref()
         .ok_or("server instructions missing")?;
-    assert!(instructions.contains("Rust and PHP code intelligence"));
+    assert!(instructions.contains("multi-language code intelligence"));
+    assert!(!instructions.contains("Rust and PHP"));
 
     let tools = client.list_all_tools().await?;
     let mut tool_names: Vec<&str> = tools.iter().map(|tool| tool.name.as_ref()).collect();
@@ -188,9 +191,10 @@ async fn status_tool_is_listed_and_callable() -> Result<(), Box<dyn Error + Send
             .and_then(|tool| tool.description.as_deref())
             .ok_or("tool description missing")?;
         assert!(
-            description.contains("PHP"),
+            description.contains("supported-language"),
             "{name} description: {description}"
         );
+        assert!(!description.contains("Rust and PHP"));
     }
     assert!(tools.iter().all(|tool| {
         tool.annotations.as_ref().is_some_and(|annotations| {
@@ -259,6 +263,15 @@ fn laravel_fixture_root() -> PathBuf {
         .join("fixtures")
         .join("php")
         .join("laravel-relationships")
+}
+
+fn java_fixture_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
+        .join("fixtures")
+        .join("java")
+        .join("controller-service-provider")
 }
 
 fn copy_fixture_tree(source: &Path, target: &Path) -> Result<(), Box<dyn Error + Send + Sync>> {
@@ -337,6 +350,113 @@ fn indexed_fixture_engine() -> Result<(TempDir, WorkspaceEngine), Box<dyn Error 
     engine.publish(update)?;
     engine.install_diff_provider(Arc::new(chakra_git::GitWorkspaceDiff))?;
     Ok((repository, engine))
+}
+
+fn indexed_java_fixture_engine() -> Result<(TempDir, WorkspaceEngine), Box<dyn Error + Send + Sync>>
+{
+    let repository = TempDir::new()?;
+    git(repository.path(), &["init", "--quiet"])?;
+    git(
+        repository.path(),
+        &["config", "user.email", "tests@example.invalid"],
+    )?;
+    git(repository.path(), &["config", "user.name", "Chakra Tests"])?;
+    copy_fixture_tree(&java_fixture_root(), repository.path())?;
+    git(repository.path(), &["add", "pom.xml", "src"])?;
+    git(repository.path(), &["commit", "--quiet", "-m", "base"])?;
+    let report = index_repository(repository.path())?;
+    let identity = WorkspaceIdentity::for_primary_worktree(&report.repository_root)?;
+    let engine = WorkspaceEngine::new(identity);
+    let mut update = engine.begin_update();
+    update.replace_graph(report.graph);
+    update.set_indexing(report.metrics.indexing);
+    update.set_status(WorkspaceStatus::Ready);
+    update.set_freshness(Freshness::Fresh);
+    engine.publish(update)?;
+    engine.install_diff_provider(Arc::new(chakra_git::GitWorkspaceDiff))?;
+    Ok((repository, engine))
+}
+
+#[tokio::test]
+async fn java_fixture_is_queryable_through_structured_mcp_tools()
+-> Result<(), Box<dyn Error + Send + Sync>> {
+    let (_repository, engine) = indexed_java_fixture_engine()?;
+    let server = ChakraMcpServer::new(Arc::new(engine));
+    let (server_transport, client_transport) = tokio::io::duplex(64 * 1024);
+    let server_task = tokio::spawn(async move { server.serve(server_transport).await });
+    let client = ().serve(client_transport).await?;
+
+    let repo_map = client
+        .call_tool(
+            CallToolRequestParams::new("repo_map").with_arguments(serde_json::from_value(
+                serde_json::json!({ "include_languages": ["java"], "limit": 20 }),
+            )?),
+        )
+        .await?
+        .structured_content
+        .ok_or("Java repo_map response missing")?;
+    let files = repo_map["data"]["files"]
+        .as_array()
+        .ok_or("Java repo_map files missing")?;
+    assert_eq!(files.len(), 8);
+    assert!(files.iter().all(|file| file["language"] == "java"));
+    assert!(files.iter().any(|file| {
+        file["source_classification"] == "maven_metadata" && file["source_role"] == "test"
+    }));
+
+    let symbols = client
+        .call_tool(CallToolRequestParams::new("symbol_search").with_arguments(
+            serde_json::from_value(
+                serde_json::json!({ "query": "sharedUniqueTarget", "limit": 5 }),
+            )?,
+        ))
+        .await?
+        .structured_content
+        .ok_or("Java symbol_search response missing")?;
+    let target = symbols["data"]["candidates"]
+        .as_array()
+        .and_then(|candidates| candidates.first())
+        .ok_or("Java sharedUniqueTarget symbol missing")?;
+    assert_eq!(target["language"], "java");
+    assert_eq!(target["precision"], "syntax");
+    assert_eq!(target["provenance"], "tree_sitter");
+
+    let symbol_ref = serde_json::json!({
+        "by_id": { "id": target["id"], "revision": symbols["revision"] }
+    });
+    let callers = client
+        .call_tool(
+            CallToolRequestParams::new("callers").with_arguments(serde_json::from_value(
+                serde_json::json!({ "symbol": symbol_ref.clone(), "limit": 10 }),
+            )?),
+        )
+        .await?
+        .structured_content
+        .ok_or("Java callers response missing")?;
+    assert!(
+        callers["data"]["callers"]
+            .as_array()
+            .is_some_and(|items| !items.is_empty())
+    );
+    assert_ne!(callers["data"]["callers"][0]["precision"], "precise");
+
+    let context =
+        client
+            .call_tool(CallToolRequestParams::new("context").with_arguments(
+                serde_json::from_value(serde_json::json!({ "symbol": symbol_ref, "limit": 10 }))?,
+            ))
+            .await?
+            .structured_content
+            .ok_or("Java context response missing")?;
+    assert_eq!(context["data"]["symbol"]["id"], target["id"]);
+
+    client.cancel().await?;
+    let running = server_task
+        .await
+        .map_err(|error| std::io::Error::other(format!("server task join: {error}")))?
+        .map_err(|error| std::io::Error::other(format!("server serve: {error}")))?;
+    running.cancel().await?;
+    Ok(())
 }
 
 #[tokio::test]

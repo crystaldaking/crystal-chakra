@@ -441,7 +441,7 @@ impl ChakraMcpServer {
 
     #[tool(
         name = "repo_map",
-        description = "Browse indexed Rust and PHP structure with a bounded overview, filters, and revision-scoped cursor pages",
+        description = "Browse indexed supported-language structure with a bounded overview, filters, and revision-scoped cursor pages",
         output_schema = rmcp::handler::server::tool::schema_for_output::<QueryEnvelope<RepoMapData>>(),
         annotations(
             read_only_hint = true,
@@ -483,7 +483,7 @@ impl ChakraMcpServer {
 
     #[tool(
         name = "symbol_search",
-        description = "Find bounded Rust and PHP syntax symbol candidates by simple or qualified name",
+        description = "Find bounded supported-language syntax symbol candidates by simple or qualified name",
         output_schema = rmcp::handler::server::tool::schema_for_output::<QueryEnvelope<SymbolSearchData>>(),
         annotations(
             read_only_hint = true,
@@ -504,7 +504,7 @@ impl ChakraMcpServer {
 
     #[tool(
         name = "context",
-        description = "Get bounded syntax context for one resolved Rust or PHP symbol, with optional current precise enrichment when supported",
+        description = "Get bounded syntax context for one resolved supported-language symbol, with optional current precise enrichment when supported",
         output_schema = rmcp::handler::server::tool::schema_for_output::<QueryEnvelope<ContextData>>(),
         annotations(
             read_only_hint = true,
@@ -525,7 +525,7 @@ impl ChakraMcpServer {
 
     #[tool(
         name = "callers",
-        description = "Get bounded callers for one resolved Rust or PHP symbol, preferring current provider precision when supported and retaining honest syntax fallback",
+        description = "Get bounded callers for one resolved supported-language symbol, preferring current provider precision when supported and retaining honest syntax fallback",
         output_schema = rmcp::handler::server::tool::schema_for_output::<QueryEnvelope<CallersData>>(),
         annotations(
             read_only_hint = true,
@@ -546,7 +546,7 @@ impl ChakraMcpServer {
 
     #[tool(
         name = "diff_context",
-        description = "Summarize bounded Rust and PHP changes from HEAD, a base ref, or a merge base to the materialized worktree, with changed symbols and related callers/tests",
+        description = "Summarize bounded supported-language changes from HEAD, a base ref, or a merge base to the materialized worktree, with changed symbols and related callers/tests",
         output_schema = rmcp::handler::server::tool::schema_for_output::<QueryEnvelope<DiffContextData>>(),
         annotations(
             read_only_hint = true,
@@ -568,7 +568,7 @@ impl ChakraMcpServer {
 
 #[tool_handler(
     name = "chakra",
-    instructions = "Chakra Rust and PHP code intelligence: inspect status and repo_map, search indexed source, resolve ambiguous names through symbol_search, request context or callers for one entity, and use diff_context for current worktree or branch-relative changes. Results are bounded and carry language, revision, freshness, provider state and capabilities, provenance, and precision.",
+    instructions = "Chakra multi-language code intelligence: inspect status and repo_map, search indexed source, resolve ambiguous names through symbol_search, request context or callers for one entity, and use diff_context for current worktree or branch-relative changes. Results are bounded and carry language, revision, freshness, provider state and capabilities, provenance, and precision.",
     router = self.tool_router
 )]
 impl ServerHandler for ChakraMcpServer {}

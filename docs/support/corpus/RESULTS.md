@@ -6,6 +6,8 @@ Measured values vary by machine and run; these artifacts are committed deliberat
 
 | Language | Repository | SHA | Status | Cold index (s) | Peak RSS (MiB) | Symbols | Edges | Warm no-op (ms) | Scenarios failed |
 |---|---|---|---|---|---|---|---|---|---|
+| java | apache/kafka | `aa502fb153d9` | pass | 5.94 | 1996 | 216644 | 241836 | 156 | 0 |
+| java | spring-projects/spring-boot | `e3d4b1ceb6d8` | pass | 3.49 | 956 | 161758 | 102723 | 452 | 0 |
 | javascript | react/react | `eb8feb71096e` | pass | 2.07 | 522 | 82629 | 66023 | 105 | 0 |
 | php | laravel/framework | `faf45dd2b154` | pass | 1.83 | 549 | 56067 | 118717 | 59 | 0 |
 | php | symfony/symfony | `add4ddb9867b` | pass | 5.22 | 1230 | 121822 | 245502 | 212 | 0 |

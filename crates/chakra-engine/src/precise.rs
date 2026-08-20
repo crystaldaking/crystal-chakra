@@ -404,6 +404,7 @@ fn language_from_path(path: &str) -> Option<Language> {
         Some("ts" | "tsx" | "mts" | "cts") => Some(Language::TypeScript),
         Some("py" | "pyi") => Some(Language::Python),
         Some("js" | "jsx" | "mjs" | "cjs") => Some(Language::JavaScript),
+        Some("java") => Some(Language::Java),
         _ => None,
     }
 }

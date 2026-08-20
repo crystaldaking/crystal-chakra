@@ -1,0 +1,384 @@
+{
+  "schema_version": 1,
+  "language": "java",
+  "repository": "spring-projects/spring-boot",
+  "sha": "e3d4b1ceb6d8971936f484bae39c7d6659a81c7f",
+  "status": "evaluated",
+  "skip_reason": "",
+  "provider_phase": "not-configured",
+  "scenario_count": 11,
+  "passed": 11,
+  "failed": 0,
+  "skipped": 0,
+  "scenarios": [
+    {
+      "id": "cold-index",
+      "status": "pass",
+      "details": "full index from scratch; coverage counts recorded",
+      "phases": [
+        {
+          "name": "GitInventory",
+          "wall_micros": 507226
+        },
+        {
+          "name": "SourceRead",
+          "wall_micros": 745270
+        },
+        {
+          "name": "ParseExtraction/Rust",
+          "wall_micros": 0
+        },
+        {
+          "name": "SymbolCatalog/Rust",
+          "wall_micros": 18
+        },
+        {
+          "name": "Relationships/Rust",
+          "wall_micros": 0
+        },
+        {
+          "name": "GraphMaterialization/Rust",
+          "wall_micros": 10
+        },
+        {
+          "name": "ParseExtraction/Php",
+          "wall_micros": 0
+        },
+        {
+          "name": "SymbolCatalog/Php",
+          "wall_micros": 0
+        },
+        {
+          "name": "Relationships/Php",
+          "wall_micros": 0
+        },
+        {
+          "name": "GraphMaterialization/Php",
+          "wall_micros": 1
+        },
+        {
+          "name": "ParseExtraction/TypeScript",
+          "wall_micros": 9
+        },
+        {
+          "name": "SymbolCatalog/TypeScript",
+          "wall_micros": 9
+        },
+        {
+          "name": "Relationships/TypeScript",
+          "wall_micros": 0
+        },
+        {
+          "name": "GraphMaterialization/TypeScript",
+          "wall_micros": 1
+        },
+        {
+          "name": "ParseExtraction/Python",
+          "wall_micros": 9
+        },
+        {
+          "name": "SymbolCatalog/Python",
+          "wall_micros": 9
+        },
+        {
+          "name": "Relationships/Python",
+          "wall_micros": 0
+        },
+        {
+          "name": "GraphMaterialization/Python",
+          "wall_micros": 1
+        },
+        {
+          "name": "ParseExtraction/JavaScript",
+          "wall_micros": 26859
+        },
+        {
+          "name": "SymbolCatalog/JavaScript",
+          "wall_micros": 171
+        },
+        {
+          "name": "Relationships/JavaScript",
+          "wall_micros": 17
+        },
+        {
+          "name": "GraphMaterialization/JavaScript",
+          "wall_micros": 507
+        },
+        {
+          "name": "ParseExtraction/Java",
+          "wall_micros": 473977
+        },
+        {
+          "name": "SymbolCatalog/Java",
+          "wall_micros": 49338
+        },
+        {
+          "name": "Relationships/Java",
+          "wall_micros": 11894
+        },
+        {
+          "name": "GraphMaterialization/Java",
+          "wall_micros": 899732
+        },
+        {
+          "name": "LanguageComposition",
+          "wall_micros": 8
+        },
+        {
+          "name": "GraphValidation",
+          "wall_micros": 710946
+        },
+        {
+          "name": "total",
+          "wall_micros": 3489020
+        }
+      ],
+      "measurements": {
+        "ambiguous_call_sites": 23366,
+        "call_sites": 224393,
+        "degradations": 3,
+        "degraded": true,
+        "discovered_files": 8670,
+        "edges": 102723,
+        "java_files": 8667,
+        "javascript_files": 3,
+        "parsed_files": 8670,
+        "peak_rss_bytes": 1002012672,
+        "php_files": 0,
+        "python_files": 0,
+        "rust_files": 0,
+        "source_bytes": 31308668,
+        "symbols": 161758,
+        "syntax_error_files": 8,
+        "typescript_files": 0,
+        "unresolved_call_sites": 184576,
+        "wall_micros": 3489020
+      },
+      "budget_verdicts": [
+        {
+          "budget": "cold_index_peak_rss_bytes",
+          "observed": 1002012672,
+          "limit": 8589934592,
+          "status": "pass"
+        },
+        {
+          "budget": "cold_index_wall_micros",
+          "observed": 3489020,
+          "limit": 250000000,
+          "status": "pass"
+        }
+      ]
+    },
+    {
+      "id": "warm-noop",
+      "status": "pass",
+      "details": "unchanged checkout: no reindex work behind the freshness barrier",
+      "phases": [
+        {
+          "name": "fresh_barrier",
+          "wall_micros": 451898
+        }
+      ],
+      "measurements": {
+        "files_inspected": 17340,
+        "git_subprocesses": 2,
+        "no_op_reconciliations": 1,
+        "wall_micros": 451898
+      },
+      "budget_verdicts": [
+        {
+          "budget": "warm_noop_wall_micros",
+          "observed": 451902,
+          "limit": 30000000,
+          "status": "pass"
+        }
+      ]
+    },
+    {
+      "id": "fingerprint",
+      "status": "pass",
+      "details": "two cold indexes produce identical fingerprints and counts",
+      "phases": [
+        {
+          "name": "reindex",
+          "wall_micros": 2626505
+        }
+      ],
+      "measurements": {
+        "fingerprint": "3c1d14f1c6d518b0",
+        "rerun_edges": 102723,
+        "rerun_symbols": 161758
+      },
+      "budget_verdicts": []
+    },
+    {
+      "id": "one-file-edit",
+      "status": "pass",
+      "details": "one-file edit: targeted reconcile, fresh query sees the change",
+      "phases": [
+        {
+          "name": "edit_and_barrier",
+          "wall_micros": 1061444
+        }
+      ],
+      "measurements": {
+        "files_reparsed": 1,
+        "full_reconciliations": 0,
+        "wall_micros": 1061444
+      },
+      "budget_verdicts": []
+    },
+    {
+      "id": "atomic-replace",
+      "status": "pass",
+      "details": "write-temp-then-rename: targeted reconcile, fresh query sees the change",
+      "phases": [
+        {
+          "name": "replace_and_barrier",
+          "wall_micros": 1482203
+        }
+      ],
+      "measurements": {
+        "files_reparsed": 1,
+        "full_reconciliations": 0,
+        "wall_micros": 1482203
+      },
+      "budget_verdicts": []
+    },
+    {
+      "id": "rename-delete",
+      "status": "pass",
+      "details": "rename + delete: inventory correct after the freshness barrier",
+      "phases": [
+        {
+          "name": "rename_delete_and_barrier",
+          "wall_micros": 3838769
+        }
+      ],
+      "measurements": {
+        "created_files": 1,
+        "deleted_files": 2,
+        "wall_micros": 3838769
+      },
+      "budget_verdicts": []
+    },
+    {
+      "id": "syntax-error",
+      "status": "pass",
+      "details": "last-good revision: `forJson` stays queryable; temporary syntax error: attributed diagnostics; restore returns to baseline on a newer revision",
+      "phases": [
+        {
+          "name": "break_and_barrier",
+          "wall_micros": 1578747
+        }
+      ],
+      "measurements": {
+        "baseline_total_diagnostics": 22
+      },
+      "budget_verdicts": []
+    },
+    {
+      "id": "diff-context",
+      "status": "pass",
+      "details": "clean tree: empty diff; after edits: correct changed-file attribution",
+      "phases": [
+        {
+          "name": "clean_diff",
+          "wall_micros": 7740305
+        },
+        {
+          "name": "dirty_diff",
+          "wall_micros": 1360850
+        }
+      ],
+      "measurements": {
+        "changed_files": [
+          {
+            "change": "Deleted",
+            "path": "build-plugin/spring-boot-antlib/src/it/sample/src/main/java/org/test/SampleApplication.java",
+            "previous_path": null
+          },
+          {
+            "change": "Deleted",
+            "path": "build-plugin/spring-boot-antlib/src/main/java/org/springframework/boot/ant/FindMainClass.java",
+            "previous_path": null
+          },
+          {
+            "change": "Added",
+            "path": "build-plugin/spring-boot-antlib/src/main/java/org/springframework/boot/ant/FindMainClass__chakra_moved.java",
+            "previous_path": null
+          }
+        ],
+        "clean_diff_wall_micros": 1357110
+      },
+      "budget_verdicts": []
+    },
+    {
+      "id": "queries",
+      "status": "pass",
+      "details": "high-degree targets chosen from the index; bounded responses with explicit truncation",
+      "phases": [
+        {
+          "name": "symbol_search",
+          "wall_micros": 293
+        },
+        {
+          "name": "callers",
+          "wall_micros": 558
+        },
+        {
+          "name": "context",
+          "wall_micros": 228
+        }
+      ],
+      "measurements": {
+        "callers_returned": 5,
+        "target": "org::springframework::boot::test::json::JsonContentAssertTests::forJson",
+        "target_incoming_calls": 114,
+        "target_precision": "TreeSitter/Syntax",
+        "targets": [
+          {
+            "incoming_calls": 114,
+            "qualified_name": "org::springframework::boot::test::json::JsonContentAssertTests::forJson"
+          },
+          {
+            "incoming_calls": 100,
+            "qualified_name": "org::springframework::boot::build::antora::Contribution::getProject"
+          },
+          {
+            "incoming_calls": 74,
+            "qualified_name": "org::springframework::boot::actuate::endpoint::SanitizingFunctionTests::sanitizedValue"
+          }
+        ]
+      },
+      "budget_verdicts": []
+    },
+    {
+      "id": "cancellation",
+      "status": "pass",
+      "details": "cancelled index and query stop promptly; no partial publication",
+      "phases": [
+        {
+          "name": "cancelled_cold_index",
+          "wall_micros": 5
+        },
+        {
+          "name": "cancelled_query",
+          "wall_micros": 0
+        }
+      ],
+      "measurements": {
+        "cancelled_index_wall_micros": 5
+      },
+      "budget_verdicts": []
+    },
+    {
+      "id": "cache-restore",
+      "status": "pass",
+      "details": "checkout restored to the pinned SHA with a clean worktree",
+      "phases": [],
+      "measurements": {},
+      "budget_verdicts": []
+    }
+  ]
+}

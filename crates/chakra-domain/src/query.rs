@@ -388,6 +388,8 @@ pub enum RepoMapGroupKind {
     ComposerPsr4,
     NpmPackage,
     PyprojectPackage,
+    MavenModule,
+    GradleProject,
 }
 
 /// Overlapping structural aggregation used by the first repository-map page.
@@ -417,7 +419,7 @@ pub struct RepoMapData {
 /// Empty include/exclude lists preserve access to every indexed role.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct SourceFilter {
-    /// Exact Cargo or Composer package name when package metadata is available.
+    /// Exact ecosystem package/project name when metadata is available.
     #[serde(default)]
     pub package: Option<String>,
     /// Repository-relative file or directory prefix.

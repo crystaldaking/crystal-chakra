@@ -41,6 +41,8 @@ pub enum Language {
     Python,
     #[serde(rename = "javascript")]
     JavaScript,
+    #[serde(rename = "java")]
+    Java,
 }
 
 /// Kind of a code entity (SPEC §8 plus the impl-block/import facts v0.1 §7

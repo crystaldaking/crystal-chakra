@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "note": "Per-language starting budgets for the corpus evaluation runner (issue #25). Initial values are sized generously from a real local run on 2026-08-18 (macOS/arm64, release build; see RESULTS.md): observed cold-index wall times were 0.19-1.75 s, peak RSS 120-591 MiB, warm-noop barriers 0.06-0.10 s. Budgets are ~25-100x those observations, so they trip on order-of-magnitude regressions (e.g. an accidental full reindex behind a warm barrier), not on machine noise. The typescript entry was added on 2026-08-19 from the pinned microsoft/vscode run on the same machine: observed cold-index wall ~7.7 s, peak RSS ~2.6 GiB, warm-noop barrier ~0.53 s (12.8k-file worktree scan), so its budgets are ~30x wall, ~3x RSS (matching the php RSS policy), and ~55x warm-noop; the run is legitimately degraded by the 128 MiB workspace source-byte budget (148 MiB of TypeScript sources), which the edit scenarios tolerate as recorded budget-boundary churn. The python entry was added on 2026-08-20 from the pinned django/django and apache/airflow runs on the same machine: observed cold-index wall 2.1-5.1 s, peak RSS 0.65-1.6 GiB, warm-noop barrier 0.13-0.24 s (2.9k-8.8k-file worktree scans, neither run degraded), so its budgets are ~50-120x wall, ~5x RSS (matching the typescript RSS policy), and ~125x warm-noop. The javascript entry was added on 2026-08-20 from the pinned react/react run on the same machine: observed cold-index wall ~1.9-2.1 s, peak RSS ~520 MiB, warm-noop barrier ~0.11 s (9.1k-file worktree scan, not degraded), so its budgets are ~30x wall, ~4x RSS, and ~90x warm-noop. Tightening a budget or changing a baseline requires review and a deliberate commit.",
+  "note": "Per-language starting budgets for the corpus evaluation runner (issue #25). Initial values are sized generously from real local macOS/arm64 release runs (see RESULTS.md), so they trip on order-of-magnitude regressions rather than machine noise. Rust/PHP started from the 2026-08-18 run (~25-100x observed values). TypeScript was added on 2026-08-19 from microsoft/vscode (7.7 s cold, 2.6 GiB peak RSS, 0.53 s warm no-op): ~30x wall, ~3x RSS, ~55x warm no-op. Python was added on 2026-08-20 from django/django and apache/airflow (2.1-5.1 s cold, 0.65-1.6 GiB RSS, 0.13-0.24 s warm no-op): ~50-120x wall, ~5x RSS, ~125x warm no-op. JavaScript was added from react/react (1.9-2.1 s cold, ~520 MiB RSS, ~0.11 s warm no-op): ~30x wall, ~4x RSS, ~90x warm no-op. Java was added from spring-projects/spring-boot and apache/kafka (3.5-5.9 s cold, 0.9-2.0 GiB RSS, ~0.15 s warm no-op): ~40x wall, ~4x RSS, ~190x warm no-op. Tightening a budget or changing a baseline requires review and a deliberate commit.",
   "languages": {
     "rust": {
       "cold_index_wall_micros": 60000000,
@@ -26,6 +26,11 @@
       "cold_index_wall_micros": 60000000,
       "cold_index_peak_rss_bytes": 2147483648,
       "warm_noop_wall_micros": 10000000
+    },
+    "java": {
+      "cold_index_wall_micros": 250000000,
+      "cold_index_peak_rss_bytes": 8589934592,
+      "warm_noop_wall_micros": 30000000
     }
   }
 }

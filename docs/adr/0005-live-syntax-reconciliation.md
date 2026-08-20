@@ -207,6 +207,11 @@ over native filesystem mechanisms:
   source bodies or bytes read.
 - A pure unit test checks both quiet and absolute debounce deadlines using
   synthetic instants.
+- The pinned Java Spring Boot corpus exceeds the non-recursive watch-directory
+  cap. Its freshness scenarios prove that stable partial notification coverage
+  remains bounded and degraded while fresh barriers complete through
+  authoritative inventory/identity reconciliation instead of repeatedly
+  reinstalling 4,096 watches and forcing whole-workspace body rereads.
 - The hardening measurement records the fresh barrier and reparse counters for
   both one ordinary edit and a 32-replacement burst. The ordinary edit reparses
   one file and recomputes only the affected relationship owner set.

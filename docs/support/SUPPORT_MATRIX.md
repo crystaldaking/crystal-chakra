@@ -9,6 +9,7 @@ Target list reviewed: 2026-08 (GitHub Octoverse 2025 top languages plus pre-exis
 
 | Language | Tier | Advertised | Grammar | Precise provider |
 |----------|------|-----------|---------|------------------|
+| java | first-class | yes | tree-sitter-java 0.23.5 | jdtls (deferred) |
 | javascript | first-class | yes | tree-sitter-javascript 0.25.0 | vtsls (integrated) |
 | php | first-class | yes | tree-sitter-php 0.24.2 | none (deferred) |
 | python | first-class | yes | tree-sitter-python 0.25.0 | pyright (integrated) |
@@ -16,6 +17,40 @@ Target list reviewed: 2026-08 (GitHub Octoverse 2025 top languages plus pre-exis
 | typescript | first-class | yes | tree-sitter-typescript 0.23.2 | vtsls (integrated) |
 
 ## Capability detail
+
+### java
+
+| Capability | Status | Mechanism |
+|------------|--------|-----------|
+| AMBIG-01 | pass | query-layer ambiguity reporting |
+| BUDGET-01 | pass | query work budgets (ADR-0025) |
+| CANCEL-01 | pass | cooperative cancellation (ADR-0025) |
+| CONFORM-01 | pass | chakra-conformance harness |
+| CORPUS-01 | pass | pinned public corpus evaluation (ADR-0029) |
+| DEGRADE-01 | pass | bounded degradation (ADR-0011) |
+| DISC-01 | pass | chakra-git discovery (.java) |
+| DISC-02 | pass | Maven pom.xml module scopes and Gradle settings.gradle(.kts)/build.gradle(.kts) project boundaries |
+| DISC-03 | pass | language-neutral source roles plus src/main/java vs src/test/java and Test*.java/*Test.java/*Tests.java conventions (ADR-0019) |
+| DOCS-01 | pass | per-language documentation |
+| FRESH-01 | pass | atomic revision publication (ADR-0001) |
+| FRESH-02 | pass | live freshness barrier (ADR-0005) |
+| PRECISE-01 | pass | recorded provider selection: jdtls (1.60.x milestone, JDK 21+) |
+| PRECISE-02 | pass | jdtls over shared chakra-lsp client (java language id) |
+| PRECISE-03 | pass | owned lifecycle, restart, orphan-free shutdown; per-workspace data dir and configurable readiness bound (ADR-0035) |
+| PRECISE-04 | pass | capability-gated enrichment through PreciseProvider |
+| PRECISE-05 | pass | graceful absence/crash degradation to syntax tier |
+| PROV-01 | pass | domain provenance model |
+| QUERY-01 | pass | chakra-engine QueryService |
+| QUERY-02 | pass | chakra-mcp |
+| QUERY-03 | pass | chakra-git diff provider |
+| SYNTAX-01 | pass | tree-sitter-java 0.23.5 |
+| SYNTAX-02 | pass | tree-sitter |
+| SYNTAX-03 | pass | tree-sitter (classes/interfaces/enums/records/annotation types, nested-class containers) |
+| SYNTAX-04 | pass | tree-sitter (single-type, static, and wildcard import facts; static-import member aliases) |
+| SYNTAX-05 | pass | tree-sitter (byte-accurate ranges) |
+| SYNTAX-06 | pass | tree-sitter + JUnit 4/5 @Test annotation hint |
+| SYNTAX-07 | pass | tree-sitter diagnostics (ADR-0022) |
+| SYNTAX-08 | pass | bounded lazy syntax call candidates with import/static-import alias resolution (ADR-0010) |
 
 ### javascript
 

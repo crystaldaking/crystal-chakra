@@ -44,6 +44,8 @@ pub enum Provenance {
     Vtsls,
     /// pyright (live precise provider for Python, ADR-0027).
     Pyright,
+    /// jdtls (live precise provider for Java, ADR-0027/0035).
+    Jdtls,
     /// Chakra-owned static resolver producing precise-tier facts from an
     /// explicit, deterministic evidence rule (ADR-0030).
     ChakraResolver,
@@ -92,6 +94,11 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<Provenance>("\"pyright\"")?,
             Provenance::Pyright
+        );
+        assert_eq!(serde_json::to_string(&Provenance::Jdtls)?, "\"jdtls\"");
+        assert_eq!(
+            serde_json::from_str::<Provenance>("\"jdtls\"")?,
+            Provenance::Jdtls
         );
         Ok(())
     }

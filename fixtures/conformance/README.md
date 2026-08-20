@@ -22,6 +22,8 @@ Each language has its own directory:
 - `javascript/` — a small JavaScript project (`src/` plus `tests/`, with
   `package.json` and `jsconfig.json` project metadata, mixing ES modules
   and CommonJS).
+- `java/` — a small Maven-layout Java project (`src/main/java` plus
+  `src/test/java`, with a `pom.xml` project manifest).
 
 Inside each language directory:
 
@@ -36,14 +38,14 @@ The fixtures deliberately contain the hard cases the scenarios assert:
 
 | Fixture element | Scenario |
 |-----------------|----------|
-| `dup_a`/`dup_b` (rust), `DupA`/`DupB` (php), `dup_a`/`dup_b` (typescript/python/javascript): same function name in two scopes | `ambiguity` |
-| `nested.rs` (`outer::inner`), `Nested.php` (`Conf\Nested\Inner`), `nested.ts` (`outer::inner` namespaces), `nested.py` (`Outer::Inner` classes), `nested.js` (`outer`/`inner` nested functions) | `declarations-containers` |
-| `use ... as audit_event`, `use ... as FormatHelperAlias`, `import { ... as audit_event }`, `from ... import ... as audit_event`, `const { ...: audit_event } = require(...)` | `imports-aliases` |
-| `src/` vs `tests/` trees | `source-roles`, `test-hints` |
+| `dup_a`/`dup_b` (rust), `DupA`/`DupB` (php), `dup_a`/`dup_b` (typescript/python/javascript), `dup_a`/`dup_b` packages (java): same function name in two scopes | `ambiguity` |
+| `nested.rs` (`outer::inner`), `Nested.php` (`Conf\Nested\Inner`), `nested.ts` (`outer::inner` namespaces), `nested.py` (`Outer::Inner` classes), `nested.js` (`outer`/`inner` nested functions), `nested/Outer.java` (`Outer`/`Inner` nested classes) | `declarations-containers` |
+| `use ... as audit_event`, `use ... as FormatHelperAlias`, `import { ... as audit_event }`, `from ... import ... as audit_event`, `const { ...: audit_event } = require(...)`, `import static ... record_conformance_event` (java) | `imports-aliases` |
+| `src/` vs `tests/` trees (java: `src/main/java` vs `src/test/java`) | `source-roles`, `test-hints` |
 | `dispatch_conformance_request` → `shared_unique_target` | `syntax-callers`, `provider-*` |
-| `#[test] fn` / `test*` method / `it("...")` block / `test_*` function | `test-hints` |
+| `#[test] fn` / `test*` method / `it("...")` block / `test_*` function / `@Test` method (java) | `test-hints` |
 | `CONFORMANCE_TEXT_NEEDLE` comment in the service file | `text-search` |
-| `fan_in.rs` / `FanIn.php` / `fan_in.ts` / `fan_in.py` / `fan_in.js`: 55 callers of one function (typescript/python/javascript: 55 plus one import/require-aliased call) | `high-degree-callers` |
+| `fan_in.rs` / `FanIn.php` / `fan_in.ts` / `fan_in.py` / `fan_in.js` / `FanIn.java`: 55 callers of one function (typescript/python/javascript/java: 55 plus one import/require/static-import-aliased call) | `high-degree-callers` |
 | service file (broken and repaired at runtime) | `syntax-error-recovery` |
 | files created/renamed/deleted at runtime | `file-lifecycle`, `diff-context-scopes` |
 

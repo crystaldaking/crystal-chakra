@@ -2,14 +2,16 @@
 
 Chakra is a local Code Intelligence Layer for AI coding agents. It exposes
 compact, current, structured, provenance-aware facts about one materialized
-Git worktree over MCP: repository structure, Rust and PHP symbols, syntax call
-candidates, source context, related tests, and current Git diff state.
+Git worktree over MCP: repository structure, symbols in every supported
+language, syntax call candidates, source context, related tests, and current
+Git diff state.
 
-Status: **v0.1 evaluation candidate**. The implemented slice supports Rust and
-PHP syntax intelligence and provides Git-aware discovery, Tree-sitter indexing, bounded live
+Status: **v0.1.2 development candidate**. The implemented slice supports Rust,
+PHP, TypeScript/TSX, Python, JavaScript/JSX, and Java syntax intelligence and
+provides Git-aware discovery, Tree-sitter indexing, bounded live
 filesystem reconciliation, deterministic fresh-query barriers, atomic
-in-memory revisions, optional Rust-only rust-analyzer call-hierarchy enrichment, and all
-seven v0.1 MCP tools:
+in-memory revisions, optional Rust-only rust-analyzer call-hierarchy
+enrichment, and all seven v0.1 MCP tools:
 
 - `status`
 - `repo_map`
@@ -121,8 +123,8 @@ when a name is ambiguous. For current changes:
 {"limit":20}
 ```
 
-with `diff_context` summarizes changed Rust/PHP files, current declarations in
-those files, and bounded related callers/tests/call candidates.
+with `diff_context` summarizes changed supported source files, current
+declarations in those files, and bounded related callers/tests/call candidates.
 
 For Laravel worktrees, `context` and `diff_context` include a bounded
 `related_relations` section. Each item carries an explicit incoming/outgoing
@@ -287,10 +289,10 @@ rust-analyzer requests send `$/cancelRequest`. `status.data.query_execution`
 reports queued/running work, outcomes, and permit hold time without itself
 entering the expensive-query pool.
 
-Indexing defaults to 100,000 Git-discovered Rust/PHP files, 8 MiB per source,
-128 MiB total source, 500,000 symbols, 1,000,000 relationships, and 1,000,000
-compact call sites. Cold-start and phase-sampled resident-memory targets default
-to 120 seconds and 2 GiB. Initial parsing may use up to eight worker-local
+Indexing defaults to 100,000 Git-discovered supported source files, 8 MiB per
+source, 128 MiB total source, 500,000 symbols, 1,000,000 relationships, and
+1,000,000 compact call sites. Cold-start and phase-sampled resident-memory
+targets default to 120 seconds and 2 GiB. Initial parsing may use up to eight worker-local
 Tree-sitter parsers. The effective limit is the minimum of the configured
 `--max-index-workers`, available logical CPUs, and a 64 MiB-per-worker memory
 reserve after reserving the configured source budget; repositories with fewer
@@ -306,11 +308,11 @@ completeness, affected capabilities, omission cause, phase measurements, and
 best-effort CPU/RSS samples. Scheduling metadata reports configured, available,
 memory-limited, and effective workers plus queue depth. Schema v4 carries these
 facts together with v3 graph-publication reuse/copy metrics. Ordinary edits use
-persistent file-owned graph deltas and shallow Rust/PHP composition, so old
-snapshot readers remain immutable without a second complete combined-graph
-copy. Calls are never resolved against a truncated symbol catalog. Time/RSS
-targets are observable warnings rather than nondeterministic inputs to graph
-contents.
+persistent file-owned graph deltas and shallow registered-language
+composition, so old snapshot readers remain immutable without a second
+complete combined-graph copy. Calls are never resolved against a truncated
+symbol catalog. Time/RSS targets are observable warnings rather than
+nondeterministic inputs to graph contents.
 
 Git discovery/diff subprocesses retain bounded output and have a 30-second
 local deadline that can only be shortened by the query deadline. Cancellation
@@ -325,7 +327,7 @@ PHP edit reparses and rebuilds only its affected framework contribution.
 ## Git diff scope
 
 `diff_context` always compares one immutable commit baseline with the final
-materialized worktree for indexed regular Rust and PHP files. The request
+materialized worktree for indexed regular supported source files. The request
 scope selects the baseline:
 
 - omitted or `{"kind":"worktree"}` preserves the v0.1 default: `HEAD`;
@@ -342,8 +344,8 @@ Every scope then applies the same materialized-worktree rules:
 - staged and unstaged tracked edits are combined; final worktree content wins;
 - commits between the selected baseline and `HEAD` are included for explicit
   base scopes (and therefore visible in a clean feature branch);
-- untracked, non-ignored Rust/PHP files are included;
-- deleted tracked Rust/PHP files are reported by their former path;
+- untracked, non-ignored supported source files are included;
+- deleted tracked supported source files are reported by their former path;
 - Git-detected staged renames carry `previous_path` and heuristic precision;
 - an unstaged move remains delete plus add when Git cannot prove a rename;
 - ignored files, `target/`, unsupported-language files, and skipped symlinks are excluded.
@@ -415,11 +417,18 @@ release, or hotfix branches and pull requests. Direct post-v0.1.0 commits to
 - `crates/chakra-domain` — core types and MCP-independent query contracts.
 - `crates/chakra-engine` — in-memory graph, atomic revisions, query layer.
 - `crates/chakra-git` — Git-aware source discovery and typed current-worktree diff adapter.
-- `crates/chakra-language` — Rust/PHP graph composition, watching, and reconciliation.
+- `crates/chakra-language` — registered-language graph composition, watching, and reconciliation.
 - `crates/chakra-language-rust` — Tree-sitter Rust syntax adapter.
 - `crates/chakra-language-php` — Tree-sitter PHP syntax adapter.
+- `crates/chakra-language-typescript` — Tree-sitter TypeScript/TSX syntax adapter.
+- `crates/chakra-language-python` — Tree-sitter Python syntax adapter.
+- `crates/chakra-language-javascript` — Tree-sitter JavaScript/JSX syntax adapter.
+- `crates/chakra-language-java` — Tree-sitter Java syntax adapter.
 - `crates/chakra-mcp` — thin stdio MCP adapter.
 - `crates/chakra-provider-rust-analyzer` — optional precise provider adapter.
+- `crates/chakra-provider-vtsls` — optional TypeScript/JavaScript precise provider adapter.
+- `crates/chakra-provider-pyright` — optional Python precise provider adapter.
+- `crates/chakra-provider-jdtls` — optional Java precise provider adapter.
 - `fixtures/rust/controller-service-provider` — integration fixture/test oracle.
 - `fixtures/php/controller-service-provider` — PHP integration fixture/test oracle.
 - `docs/SPEC.md` — architectural source of truth.
@@ -433,9 +442,10 @@ identity of Git's reported common administrative directory.
 
 ## Known v0.1 limits
 
-v0.1 supports one repository, one active materialized worktree, Rust and PHP,
-and an in-memory index rebuilt at startup. It intentionally has no historical
-commit materialization, persistent graph snapshots, provider pool, eager
+v0.1 supports one repository, one active materialized worktree, the six syntax
+languages listed above, and an in-memory index rebuilt at startup. It
+intentionally has no historical commit materialization, persistent graph
+snapshots, provider pool, eager
 precise call graph, semantic/vector search, precise PHP provider, or web UI.
 Rust module qualification follows conventional `src/foo.rs`, `foo/mod.rs`,
 and inline-module layouts; custom external module remapping through `#[path]`
@@ -449,7 +459,7 @@ runtime container state. Deterministic Laravel class-constant bindings and
 framework relationships are heuristic facts; PHP call and test relations
 remain explicitly syntax/heuristic facts.
 Provider activation is decided at startup; after adding the first Rust file to
-an already running PHP-only workspace, restart Chakra to enable precise Rust
+an already running non-Rust workspace, restart Chakra to enable precise Rust
 enrichment. Live Rust syntax intelligence does not require that restart.
 
 ## License

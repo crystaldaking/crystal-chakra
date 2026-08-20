@@ -47,15 +47,15 @@ struct ServeArgs {
     #[arg(long, value_name = "PATH", default_value = "rust-analyzer")]
     rust_analyzer_path: OsString,
 
-    /// Maximum Git-discovered Rust/PHP files admitted to one revision.
+    /// Maximum Git-discovered supported source files admitted to one revision.
     #[arg(long, default_value_t = DEFAULT_MAX_INDEX_FILES)]
     max_index_files: u64,
 
-    /// Maximum bytes retained from one Rust/PHP source file.
+    /// Maximum bytes retained from one supported source file.
     #[arg(long, default_value_t = DEFAULT_MAX_SOURCE_FILE_BYTES)]
     max_source_file_bytes: u64,
 
-    /// Maximum total Rust/PHP source bytes retained by the syntax index.
+    /// Maximum total supported source bytes retained by the syntax index.
     #[arg(long, default_value_t = DEFAULT_MAX_WORKSPACE_SOURCE_BYTES)]
     max_workspace_source_bytes: u64,
 
@@ -219,7 +219,7 @@ async fn serve(args: ServeArgs) -> ExitCode {
         current_rss_bytes = ?initial_metrics.indexing.memory.current_rss_bytes,
         observed_phase_peak_rss_bytes = ?initial_metrics.indexing.memory.observed_phase_peak_rss_bytes,
         elapsed_micros = initial_metrics.elapsed.as_micros(),
-        "initial Rust/PHP syntax revision published as stale pending live reconciliation"
+        "initial syntax revision published as stale pending live reconciliation"
     );
     let repository_root = report.repository_root;
     let syntax_index = report.syntax_index;
@@ -314,6 +314,20 @@ mod tests {
     #[test]
     fn cli_definition_is_valid() {
         Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn serve_budget_help_is_language_neutral() -> Result<(), Box<dyn std::error::Error>> {
+        let mut command = Cli::command();
+        let help = command
+            .find_subcommand_mut("serve")
+            .ok_or("serve subcommand must exist")?
+            .render_long_help()
+            .to_string();
+        assert!(help.contains("supported source files"));
+        assert!(help.contains("supported source bytes"));
+        assert!(!help.contains("Rust/PHP"));
+        Ok(())
     }
 
     #[test]

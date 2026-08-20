@@ -54,18 +54,27 @@ pub enum SourceClassification {
     ComposerMetadata,
     /// Package ownership came from a Git-visible `package.json` (npm-style
     /// package or workspace root); test conventions still come from
-    /// deterministic TypeScript path rules.
+    /// deterministic TypeScript/JavaScript path rules.
     PackageJsonMetadata,
     /// Package ownership came from a Git-visible `pyproject.toml` (or a
     /// `setup.py`/`setup.cfg` project boundary without one); test
     /// conventions still come from deterministic Python path rules.
     PyprojectMetadata,
+    /// Module ownership came from a Git-visible Maven `pom.xml`; source
+    /// roles still come from deterministic Maven/Gradle layout and file-name
+    /// conventions.
+    MavenMetadata,
+    /// Project ownership came from a Git-visible Gradle `build.gradle(.kts)`
+    /// (or a `settings.gradle(.kts)` boundary without one); source roles
+    /// still come from deterministic Maven/Gradle layout and file-name
+    /// conventions.
+    GradleMetadata,
     /// No applicable package metadata was available; deterministic path
     /// conventions supplied the role.
     PathFallback,
 }
 
-/// Stable repository-relative identity of a Cargo or Composer package source
+/// Stable repository-relative identity of an ecosystem package/project source
 /// root containing a file.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct SourcePackage {
@@ -104,6 +113,8 @@ pub struct SourceMetadataCoverage {
     pub composer_metadata_files: u64,
     pub package_json_metadata_files: u64,
     pub pyproject_metadata_files: u64,
+    pub maven_metadata_files: u64,
+    pub gradle_metadata_files: u64,
     pub path_fallback_files: u64,
 }
 

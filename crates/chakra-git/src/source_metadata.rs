@@ -29,6 +29,8 @@ const MAX_PACKAGE_JSON_MANIFESTS: usize = 256;
 const MAX_PACKAGE_JSON_MANIFEST_BYTES: usize = 1024 * 1024;
 const MAX_PYPROJECT_MANIFESTS: usize = 256;
 const MAX_PYPROJECT_MANIFEST_BYTES: usize = 1024 * 1024;
+const MAX_JAVA_BUILD_MANIFESTS: usize = 512;
+const MAX_JAVA_BUILD_MANIFEST_BYTES: usize = 1024 * 1024;
 
 /// One discovered source plus deterministic query metadata.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -93,6 +95,22 @@ struct PackageJsonRoot {
 #[derive(Debug, Clone)]
 struct PyprojectRoot {
     package: SourcePackage,
+}
+
+/// Which Java build tool contributed a project scope.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum JavaBuildKind {
+    Maven,
+    Gradle,
+}
+
+/// Java project scope from a Maven `pom.xml` or a Gradle
+/// `settings.gradle(.kts)` (or a `build.gradle(.kts)` project boundary
+/// without one).
+#[derive(Debug, Clone)]
+struct JavaRoot {
+    package: SourcePackage,
+    build: JavaBuildKind,
 }
 
 fn read_bounded(mut reader: impl Read, limit: usize) -> io::Result<BoundedRead> {
@@ -829,6 +847,220 @@ fn classify_python(path: &RepoRelativePath, packages: &[PyprojectRoot]) -> Sourc
     }
 }
 
+/// Minimal `<artifactId>` extraction from `pom.xml` text with the `<parent>`
+/// block excluded. A full XML parser is deliberately not a dependency for
+/// one bounded string field; anything unparseable falls back to the
+/// directory name.
+fn pom_artifact_id(text: &str) -> Option<&str> {
+    let parent = text.find("<parent>").zip(text.find("</parent>"));
+    let search_from = match parent {
+        Some((_, end)) => end + "</parent>".len(),
+        None => 0,
+    };
+    let rest = text.get(search_from..)?;
+    let start = rest.find("<artifactId>")? + "<artifactId>".len();
+    let end = rest[start..].find("</artifactId>")?;
+    let name = rest[start..start + end].trim();
+    (!name.is_empty()).then_some(name)
+}
+
+/// Minimal `rootProject.name` extraction from a `settings.gradle(.kts)`:
+/// `rootProject.name = "x"` (or single quotes). Anything unparseable falls
+/// back to the directory name.
+fn gradle_root_project_name(text: &str) -> Option<&str> {
+    for line in text.lines() {
+        let line = line.trim();
+        let Some(value) = line.strip_prefix("rootProject.name") else {
+            continue;
+        };
+        let Some(value) = value.trim_start().strip_prefix('=') else {
+            continue;
+        };
+        let name = value.trim().trim_matches('"').trim_matches('\'').trim();
+        if !name.is_empty() {
+            return Some(name);
+        }
+    }
+    None
+}
+
+fn read_java_build_manifest(root: &Path, manifest: &RepoRelativePath) -> Option<String> {
+    let manifest_path = root.join(manifest.as_str());
+    let file = fs::File::open(&manifest_path).ok()?;
+    let mut bytes = Vec::new();
+    if file
+        .take((MAX_JAVA_BUILD_MANIFEST_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)
+        .is_err()
+        || bytes.len() > MAX_JAVA_BUILD_MANIFEST_BYTES
+    {
+        return None;
+    }
+    String::from_utf8(bytes).ok()
+}
+
+/// Collects Java project scopes. Every `pom.xml` is a Maven module root
+/// (`<artifactId>` when parseable); every `settings.gradle(.kts)` is a Gradle
+/// project root (`rootProject.name` when parseable); a
+/// `build.gradle(.kts)` in a directory without a Gradle settings file is a
+/// project boundary named after its directory.
+fn java_packages(
+    root: &Path,
+    metadata_inputs: &[RepoRelativePath],
+    operation: &OperationContext,
+) -> Result<Vec<JavaRoot>, OperationAbort> {
+    let mut packages = Vec::new();
+    let mut gradle_covered = BTreeSet::new();
+    for manifest in manifests_named(metadata_inputs, "pom.xml")
+        .iter()
+        .take(MAX_JAVA_BUILD_MANIFESTS)
+    {
+        operation.check()?;
+        let directory = manifest_directory(manifest, "pom.xml");
+        let fallback_name = manifest
+            .as_str()
+            .strip_suffix("/pom.xml")
+            .unwrap_or("repository");
+        let text = read_java_build_manifest(root, manifest);
+        let name = text
+            .as_deref()
+            .and_then(pom_artifact_id)
+            .unwrap_or(fallback_name);
+        packages.push(JavaRoot {
+            package: SourcePackage {
+                name: name.to_owned(),
+                root: directory,
+            },
+            build: JavaBuildKind::Maven,
+        });
+    }
+    for settings in ["settings.gradle", "settings.gradle.kts"] {
+        for manifest in manifests_named(metadata_inputs, settings)
+            .iter()
+            .take(MAX_JAVA_BUILD_MANIFESTS)
+        {
+            operation.check()?;
+            let directory = manifest_directory(manifest, settings);
+            if let Some(directory) = &directory {
+                gradle_covered.insert(directory.clone());
+            }
+            let fallback_name = manifest
+                .as_str()
+                .strip_suffix(&format!("/{settings}"))
+                .unwrap_or("repository");
+            let text = read_java_build_manifest(root, manifest);
+            let name = text
+                .as_deref()
+                .and_then(gradle_root_project_name)
+                .unwrap_or(fallback_name);
+            packages.push(JavaRoot {
+                package: SourcePackage {
+                    name: name.to_owned(),
+                    root: directory,
+                },
+                build: JavaBuildKind::Gradle,
+            });
+        }
+    }
+    let mut root_covered = packages
+        .iter()
+        .any(|package| package.build == JavaBuildKind::Gradle && package.package.root.is_none());
+    for build in ["build.gradle", "build.gradle.kts"] {
+        for manifest in manifests_named(metadata_inputs, build)
+            .iter()
+            .take(MAX_JAVA_BUILD_MANIFESTS)
+        {
+            operation.check()?;
+            match manifest_directory(manifest, build) {
+                Some(directory) => {
+                    if gradle_covered.contains(&directory) {
+                        continue;
+                    }
+                    gradle_covered.insert(directory.clone());
+                    packages.push(JavaRoot {
+                        package: SourcePackage {
+                            name: directory.as_str().to_owned(),
+                            root: Some(directory),
+                        },
+                        build: JavaBuildKind::Gradle,
+                    });
+                }
+                None => {
+                    if root_covered {
+                        continue;
+                    }
+                    root_covered = true;
+                    packages.push(JavaRoot {
+                        package: SourcePackage {
+                            name: "repository".to_owned(),
+                            root: None,
+                        },
+                        build: JavaBuildKind::Gradle,
+                    });
+                }
+            }
+        }
+    }
+    operation.check()?;
+    Ok(packages)
+}
+
+/// Java test conventions beyond the language-neutral path fallback: the
+/// Maven/Gradle `src/test/java` source root and the JUnit `Test*.java` /
+/// `*Test.java` / `*Tests.java` file-name conventions.
+fn java_path_role(path: &RepoRelativePath) -> SourceRole {
+    let fallback = SourceMetadata::path_fallback(path);
+    if fallback.role != SourceRole::Production {
+        return fallback.role;
+    }
+    let components: Vec<&str> = path.as_str().split('/').collect();
+    if components.starts_with(&["src", "test", "java"]) {
+        return SourceRole::Test;
+    }
+    let is_test_stem = path
+        .as_str()
+        .rsplit('/')
+        .next()
+        .and_then(|file| file.strip_suffix(".java"))
+        .is_some_and(|stem| {
+            stem.starts_with("Test") || stem.ends_with("Test") || stem.ends_with("Tests")
+        });
+    if is_test_stem {
+        SourceRole::Test
+    } else {
+        SourceRole::Production
+    }
+}
+
+fn classify_java(path: &RepoRelativePath, packages: &[JavaRoot]) -> SourceMetadata {
+    let role = java_path_role(path);
+    let package = packages
+        .iter()
+        .filter(|package| is_inside(path, package.package.root.as_ref()))
+        .max_by_key(|package| {
+            package
+                .package
+                .root
+                .as_ref()
+                .map_or(0, |root| root.as_str().len())
+        });
+    let Some(package) = package else {
+        return SourceMetadata {
+            role,
+            classification: SourceClassification::PathFallback,
+            package: None,
+        };
+    };
+    SourceMetadata {
+        role,
+        classification: match package.build {
+            JavaBuildKind::Maven => SourceClassification::MavenMetadata,
+            JavaBuildKind::Gradle => SourceClassification::GradleMetadata,
+        },
+        package: Some(package.package.clone()),
+    }
+}
+
 fn classify_rust(path: &RepoRelativePath, packages: &[CargoPackage]) -> SourceMetadata {
     let fallback = SourceMetadata::path_fallback(path);
     let package = packages
@@ -938,6 +1170,11 @@ pub fn classify_discovered_sources_with_context(
     } else {
         None
     };
+    let java = if language == Language::Java {
+        Some(java_packages(root, metadata_inputs, operation)?)
+    } else {
+        None
+    };
     let mut classified = Vec::with_capacity(files.len());
     for path in files {
         operation.check()?;
@@ -951,6 +1188,7 @@ pub fn classify_discovered_sources_with_context(
                 Language::Python => {
                     classify_python(&path, pyproject.as_deref().unwrap_or_default())
                 }
+                Language::Java => classify_java(&path, java.as_deref().unwrap_or_default()),
             },
             path,
             language,
@@ -1400,6 +1638,138 @@ mod tests {
         let spec = &by_path[&RepoRelativePath::new("src/util.spec.js")?];
         assert_eq!(spec.classification, SourceClassification::PathFallback);
         assert_eq!(spec.role, SourceRole::Test);
+        Ok(())
+    }
+
+    #[test]
+    fn pom_scopes_and_java_test_conventions() -> Result<(), Box<dyn Error>> {
+        let repository = repository()?;
+        let root = repository.path();
+        write(
+            root,
+            "pom.xml",
+            "<project>\n  <artifactId>chakra-parent</artifactId>\n</project>\n",
+        )?;
+        write(
+            root,
+            "service/pom.xml",
+            "<project>\n  <parent>\n    <artifactId>chakra-parent</artifactId>\n  </parent>\n  <artifactId>chakra-service</artifactId>\n</project>\n",
+        )?;
+        for (path, source) in [
+            (
+                "service/src/main/java/chakra/Service.java",
+                "package chakra;\nclass Service {}\n",
+            ),
+            (
+                "service/src/test/java/chakra/ServiceTest.java",
+                "package chakra;\nclass ServiceTest {}\n",
+            ),
+            (
+                "service/src/main/java/chakra/TestHelper.java",
+                "package chakra;\nclass TestHelper {}\n",
+            ),
+        ] {
+            write(root, path, source)?;
+        }
+
+        let classified = discover_classified_sources(root, Language::Java)?;
+        let by_path: BTreeMap<_, _> = classified
+            .into_iter()
+            .map(|source| (source.path, source.metadata))
+            .collect();
+        let service =
+            &by_path[&RepoRelativePath::new("service/src/main/java/chakra/Service.java")?];
+        assert_eq!(service.classification, SourceClassification::MavenMetadata);
+        assert_eq!(service.role, SourceRole::Production);
+        assert_eq!(
+            service.package.as_ref().map(|package| (
+                package.name.as_str(),
+                package.root.as_ref().map(RepoRelativePath::as_str)
+            )),
+            Some(("chakra-service", Some("service"))),
+            "the module pom scopes its sources; the parent artifactId stays in <parent>"
+        );
+        let test =
+            &by_path[&RepoRelativePath::new("service/src/test/java/chakra/ServiceTest.java")?];
+        assert_eq!(test.classification, SourceClassification::MavenMetadata);
+        assert_eq!(
+            test.role,
+            SourceRole::Test,
+            "src/test/java is the Maven/Gradle test source root"
+        );
+        let helper =
+            &by_path[&RepoRelativePath::new("service/src/main/java/chakra/TestHelper.java")?];
+        assert_eq!(
+            helper.role,
+            SourceRole::Test,
+            "Test*.java is a test convention even under src/main/java"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn gradle_settings_and_build_boundaries_scope_java_sources() -> Result<(), Box<dyn Error>> {
+        let repository = repository()?;
+        let root = repository.path();
+        write(root, "settings.gradle", "rootProject.name = 'chakra-app'\n")?;
+        write(root, "app/build.gradle.kts", "plugins { java }\n")?;
+        write(
+            root,
+            "src/main/java/chakra/App.java",
+            "package chakra;\nclass App {}\n",
+        )?;
+        write(
+            root,
+            "app/src/test/java/chakra/AppTests.java",
+            "package chakra;\nclass AppTests {}\n",
+        )?;
+
+        let classified = discover_classified_sources(root, Language::Java)?;
+        let by_path: BTreeMap<_, _> = classified
+            .into_iter()
+            .map(|source| (source.path, source.metadata))
+            .collect();
+        let app = &by_path[&RepoRelativePath::new("src/main/java/chakra/App.java")?];
+        assert_eq!(app.classification, SourceClassification::GradleMetadata);
+        assert_eq!(
+            app.package.as_ref().map(|package| (
+                package.name.as_str(),
+                package.root.as_ref().map(RepoRelativePath::as_str)
+            )),
+            Some(("chakra-app", None))
+        );
+        let tests = &by_path[&RepoRelativePath::new("app/src/test/java/chakra/AppTests.java")?];
+        assert_eq!(tests.classification, SourceClassification::GradleMetadata);
+        assert_eq!(tests.role, SourceRole::Test);
+        assert_eq!(
+            tests.package.as_ref().map(|package| (
+                package.name.as_str(),
+                package.root.as_ref().map(RepoRelativePath::as_str)
+            )),
+            Some(("app", Some("app"))),
+            "a build.gradle.kts without a sibling settings file is a project boundary"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn java_without_manifests_uses_test_conventions_and_fallback() -> Result<(), Box<dyn Error>> {
+        let repository = repository()?;
+        let root = repository.path();
+        write(root, "src/Util.java", "class Util {}\n")?;
+        write(root, "src/UtilTest.java", "class UtilTest {}\n")?;
+
+        let classified = discover_classified_sources(root, Language::Java)?;
+        let by_path: BTreeMap<_, _> = classified
+            .into_iter()
+            .map(|source| (source.path, source.metadata))
+            .collect();
+        let util = &by_path[&RepoRelativePath::new("src/Util.java")?];
+        assert_eq!(util.classification, SourceClassification::PathFallback);
+        assert_eq!(util.role, SourceRole::Production);
+        let test = &by_path[&RepoRelativePath::new("src/UtilTest.java")?];
+        assert_eq!(test.classification, SourceClassification::PathFallback);
+        assert_eq!(test.role, SourceRole::Test);
         Ok(())
     }
 
