@@ -467,8 +467,8 @@
     },
     {
       "language": "typescript",
-      "advertised": false,
-      "tier": "in-progress",
+      "advertised": true,
+      "tier": "first-class",
       "grammar": {
         "name": "tree-sitter-typescript",
         "version": "0.23.2",
@@ -476,8 +476,8 @@
       },
       "precise_provider": {
         "name": "vtsls",
-        "adr": "docs/adr/0027-grammar-and-provider-selection.md",
-        "status": "selected-not-integrated"
+        "adr": "docs/adr/0032-shared-lsp-client-and-vtsls-provider.md",
+        "status": "integrated"
       },
       "capabilities": {
         "DISC-01": {
@@ -564,24 +564,38 @@
           "status": "pass",
           "mechanism": "recorded provider selection: vtsls (@vtsls/language-server 0.3.x)",
           "evidence": [
-            "docs/adr/0027-grammar-and-provider-selection.md"
+            "docs/adr/0027-grammar-and-provider-selection.md",
+            "docs/adr/0032-shared-lsp-client-and-vtsls-provider.md"
           ]
         },
         "PRECISE-02": {
-          "status": "missing",
-          "note": "vtsls integration lands in Part B of #27."
+          "status": "pass",
+          "mechanism": "vtsls over shared chakra-lsp client",
+          "evidence": [
+            "crates/chakra-provider-vtsls/tests/lifecycle.rs"
+          ]
         },
         "PRECISE-03": {
-          "status": "not-applicable",
-          "note": "No provider integrated yet (Part B of #27)."
+          "status": "pass",
+          "mechanism": "owned lifecycle, restart, orphan-free shutdown (ADR-0032)",
+          "evidence": [
+            "crates/chakra-provider-vtsls/tests/lifecycle.rs",
+            "crates/chakra-lsp/tests/lifecycle.rs"
+          ]
         },
         "PRECISE-04": {
-          "status": "not-applicable",
-          "note": "No provider integrated yet (Part B of #27)."
+          "status": "pass",
+          "mechanism": "capability-gated enrichment through PreciseProvider",
+          "evidence": [
+            "crates/chakra-provider-vtsls/tests/lifecycle.rs"
+          ]
         },
         "PRECISE-05": {
-          "status": "not-applicable",
-          "note": "No provider integrated yet (Part B of #27)."
+          "status": "pass",
+          "mechanism": "graceful absence/crash degradation to syntax tier",
+          "evidence": [
+            "crates/chakra-provider-vtsls/tests/lifecycle.rs"
+          ]
         },
         "QUERY-01": {
           "status": "pass",

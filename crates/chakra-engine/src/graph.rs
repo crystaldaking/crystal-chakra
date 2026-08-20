@@ -2488,6 +2488,7 @@ fn diagnostic_cmp(left: &SyntaxDiagnostic, right: &SyntaxDiagnostic) -> Ordering
 fn provenance_rank(provenance: Provenance) -> u8 {
     match provenance {
         Provenance::RustAnalyzer => 0,
+        Provenance::Vtsls => 0,
         Provenance::ChakraResolver => 0,
         Provenance::TreeSitter => 1,
         Provenance::Git => 2,

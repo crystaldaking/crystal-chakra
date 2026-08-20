@@ -11,7 +11,7 @@ Target list reviewed: 2026-08 (GitHub Octoverse 2025 top languages plus pre-exis
 |----------|------|-----------|---------|------------------|
 | php | first-class | yes | tree-sitter-php 0.24.2 | none (deferred) |
 | rust | first-class | yes | tree-sitter-rust 0.24 | rust-analyzer (integrated) |
-| typescript | in-progress | no | tree-sitter-typescript 0.23.2 | vtsls (selected-not-integrated) |
+| typescript | first-class | yes | tree-sitter-typescript 0.23.2 | vtsls (integrated) |
 
 ## Capability detail
 
@@ -100,10 +100,10 @@ Target list reviewed: 2026-08 (GitHub Octoverse 2025 top languages plus pre-exis
 | FRESH-01 | pass | atomic revision publication (ADR-0001) |
 | FRESH-02 | pass | live freshness barrier (ADR-0005) |
 | PRECISE-01 | pass | recorded provider selection: vtsls (@vtsls/language-server 0.3.x) |
-| PRECISE-02 | missing | vtsls integration lands in Part B of #27. |
-| PRECISE-03 | not-applicable | No provider integrated yet (Part B of #27). |
-| PRECISE-04 | not-applicable | No provider integrated yet (Part B of #27). |
-| PRECISE-05 | not-applicable | No provider integrated yet (Part B of #27). |
+| PRECISE-02 | pass | vtsls over shared chakra-lsp client |
+| PRECISE-03 | pass | owned lifecycle, restart, orphan-free shutdown (ADR-0032) |
+| PRECISE-04 | pass | capability-gated enrichment through PreciseProvider |
+| PRECISE-05 | pass | graceful absence/crash degradation to syntax tier |
 | PROV-01 | pass | domain provenance model |
 | QUERY-01 | pass | chakra-engine QueryService |
 | QUERY-02 | pass | chakra-mcp |

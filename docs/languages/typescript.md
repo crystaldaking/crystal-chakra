@@ -1,9 +1,8 @@
 # TypeScript language support
 
-Status: in-progress (see `docs/support/languages/typescript.json` and
-`docs/language-parity-contract.md`). Selection record: ADR-0027. The syntax
-adapter and full parity evidence landed in Part A of issue #27; the precise
-provider (vtsls) lands in Part B and flips the tier to first-class.
+Status: first-class (see `docs/support/languages/typescript.json` and
+`docs/language-parity-contract.md`). Selection record: ADR-0027; provider
+integration record: ADR-0032.
 
 ## What is supported
 
@@ -26,6 +25,9 @@ provider (vtsls) lands in Part B and flips the tier to first-class.
   with *relative* specifiers resolve calls and `extends`/`implements`
   relations against the target module; `new X()` records a constructor call.
   Package (non-relative) specifiers are not resolved syntactically.
+- Precise enrichment through vtsls (optional, on demand; ADR-0032):
+  definitions, references, and callers with revision-scoped synchronization
+  over the shared `chakra-lsp` client.
 - All seven Chakra queries (`status`, `repo_map`, `search`, `symbol_search`,
   `context`, `callers`, `diff_context`) and their MCP exposure, with atomic
   revisions, `require_fresh`, provenance/precision, ambiguity reporting,
@@ -33,21 +35,28 @@ provider (vtsls) lands in Part B and flips the tier to first-class.
 
 ## Install and runtime requirements
 
-None. The grammar is compiled into Chakra and indexing runs fully offline:
-no Node.js, no npm install, and no language server is required for any
-TypeScript capability shipped in Part A. The precise provider selected in
-ADR-0027 (vtsls, `@vtsls/language-server` 0.3.x) requires Node.js and lands
-in Part B; until then `status` reports no provider entry for a
-TypeScript-only workspace.
+- **Syntax intelligence** (always available): none. The grammar is compiled
+  into Chakra and indexing runs fully offline: no Node.js, no npm install,
+  and no language server is required.
+- **Precise enrichment** (optional): Node.js plus the vtsls server
+  (`npm install -g @vtsls/language-server`, or a project-local install) and a
+  resolvable TypeScript (`tsdk`) — vtsls exits silently without one; see
+  ADR-0032. Chakra owns the process lifecycle: bounded readiness, restart,
+  cancellation, and shutdown without orphan processes. When vtsls is absent,
+  crashed, or not ready, queries degrade to syntax intelligence with explicit
+  provenance and `status` reports no provider entry.
 
 ## Precision tiers
 
+- **Precise** (`vtsls`): definitions, references, and callers confirmed by
+  the language server, when configured.
 - **Syntax** (`tree_sitter`): declarations, containers, imports, ranges,
   diagnostics, call-site records.
 - **Heuristic** (`tree_sitter`): resolved call and heritage relations.
 - **Textual** (`text_search`): plain text search hits.
 
-There is no precise tier yet; Part B adds vtsls-backed precise facts.
+Corpus evidence (`docs/support/corpus/results/`) is syntax-tier: providers
+are off by default in the corpus runner.
 
 ## Measured limitations
 
