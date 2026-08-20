@@ -88,6 +88,7 @@ impl PreciseProvider for FlakyProvider {
         PreciseQueryResult {
             revision: request.workspace.revision,
             state: ProviderState::Ready,
+            fallback_cause: None,
             incoming: state.incoming.clone(),
             outgoing: Vec::new(),
             incoming_truncated: false,

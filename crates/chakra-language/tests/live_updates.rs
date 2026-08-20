@@ -145,14 +145,26 @@ fn degraded_budget_metadata_survives_incremental_live_updates() -> Result<(), Bo
         "src/one.rs",
         "pub fn alpha_after_budgeted_edit() {}\n",
     )?;
+    let updated = engine.symbol_search(SymbolSearchRequest {
+        query: "alpha_after_budgeted_edit".to_owned(),
+        source: Default::default(),
+        limit: None,
+        freshness: FreshnessRequirement::RequireFresh,
+        ..SymbolSearchRequest::default()
+    })?;
+    assert_eq!(updated.freshness, Freshness::Fresh);
     assert_eq!(
-        symbols(&engine, "alpha_after_budgeted_edit")?,
+        updated
+            .data
+            .candidates
+            .iter()
+            .map(|candidate| candidate.qualified_name.as_str())
+            .collect::<Vec<_>>(),
         ["one::alpha_after_budgeted_edit"]
     );
-    let updated = engine.snapshot();
-    assert_eq!(updated.status(), WorkspaceStatus::Degraded);
-    assert_eq!(updated.indexing().coverage.discovered_files, 3);
-    assert_eq!(updated.indexing().coverage.indexed_files, 2);
+    assert_eq!(updated.status, WorkspaceStatus::Degraded);
+    assert_eq!(updated.indexing.coverage.discovered_files, 3);
+    assert_eq!(updated.indexing.coverage.indexed_files, 2);
     for required in [
         IndexPhase::ParseExtraction,
         IndexPhase::SymbolCatalog,
@@ -163,7 +175,7 @@ fn degraded_budget_metadata_survives_incremental_live_updates() -> Result<(), Bo
     ] {
         assert!(
             updated
-                .indexing()
+                .indexing
                 .phases
                 .iter()
                 .any(|measurement| measurement.phase == required),
@@ -171,7 +183,7 @@ fn degraded_budget_metadata_survives_incremental_live_updates() -> Result<(), Bo
         );
     }
     assert_eq!(live.metrics().files_reparsed - baseline.files_reparsed, 1);
-    updated.graph().validate_consistency()?;
+    engine.snapshot().graph().validate_consistency()?;
     live.shutdown()?;
     Ok(())
 }

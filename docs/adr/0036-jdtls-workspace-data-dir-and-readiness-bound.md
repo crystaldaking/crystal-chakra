@@ -1,4 +1,4 @@
-# ADR-0035: jdtls workspace data directory and readiness bound
+# ADR-0036: jdtls workspace data directory and readiness bound
 
 Status: accepted
 Date: 2026-08-20

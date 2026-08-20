@@ -6,8 +6,8 @@
 use std::ffi::OsString;
 use std::path::PathBuf;
 use std::process::ExitCode;
-use std::sync::Arc;
-use std::time::Instant;
+use std::sync::{Arc, OnceLock};
+use std::time::{Duration, Instant};
 
 use chakra_domain::indexing::{
     DEFAULT_MAX_INDEX_CALL_SITES, DEFAULT_MAX_INDEX_EDGES, DEFAULT_MAX_INDEX_FILES,
@@ -16,7 +16,11 @@ use chakra_domain::indexing::{
     IndexBudgets, IndexCancellation,
 };
 use chakra_domain::state::{Freshness, WorkspaceStatus};
-use chakra_engine::WorkspaceEngine;
+use chakra_domain::symbol::Language;
+use chakra_engine::{PreciseProvider, WorkspaceEngine};
+use chakra_provider_pool::{
+    ProviderPool, ProviderPoolConfig, ProviderRegistration, ProviderStartError,
+};
 use clap::{Args, CommandFactory, Parser, Subcommand};
 
 /// Local code intelligence layer for AI coding agents.
@@ -47,6 +51,57 @@ struct ServeArgs {
     #[arg(long, value_name = "PATH", default_value = "rust-analyzer")]
     rust_analyzer_path: OsString,
 
+    /// Run without the optional vtsls TypeScript/JavaScript provider.
+    #[arg(long)]
+    no_vtsls: bool,
+
+    /// Explicit vtsls executable; omit to use bounded PATH/npm discovery.
+    #[arg(long, value_name = "PATH")]
+    vtsls_path: Option<OsString>,
+
+    /// Run without the optional pyright Python provider.
+    #[arg(long)]
+    no_pyright: bool,
+
+    /// Explicit pyright-langserver executable; omit for bounded discovery.
+    #[arg(long, value_name = "PATH")]
+    pyright_path: Option<OsString>,
+
+    /// Run without the optional jdtls Java provider.
+    #[arg(long)]
+    no_jdtls: bool,
+
+    /// Explicit jdtls executable; omit to use bounded PATH discovery.
+    #[arg(long, value_name = "PATH")]
+    jdtls_path: Option<OsString>,
+
+    /// Maximum jdtls project-import readiness wait, in milliseconds.
+    #[arg(long, default_value_t = 3 * 60 * 1_000_u64)]
+    jdtls_readiness_timeout_millis: u64,
+
+    /// Maximum simultaneously active precise providers.
+    #[arg(long, default_value_t = 3)]
+    max_active_providers: usize,
+
+    /// Maximum deterministic memory reservations for active providers.
+    #[arg(long, default_value_t = 2 * 1024 * 1024 * 1024_u64)]
+    max_provider_reserved_memory_bytes: u64,
+
+    /// Maximum precise-provider queries admitted concurrently.
+    #[arg(long, default_value_t = 4)]
+    max_concurrent_provider_queries: usize,
+
+    /// Maximum precise-provider queries waiting for admission.
+    #[arg(long, default_value_t = 16)]
+    max_queued_provider_queries: usize,
+
+    /// Maximum queue wait before syntax fallback, in milliseconds.
+    #[arg(long, default_value_t = 1_000)]
+    provider_queue_timeout_millis: u64,
+
+    /// Idle time before an inactive provider is stopped, in milliseconds.
+    #[arg(long, default_value_t = 5 * 60 * 1_000_u64)]
+    provider_idle_timeout_millis: u64,
     /// Maximum Git-discovered supported source files admitted to one revision.
     #[arg(long, default_value_t = DEFAULT_MAX_INDEX_FILES)]
     max_index_files: u64,
@@ -102,8 +157,8 @@ async fn main() -> ExitCode {
     }
 }
 
-fn should_start_rust_analyzer(disabled: bool, has_rust_sources: bool) -> bool {
-    !disabled && has_rust_sources
+fn should_register_provider(disabled: bool) -> bool {
+    !disabled
 }
 
 async fn serve(args: ServeArgs) -> ExitCode {
@@ -122,6 +177,19 @@ async fn serve(args: ServeArgs) -> ExitCode {
         repo,
         no_rust_analyzer,
         rust_analyzer_path,
+        no_vtsls,
+        vtsls_path,
+        no_pyright,
+        pyright_path,
+        no_jdtls,
+        jdtls_path,
+        jdtls_readiness_timeout_millis,
+        max_active_providers,
+        max_provider_reserved_memory_bytes,
+        max_concurrent_provider_queries,
+        max_queued_provider_queries,
+        provider_queue_timeout_millis,
+        provider_idle_timeout_millis,
         max_index_files,
         max_source_file_bytes,
         max_workspace_source_bytes,
@@ -197,7 +265,6 @@ async fn serve(args: ServeArgs) -> ExitCode {
         "initial syntax revision publication completed"
     );
     let initial_metrics = report.metrics;
-    let has_rust_sources = initial_metrics.rust_files > 0;
     tracing::info!(
         files = initial_metrics.parsed_files,
         rust_files = initial_metrics.rust_files,
@@ -239,50 +306,186 @@ async fn serve(args: ServeArgs) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let precise_provider = if !should_start_rust_analyzer(no_rust_analyzer, has_rust_sources) {
-        if no_rust_analyzer {
-            tracing::info!("rust-analyzer precise enrichment is disabled");
-        } else {
-            tracing::info!(
-                "rust-analyzer was not started because the workspace has no Rust sources"
-            );
-        }
-        None
+    let mut registrations = Vec::new();
+    if should_register_provider(no_rust_analyzer) {
+        let query_wait_budget = chakra_provider_rust_analyzer::DEFAULT_QUERY_WAIT_TIMEOUT;
+        registrations.push(
+            ProviderRegistration::new(
+                "rust-analyzer",
+                vec![Language::Rust],
+                768 * 1024 * 1024,
+                move |workspace,
+                      _operation|
+                      -> Result<Arc<dyn PreciseProvider>, ProviderStartError> {
+                    let config = chakra_provider_rust_analyzer::RustAnalyzerConfig {
+                        executable: rust_analyzer_path.clone(),
+                        ..chakra_provider_rust_analyzer::RustAnalyzerConfig::default()
+                    };
+                    chakra_provider_rust_analyzer::RustAnalyzerProvider::start(workspace, config)
+                        .map(|provider| provider as Arc<dyn PreciseProvider>)
+                        .map_err(|error| ProviderStartError::new(error.to_string()))
+                },
+            )
+            .with_additional_wait_budget(query_wait_budget),
+        );
     } else {
-        let config = chakra_provider_rust_analyzer::RustAnalyzerConfig {
-            executable: rust_analyzer_path,
-            ..chakra_provider_rust_analyzer::RustAnalyzerConfig::default()
+        tracing::info!("rust-analyzer precise enrichment is disabled");
+    }
+    if should_register_provider(no_vtsls) {
+        let command: OnceLock<chakra_provider_vtsls::VtslsCommand> = OnceLock::new();
+        let discovery_budget = if vtsls_path.is_some() {
+            Duration::ZERO
+        } else {
+            chakra_provider_vtsls::COMMAND_DISCOVERY_TIMEOUT
         };
-        match chakra_provider_rust_analyzer::RustAnalyzerProvider::start(
-            engine.provider_workspace(),
-            config,
-        ) {
-            Ok(provider) => {
-                let adapter: Arc<dyn chakra_engine::PreciseProvider> = provider.clone();
-                if let Err(error) = engine.install_precise_provider(adapter) {
-                    tracing::warn!(%error, "precise provider was not installed");
-                    let _ = provider.shutdown();
-                    None
-                } else {
-                    Some(provider)
-                }
-            }
-            Err(error) => {
-                tracing::warn!(%error, "precise provider could not start; syntax intelligence remains available");
-                None
-            }
+        let query_wait_budget = chakra_provider_vtsls::DEFAULT_QUERY_WAIT_TIMEOUT;
+        registrations.push(
+            ProviderRegistration::new(
+                "vtsls",
+                vec![Language::TypeScript, Language::JavaScript],
+                512 * 1024 * 1024,
+                move |workspace,
+                      operation|
+                      -> Result<Arc<dyn PreciseProvider>, ProviderStartError> {
+                    let resolved_command = if let Some(command) = command.get() {
+                        command.clone()
+                    } else {
+                        let resolved = chakra_provider_vtsls::resolve_command_with_context(
+                            vtsls_path.as_deref(),
+                            operation,
+                        )
+                        .map_err(ProviderStartError::from)?;
+                        let _ = command.set(resolved.clone());
+                        resolved
+                    };
+                    let config = chakra_provider_vtsls::VtslsConfig {
+                        command: resolved_command,
+                        ..chakra_provider_vtsls::VtslsConfig::default()
+                    };
+                    chakra_provider_vtsls::VtslsProvider::start(workspace, config)
+                        .map(|provider| provider as Arc<dyn PreciseProvider>)
+                        .map_err(|error| ProviderStartError::new(error.to_string()))
+                },
+            )
+            .with_additional_wait_budget(discovery_budget.saturating_add(query_wait_budget)),
+        );
+    } else {
+        tracing::info!("vtsls precise enrichment is disabled");
+    }
+    if should_register_provider(no_pyright) {
+        let command: OnceLock<chakra_provider_pyright::PyrightCommand> = OnceLock::new();
+        let discovery_budget = if pyright_path.is_some() {
+            Duration::ZERO
+        } else {
+            chakra_provider_pyright::COMMAND_DISCOVERY_TIMEOUT
+        };
+        let query_wait_budget = chakra_provider_pyright::DEFAULT_QUERY_WAIT_TIMEOUT;
+        registrations.push(
+            ProviderRegistration::new(
+                "pyright",
+                vec![Language::Python],
+                512 * 1024 * 1024,
+                move |workspace,
+                      operation|
+                      -> Result<Arc<dyn PreciseProvider>, ProviderStartError> {
+                    let resolved_command = if let Some(command) = command.get() {
+                        command.clone()
+                    } else {
+                        let resolved = chakra_provider_pyright::resolve_command_with_context(
+                            pyright_path.as_deref(),
+                            operation,
+                        )
+                        .map_err(ProviderStartError::from)?;
+                        let _ = command.set(resolved.clone());
+                        resolved
+                    };
+                    let config = chakra_provider_pyright::PyrightConfig {
+                        command: resolved_command,
+                        ..chakra_provider_pyright::PyrightConfig::default()
+                    };
+                    chakra_provider_pyright::PyrightProvider::start(workspace, config)
+                        .map(|provider| provider as Arc<dyn PreciseProvider>)
+                        .map_err(|error| ProviderStartError::new(error.to_string()))
+                },
+            )
+            .with_additional_wait_budget(discovery_budget.saturating_add(query_wait_budget)),
+        );
+    } else {
+        tracing::info!("pyright precise enrichment is disabled");
+    }
+    if should_register_provider(no_jdtls) {
+        let command: OnceLock<chakra_provider_jdtls::JdtlsCommand> = OnceLock::new();
+        let query_wait_budget = chakra_provider_jdtls::DEFAULT_QUERY_WAIT_TIMEOUT;
+        registrations.push(
+            ProviderRegistration::new(
+                "jdtls",
+                vec![Language::Java],
+                1024 * 1024 * 1024,
+                move |workspace,
+                      operation|
+                      -> Result<Arc<dyn PreciseProvider>, ProviderStartError> {
+                    let resolved_command = if let Some(command) = command.get() {
+                        command.clone()
+                    } else {
+                        let resolved = chakra_provider_jdtls::resolve_command_with_context(
+                            jdtls_path.as_deref(),
+                            &workspace.repository_root,
+                            operation,
+                        )
+                        .map_err(ProviderStartError::from)?;
+                        let _ = command.set(resolved.clone());
+                        resolved
+                    };
+                    let config = chakra_provider_jdtls::JdtlsConfig {
+                        command: resolved_command,
+                        readiness_timeout: Duration::from_millis(jdtls_readiness_timeout_millis),
+                        ..chakra_provider_jdtls::JdtlsConfig::default()
+                    };
+                    chakra_provider_jdtls::JdtlsProvider::start(workspace, config)
+                        .map(|provider| provider as Arc<dyn PreciseProvider>)
+                        .map_err(|error| ProviderStartError::new(error.to_string()))
+                },
+            )
+            .with_additional_wait_budget(query_wait_budget),
+        );
+    } else {
+        tracing::info!("jdtls precise enrichment is disabled");
+    }
+    let provider_pool = match ProviderPool::start(
+        ProviderPoolConfig {
+            max_active_providers,
+            max_reserved_memory_bytes: max_provider_reserved_memory_bytes,
+            max_concurrent_queries: max_concurrent_provider_queries,
+            max_queued_queries: max_queued_provider_queries,
+            query_queue_timeout: Duration::from_millis(provider_queue_timeout_millis),
+            idle_timeout: Duration::from_millis(provider_idle_timeout_millis),
+            ..ProviderPoolConfig::default()
+        },
+        registrations,
+    ) {
+        Ok(pool) => pool,
+        Err(error) => {
+            eprintln!("chakra: invalid precise-provider pool: {error}");
+            let _ = tokio::task::spawn_blocking(move || live.shutdown()).await;
+            return ExitCode::FAILURE;
         }
     };
+    for provider in provider_pool.providers() {
+        if let Err(error) = engine.install_precise_provider(provider) {
+            eprintln!("chakra: failed to install precise provider: {error}");
+            let _ = tokio::task::spawn_blocking(move || provider_pool.shutdown()).await;
+            let _ = tokio::task::spawn_blocking(move || live.shutdown()).await;
+            return ExitCode::FAILURE;
+        }
+    }
     let serve_result = chakra_mcp::serve_stdio(engine).await;
-    if let Some(provider) = precise_provider {
-        match tokio::task::spawn_blocking(move || provider.shutdown()).await {
-            Ok(Ok(())) => {}
-            Ok(Err(error)) => {
-                tracing::warn!(%error, "precise provider did not shut down cleanly");
-            }
-            Err(error) => {
-                tracing::warn!(%error, "precise provider shutdown task failed");
-            }
+    match tokio::task::spawn_blocking(move || provider_pool.shutdown()).await {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => {
+            tracing::warn!(%error, "precise-provider pool did not shut down cleanly");
+        }
+        Err(error) => {
+            tracing::warn!(%error, "precise-provider pool shutdown task failed");
         }
     }
     match tokio::task::spawn_blocking(move || live.shutdown()).await {
@@ -346,6 +549,14 @@ mod tests {
             }) if args.repo == Path::new("/tmp/example")
                 && !args.no_rust_analyzer
                 && args.rust_analyzer_path == "rust-analyzer"
+                && !args.no_vtsls
+                && args.vtsls_path.is_none()
+                && !args.no_pyright
+                && args.pyright_path.is_none()
+                && !args.no_jdtls
+                && args.jdtls_path.is_none()
+                && args.jdtls_readiness_timeout_millis == 180_000
+                && args.max_active_providers == 3
                 && args.max_index_files == DEFAULT_MAX_INDEX_FILES
                 && args.max_index_symbols == DEFAULT_MAX_INDEX_SYMBOLS
                 && args.max_index_workers == DEFAULT_MAX_INDEX_WORKERS
@@ -360,6 +571,17 @@ mod tests {
             "--no-rust-analyzer",
             "--rust-analyzer-path",
             "/opt/bin/rust-analyzer",
+            "--no-vtsls",
+            "--vtsls-path",
+            "/opt/bin/vtsls",
+            "--no-pyright",
+            "--pyright-path",
+            "/opt/bin/pyright-langserver",
+            "--no-jdtls",
+            "--jdtls-path",
+            "/opt/bin/jdtls",
+            "--jdtls-readiness-timeout-millis",
+            "240000",
         ]);
         assert!(matches!(
             cli,
@@ -367,6 +589,15 @@ mod tests {
                 command: Some(Commands::Serve(ref args)),
             }) if args.no_rust_analyzer
                 && args.rust_analyzer_path == "/opt/bin/rust-analyzer"
+                && args.no_vtsls
+                && args.vtsls_path.as_deref() == Some(std::ffi::OsStr::new("/opt/bin/vtsls"))
+                && args.no_pyright
+                && args.pyright_path.as_deref()
+                    == Some(std::ffi::OsStr::new("/opt/bin/pyright-langserver"))
+                && args.no_jdtls
+                && args.jdtls_path.as_deref()
+                    == Some(std::ffi::OsStr::new("/opt/bin/jdtls"))
+                && args.jdtls_readiness_timeout_millis == 240_000
         ));
     }
 
@@ -382,9 +613,8 @@ mod tests {
     }
 
     #[test]
-    fn rust_analyzer_start_policy_requires_rust_sources_and_permission() {
-        assert!(should_start_rust_analyzer(false, true));
-        assert!(!should_start_rust_analyzer(false, false));
-        assert!(!should_start_rust_analyzer(true, true));
+    fn provider_registration_policy_is_independent_of_startup_inventory() {
+        assert!(should_register_provider(false));
+        assert!(!should_register_provider(true));
     }
 }

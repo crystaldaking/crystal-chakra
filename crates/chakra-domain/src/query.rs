@@ -262,6 +262,32 @@ pub struct ProviderDocumentSyncMetrics {
 pub struct ProviderMetrics {
     pub cache: ProviderCacheMetrics,
     pub document_sync: ProviderDocumentSyncMetrics,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub orchestration: Option<ProviderOrchestrationMetrics>,
+}
+
+/// Provider-pool lifecycle and admission counters. Reservations are
+/// deterministic configuration bounds, not process RSS measurements.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct ProviderOrchestrationMetrics {
+    pub configured_providers: u64,
+    pub active_providers: u64,
+    pub max_active_providers: u64,
+    pub reserved_memory_bytes: u64,
+    pub max_reserved_memory_bytes: u64,
+    pub running_queries: u64,
+    pub queued_queries: u64,
+    pub max_concurrent_queries: u64,
+    pub max_queued_queries: u64,
+    pub activations: u64,
+    pub activation_failures: u64,
+    pub activation_timeouts: u64,
+    pub idle_shutdowns: u64,
+    pub resource_evictions: u64,
+    pub shutdown_failures: u64,
+    pub saturated_queries: u64,
+    pub queue_timeouts: u64,
+    pub cancelled_queries: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -282,14 +308,30 @@ pub struct ProviderInfo {
     pub query_wait_budget_millis: Option<u64>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderFallbackCause {
+    QueueSaturated,
+    QueueTimedOut,
+    ActivationCapacity,
+    ActivationFailed,
+    ActivationTimedOut,
+    Cancelled,
+    ProviderStopped,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ProviderQueryInfo {
     pub name: String,
     pub state: ProviderState,
     pub fallback_used: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fallback_cause: Option<ProviderFallbackCause>,
     pub fallback_reason: Option<String>,
     pub last_error: Option<String>,
     pub progress: Option<ProviderProgress>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metrics: Option<ProviderMetrics>,
     pub wait_budget_millis: Option<u64>,
 }
 

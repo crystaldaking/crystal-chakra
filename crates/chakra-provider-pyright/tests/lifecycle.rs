@@ -5,7 +5,7 @@ use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use chakra_domain::location::{RepoRelativePath, SourceRange, TextPosition};
@@ -185,6 +185,34 @@ fn compile_fake_server(root: &Path, name: &str) -> Result<PathBuf, Box<dyn Error
     Ok(executable)
 }
 
+struct SharedFakeServer {
+    _scratch: tempfile::TempDir,
+    executable: PathBuf,
+}
+
+fn materialize_fake_server(root: &Path, name: &str) -> Result<PathBuf, Box<dyn Error>> {
+    static SERVER: OnceLock<Result<SharedFakeServer, String>> = OnceLock::new();
+    let shared = match SERVER.get_or_init(|| {
+        let scratch = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let executable = compile_fake_server(scratch.path(), "fake-pyright-shared")
+            .map_err(|error| error.to_string())?;
+        Ok(SharedFakeServer {
+            _scratch: scratch,
+            executable,
+        })
+    }) {
+        Ok(server) => &server.executable,
+        Err(message) => return Err(std::io::Error::other(message.clone()).into()),
+    };
+    let executable = root.join(if cfg!(windows) {
+        format!("{name}.exe")
+    } else {
+        name.to_owned()
+    });
+    fs::copy(shared, &executable)?;
+    Ok(executable)
+}
+
 const TARGET_SOURCE: &str = "def target():\n    pass\n\ndef caller():\n    target()\n";
 
 fn document(path: &RepoRelativePath, source: &str) -> ProviderDocument {
@@ -227,6 +255,7 @@ fn request(root: &Path, revision: Revision) -> Result<PreciseQueryRequest, Box<d
             outgoing: false,
         },
         limit: 20,
+        priority: chakra_engine::ProviderRequestPriority::Normal,
     })
 }
 
@@ -250,7 +279,7 @@ fn counter(executable: &Path, extension: &str) -> String {
 #[test]
 fn precise_incoming_call_carries_pyright_provenance() -> Result<(), Box<dyn Error>> {
     let repository = tempfile::tempdir()?;
-    let executable = compile_fake_server(repository.path(), "fake-pyright-precise")?;
+    let executable = materialize_fake_server(repository.path(), "fake-pyright-precise")?;
     let request = request(repository.path(), Revision(1))?;
     let provider = PyrightProvider::start(request.workspace.clone(), config(&executable))?;
 
@@ -276,7 +305,7 @@ fn precise_incoming_call_carries_pyright_provenance() -> Result<(), Box<dyn Erro
 #[test]
 fn revision_delta_syncs_only_opened_documents_with_full_text() -> Result<(), Box<dyn Error>> {
     let repository = tempfile::tempdir()?;
-    let executable = compile_fake_server(repository.path(), "fake-pyright-delta")?;
+    let executable = materialize_fake_server(repository.path(), "fake-pyright-delta")?;
     let mut request = request(repository.path(), Revision(1))?;
     let other_path = RepoRelativePath::new("src/other.py")?;
     fs::write(repository.path().join(other_path.as_str()), "other = 1\n")?;
@@ -357,7 +386,7 @@ fn revision_delta_syncs_only_opened_documents_with_full_text() -> Result<(), Box
 #[test]
 fn timed_out_request_is_cancelled_and_reports_catching_up() -> Result<(), Box<dyn Error>> {
     let repository = tempfile::tempdir()?;
-    let executable = compile_fake_server(repository.path(), "fake-pyright-hang")?;
+    let executable = materialize_fake_server(repository.path(), "fake-pyright-hang")?;
     let request = request(repository.path(), Revision(1))?;
     let provider = PyrightProvider::start(request.workspace.clone(), config(&executable))?;
 
@@ -372,7 +401,7 @@ fn timed_out_request_is_cancelled_and_reports_catching_up() -> Result<(), Box<dy
 #[test]
 fn per_query_wait_budget_returns_before_the_request_timeout() -> Result<(), Box<dyn Error>> {
     let repository = tempfile::tempdir()?;
-    let executable = compile_fake_server(repository.path(), "fake-pyright-hang-budget")?;
+    let executable = materialize_fake_server(repository.path(), "fake-pyright-hang-budget")?;
     let request = request(repository.path(), Revision(1))?;
     let mut bounded = config(&executable);
     bounded.request_timeout = Duration::from_secs(2);
@@ -391,7 +420,7 @@ fn per_query_wait_budget_returns_before_the_request_timeout() -> Result<(), Box<
 #[test]
 fn transport_crash_restarts_once_then_degrades() -> Result<(), Box<dyn Error>> {
     let repository = tempfile::tempdir()?;
-    let executable = compile_fake_server(repository.path(), "fake-pyright-crash")?;
+    let executable = materialize_fake_server(repository.path(), "fake-pyright-crash")?;
     let request = request(repository.path(), Revision(1))?;
     let provider = PyrightProvider::start(request.workspace.clone(), config(&executable))?;
 
@@ -413,7 +442,7 @@ fn transport_crash_restarts_once_then_degrades() -> Result<(), Box<dyn Error>> {
 #[test]
 fn missing_call_hierarchy_capability_degrades() -> Result<(), Box<dyn Error>> {
     let repository = tempfile::tempdir()?;
-    let executable = compile_fake_server(repository.path(), "fake-pyright-no-hierarchy")?;
+    let executable = materialize_fake_server(repository.path(), "fake-pyright-no-hierarchy")?;
     let request = request(repository.path(), Revision(1))?;
     let provider = PyrightProvider::start(request.workspace.clone(), config(&executable))?;
 
@@ -434,7 +463,7 @@ fn missing_call_hierarchy_capability_degrades() -> Result<(), Box<dyn Error>> {
 #[test]
 fn shutdown_reaps_provider_process_group_descendants() -> Result<(), Box<dyn Error>> {
     let repository = tempfile::tempdir()?;
-    let executable = compile_fake_server(repository.path(), "fake-pyright-spawn-child")?;
+    let executable = materialize_fake_server(repository.path(), "fake-pyright-spawn-child")?;
     let request = request(repository.path(), Revision(1))?;
     let provider = PyrightProvider::start(request.workspace.clone(), config(&executable))?;
     let result = provider.enrich(request);

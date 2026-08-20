@@ -1609,6 +1609,27 @@ fn desired_watch_directories(
     repository_root: &Path,
     indexed_paths: &[RepoRelativePath],
 ) -> (BTreeSet<PathBuf>, bool) {
+    // FSEvents observes directory trees natively. Register one recursive
+    // watch per indexed top-level source root plus a non-recursive repository
+    // watch. This avoids both redundant ancestor streams and broad recursive
+    // observation of unrelated generated/vendor trees.
+    if cfg!(target_os = "macos") {
+        let mut desired = BTreeSet::from([repository_root.to_path_buf()]);
+        for path in indexed_paths {
+            let Some(top_level) = Path::new(path.as_str()).components().next() else {
+                continue;
+            };
+            let directory = repository_root.join(top_level);
+            if directory.is_dir() {
+                desired.insert(directory);
+            }
+        }
+        let truncated = desired.len() > MAX_WATCHED_DIRECTORIES;
+        if truncated {
+            desired = desired.into_iter().take(MAX_WATCHED_DIRECTORIES).collect();
+        }
+        return (desired, truncated);
+    }
     let mut desired = BTreeSet::from([repository_root.to_path_buf()]);
     for path in indexed_paths {
         if let Some(parent) = Path::new(path.as_str()).parent() {
@@ -1663,7 +1684,12 @@ fn refresh_watches(
         watched.remove(&directory);
     }
     for directory in desired.difference(watched).cloned().collect::<Vec<_>>() {
-        match watcher.watch(&directory, RecursiveMode::NonRecursive) {
+        let recursive_mode = if cfg!(target_os = "macos") && directory != repository_root {
+            RecursiveMode::Recursive
+        } else {
+            RecursiveMode::NonRecursive
+        };
+        match watcher.watch(&directory, recursive_mode) {
             Ok(()) => {
                 watched.insert(directory);
             }
@@ -1882,6 +1908,28 @@ mod tests {
         assert_eq!(latest, 10);
         assert!(event_epoch_is_non_contiguous(&mut latest, 9));
         assert_eq!(latest, 10);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn fsevents_coalesces_nested_sources_into_top_level_watches()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let workspace = tempfile::tempdir()?;
+        let root = workspace.path();
+        std::fs::create_dir(root.join("src"))?;
+        let paths = [
+            RepoRelativePath::new("src/main/java/example/Main.java")?,
+            RepoRelativePath::new("src/test/java/example/MainTest.java")?,
+        ];
+
+        let (desired, truncated) = desired_watch_directories(root, &paths);
+
+        assert_eq!(
+            desired,
+            BTreeSet::from([root.to_path_buf(), root.join("src")])
+        );
+        assert!(!truncated);
+        Ok(())
     }
 
     #[test]

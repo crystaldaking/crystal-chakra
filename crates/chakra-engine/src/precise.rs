@@ -13,7 +13,7 @@ use std::time::Duration;
 use chakra_domain::location::{RepoRelativePath, SourceRange};
 use chakra_domain::operation::{OperationAbort, OperationContext};
 use chakra_domain::provenance::Provenance;
-use chakra_domain::query::{ProviderMetrics, ProviderProgress};
+use chakra_domain::query::{ProviderFallbackCause, ProviderMetrics, ProviderProgress};
 use chakra_domain::revision::Revision;
 use chakra_domain::state::ProviderState;
 use chakra_domain::symbol::Language;
@@ -308,6 +308,16 @@ pub struct PreciseQueryRequest {
     pub symbol: ProviderSymbol,
     pub directions: CallHierarchyDirections,
     pub limit: usize,
+    pub priority: ProviderRequestPriority,
+}
+
+/// Admission priority used by the bounded multi-provider scheduler.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub enum ProviderRequestPriority {
+    Background,
+    #[default]
+    Normal,
+    Interactive,
 }
 
 /// One provider-confirmed relationship endpoint and optional call site.
@@ -327,6 +337,7 @@ pub struct PreciseRelation {
 pub struct PreciseQueryResult {
     pub revision: Revision,
     pub state: ProviderState,
+    pub fallback_cause: Option<ProviderFallbackCause>,
     pub incoming: Vec<PreciseRelation>,
     pub outgoing: Vec<PreciseRelation>,
     pub incoming_truncated: bool,
@@ -339,10 +350,22 @@ impl PreciseQueryResult {
         Self {
             revision,
             state,
+            fallback_cause: None,
             incoming: Vec::new(),
             outgoing: Vec::new(),
             incoming_truncated: false,
             outgoing_truncated: false,
+        }
+    }
+
+    pub fn unavailable_because(
+        revision: Revision,
+        state: ProviderState,
+        cause: ProviderFallbackCause,
+    ) -> Self {
+        Self {
+            fallback_cause: Some(cause),
+            ..Self::unavailable(revision, state)
         }
     }
 }
@@ -381,6 +404,11 @@ pub trait PreciseProvider: std::fmt::Debug + Send + Sync {
         None
     }
 
+    /// Idempotently stops provider-owned workers and child processes.
+    fn shutdown(&self) -> Result<(), ProviderShutdownError> {
+        Ok(())
+    }
+
     /// Lazily enrich one selected symbol. Implementations must bound waiting
     /// and return `CatchingUp`/`Degraded` rather than stale precise facts.
     fn enrich(&self, request: PreciseQueryRequest) -> PreciseQueryResult {
@@ -392,6 +420,22 @@ pub trait PreciseProvider: std::fmt::Debug + Send + Sync {
         request: PreciseQueryRequest,
         operation: &OperationContext,
     ) -> PreciseQueryResult;
+}
+
+/// Adapter-neutral provider shutdown failure retained at the orchestration
+/// boundary without leaking provider-specific error types.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("{message}")]
+pub struct ProviderShutdownError {
+    message: String,
+}
+
+impl ProviderShutdownError {
+    pub fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+        }
+    }
 }
 
 fn language_from_path(path: &str) -> Option<Language> {

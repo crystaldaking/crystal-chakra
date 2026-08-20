@@ -57,6 +57,7 @@ Accepted decisions:
 - ADR-032: shared LSP client crate and vtsls precise provider
 - ADR-033: slot-keyed revision-local entity-id partitions
 - ADR-034: CommonJS facts in the JavaScript syntax model
-- ADR-035: jdtls workspace data directory and readiness bound
+- ADR-035: bounded multi-provider orchestration
+- ADR-036: jdtls workspace data directory and readiness bound
 
 Do not pre-create empty ADRs merely to satisfy a list.

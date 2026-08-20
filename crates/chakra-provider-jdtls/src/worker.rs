@@ -331,6 +331,7 @@ impl Worker {
                     return Ok(PreciseQueryResult {
                         revision: request.workspace.revision,
                         state: ProviderState::Ready,
+                        fallback_cause: None,
                         incoming: Vec::new(),
                         outgoing: Vec::new(),
                         incoming_truncated: false,
@@ -344,6 +345,7 @@ impl Worker {
                     return Ok(PreciseQueryResult {
                         revision: request.workspace.revision,
                         state: ProviderState::Ready,
+                        fallback_cause: None,
                         incoming: Vec::new(),
                         outgoing: Vec::new(),
                         incoming_truncated: false,
@@ -407,6 +409,7 @@ impl Worker {
         Ok(PreciseQueryResult {
             revision: request.workspace.revision,
             state: ProviderState::Ready,
+            fallback_cause: None,
             incoming,
             outgoing,
             incoming_truncated,
@@ -740,7 +743,7 @@ impl Worker {
             .map(std::ffi::OsString::as_os_str)
             .collect();
         // jdtls writes its project model under `-data`; create the
-        // per-workspace data directory (outside the repository, ADR-0035)
+        // per-workspace data directory (outside the repository, ADR-0036)
         // so a missing parent never surfaces as an opaque server failure.
         if let Some(data_dir) = self.config.command.data_dir()
             && let Err(error) = std::fs::create_dir_all(data_dir)

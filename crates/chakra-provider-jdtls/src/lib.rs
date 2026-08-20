@@ -1,4 +1,4 @@
-//! Live, optional jdtls adapter for Java precise enrichment (ADR-0035).
+//! Live, optional jdtls adapter for Java precise enrichment (ADR-0036).
 //!
 //! Only the v0.1 call-hierarchy operations cross this adapter internally.
 //! Public contracts are Chakra-native, so LSP URIs, UTF-16 positions, and
@@ -19,12 +19,15 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
-use chakra_domain::operation::OperationContext;
+use chakra_domain::operation::{OperationAbort, OperationContext};
 use chakra_domain::query::{ProviderMetrics, ProviderProgress};
 use chakra_domain::revision::Revision;
 use chakra_domain::state::ProviderState;
 use chakra_domain::symbol::Language;
-use chakra_engine::{PreciseProvider, PreciseQueryRequest, PreciseQueryResult, ProviderWorkspace};
+use chakra_engine::{
+    PreciseProvider, PreciseQueryRequest, PreciseQueryResult, ProviderShutdownError,
+    ProviderWorkspace,
+};
 use crossbeam_channel::{SendTimeoutError, Sender, bounded};
 use thiserror::Error;
 
@@ -32,7 +35,7 @@ use crate::worker::Worker;
 
 const DEFAULT_COMMAND_CAPACITY: usize = 8;
 const DEFAULT_MAX_MESSAGE_BYTES: usize = 32 * 1024 * 1024;
-const DEFAULT_QUERY_WAIT_TIMEOUT: Duration = Duration::from_secs(1);
+pub const DEFAULT_QUERY_WAIT_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// Resolved jdtls invocation. jdtls is a JVM application: both the `jdtls`
 /// launcher script and the `jdt-language-server` binary accept the same
@@ -167,7 +170,7 @@ fn data_dir_is_safe(repository_root: &Path, data_dir: &Path) -> bool {
 }
 
 /// The jdtls per-workspace data directory: under the OS temporary directory,
-/// keyed by the workspace path, never inside the repository (ADR-0035).
+/// keyed by the workspace path, never inside the repository (ADR-0036).
 pub fn workspace_data_dir(repository_root: &Path) -> PathBuf {
     std::env::temp_dir().join(format!(
         "chakra-jdtls-{:016x}",
@@ -422,6 +425,10 @@ impl PreciseProvider for JdtlsProvider {
         Some(self.config.query_wait_timeout)
     }
 
+    fn shutdown(&self) -> Result<(), ProviderShutdownError> {
+        JdtlsProvider::shutdown(self).map_err(|error| ProviderShutdownError::new(error.to_string()))
+    }
+
     fn enrich(&self, request: PreciseQueryRequest) -> PreciseQueryResult {
         self.enrich_with_context(request, &OperationContext::unbounded())
     }
@@ -485,16 +492,28 @@ impl Drop for JdtlsProvider {
 
 /// Resolves the provider command: an explicit executable path first, then
 /// `jdtls`/`jdt-language-server` discovery on `PATH`. The data directory is
-/// the per-workspace tempdir location (ADR-0035). Exposed for CLI wiring and
+/// the per-workspace tempdir location (ADR-0036). Exposed for CLI wiring and
 /// diagnostics.
 pub fn resolve_command(explicit: Option<&OsStr>, repository_root: &Path) -> JdtlsCommand {
+    resolve_command_with_context(explicit, repository_root, &OperationContext::unbounded())
+        .unwrap_or_else(|_| JdtlsCommand::for_workspace(OsString::from("jdtls")))
+}
+
+pub fn resolve_command_with_context(
+    explicit: Option<&OsStr>,
+    repository_root: &Path,
+    operation: &OperationContext,
+) -> Result<JdtlsCommand, OperationAbort> {
+    operation.check()?;
     let data_dir = workspace_data_dir(repository_root);
-    match explicit {
+    let command = match explicit {
         Some(path) => JdtlsCommand::stdio(path.to_owned(), data_dir.into_os_string()),
         None => JdtlsCommand::discover(&data_dir).unwrap_or_else(|| {
             JdtlsCommand::stdio(OsString::from("jdtls"), data_dir.into_os_string())
         }),
-    }
+    };
+    operation.check()?;
+    Ok(command)
 }
 
 #[cfg(test)]
@@ -502,6 +521,17 @@ mod tests {
     use super::*;
     use chakra_domain::location::{RepoRelativePath, SourceRange, TextPosition};
     use chakra_engine::{CallHierarchyDirections, ProviderDocument};
+
+    #[test]
+    fn command_resolution_observes_the_caller_deadline() -> Result<(), Box<dyn std::error::Error>> {
+        let root = tempfile::tempdir()?;
+        let operation = OperationContext::with_timeout(Duration::ZERO);
+        assert_eq!(
+            resolve_command_with_context(None, root.path(), &operation),
+            Err(OperationAbort::DeadlineExceeded)
+        );
+        Ok(())
+    }
 
     #[test]
     fn missing_executable_degrades_without_failing_queries()
@@ -543,6 +573,7 @@ mod tests {
                 outgoing: false,
             },
             limit: 20,
+            priority: chakra_engine::ProviderRequestPriority::Normal,
         });
         assert_eq!(result.state, ProviderState::Degraded);
         assert_eq!(provider.name(), "jdtls");

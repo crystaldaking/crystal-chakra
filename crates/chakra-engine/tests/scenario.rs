@@ -16,8 +16,9 @@ use chakra_domain::location::{RepoRelativePath, SourceRange, TextPosition};
 use chakra_domain::operation::OperationContext;
 use chakra_domain::provenance::{Precision, Provenance};
 use chakra_domain::query::{
-    CallersRequest, ContextRequest, DiffContextRequest, QueryError, QueryService, RepoMapRequest,
-    SearchRequest, SourceFilter, StatusRequest, SymbolRef, SymbolSearchRequest,
+    CallersRequest, ContextRequest, DiffContextRequest, ProviderFallbackCause, QueryError,
+    QueryService, RepoMapRequest, SearchRequest, SourceFilter, StatusRequest, SymbolRef,
+    SymbolSearchRequest,
 };
 use chakra_domain::revision::Revision;
 use chakra_domain::source::{SourceClassification, SourceMetadata, SourcePackage, SourceRole};
@@ -1507,6 +1508,7 @@ fn current_precise_callers_replace_matching_syntax_candidates() -> Result<(), Bo
         result: PreciseQueryResult {
             revision,
             state: ProviderState::Ready,
+            fallback_cause: None,
             incoming: vec![
                 PreciseRelation {
                     name: caller.name().to_owned(),
@@ -1571,6 +1573,7 @@ fn older_precise_result_is_never_labeled_current_after_revision_change()
         result: PreciseQueryResult {
             revision: old_revision,
             state: ProviderState::Ready,
+            fallback_cause: None,
             incoming: vec![PreciseRelation {
                 name: caller.name().to_owned(),
                 declaration: caller.location,
@@ -1611,7 +1614,11 @@ fn degraded_provider_preserves_useful_syntax_callers() -> Result<(), Box<dyn Err
     let (engine, ids) = scenario_engine()?;
     let revision = engine.snapshot().revision();
     engine.install_precise_provider(Arc::new(FixedProvider {
-        result: PreciseQueryResult::unavailable(revision, ProviderState::Degraded),
+        result: PreciseQueryResult::unavailable_because(
+            revision,
+            ProviderState::Degraded,
+            ProviderFallbackCause::ActivationFailed,
+        ),
         last_error: Some("provider process stopped"),
     }))?;
     let envelope = engine.callers(CallersRequest {
@@ -1625,6 +1632,14 @@ fn degraded_provider_preserves_useful_syntax_callers() -> Result<(), Box<dyn Err
     assert_eq!(envelope.data.callers.len(), 1);
     assert_eq!(envelope.data.callers[0].symbol.id, ids.service_refund);
     assert_eq!(envelope.data.callers[0].precision, Precision::Syntax);
+    assert_eq!(
+        envelope
+            .data
+            .provider
+            .as_ref()
+            .and_then(|provider| provider.fallback_cause),
+        Some(ProviderFallbackCause::ActivationFailed)
+    );
     let status = engine.status(StatusRequest)?;
     assert_eq!(
         status.data.providers[0].last_error.as_deref(),
@@ -1650,6 +1665,7 @@ fn precise_result_is_discarded_if_workspace_advances_during_provider_query()
         result: PreciseQueryResult {
             revision,
             state: ProviderState::Ready,
+            fallback_cause: None,
             incoming: vec![PreciseRelation {
                 name: caller.name().to_owned(),
                 declaration: caller.location,
@@ -1699,6 +1715,7 @@ fn precise_result_is_discarded_if_post_provider_freshness_advances() -> Result<(
         result: PreciseQueryResult {
             revision,
             state: ProviderState::Ready,
+            fallback_cause: None,
             incoming: vec![PreciseRelation {
                 name: caller.name().to_owned(),
                 declaration: caller.location,
@@ -1746,6 +1763,7 @@ fn post_provider_freshness_failure_keeps_syntax_fallback() -> Result<(), Box<dyn
         result: PreciseQueryResult {
             revision,
             state: ProviderState::Ready,
+            fallback_cause: None,
             incoming: vec![PreciseRelation {
                 name: caller.name().to_owned(),
                 declaration: caller.location,

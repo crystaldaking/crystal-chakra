@@ -324,6 +324,7 @@ impl Worker {
                     return Ok(PreciseQueryResult {
                         revision: request.workspace.revision,
                         state: ProviderState::Ready,
+                        fallback_cause: None,
                         incoming: Vec::new(),
                         outgoing: Vec::new(),
                         incoming_truncated: false,
@@ -337,6 +338,7 @@ impl Worker {
                     return Ok(PreciseQueryResult {
                         revision: request.workspace.revision,
                         state: ProviderState::Ready,
+                        fallback_cause: None,
                         incoming: Vec::new(),
                         outgoing: Vec::new(),
                         incoming_truncated: false,
@@ -396,6 +398,7 @@ impl Worker {
         Ok(PreciseQueryResult {
             revision: request.workspace.revision,
             state: ProviderState::Ready,
+            fallback_cause: None,
             incoming,
             outgoing,
             incoming_truncated,

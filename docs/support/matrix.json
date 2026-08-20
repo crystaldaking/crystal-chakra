@@ -28,8 +28,8 @@
       },
       "precise_provider": {
         "name": "jdtls",
-        "adr": "docs/adr/0035-jdtls-workspace-data-dir-and-readiness-bound.md",
-        "status": "deferred"
+        "adr": "docs/adr/0036-jdtls-workspace-data-dir-and-readiness-bound.md",
+        "status": "integrated"
       },
       "capabilities": {
         "DISC-01": {
@@ -119,7 +119,7 @@
           "mechanism": "recorded provider selection: jdtls (1.60.x milestone, JDK 21+)",
           "evidence": [
             "docs/adr/0027-grammar-and-provider-selection.md",
-            "docs/adr/0035-jdtls-workspace-data-dir-and-readiness-bound.md"
+            "docs/adr/0036-jdtls-workspace-data-dir-and-readiness-bound.md"
           ]
         },
         "PRECISE-02": {
@@ -131,7 +131,7 @@
         },
         "PRECISE-03": {
           "status": "pass",
-          "mechanism": "owned lifecycle, restart, orphan-free shutdown; per-workspace data dir and configurable readiness bound (ADR-0035)",
+          "mechanism": "owned lifecycle, restart, orphan-free shutdown; per-workspace data dir and configurable readiness bound (ADR-0036)",
           "evidence": [
             "crates/chakra-provider-jdtls/tests/lifecycle.rs",
             "crates/chakra-lsp/tests/lifecycle.rs"

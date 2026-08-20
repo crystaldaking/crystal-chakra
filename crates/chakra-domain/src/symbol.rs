@@ -45,6 +45,18 @@ pub enum Language {
     Java,
 }
 
+impl Language {
+    /// Languages understood by the current Chakra build, in stable display order.
+    pub const ALL: [Self; 6] = [
+        Self::Rust,
+        Self::Php,
+        Self::TypeScript,
+        Self::Python,
+        Self::JavaScript,
+        Self::Java,
+    ];
+}
+
 /// Kind of a code entity (SPEC §8 plus the impl-block/import facts v0.1 §7
 /// requires).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, schemars::JsonSchema)]

@@ -6,7 +6,7 @@
 //! matches is rejected with [`PublishError::Conflict`], so a slow update can
 //! never overwrite a newer revision.
 
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, OnceLock, RwLock};
 
 use arc_swap::ArcSwap;
 use chakra_domain::identity::WorkspaceIdentity;
@@ -14,6 +14,7 @@ use chakra_domain::indexing::IndexingStatus;
 use chakra_domain::operation::OperationContext;
 use chakra_domain::revision::Revision;
 use chakra_domain::state::{Freshness, ProviderState, WorkspaceStatus};
+use chakra_domain::symbol::Language;
 use thiserror::Error;
 
 use crate::diff::WorkspaceDiffProvider;
@@ -112,10 +113,20 @@ pub trait FreshnessBarrier: std::fmt::Debug + Send + Sync {
 #[error("a freshness barrier is already installed")]
 pub struct BarrierAlreadyInstalled;
 
-/// A workspace has at most one optional precise-provider adapter.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
-#[error("a precise provider is already installed")]
-pub struct ProviderAlreadyInstalled;
+/// A provider cannot be installed unless routing stays unambiguous.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum ProviderInstallError {
+    #[error("precise provider {provider} does not support a known language")]
+    NoSupportedLanguages { provider: String },
+    #[error(
+        "language {language:?} is already owned by {installed}; cannot also install {candidate}"
+    )]
+    LanguageConflict {
+        language: Language,
+        installed: String,
+        candidate: String,
+    },
+}
 
 /// A workspace has at most one Git/workspace diff adapter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
@@ -200,7 +211,7 @@ impl UpdateBuilder {
 pub struct WorkspaceEngine {
     current: ArcSwap<WorkspaceSnapshot>,
     freshness_barrier: OnceLock<Arc<dyn FreshnessBarrier>>,
-    precise_provider: OnceLock<Arc<dyn PreciseProvider>>,
+    precise_providers: RwLock<Vec<Arc<dyn PreciseProvider>>>,
     diff_provider: OnceLock<Arc<dyn WorkspaceDiffProvider>>,
 }
 
@@ -224,7 +235,7 @@ impl WorkspaceEngine {
         Self {
             current: ArcSwap::from_pointee(snapshot),
             freshness_barrier: OnceLock::new(),
-            precise_provider: OnceLock::new(),
+            precise_providers: RwLock::new(Vec::new()),
             diff_provider: OnceLock::new(),
         }
     }
@@ -239,14 +250,36 @@ impl WorkspaceEngine {
             .map_err(|_| BarrierAlreadyInstalled)
     }
 
-    /// Installs the optional, language-neutral precise-provider adapter.
+    /// Installs one language-neutral precise-provider adapter. Languages are
+    /// exclusive so query routing cannot silently depend on install order.
     pub fn install_precise_provider(
         &self,
         provider: Arc<dyn PreciseProvider>,
-    ) -> Result<(), ProviderAlreadyInstalled> {
-        self.precise_provider
-            .set(provider)
-            .map_err(|_| ProviderAlreadyInstalled)
+    ) -> Result<(), ProviderInstallError> {
+        let supported: Vec<_> = Language::ALL
+            .into_iter()
+            .filter(|language| provider.supports(*language))
+            .collect();
+        if supported.is_empty() {
+            return Err(ProviderInstallError::NoSupportedLanguages {
+                provider: provider.name().to_owned(),
+            });
+        }
+        let mut providers = write_providers(&self.precise_providers);
+        for language in supported {
+            if let Some(installed) = providers
+                .iter()
+                .find(|installed| installed.supports(language))
+            {
+                return Err(ProviderInstallError::LanguageConflict {
+                    language,
+                    installed: installed.name().to_owned(),
+                    candidate: provider.name().to_owned(),
+                });
+            }
+        }
+        providers.push(provider);
+        Ok(())
     }
 
     /// Installs the Git/workspace adapter used by `diff_context`.
@@ -264,8 +297,18 @@ impl WorkspaceEngine {
         ProviderWorkspace::from_snapshot(&self.snapshot())
     }
 
-    pub(crate) fn precise_provider(&self) -> Option<&Arc<dyn PreciseProvider>> {
-        self.precise_provider.get()
+    pub(crate) fn precise_providers(&self) -> Vec<Arc<dyn PreciseProvider>> {
+        read_providers(&self.precise_providers).clone()
+    }
+
+    pub(crate) fn precise_provider_for(
+        &self,
+        language: Language,
+    ) -> Option<Arc<dyn PreciseProvider>> {
+        read_providers(&self.precise_providers)
+            .iter()
+            .find(|provider| provider.supports(language))
+            .cloned()
     }
 
     pub(crate) fn diff_provider(&self) -> Option<&Arc<dyn WorkspaceDiffProvider>> {
@@ -357,9 +400,58 @@ impl WorkspaceEngine {
     }
 }
 
+fn read_providers(
+    providers: &RwLock<Vec<Arc<dyn PreciseProvider>>>,
+) -> std::sync::RwLockReadGuard<'_, Vec<Arc<dyn PreciseProvider>>> {
+    match providers.read() {
+        Ok(providers) => providers,
+        Err(poisoned) => poisoned.into_inner(),
+    }
+}
+
+fn write_providers(
+    providers: &RwLock<Vec<Arc<dyn PreciseProvider>>>,
+) -> std::sync::RwLockWriteGuard<'_, Vec<Arc<dyn PreciseProvider>>> {
+    match providers.write() {
+        Ok(providers) => providers,
+        Err(poisoned) => poisoned.into_inner(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[derive(Debug)]
+    struct LanguageProvider {
+        name: &'static str,
+        language: Option<Language>,
+    }
+
+    impl PreciseProvider for LanguageProvider {
+        fn name(&self) -> &'static str {
+            self.name
+        }
+
+        fn supports(&self, language: Language) -> bool {
+            self.language == Some(language)
+        }
+
+        fn state_for(&self, _revision: Revision) -> ProviderState {
+            ProviderState::Dormant
+        }
+
+        fn enrich_with_context(
+            &self,
+            request: crate::PreciseQueryRequest,
+            _operation: &OperationContext,
+        ) -> crate::PreciseQueryResult {
+            crate::PreciseQueryResult::unavailable(
+                request.workspace.revision,
+                ProviderState::Dormant,
+            )
+        }
+    }
 
     fn engine() -> Result<WorkspaceEngine, Box<dyn std::error::Error>> {
         let identity = WorkspaceIdentity::for_primary_worktree(std::path::Path::new("."))?;
@@ -376,6 +468,64 @@ mod tests {
         assert_eq!(snapshot.status(), WorkspaceStatus::Initializing);
         assert_eq!(snapshot.freshness(), Freshness::Stale);
         assert_eq!(snapshot.provider_state(), ProviderState::NotConfigured);
+        Ok(())
+    }
+
+    #[test]
+    fn precise_provider_installation_routes_disjoint_languages()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let engine = engine()?;
+        engine.install_precise_provider(Arc::new(LanguageProvider {
+            name: "rust",
+            language: Some(Language::Rust),
+        }))?;
+        engine.install_precise_provider(Arc::new(LanguageProvider {
+            name: "python",
+            language: Some(Language::Python),
+        }))?;
+
+        assert_eq!(
+            engine
+                .precise_provider_for(Language::Rust)
+                .map(|provider| provider.name()),
+            Some("rust")
+        );
+        assert_eq!(
+            engine
+                .precise_provider_for(Language::Python)
+                .map(|provider| provider.name()),
+            Some("python")
+        );
+        assert!(engine.precise_provider_for(Language::Php).is_none());
+        assert_eq!(engine.precise_providers().len(), 2);
+        Ok(())
+    }
+
+    #[test]
+    fn precise_provider_installation_rejects_ambiguous_or_empty_routing()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let engine = engine()?;
+        engine.install_precise_provider(Arc::new(LanguageProvider {
+            name: "first-rust",
+            language: Some(Language::Rust),
+        }))?;
+        assert!(matches!(
+            engine.install_precise_provider(Arc::new(LanguageProvider {
+                name: "second-rust",
+                language: Some(Language::Rust),
+            })),
+            Err(ProviderInstallError::LanguageConflict {
+                language: Language::Rust,
+                ..
+            })
+        ));
+        assert!(matches!(
+            engine.install_precise_provider(Arc::new(LanguageProvider {
+                name: "empty",
+                language: None,
+            })),
+            Err(ProviderInstallError::NoSupportedLanguages { .. })
+        ));
         Ok(())
     }
 

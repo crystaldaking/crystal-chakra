@@ -23,9 +23,24 @@ version tags prefixed with `v`.
   `Provenance::Jdtls`) owns the jdtls lifecycle: per-workspace data
   directory under the OS tempdir (workspace-bound defaults and validation
   reject relative/repository-contained cache paths) and a configurable
-  readiness bound for the slow first project import (ADR-0035). Conformance fixture (14/14
-  scenarios) and the pinned spring-projects/spring-boot plus apache/kafka
-  corpus evaluations. Java is advertised first-class.
+  readiness bound for the slow first project import (ADR-0036). Conformance
+  fixture (14/14 scenarios) and the pinned spring-projects/spring-boot plus
+  apache/kafka corpus evaluations. Java is advertised first-class. On macOS,
+  live indexing now coalesces nested source directories into recursive
+  FSEvents watches at their indexed top-level roots instead of redundantly
+  registering every ancestor; live conformance suites serialize watcher
+  ownership to avoid backend registration storms.
+- Bounded multi-provider orchestration (issue #26, ADR-0035):
+  rust-analyzer, vtsls (shared by TypeScript/JavaScript), pyright, and jdtls
+  now coexist through strict language routing and start only on the first
+  precise query. Deterministic active-provider, memory-reservation,
+  concurrent-query, and queue limits provide priority/FIFO admission with
+  observable syntax fallback under saturation. Idle/LRU eviction, activation
+  backoff, cancellation, and owned pool/provider shutdown prevent unbounded
+  work or orphan processes; failed eviction cleanup retains its reservation
+  and is retried observably. Provider status distinguishes `dormant` from
+  `not_configured` and reports pool lifecycle/capacity metrics; the response
+  envelope schema advances to version 8.
 - First-class JavaScript/JSX support (issue #29): a
   `chakra-language-javascript` adapter crate (tree-sitter-javascript
   0.25.0, `.js`/`.jsx`/`.mjs`/`.cjs`; the single grammar parses JSX

@@ -9,7 +9,7 @@ Target list reviewed: 2026-08 (GitHub Octoverse 2025 top languages plus pre-exis
 
 | Language | Tier | Advertised | Grammar | Precise provider |
 |----------|------|-----------|---------|------------------|
-| java | first-class | yes | tree-sitter-java 0.23.5 | jdtls (deferred) |
+| java | first-class | yes | tree-sitter-java 0.23.5 | jdtls (integrated) |
 | javascript | first-class | yes | tree-sitter-javascript 0.25.0 | vtsls (integrated) |
 | php | first-class | yes | tree-sitter-php 0.24.2 | none (deferred) |
 | python | first-class | yes | tree-sitter-python 0.25.0 | pyright (integrated) |
@@ -36,7 +36,7 @@ Target list reviewed: 2026-08 (GitHub Octoverse 2025 top languages plus pre-exis
 | FRESH-02 | pass | live freshness barrier (ADR-0005) |
 | PRECISE-01 | pass | recorded provider selection: jdtls (1.60.x milestone, JDK 21+) |
 | PRECISE-02 | pass | jdtls over shared chakra-lsp client (java language id) |
-| PRECISE-03 | pass | owned lifecycle, restart, orphan-free shutdown; per-workspace data dir and configurable readiness bound (ADR-0035) |
+| PRECISE-03 | pass | owned lifecycle, restart, orphan-free shutdown; per-workspace data dir and configurable readiness bound (ADR-0036) |
 | PRECISE-04 | pass | capability-gated enrichment through PreciseProvider |
 | PRECISE-05 | pass | graceful absence/crash degradation to syntax tier |
 | PROV-01 | pass | domain provenance model |

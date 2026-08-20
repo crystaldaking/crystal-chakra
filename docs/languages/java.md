@@ -2,7 +2,7 @@
 
 Status: first-class (see `docs/support/languages/java.json` and
 `docs/language-parity-contract.md`). Selection record: ADR-0027; shared LSP
-client record: ADR-0032; jdtls lifecycle record: ADR-0035.
+client record: ADR-0032; jdtls lifecycle record: ADR-0036.
 
 ## What is supported
 
@@ -30,11 +30,10 @@ client record: ADR-0032; jdtls lifecycle record: ADR-0035.
   qualify against the (imported) type; `new X()` records a constructor
   call; heritage resolves against nested-class, same-package, single-type
   import, and wildcard candidates in that order.
-- A tested jdtls provider adapter (ADR-0027/0035) for definitions,
+- A tested jdtls provider adapter (ADR-0027/0036) for definitions,
   references, and callers with revision-scoped synchronization and
-  `Provenance::Jdtls` provenance. Product-level activation is deferred to
-  multi-provider orchestration (#26); the current `chakra serve` composition
-  answers Java queries at the syntax tier.
+  `Provenance::Jdtls` provenance. The shipped CLI registers it as a dormant
+  route and activates it only when a precise Java query needs it (#26).
 - All seven Chakra queries (`status`, `repo_map`, `search`, `symbol_search`,
   `context`, `callers`, `diff_context`) and their MCP exposure, with atomic
   revisions, `require_fresh`, provenance/precision, ambiguity reporting,
@@ -45,27 +44,26 @@ client record: ADR-0032; jdtls lifecycle record: ADR-0035.
 - **Syntax intelligence** (always available): none. The grammar is compiled
   into Chakra and indexing runs fully offline: no JDK, no build tool, and
   no language server is required.
-- **Provider adapter** (not yet activated by `chakra serve`): the jdtls
-  language server — a `jdtls`
+- **Provider adapter** (optional, activated on demand by `chakra serve`): the
+  jdtls language server — a `jdtls`
   launcher or `jdt-language-server` binary on `PATH` (or an explicitly
   configured path) — plus a **JDK 21+** runtime. jdtls is a JVM
   application: ADR-0027 records a 1–2 GB heap profile, and the first
   project import on a cold workspace can take minutes. Chakra owns the
-  lifecycle (ADR-0035): the per-workspace data directory lives under the OS
+  lifecycle (ADR-0036): the per-workspace data directory lives under the OS
   temporary directory (`chakra-jdtls-<workspace hash>`, never inside the
   repository; relative or repository-contained custom `-data` paths are
   rejected), the post-synchronization readiness barrier is bounded by a
   configurable `readiness_timeout` (default 180 s), and every query keeps
   its own bounded wait budget. Its contract tests prove that absence, crash,
   and slow import degrade to syntax intelligence without orphaning a process.
-  Runtime discovery, configuration, and status reporting through the shipped
-  CLI remain part of #26.
+  The CLI exposes `--jdtls-path`, `--no-jdtls`, and the readiness timeout;
+  status reports the enabled adapter as `dormant` before its first query.
 
 ## Precision tiers
 
 - **Precise** (`jdtls` adapter): definitions, references, and callers
-  confirmed by the language server when a host installs the adapter; the
-  shipped CLI does not yet install it (#26).
+  confirmed by the language server for the pinned workspace revision.
 - **Syntax** (`tree_sitter`): declarations, containers, imports, ranges,
   diagnostics, call-site records.
 - **Heuristic** (`tree_sitter`): resolved call and `extends`/`implements`

@@ -2,13 +2,22 @@
 //! every fixture language, and the runner must report failures loudly.
 
 use std::error::Error;
+use std::sync::Mutex;
 
 use chakra_conformance::{
     Manifest, ScenarioStatus, fixtures_root, languages, run_language, run_scenario,
     validate_manifest,
 };
 
+static LIVE_CONFORMANCE: Mutex<()> = Mutex::new(());
+
 fn assert_language_passes(language: &str) -> Result<(), Box<dyn Error>> {
+    // Each language suite creates and destroys several real filesystem
+    // watchers. macOS FSEvents registration can stall when those suites race,
+    // obscuring conformance failures with backend startup contention.
+    let _live_conformance = LIVE_CONFORMANCE
+        .lock()
+        .map_err(|_| std::io::Error::other("live conformance lock is poisoned"))?;
     let report = run_language(language)?;
     let failures: Vec<String> = report
         .scenarios

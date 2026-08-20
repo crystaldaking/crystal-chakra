@@ -18,7 +18,11 @@ chakra-engine = { path = "../chakra-engine", version = "0.1.1" }
 chakra-git = { path = "../chakra-git", version = "0.1.1" }
 chakra-language = { path = "../chakra-language", version = "0.1.1" }
 chakra-mcp = { path = "../chakra-mcp", version = "0.1.1" }
+chakra-provider-jdtls = { path = "../chakra-provider-jdtls", version = "0.1.1" }
+chakra-provider-pool = { path = "../chakra-provider-pool", version = "0.1.1" }
+chakra-provider-pyright = { path = "../chakra-provider-pyright", version = "0.1.1" }
 chakra-provider-rust-analyzer = { path = "../chakra-provider-rust-analyzer", version = "0.1.1" }
+chakra-provider-vtsls = { path = "../chakra-provider-vtsls", version = "0.1.1" }
 clap.workspace = true
 tokio.workspace = true
 tracing.workspace = true

@@ -10,8 +10,8 @@ Status: **v0.1.2 development candidate**. The implemented slice supports Rust,
 PHP, TypeScript/TSX, Python, JavaScript/JSX, and Java syntax intelligence and
 provides Git-aware discovery, Tree-sitter indexing, bounded live
 filesystem reconciliation, deterministic fresh-query barriers, atomic
-in-memory revisions, optional Rust-only rust-analyzer call-hierarchy
-enrichment, and all seven v0.1 MCP tools:
+in-memory revisions, optional lazy precise call-hierarchy enrichment through
+rust-analyzer, vtsls, pyright, and jdtls, and all seven v0.1 MCP tools:
 
 - `status`
 - `repo_map`
@@ -26,9 +26,10 @@ enrichment, and all seven v0.1 MCP tools:
 - Git available on `PATH`.
 - [rustup](https://rustup.rs/) for building from source. The repository pins
   Rust `1.97.1` and Edition 2024 in `rust-toolchain.toml`.
-- Optional: `rust-analyzer` on `PATH`. If it is unavailable or unhealthy,
-  Chakra continues serving current syntax facts and reports the provider as
-  degraded instead of inventing precise results.
+- Optional precise providers: `rust-analyzer`; vtsls and pyright executables
+  (or their Node/npm installations); and jdtls with JDK 21+. If any provider
+  is unavailable or unhealthy, Chakra continues serving current syntax facts
+  and reports that provider as degraded instead of inventing precise results.
 
 A PHP runtime or Composer installation is not required for indexing. PHP v0.1
 facts are syntax-derived through the official Tree-sitter PHP grammar.
@@ -71,10 +72,15 @@ chakra serve --repo /absolute/path/to/a/git-worktree
 ```
 
 Logging goes to stderr (`RUST_LOG=debug` for more detail). Stdout is reserved
-for the MCP protocol stream. Use `--no-rust-analyzer` for deterministic
-syntax-only operation, or `--rust-analyzer-path /absolute/path/to/rust-analyzer`
-when the provider is not on `PATH`. Chakra does not start rust-analyzer for a
-workspace with no indexed Rust sources.
+for the MCP protocol stream. rust-analyzer, vtsls (TypeScript/JavaScript),
+pyright (Python), and jdtls (Java) are registered as dormant routes by default
+and start lazily on the first precise query, including for a language added
+after server startup. Explicit executable controls are
+`--rust-analyzer-path`, `--vtsls-path`, `--pyright-path`, and `--jdtls-path`.
+Use the corresponding four `--no-*` flags for deterministic syntax-only
+operation. `chakra serve --help` lists the bounded active-provider,
+memory-reservation, concurrent-query, queue, idle-timeout, and jdtls readiness
+controls.
 
 ## Connect Codex
 
@@ -103,8 +109,8 @@ tool_timeout_sec = 60
 
 After connecting, `status` should report a published revision and fresh syntax
 state. Its provider list also reports provider languages and capabilities, so
-the Rust-only precise enrichment boundary is machine-visible. Useful starting
-calls are:
+each precise enrichment boundary is machine-visible. Useful starting calls
+are:
 
 ```json
 {"query":"refund","limit":20}
@@ -245,16 +251,26 @@ authoritative Git/filesystem reconciliation and waits on a deterministic
 barrier; callers do not need to sleep after editing. One immutable workspace
 revision is pinned for the complete response. rust-analyzer is queried only
 for Rust symbols and its data is accepted as precise only for that same
-revision; otherwise current syntax facts are
-returned with `catching_up` or `degraded` provider metadata.
-Optional precision has its own one-second wait budget inside the 30-second MCP
-deadline. `context.data.provider` and `callers.data.provider` explain whether a
+revision; otherwise current syntax facts are returned with `dormant`,
+`catching_up`, or `degraded` provider metadata.
+Optional precision reports its complete pool-admission plus activation/query
+wait budget inside the 30-second MCP deadline. `context.data.provider` and `callers.data.provider` explain whether a
 syntax fallback was used, the current provider stage, whether that stage came
-directly from rust-analyzer or was inferred by Chakra, and the wait budget.
+directly from its language adapter or was inferred by Chakra, and the wait budget.
 `status.data.providers[].metrics` reports document-delta traffic and the
-entry/byte-bounded precise cache.
+entry/byte-bounded precise cache plus provider-pool capacity, lifecycle,
+saturation, queue/activation timeout, cancellation, and shutdown-failure
+counters.
 
-Provider startup no longer opens every Rust file. A precise query opens the
+The provider pool routes each language to exactly one adapter and admits
+interactive work ahead of normal/background waiters while preserving FIFO
+within a priority. It starts no language-server process at MCP startup, keeps
+at most three providers active by default, and reclaims only providers with no
+in-flight query. Deterministic memory values are admission reservations rather
+than measured RSS. Saturation, activation failure, or idle shutdown never
+removes syntax intelligence.
+
+Provider startup does not open every source file. A precise query opens the
 selected target from its pinned snapshot; unchanged callers remain disk-backed.
 Later revisions send full text only for documents Chakra already opened and
 use watched-file events for other exact create/change/delete deltas. Provider
@@ -285,14 +301,15 @@ bounded to five seconds and execution to a 30-second end-to-end deadline.
 Cancellation before dispatch removes queued work; cancellation after dispatch
 cooperatively interrupts freshness, graph traversal, Git, and optional provider
 work while the request retains its slot through cleanup. Timed-out or cancelled
-rust-analyzer requests send `$/cancelRequest`. `status.data.query_execution`
+LSP-provider requests send `$/cancelRequest`. `status.data.query_execution`
 reports queued/running work, outcomes, and permit hold time without itself
 entering the expensive-query pool.
 
 Indexing defaults to 100,000 Git-discovered supported source files, 8 MiB per
 source, 128 MiB total source, 500,000 symbols, 1,000,000 relationships, and
 1,000,000 compact call sites. Cold-start and phase-sampled resident-memory
-targets default to 120 seconds and 2 GiB. Initial parsing may use up to eight worker-local
+targets default to 120 seconds and 2 GiB. Initial parsing may use up to eight
+worker-local
 Tree-sitter parsers. The effective limit is the minimum of the configured
 `--max-index-workers`, available logical CPUs, and a 64 MiB-per-worker memory
 reserve after reserving the configured source budget; repositories with fewer
@@ -306,13 +323,13 @@ possible: files, text search, and retained declarations remain queryable. Every
 query envelope reports exact indexing budgets, corpus coverage, capability
 completeness, affected capabilities, omission cause, phase measurements, and
 best-effort CPU/RSS samples. Scheduling metadata reports configured, available,
-memory-limited, and effective workers plus queue depth. Schema v4 carries these
-facts together with v3 graph-publication reuse/copy metrics. Ordinary edits use
-persistent file-owned graph deltas and shallow registered-language
-composition, so old snapshot readers remain immutable without a second
-complete combined-graph copy. Calls are never resolved against a truncated
-symbol catalog. Time/RSS targets are observable warnings rather than
-nondeterministic inputs to graph contents.
+memory-limited, and effective workers plus queue depth. Schema v8 carries these
+facts together with graph-publication reuse/copy and provider-pool metrics.
+Ordinary edits use persistent file-owned graph deltas and shallow
+registered-language composition, so old snapshot readers remain immutable
+without a second complete combined-graph copy. Calls are never resolved
+against a truncated symbol catalog. Time/RSS targets are observable warnings
+rather than nondeterministic inputs to graph contents.
 
 Git discovery/diff subprocesses retain bounded output and have a 30-second
 local deadline that can only be shortened by the query deadline. Cancellation
@@ -417,7 +434,7 @@ release, or hotfix branches and pull requests. Direct post-v0.1.0 commits to
 - `crates/chakra-domain` — core types and MCP-independent query contracts.
 - `crates/chakra-engine` — in-memory graph, atomic revisions, query layer.
 - `crates/chakra-git` — Git-aware source discovery and typed current-worktree diff adapter.
-- `crates/chakra-language` — registered-language graph composition, watching, and reconciliation.
+- `crates/chakra-language` — language-adapter registry, graph composition, watching, and reconciliation.
 - `crates/chakra-language-rust` — Tree-sitter Rust syntax adapter.
 - `crates/chakra-language-php` — Tree-sitter PHP syntax adapter.
 - `crates/chakra-language-typescript` — Tree-sitter TypeScript/TSX syntax adapter.
@@ -425,6 +442,7 @@ release, or hotfix branches and pull requests. Direct post-v0.1.0 commits to
 - `crates/chakra-language-javascript` — Tree-sitter JavaScript/JSX syntax adapter.
 - `crates/chakra-language-java` — Tree-sitter Java syntax adapter.
 - `crates/chakra-mcp` — thin stdio MCP adapter.
+- `crates/chakra-provider-pool` — bounded lazy provider orchestration.
 - `crates/chakra-provider-rust-analyzer` — optional precise provider adapter.
 - `crates/chakra-provider-vtsls` — optional TypeScript/JavaScript precise provider adapter.
 - `crates/chakra-provider-pyright` — optional Python precise provider adapter.
