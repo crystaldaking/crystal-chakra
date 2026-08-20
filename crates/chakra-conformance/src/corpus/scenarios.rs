@@ -19,6 +19,7 @@ use serde_json::Value;
 
 use chakra_domain::envelope::TruncationSection;
 use chakra_domain::indexing::{IndexBudgetKind, IndexBudgets, IndexCancellation};
+use chakra_domain::location::RepoRelativePath;
 use chakra_domain::operation::OperationContext;
 use chakra_domain::query::{
     CallersRequest, ChangeKind, ContextRequest, DiffContextRequest, QueryError, QueryService,
@@ -309,30 +310,31 @@ impl ProbePlan {
     /// PHP probe files must not close the `?>` tag, otherwise appended probe
     /// code would be inline HTML.
     fn select(language: &str, checkout: &Path, cold: &IndexReport) -> Check<Self> {
-        let extension = match language {
-            "rust" => "rs",
-            "php" => "php",
-            "typescript" => "ts",
-            "python" => "py",
-            "javascript" => "js",
-            "java" => "java",
-            "csharp" => "cs",
+        let extensions: &[&str] = match language {
+            "rust" => &["rs"],
+            "php" => &["php"],
+            "typescript" => &["ts"],
+            "python" => &["py"],
+            "javascript" => &["js"],
+            "java" => &["java"],
+            "csharp" => &["cs"],
+            "shell" => &["sh", "bash", "zsh", "ksh"],
             other => return Err(failure(format!("no probe plan for language `{other}`")).into()),
         };
-        let mut paths: Vec<String> = cold
+        let mut paths: Vec<RepoRelativePath> = cold
             .syntax_index
             .paths()
-            .iter()
-            .map(|path| path.as_str().to_owned())
-            .filter(|path| path.ends_with(&format!(".{extension}")))
+            .into_iter()
+            .filter(|path| {
+                extensions
+                    .iter()
+                    .any(|extension| path.as_str().ends_with(&format!(".{extension}")))
+            })
             .collect();
         paths.sort();
         let mut suitable = Vec::new();
         for path in paths {
-            if suitable.len() == 3 {
-                break;
-            }
-            let content = fs::read_to_string(checkout.join(&path))?;
+            let content = cold.graph.file_source(&path).unwrap_or_default();
             let usable = !content.trim().is_empty()
                 && (language != "php" || !content.trim_end().ends_with("?>"));
             if usable {
@@ -346,9 +348,26 @@ impl ProbePlan {
             ))
             .into());
         }
-        let edit_file = suitable[0].clone();
-        let rename_file = suitable[1].clone();
-        let syntax_file = suitable[2].clone();
+        let edit_file = suitable[0].as_str().to_owned();
+        let mut rename_file = None;
+        for path in suitable.iter().skip(1) {
+            let renamed = renamed_sibling(path.as_str())?;
+            if !git_path_is_ignored(checkout, &renamed)? {
+                rename_file = Some(path.as_str().to_owned());
+                break;
+            }
+        }
+        let rename_file = rename_file
+            .ok_or_else(|| failure("corpus probe found no Git-visible rename target"))?;
+        let syntax_file = suitable
+            .iter()
+            .find(|path| {
+                path.as_str() != edit_file
+                    && path.as_str() != rename_file
+                    && cold.graph.file_diagnostic_count(path) == Some(0)
+            })
+            .map(|path| path.as_str().to_owned())
+            .ok_or_else(|| failure("corpus probe found no baseline-clean syntax-error target"))?;
         let renamed_file = renamed_sibling(&rename_file)?;
         let swap_file = match edit_file.rsplit_once('/') {
             Some((directory, name)) => format!("{directory}/.{name}.chakra-swap"),
@@ -412,6 +431,14 @@ impl ProbePlan {
                     "\nclass ChakraCorpusProbeTwo {}\n".to_owned(),
                     "\nclass ChakraCorpusBroken { void Broken() { int x = ; } }\n".to_owned(),
                 ),
+                "shell" => (
+                    "chakra_corpus_probe",
+                    "chakra_corpus_probe_one",
+                    "chakra_corpus_probe_two",
+                    "\nchakra_corpus_probe_one() { true; }\n".to_owned(),
+                    "\nchakra_corpus_probe_two() { true; }\n".to_owned(),
+                    "\nchakra_corpus_broken() { if true; then\n".to_owned(),
+                ),
                 other => {
                     return Err(failure(format!("no probe plan for language `{other}`")).into());
                 }
@@ -449,6 +476,21 @@ fn renamed_sibling(path: &str) -> Check<String> {
     } else {
         format!("{directory}/{renamed}")
     })
+}
+
+fn git_path_is_ignored(checkout: &Path, path: &str) -> Check<bool> {
+    let status = Command::new("git")
+        .current_dir(checkout)
+        .args(["check-ignore", "--quiet", "--no-index", "--", path])
+        .status()?;
+    match status.code() {
+        Some(0) => Ok(true),
+        Some(1) => Ok(false),
+        code => Err(failure(format!(
+            "git check-ignore failed for `{path}` with status {code:?}"
+        ))
+        .into()),
+    }
 }
 
 fn evaluate_repository(
@@ -616,13 +658,15 @@ fn evaluate_repository(
         run_query_scenario(scenario, &workspace, &facts)
     });
 
-    // --- edit scenarios, diff-context, cache restore ----------------------
-    run_mutation_scenarios(&mut slots, &checkout, &workspace, &plan, &facts, repo);
-
     // --- syntax-error -----------------------------------------------------
     slots.run("syntax-error", |scenario| {
         run_syntax_error_scenario(scenario, &checkout, &workspace, &plan, &facts)
     });
+
+    // --- edit scenarios, diff-context, cache restore ----------------------
+    // These run last so cache-restore is the final mutation and clean-tree
+    // proof even when an earlier scenario fails.
+    run_mutation_scenarios(&mut slots, &checkout, &workspace, &plan, &facts, repo);
 
     // --- cancellation -----------------------------------------------------
     slots.run("cancellation", |scenario| {
@@ -716,6 +760,7 @@ fn record_cold_index(
     builder.measure("javascript_files", cold.metrics.javascript_files);
     builder.measure("java_files", cold.metrics.java_files);
     builder.measure("csharp_files", cold.metrics.csharp_files);
+    builder.measure("shell_files", cold.metrics.shell_files);
     builder.measure("source_bytes", cold.metrics.indexing.coverage.source_bytes);
     builder.measure("degraded", cold.metrics.indexing.is_degraded());
     builder.measure(
@@ -816,7 +861,10 @@ fn collect_facts(engine: &Arc<WorkspaceEngine>, plan: &ProbePlan) -> WorkspaceFa
     let rename_symbol = graph
         .symbols()
         .iter()
-        .find(|symbol| symbol.location.file().as_str() == plan.rename_file)
+        .find(|symbol| {
+            symbol.location.file().as_str() == plan.rename_file
+                && symbol.key.kind != SymbolKind::Module
+        })
         .map(|symbol| (symbol.key.qualified_name.clone(), symbol.name().to_owned()));
     WorkspaceFacts {
         targets,
@@ -1260,36 +1308,55 @@ fn run_syntax_error_scenario(
         format!("{original}{}", plan.broken),
     )?;
     let started = Instant::now();
-    if let Some(retained) = facts.retained_query() {
+    let validation = (|| -> Check<_> {
+        if let Some(retained) = facts.retained_query() {
+            reject(
+                workspace.find_symbol(&retained)?,
+                format!("intact symbol `{retained}` lost while another file is broken"),
+            )?;
+            scenario.note(format!("last-good revision: `{retained}` stays queryable"));
+        } else {
+            workspace.barrier_search("chakra")?;
+        }
+        scenario.phase("break_and_barrier", started);
+        let broken = workspace.engine.status(StatusRequest)?;
+        let broken_attributed = broken
+            .data
+            .syntax_diagnostics
+            .diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.range.file().as_str() == plan.syntax_file)
+            .count();
         reject(
-            workspace.find_symbol(&retained)?,
-            format!("intact symbol `{retained}` lost while another file is broken"),
+            broken_attributed > baseline_attributed,
+            format!(
+                "breaking `{}` added no diagnostic attributed to it (baseline {baseline_attributed}, broken {broken_attributed})",
+                plan.syntax_file
+            ),
         )?;
-        scenario.note(format!("last-good revision: `{retained}` stays queryable"));
-    } else {
+        Ok(broken.revision)
+    })();
+
+    // Restoration is exception-safe: even a failed assertion above must not
+    // leave a pinned public-corpus checkout dirty.
+    let cleanup = (|| -> Check<_> {
+        fs::write(checkout.join(&plan.syntax_file), &original)?;
         workspace.barrier_search("chakra")?;
-    }
-    scenario.phase("break_and_barrier", started);
-    let broken = workspace.engine.status(StatusRequest)?;
-    let broken_attributed = broken
-        .data
-        .syntax_diagnostics
-        .diagnostics
-        .iter()
-        .filter(|diagnostic| diagnostic.range.file().as_str() == plan.syntax_file)
-        .count();
-    reject(
-        broken_attributed > baseline_attributed,
-        format!(
-            "breaking `{}` added no diagnostic attributed to it (baseline {baseline_attributed}, broken {broken_attributed})",
-            plan.syntax_file
-        ),
-    )?;
-    // Restore by writing the exact original bytes back, then confirm the
-    // diagnostics return to baseline on a newer published revision.
-    fs::write(checkout.join(&plan.syntax_file), &original)?;
-    workspace.barrier_search("chakra")?;
-    let healed = workspace.engine.status(StatusRequest)?;
+        Ok(workspace.engine.status(StatusRequest)?)
+    })();
+    let broken_revision = match validation {
+        Ok(revision) => revision,
+        Err(validation_error) => {
+            return match cleanup {
+                Ok(_) => Err(validation_error),
+                Err(cleanup_error) => Err(failure(format!(
+                    "{validation_error}; cleanup also failed: {cleanup_error}"
+                ))
+                .into()),
+            };
+        }
+    };
+    let healed = cleanup?;
     let healed_attributed = healed
         .data
         .syntax_diagnostics
@@ -1306,7 +1373,7 @@ fn run_syntax_error_scenario(
         ),
     )?;
     reject(
-        healed.revision > broken.revision,
+        healed.revision > broken_revision,
         "recovery did not publish a newer revision",
     )?;
     scenario.note("temporary syntax error: attributed diagnostics; restore returns to baseline on a newer revision");
@@ -1393,6 +1460,12 @@ mod tests {
         let cache = TempDir::new()?;
         let checkout = cache.path().join("tiny__tiny");
         fs::create_dir_all(checkout.join("src"))?;
+        fs::create_dir_all(checkout.join("ignored"))?;
+        fs::write(checkout.join(".gitignore"), "ignored/\n")?;
+        fs::write(
+            checkout.join("ignored/first.rs"),
+            "pub fn tracked_ignored() {}\n",
+        )?;
         fs::write(
             checkout.join("src/lib.rs"),
             "pub fn hot() {}\npub fn alpha() { hot(); }\n",
@@ -1404,6 +1477,7 @@ mod tests {
         fs::write(checkout.join("src/extra.rs"), "pub fn delta() { hot(); }\n")?;
         fs::write(checkout.join("src/spare.rs"), "pub fn epsilon() {}\n")?;
         git(&checkout, &["init", "--quiet"])?;
+        git(&checkout, &["add", "-f", "ignored/first.rs"])?;
         git(&checkout, &["add", "-A"])?;
         git(
             &checkout,
@@ -1528,6 +1602,23 @@ mod tests {
     fn renamed_sibling_keeps_the_extension() -> Check<()> {
         assert_eq!(renamed_sibling("src/lib.rs")?, "src/lib__chakra_moved.rs");
         assert_eq!(renamed_sibling("Service.php")?, "Service__chakra_moved.php");
+        Ok(())
+    }
+
+    #[test]
+    fn failed_syntax_probe_restores_the_original_checkout() -> Check<()> {
+        let (_cache, checkout, _repo) = tiny_cache()?;
+        let cold = index_repository(&checkout)?;
+        let mut plan = ProbePlan::select("rust", &checkout, &cold)?;
+        plan.broken = "\n// deliberately valid: force the assertion to fail\n".to_owned();
+        let workspace = start_live_workspace(&checkout, cold)?;
+        let facts = collect_facts(&workspace.engine, &plan);
+        let mut scenario = ScenarioBuilder::new("syntax-error");
+
+        let result = run_syntax_error_scenario(&mut scenario, &checkout, &workspace, &plan, &facts);
+
+        assert!(result.is_err());
+        assert_eq!(git(&checkout, &["status", "--porcelain"])?, "");
         Ok(())
     }
 }

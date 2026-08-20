@@ -70,6 +70,7 @@ impl QueryService for StubService {
                     maven_metadata_files: 0,
                     gradle_metadata_files: 0,
                     dotnet_project_metadata_files: 0,
+                    shell_project_metadata_files: 0,
                     path_fallback_files: 1,
                 },
                 syntax_diagnostics: Default::default(),
@@ -284,6 +285,15 @@ fn csharp_fixture_root() -> PathBuf {
         .join("controller-service-provider")
 }
 
+fn shell_fixture_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
+        .join("fixtures")
+        .join("shell")
+        .join("controller-service-provider")
+}
+
 fn copy_fixture_tree(source: &Path, target: &Path) -> Result<(), Box<dyn Error + Send + Sync>> {
     for entry in fs::read_dir(source)? {
         let entry = entry?;
@@ -409,6 +419,40 @@ fn indexed_csharp_fixture_engine()
     update.set_freshness(Freshness::Fresh);
     engine.publish(update)?;
     engine.install_diff_provider(Arc::new(chakra_git::GitWorkspaceDiff))?;
+    Ok((repository, engine))
+}
+
+fn indexed_shell_fixture_engine() -> Result<(TempDir, WorkspaceEngine), Box<dyn Error + Send + Sync>>
+{
+    let repository = TempDir::new()?;
+    git(repository.path(), &["init", "--quiet"])?;
+    git(
+        repository.path(),
+        &["config", "user.email", "tests@example.invalid"],
+    )?;
+    git(repository.path(), &["config", "user.name", "Chakra Tests"])?;
+    copy_fixture_tree(&shell_fixture_root(), repository.path())?;
+    git(
+        repository.path(),
+        &[
+            "add",
+            ".shellcheckrc",
+            "src",
+            "tests",
+            "vendor",
+            "generated",
+        ],
+    )?;
+    git(repository.path(), &["commit", "--quiet", "-m", "base"])?;
+    let report = index_repository(repository.path())?;
+    let identity = WorkspaceIdentity::for_primary_worktree(&report.repository_root)?;
+    let engine = WorkspaceEngine::new(identity);
+    let mut update = engine.begin_update();
+    update.replace_graph(report.graph);
+    update.set_indexing(report.metrics.indexing);
+    update.set_status(WorkspaceStatus::Ready);
+    update.set_freshness(Freshness::Fresh);
+    engine.publish(update)?;
     Ok((repository, engine))
 }
 
@@ -566,6 +610,70 @@ async fn csharp_fixture_is_queryable_through_structured_mcp_tools()
             .structured_content
             .ok_or("C# context response missing")?;
     assert_eq!(context["data"]["symbol"]["id"], target["id"]);
+
+    client.cancel().await?;
+    let running = server_task
+        .await
+        .map_err(|error| std::io::Error::other(format!("server task join: {error}")))?
+        .map_err(|error| std::io::Error::other(format!("server serve: {error}")))?;
+    running.cancel().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn shell_fixture_is_queryable_through_structured_mcp_tools()
+-> Result<(), Box<dyn Error + Send + Sync>> {
+    let (_repository, engine) = indexed_shell_fixture_engine()?;
+    let server = ChakraMcpServer::new(Arc::new(engine));
+    let (server_transport, client_transport) = tokio::io::duplex(64 * 1024);
+    let server_task = tokio::spawn(async move { server.serve(server_transport).await });
+    let client = ().serve(client_transport).await?;
+
+    let repo_map = client
+        .call_tool(
+            CallToolRequestParams::new("repo_map").with_arguments(serde_json::from_value(
+                serde_json::json!({ "include_languages": ["shell"], "limit": 20 }),
+            )?),
+        )
+        .await?
+        .structured_content
+        .ok_or("Shell repo_map response missing")?;
+    let files = repo_map["data"]["files"]
+        .as_array()
+        .ok_or("Shell repo_map files missing")?;
+    assert_eq!(files.len(), 7);
+    assert!(files.iter().all(|file| file["language"] == "shell"));
+    assert!(files.iter().any(|file| {
+        file["source_classification"] == "shell_project_metadata" && file["source_role"] == "test"
+    }));
+
+    let symbols = client
+        .call_tool(CallToolRequestParams::new("symbol_search").with_arguments(
+            serde_json::from_value(serde_json::json!({ "query": "refund_provider", "limit": 5 }))?,
+        ))
+        .await?
+        .structured_content
+        .ok_or("Shell symbol_search response missing")?;
+    let target = symbols["data"]["candidates"]
+        .as_array()
+        .and_then(|candidates| candidates.first())
+        .ok_or("Shell refund_provider symbol missing")?;
+    assert_eq!(target["language"], "shell");
+    assert_eq!(target["precision"], "syntax");
+    assert_eq!(target["provenance"], "tree_sitter");
+
+    let symbol_ref = serde_json::json!({
+        "by_id": { "id": target["id"], "revision": symbols["revision"] }
+    });
+    let callers =
+        client
+            .call_tool(CallToolRequestParams::new("callers").with_arguments(
+                serde_json::from_value(serde_json::json!({ "symbol": symbol_ref, "limit": 10 }))?,
+            ))
+            .await?
+            .structured_content
+            .ok_or("Shell callers response missing")?;
+    assert_eq!(callers["data"]["callers"].as_array().map(Vec::len), Some(1));
 
     client.cancel().await?;
     let running = server_task

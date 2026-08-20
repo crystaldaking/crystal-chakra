@@ -1233,6 +1233,7 @@ mod tests {
             Language::JavaScript => "src/index.js",
             Language::Java => "src/Main.java",
             Language::CSharp => "src/Program.cs",
+            Language::Shell => "src/main.sh",
         };
         Ok(PreciseQueryRequest {
             workspace: ProviderWorkspace::from_documents(

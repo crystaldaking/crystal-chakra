@@ -553,7 +553,11 @@ fn raw_is_supported_source(raw: &[u8]) -> Result<bool, WorkspaceDiffError> {
         || raw.ends_with(b".mjs")
         || raw.ends_with(b".cjs")
         || raw.ends_with(b".java")
-        || raw.ends_with(b".cs");
+        || raw.ends_with(b".cs")
+        || raw.ends_with(b".sh")
+        || raw.ends_with(b".bash")
+        || raw.ends_with(b".zsh")
+        || raw.ends_with(b".ksh");
     if !looks_supported {
         return Ok(false);
     }
@@ -1609,6 +1613,34 @@ mod tests {
         assert_eq!(changes["src/service.py"], ChangeKind::Modified);
         assert_eq!(changes["src/deleted.pyi"], ChangeKind::Deleted);
         assert_eq!(changes["src/untracked.py"], ChangeKind::Added);
+        Ok(())
+    }
+
+    #[test]
+    fn shell_modify_untracked_and_delete_use_the_same_diff_scope() -> Result<(), Box<dyn Error>> {
+        let repository = TempDir::new()?;
+        let root = repository.path();
+        git(root, &["init", "--quiet"])?;
+        git(root, &["config", "user.email", "tests@example.invalid"])?;
+        git(root, &["config", "user.name", "Chakra Tests"])?;
+        write(root, "src/service.sh", "pay() { true; }\n")?;
+        write(root, "src/deleted.zsh", "removed() { true; }\n")?;
+        git(root, &["add", "src"])?;
+        git(root, &["commit", "--quiet", "-m", "base"])?;
+
+        write(root, "src/service.sh", "pay_now() { true; }\n")?;
+        fs::remove_file(root.join("src/deleted.zsh"))?;
+        write(root, "src/untracked.ksh", "added() { true; }\n")?;
+        let workspace = workspace(root, &["src/service.sh", "src/untracked.ksh"])?;
+        let diff = GitWorkspaceDiff.diff(workspace)?;
+        let changes: BTreeMap<_, _> = diff
+            .files
+            .iter()
+            .map(|change| (change.path.as_str(), change.change))
+            .collect();
+        assert_eq!(changes["src/service.sh"], ChangeKind::Modified);
+        assert_eq!(changes["src/deleted.zsh"], ChangeKind::Deleted);
+        assert_eq!(changes["src/untracked.ksh"], ChangeKind::Added);
         Ok(())
     }
 }

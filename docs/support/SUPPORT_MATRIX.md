@@ -15,6 +15,7 @@ Target list reviewed: 2026-08 (GitHub Octoverse 2025 top languages plus pre-exis
 | php | first-class | yes | tree-sitter-php 0.24.2 | none (deferred) |
 | python | first-class | yes | tree-sitter-python 0.25.0 | pyright (integrated) |
 | rust | first-class | yes | tree-sitter-rust 0.24 | rust-analyzer (integrated) |
+| shell | first-class | yes | tree-sitter-bash 0.25.1 | bash-language-server (integrated) |
 | typescript | first-class | yes | tree-sitter-typescript 0.23.2 | vtsls (integrated) |
 
 ## Capability detail
@@ -222,6 +223,40 @@ Target list reviewed: 2026-08 (GitHub Octoverse 2025 top languages plus pre-exis
 | SYNTAX-06 | pass | tree-sitter |
 | SYNTAX-07 | pass | tree-sitter diagnostics (ADR-0022) |
 | SYNTAX-08 | pass | lazy syntax call sites (ADR-0010) |
+
+### shell
+
+| Capability | Status | Mechanism |
+|------------|--------|-----------|
+| AMBIG-01 | pass | query-layer ambiguity reporting |
+| BUDGET-01 | pass | query and index work budgets (ADR-0025) |
+| CANCEL-01 | pass | cooperative syntax and provider cancellation |
+| CONFORM-01 | pass | chakra-conformance harness |
+| CORPUS-01 | pass | pinned ohmyzsh and nvm public-corpus evaluation (ADR-0029) |
+| DEGRADE-01 | pass | bounded degradation (ADR-0011) |
+| DISC-01 | pass | chakra-git discovery (.sh/.bash/.zsh/.ksh) |
+| DISC-02 | pass | nearest .shellcheckrc/shellcheckrc project scope with path fallback |
+| DISC-03 | pass | language-neutral test/vendor/generated roles from Shell path conventions |
+| DOCS-01 | pass | per-language documentation |
+| FRESH-01 | pass | atomic revision publication (ADR-0001) |
+| FRESH-02 | pass | Shell live freshness barrier and language-partition reconciliation |
+| PRECISE-01 | pass | recorded provider selection: bash-language-server 5.6.x plus Chakra-owned outgoing equivalent |
+| PRECISE-02 | pass | bash-language-server references/document symbols over shared chakra-lsp client |
+| PRECISE-03 | pass | owned lifecycle, revision-scoped Shell document synchronization, restart, cancellation, and orphan-free shutdown |
+| PRECISE-04 | pass | capability-gated incoming reference enrichment through PreciseProvider; outgoing remains syntax-derived |
+| PRECISE-05 | pass | graceful absence/crash/capability degradation to syntax tier |
+| PROV-01 | pass | domain provenance model including BashLanguageServer |
+| QUERY-01 | pass | chakra-engine QueryService |
+| QUERY-02 | pass | chakra-mcp |
+| QUERY-03 | pass | chakra-git diff provider |
+| SYNTAX-01 | pass | tree-sitter-bash 0.25.1 |
+| SYNTAX-02 | pass | tree-sitter |
+| SYNTAX-03 | pass | tree-sitter (script modules and nested/top-level functions) |
+| SYNTAX-04 | pass | tree-sitter (source/dot imports and aliases) |
+| SYNTAX-05 | pass | tree-sitter (byte-accurate ranges) |
+| SYNTAX-06 | pass | tree-sitter + test function/file conventions |
+| SYNTAX-07 | pass | tree-sitter diagnostics (ADR-0022) |
+| SYNTAX-08 | pass | bounded static command candidates and Chakra-owned local function edges (ADR-0038) |
 
 ### typescript
 

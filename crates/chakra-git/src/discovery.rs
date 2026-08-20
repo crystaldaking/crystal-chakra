@@ -495,6 +495,9 @@ pub fn source_language(path: &str) -> Option<Language> {
         }
         Some(extension) if extension == OsStr::new("java") => Some(Language::Java),
         Some(extension) if extension == OsStr::new("cs") => Some(Language::CSharp),
+        Some(extension) if matches!(extension.to_str(), Some("sh" | "bash" | "zsh" | "ksh")) => {
+            Some(Language::Shell)
+        }
         _ => None,
     }
 }
@@ -602,7 +605,11 @@ fn workspace_inventory_from_git_output(
             || raw.ends_with(b".mjs")
             || raw.ends_with(b".cjs")
             || raw.ends_with(b".java")
-            || raw.ends_with(b".cs");
+            || raw.ends_with(b".cs")
+            || raw.ends_with(b".sh")
+            || raw.ends_with(b".bash")
+            || raw.ends_with(b".zsh")
+            || raw.ends_with(b".ksh");
         let metadata_input = raw_is_metadata_input(raw);
         if !source && !metadata_input {
             continue;
@@ -671,6 +678,8 @@ fn raw_is_metadata_input(raw: &[u8]) -> bool {
         b"Directory.Build.targets".as_slice(),
         b"Directory.Packages.props".as_slice(),
         b"global.json".as_slice(),
+        b".shellcheckrc".as_slice(),
+        b"shellcheckrc".as_slice(),
         b".cargo/config".as_slice(),
         b".cargo/config.toml".as_slice(),
         b"rust-toolchain".as_slice(),
@@ -1049,6 +1058,48 @@ mod tests {
                 "src/Payments/Payments.csproj"
             ]
         );
+        Ok(())
+    }
+
+    #[test]
+    fn discovers_shell_dialects_without_mixing_shellcheck_metadata() -> Result<(), Box<dyn Error>> {
+        let repository = repository()?;
+        let root = repository.path();
+        for (path, source) in [
+            ("src/run.sh", "run() { true; }\n"),
+            ("src/login.bash", "login() { true; }\n"),
+            ("src/prompt.zsh", "prompt() { true; }\n"),
+            ("src/task.ksh", "task() { true; }\n"),
+            ("ignored.sh", "ignored() { true; }\n"),
+        ] {
+            fs::write(root.join(path), source)?;
+        }
+        fs::write(root.join(".shellcheckrc"), "enable=all\n")?;
+        fs::write(root.join("shellcheckrc"), "disable=SC1090\n")?;
+        fs::write(root.join(".gitignore"), "ignored.rs\nignored.sh\ntarget/\n")?;
+
+        let shell = discover_language_files(root, Language::Shell)?;
+        let paths: Vec<&str> = shell.iter().map(RepoRelativePath::as_str).collect();
+        assert_eq!(
+            paths,
+            [
+                "src/login.bash",
+                "src/prompt.zsh",
+                "src/run.sh",
+                "src/task.ksh"
+            ]
+        );
+        let inventory = discover_workspace_inventory_in_worktree_with_context(
+            root,
+            &OperationContext::unbounded(),
+        )?;
+        let metadata: Vec<&str> = inventory
+            .metadata_inputs
+            .iter()
+            .map(RepoRelativePath::as_str)
+            .filter(|path| path.contains("shellcheck"))
+            .collect();
+        assert_eq!(metadata, [".shellcheckrc", "shellcheckrc"]);
         Ok(())
     }
 }

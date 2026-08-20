@@ -60,5 +60,6 @@ Accepted decisions:
 - ADR-035: bounded multi-provider orchestration
 - ADR-036: jdtls workspace data directory and readiness bound
 - ADR-037: csharp-ls workspace-only enrichment
+- ADR-038: bash-language-server reference enrichment
 
 Do not pre-create empty ADRs merely to satisfy a list.

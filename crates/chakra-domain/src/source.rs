@@ -72,6 +72,9 @@ pub enum SourceClassification {
     /// Project ownership came from a Git-visible .NET `*.csproj`; related
     /// solution and build files remain freshness inputs for the revision.
     DotnetProjectMetadata,
+    /// Project ownership came from the nearest Git-visible `.shellcheckrc`
+    /// or `shellcheckrc` boundary.
+    ShellProjectMetadata,
     /// No applicable package metadata was available; deterministic path
     /// conventions supplied the role.
     PathFallback,
@@ -119,6 +122,7 @@ pub struct SourceMetadataCoverage {
     pub maven_metadata_files: u64,
     pub gradle_metadata_files: u64,
     pub dotnet_project_metadata_files: u64,
+    pub shell_project_metadata_files: u64,
     pub path_fallback_files: u64,
 }
 

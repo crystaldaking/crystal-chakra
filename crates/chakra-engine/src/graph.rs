@@ -28,7 +28,7 @@ use thiserror::Error;
 /// in-memory only — no id is ever persisted — so the slot layout may change
 /// between releases as long as it is consistent within one process.
 /// Explicit slot assignment: Rust = 0, Php = 1, TypeScript = 2, Python = 3,
-/// JavaScript = 4, Java = 5, C# = 6; 9 slots remain. Adding a language means
+/// JavaScript = 4, Java = 5, C# = 6, Shell = 7; 8 slots remain. Adding a language means
 /// assigning it the next free slot
 /// in `language_entity_slot` and appending it to `ENTITY_SLOT_LANGUAGES` —
 /// nothing else in the id machinery changes.
@@ -46,6 +46,7 @@ const ENTITY_SLOT_LANGUAGES: &[Language] = &[
     Language::JavaScript,
     Language::Java,
     Language::CSharp,
+    Language::Shell,
 ];
 
 /// The entity-id slot a language owns; see the slot registry above.
@@ -58,6 +59,7 @@ fn language_entity_slot(language: Language) -> usize {
         Language::JavaScript => 4,
         Language::Java => 5,
         Language::CSharp => 6,
+        Language::Shell => 7,
     }
 }
 
@@ -1246,6 +1248,9 @@ impl SymbolGraph {
                     coverage.dotnet_project_metadata_files = coverage
                         .dotnet_project_metadata_files
                         .saturating_add(part.dotnet_project_metadata_files);
+                    coverage.shell_project_metadata_files = coverage
+                        .shell_project_metadata_files
+                        .saturating_add(part.shell_project_metadata_files);
                     coverage.path_fallback_files = coverage
                         .path_fallback_files
                         .saturating_add(part.path_fallback_files);
@@ -1274,6 +1279,9 @@ impl SymbolGraph {
                 }
                 SourceClassification::DotnetProjectMetadata => {
                     coverage.dotnet_project_metadata_files += 1;
+                }
+                SourceClassification::ShellProjectMetadata => {
+                    coverage.shell_project_metadata_files += 1;
                 }
                 SourceClassification::PathFallback => coverage.path_fallback_files += 1,
             }
@@ -1359,6 +1367,16 @@ impl SymbolGraph {
             capture_omitted,
             response_omitted,
         }
+    }
+
+    /// Exact number of syntax diagnostics attributed to one indexed file.
+    pub fn file_diagnostic_count(&self, path: &RepoRelativePath) -> Option<u64> {
+        if let Some(parts) = self.parts.as_ref() {
+            return parts
+                .iter()
+                .find_map(|part| part.file_diagnostic_count(path));
+        }
+        self.files.get(path).map(|file| file.diagnostic_count)
     }
 
     /// Captured source for one file in this graph revision.
@@ -2509,6 +2527,7 @@ fn provenance_rank(provenance: Provenance) -> u8 {
         Provenance::Pyright => 0,
         Provenance::Jdtls => 0,
         Provenance::CsharpLs => 0,
+        Provenance::BashLanguageServer => 0,
         Provenance::ChakraResolver => 0,
         Provenance::TreeSitter => 1,
         Provenance::Git => 2,
@@ -3374,6 +3393,8 @@ mod tests {
         assert_eq!(summaries[0].provenance, Provenance::Git);
         assert_eq!(summaries[0].precision, Precision::Precise);
         assert_eq!(graph.file_source(&path), Some("//! Documentation only.\n"));
+        assert_eq!(graph.file_diagnostic_count(&path), Some(0));
+        assert_eq!(graph.file_diagnostic_count(&file("src/missing.rs")?), None);
         assert!(matches!(
             graph.add_file(path.clone(), "changed"),
             Err(GraphError::DuplicateFile(duplicate)) if duplicate == path

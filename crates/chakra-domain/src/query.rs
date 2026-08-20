@@ -433,6 +433,7 @@ pub enum RepoMapGroupKind {
     MavenModule,
     GradleProject,
     DotnetProject,
+    ShellProject,
 }
 
 /// Overlapping structural aggregation used by the first repository-map page.

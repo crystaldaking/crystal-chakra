@@ -48,6 +48,8 @@ pub enum Provenance {
     Jdtls,
     /// csharp-ls (live precise provider for C#, ADR-0027/0037).
     CsharpLs,
+    /// bash-language-server (live reference provider for Shell, ADR-0027).
+    BashLanguageServer,
     /// Chakra-owned static resolver producing precise-tier facts from an
     /// explicit, deterministic evidence rule (ADR-0030).
     ChakraResolver,
@@ -109,6 +111,10 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<Provenance>("\"csharp_ls\"")?,
             Provenance::CsharpLs
+        );
+        assert_eq!(
+            serde_json::to_string(&Provenance::BashLanguageServer)?,
+            "\"bash_language_server\""
         );
         Ok(())
     }

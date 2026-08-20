@@ -87,6 +87,14 @@ struct ServeArgs {
     #[arg(long, value_name = "PATH")]
     csharp_ls_path: Option<OsString>,
 
+    /// Run without the optional bash-language-server Shell provider.
+    #[arg(long)]
+    no_bash_language_server: bool,
+
+    /// Explicit bash-language-server executable; omit for PATH discovery.
+    #[arg(long, value_name = "PATH")]
+    bash_language_server_path: Option<OsString>,
+
     /// Maximum simultaneously active precise providers.
     #[arg(long, default_value_t = 3)]
     max_active_providers: usize,
@@ -194,6 +202,8 @@ async fn serve(args: ServeArgs) -> ExitCode {
         jdtls_readiness_timeout_millis,
         no_csharp_ls,
         csharp_ls_path,
+        no_bash_language_server,
+        bash_language_server_path,
         max_active_providers,
         max_provider_reserved_memory_bytes,
         max_concurrent_provider_queries,
@@ -497,6 +507,46 @@ async fn serve(args: ServeArgs) -> ExitCode {
     } else {
         tracing::info!("csharp-ls precise enrichment is disabled");
     }
+    if should_register_provider(no_bash_language_server) {
+        let command: OnceLock<chakra_provider_bash_language_server::BashLanguageServerCommand> =
+            OnceLock::new();
+        let query_wait_budget = chakra_provider_bash_language_server::DEFAULT_QUERY_WAIT_TIMEOUT;
+        registrations.push(
+            ProviderRegistration::new(
+                "bash-language-server",
+                vec![Language::Shell],
+                512 * 1024 * 1024,
+                move |workspace,
+                      operation|
+                      -> Result<Arc<dyn PreciseProvider>, ProviderStartError> {
+                    let resolved_command = if let Some(command) = command.get() {
+                        command.clone()
+                    } else {
+                        let resolved =
+                            chakra_provider_bash_language_server::resolve_command_with_context(
+                                bash_language_server_path.as_deref(),
+                                operation,
+                            )
+                            .map_err(ProviderStartError::from)?;
+                        let _ = command.set(resolved.clone());
+                        resolved
+                    };
+                    let config = chakra_provider_bash_language_server::BashLanguageServerConfig {
+                        command: resolved_command,
+                        ..chakra_provider_bash_language_server::BashLanguageServerConfig::default()
+                    };
+                    chakra_provider_bash_language_server::BashLanguageServerProvider::start(
+                        workspace, config,
+                    )
+                    .map(|provider| provider as Arc<dyn PreciseProvider>)
+                    .map_err(|error| ProviderStartError::new(error.to_string()))
+                },
+            )
+            .with_additional_wait_budget(query_wait_budget),
+        );
+    } else {
+        tracing::info!("bash-language-server precise enrichment is disabled");
+    }
     let provider_pool = match ProviderPool::start(
         ProviderPoolConfig {
             max_active_providers,
@@ -604,6 +654,8 @@ mod tests {
                 && args.jdtls_readiness_timeout_millis == 180_000
                 && !args.no_csharp_ls
                 && args.csharp_ls_path.is_none()
+                && !args.no_bash_language_server
+                && args.bash_language_server_path.is_none()
                 && args.max_active_providers == 3
                 && args.max_index_files == DEFAULT_MAX_INDEX_FILES
                 && args.max_index_symbols == DEFAULT_MAX_INDEX_SYMBOLS
@@ -633,6 +685,9 @@ mod tests {
             "--no-csharp-ls",
             "--csharp-ls-path",
             "/opt/bin/csharp-ls",
+            "--no-bash-language-server",
+            "--bash-language-server-path",
+            "/opt/bin/bash-language-server",
         ]);
         assert!(matches!(
             cli,
@@ -652,6 +707,9 @@ mod tests {
                 && args.no_csharp_ls
                 && args.csharp_ls_path.as_deref()
                     == Some(std::ffi::OsStr::new("/opt/bin/csharp-ls"))
+                && args.no_bash_language_server
+                && args.bash_language_server_path.as_deref()
+                    == Some(std::ffi::OsStr::new("/opt/bin/bash-language-server"))
         ));
     }
 

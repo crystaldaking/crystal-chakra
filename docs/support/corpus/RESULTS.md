@@ -16,4 +16,6 @@ Measured values vary by machine and run; these artifacts are committed deliberat
 | python | django/django | `d92b02090140` | pass | 2.10 | 651 | 117181 | 139240 | 129 | 0 |
 | rust | BurntSushi/ripgrep | `3fce3b5bb023` | pass | 0.18 | 211 | 5195 | 8576 | 63 | 0 |
 | rust | tokio-rs/tokio | `625954f36572` | pass | 0.49 | 124 | 16888 | 19117 | 90 | 0 |
+| shell | nvm-sh/nvm | `6798d1dbc99e` | pass | 0.04 | 58 | 174 | 1060 | 12 | 0 |
+| shell | ohmyzsh/ohmyzsh | `97e11051e2f8` | pass | 0.12 | 39 | 3895 | 4236 | 23 | 0 |
 | typescript | microsoft/vscode | `4d9c292ee3e2` | pass | 7.65 | 2630 | 499484 | 315023 | 321 | 0 |

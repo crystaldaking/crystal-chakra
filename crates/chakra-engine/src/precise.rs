@@ -449,6 +449,50 @@ fn language_from_path(path: &str) -> Option<Language> {
         Some("py" | "pyi") => Some(Language::Python),
         Some("js" | "jsx" | "mjs" | "cjs") => Some(Language::JavaScript),
         Some("java") => Some(Language::Java),
+        Some("cs") => Some(Language::CSharp),
+        Some("sh" | "bash" | "zsh" | "ksh") => Some(Language::Shell),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::error::Error;
+
+    use chakra_domain::identity::WorkspaceIdentity;
+
+    use super::*;
+    use crate::WorkspaceEngine;
+
+    #[test]
+    fn snapshot_backed_workspaces_retain_csharp_and_shell_documents() -> Result<(), Box<dyn Error>>
+    {
+        let root = std::env::current_dir()?;
+        let engine = WorkspaceEngine::new(WorkspaceIdentity::for_primary_worktree(&root)?);
+        let mut update = engine.begin_update();
+        update.graph_mut().add_file(
+            RepoRelativePath::new("src/Program.cs")?,
+            "class Program {}\n",
+        )?;
+        update.graph_mut().add_file(
+            RepoRelativePath::new("scripts/release.sh")?,
+            "release() { true; }\n",
+        )?;
+        engine.publish(update)?;
+
+        let workspace = ProviderWorkspace::from_snapshot(&engine.snapshot());
+        assert_eq!(workspace.document_count(Language::CSharp), 1);
+        assert_eq!(workspace.document_count(Language::Shell), 1);
+        assert!(
+            workspace
+                .document(&RepoRelativePath::new("src/Program.cs")?)
+                .is_some()
+        );
+        assert!(
+            workspace
+                .document(&RepoRelativePath::new("scripts/release.sh")?)
+                .is_some()
+        );
+        Ok(())
     }
 }

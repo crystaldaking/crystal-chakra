@@ -33,6 +33,7 @@ const MAX_JAVA_BUILD_MANIFESTS: usize = 512;
 const MAX_JAVA_BUILD_MANIFEST_BYTES: usize = 1024 * 1024;
 const MAX_DOTNET_PROJECT_MANIFESTS: usize = 512;
 const MAX_DOTNET_PROJECT_MANIFEST_BYTES: usize = 1024 * 1024;
+const MAX_SHELL_PROJECT_MANIFESTS: usize = 256;
 
 /// One discovered source plus deterministic query metadata.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -120,6 +121,12 @@ struct JavaRoot {
 struct DotnetRoot {
     package: SourcePackage,
     is_test: bool,
+}
+
+/// Shell project scope from a Git-visible ShellCheck configuration boundary.
+#[derive(Debug, Clone)]
+struct ShellRoot {
+    package: SourcePackage,
 }
 
 fn read_bounded(mut reader: impl Read, limit: usize) -> io::Result<BoundedRead> {
@@ -1233,6 +1240,61 @@ fn classify_csharp(path: &RepoRelativePath, packages: &[DotnetRoot]) -> SourceMe
     }
 }
 
+fn shell_projects(
+    metadata_inputs: &[RepoRelativePath],
+    operation: &OperationContext,
+) -> Result<Vec<ShellRoot>, OperationAbort> {
+    let mut projects = Vec::new();
+    let mut covered = BTreeSet::new();
+    let mut examined = 0_usize;
+    'boundaries: for boundary in [".shellcheckrc", "shellcheckrc"] {
+        for manifest in manifests_named(metadata_inputs, boundary) {
+            if examined == MAX_SHELL_PROJECT_MANIFESTS {
+                break 'boundaries;
+            }
+            examined += 1;
+            operation.check()?;
+            let directory = manifest_directory(&manifest, boundary);
+            if !covered.insert(directory.clone()) {
+                continue;
+            }
+            let name = directory
+                .as_ref()
+                .map_or_else(|| "repository".to_owned(), |root| root.as_str().to_owned());
+            projects.push(ShellRoot {
+                package: SourcePackage {
+                    name,
+                    root: directory,
+                },
+            });
+        }
+    }
+    operation.check()?;
+    Ok(projects)
+}
+
+fn classify_shell(path: &RepoRelativePath, projects: &[ShellRoot]) -> SourceMetadata {
+    let fallback = SourceMetadata::path_fallback(path);
+    let project = projects
+        .iter()
+        .filter(|project| is_inside(path, project.package.root.as_ref()))
+        .max_by_key(|project| {
+            project
+                .package
+                .root
+                .as_ref()
+                .map_or(0, |root| root.as_str().len())
+        });
+    let Some(project) = project else {
+        return fallback;
+    };
+    SourceMetadata {
+        role: fallback.role,
+        classification: SourceClassification::ShellProjectMetadata,
+        package: Some(project.package.clone()),
+    }
+}
+
 fn classify_rust(path: &RepoRelativePath, packages: &[CargoPackage]) -> SourceMetadata {
     let fallback = SourceMetadata::path_fallback(path);
     let package = packages
@@ -1352,6 +1414,11 @@ pub fn classify_discovered_sources_with_context(
     } else {
         None
     };
+    let shell = if language == Language::Shell {
+        Some(shell_projects(metadata_inputs, operation)?)
+    } else {
+        None
+    };
     let mut classified = Vec::with_capacity(files.len());
     for path in files {
         operation.check()?;
@@ -1367,6 +1434,7 @@ pub fn classify_discovered_sources_with_context(
                 }
                 Language::Java => classify_java(&path, java.as_deref().unwrap_or_default()),
                 Language::CSharp => classify_csharp(&path, dotnet.as_deref().unwrap_or_default()),
+                Language::Shell => classify_shell(&path, shell.as_deref().unwrap_or_default()),
             },
             path,
             language,
@@ -2223,6 +2291,54 @@ mod tests {
         );
         assert_eq!(service.metadata.role, SourceRole::Production);
         assert!(service.metadata.package.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn shellcheck_boundary_scopes_shell_roles_and_leaves_outside_files_on_fallback()
+    -> Result<(), Box<dyn Error>> {
+        let repository = repository()?;
+        let root = repository.path();
+        write(root, "tools/.shellcheckrc", "enable=all\n")?;
+        for (path, source) in [
+            ("scripts/root.sh", "root_task() { true; }\n"),
+            ("tools/src/run.bash", "run() { true; }\n"),
+            ("tools/tests/flow.zsh", "test_flow() { true; }\n"),
+            ("tools/vendor/external.ksh", "external() { true; }\n"),
+            ("tools/generated/schema.sh", "schema() { true; }\n"),
+        ] {
+            write(root, path, source)?;
+        }
+
+        let classified = discover_classified_sources(root, Language::Shell)?;
+        let by_path: BTreeMap<_, _> = classified
+            .into_iter()
+            .map(|source| (source.path, source.metadata))
+            .collect();
+        let outside = &by_path[&RepoRelativePath::new("scripts/root.sh")?];
+        assert_eq!(outside.classification, SourceClassification::PathFallback);
+        assert!(outside.package.is_none());
+
+        for (path, role) in [
+            ("tools/src/run.bash", SourceRole::Production),
+            ("tools/tests/flow.zsh", SourceRole::Test),
+            ("tools/vendor/external.ksh", SourceRole::Vendor),
+            ("tools/generated/schema.sh", SourceRole::Generated),
+        ] {
+            let source = &by_path[&RepoRelativePath::new(path)?];
+            assert_eq!(
+                source.classification,
+                SourceClassification::ShellProjectMetadata
+            );
+            assert_eq!(source.role, role);
+            assert_eq!(
+                source.package.as_ref().map(|package| (
+                    package.name.as_str(),
+                    package.root.as_ref().map(RepoRelativePath::as_str)
+                )),
+                Some(("tools", Some("tools")))
+            );
+        }
         Ok(())
     }
 
