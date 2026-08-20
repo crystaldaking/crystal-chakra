@@ -373,6 +373,7 @@ fn language_from_path(path: &str) -> Option<Language> {
         Some("rs") => Some(Language::Rust),
         Some("php") => Some(Language::Php),
         Some("ts" | "tsx" | "mts" | "cts") => Some(Language::TypeScript),
+        Some("py" | "pyi") => Some(Language::Python),
         _ => None,
     }
 }

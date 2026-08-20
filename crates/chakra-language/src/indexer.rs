@@ -262,6 +262,7 @@ pub struct IndexMetrics {
     pub rust_files: u64,
     pub php_files: u64,
     pub typescript_files: u64,
+    pub python_files: u64,
     pub laravel_detected: bool,
     pub framework_symbols: u64,
     pub framework_edges: u64,
@@ -294,6 +295,8 @@ pub enum WorkspaceIndexError {
     Php(#[from] chakra_language_php::PhpIndexError),
     #[error(transparent)]
     TypeScript(#[from] chakra_language_typescript::TypeScriptIndexError),
+    #[error(transparent)]
+    Python(#[from] chakra_language_python::PythonIndexError),
     #[error(transparent)]
     Graph(#[from] GraphError),
     #[error("constructed workspace syntax graph is inconsistent: {0}")]
@@ -729,6 +732,7 @@ pub fn index_repository_with_options(
     let rust_files = language_files(Language::Rust);
     let php_files = language_files(Language::Php);
     let typescript_files = language_files(Language::TypeScript);
+    let python_files = language_files(Language::Python);
     let mut framework = AdapterFrameworkMetrics::default();
     for metrics in &built_metrics {
         framework.detected |= metrics.framework.detected;
@@ -760,6 +764,7 @@ pub fn index_repository_with_options(
         rust_files,
         php_files,
         typescript_files,
+        python_files,
         laravel_detected: framework.detected,
         framework_symbols: framework.symbols,
         framework_edges: framework.edges,

@@ -37,6 +37,8 @@ pub enum Language {
     Php,
     #[serde(rename = "typescript")]
     TypeScript,
+    #[serde(rename = "python")]
+    Python,
 }
 
 /// Kind of a code entity (SPEC §8 plus the impl-block/import facts v0.1 §7

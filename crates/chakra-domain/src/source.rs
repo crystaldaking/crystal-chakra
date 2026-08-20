@@ -56,6 +56,10 @@ pub enum SourceClassification {
     /// package or workspace root); test conventions still come from
     /// deterministic TypeScript path rules.
     PackageJsonMetadata,
+    /// Package ownership came from a Git-visible `pyproject.toml` (or a
+    /// `setup.py`/`setup.cfg` project boundary without one); test
+    /// conventions still come from deterministic Python path rules.
+    PyprojectMetadata,
     /// No applicable package metadata was available; deterministic path
     /// conventions supplied the role.
     PathFallback,
@@ -99,6 +103,7 @@ pub struct SourceMetadataCoverage {
     pub cargo_metadata_files: u64,
     pub composer_metadata_files: u64,
     pub package_json_metadata_files: u64,
+    pub pyproject_metadata_files: u64,
     pub path_fallback_files: u64,
 }
 

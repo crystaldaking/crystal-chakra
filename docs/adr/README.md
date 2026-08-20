@@ -55,5 +55,6 @@ Accepted decisions:
 - ADR-030: PHP precise-equivalent resolver through strict-tier promotion
 - ADR-031: object-safe syntax language adapter trait and registry
 - ADR-032: shared LSP client crate and vtsls precise provider
+- ADR-033: slot-keyed revision-local entity-id partitions
 
 Do not pre-create empty ADRs merely to satisfy a list.

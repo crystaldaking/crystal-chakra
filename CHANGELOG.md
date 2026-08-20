@@ -7,6 +7,21 @@ version tags prefixed with `v`.
 
 ### Added
 
+- First-class Python support (issue #28): a `chakra-language-python`
+  adapter crate (tree-sitter-python 0.25.0, `.py`/`.pyi`) registered in the
+  ADR-0031 adapter registry after TypeScript; `import`/`from ... import`
+  and alias facts (including relative imports), module/class/function
+  containers with decorators recorded, base-class relations, pytest/unittest
+  test hints, bounded lazy call candidates (bare, `self.`/`cls.`,
+  module-alias, `ClassName()` constructor, and single-base `super()` calls),
+  and actionable syntax diagnostics. pyproject.toml project scopes plus
+  setup.py/setup.cfg boundaries and `test_*.py`/`*_test.py` source roles; a
+  `chakra-provider-pyright` precise provider over the shared chakra-lsp
+  client (additive `Provenance::Pyright`); conformance fixture (14/14
+  scenarios) and the pinned django/django + apache/airflow corpus
+  evaluations (11/11 each, no degradations). Revision-local entity ids now
+  use the ADR-0033 slot registry (4-bit language slot + 60-bit counter)
+  instead of hardcoded per-language bases; ids remain in-memory only.
 - First-class TypeScript/TSX syntax support (issue #27, Part A): a
   `chakra-language-typescript` adapter crate (tree-sitter-typescript 0.23.2,
   TypeScript grammar for `.ts`/`.mts`/`.cts`, TSX grammar for `.tsx`)
@@ -17,8 +32,12 @@ version tags prefixed with `v`.
   package.json/tsconfig.json project scopes plus `*.test.*`/`*.spec.*`/
   `__tests__/` source roles; conformance fixture (14/14 scenarios) and the
   pinned microsoft/vscode corpus evaluation (11/11, degraded as designed by
-  the workspace source-byte and symbol budgets). The vtsls precise provider
-  lands in Part B; TypeScript is not yet advertised.
+  the workspace source-byte and symbol budgets).
+- Shared `chakra-lsp` stdio client crate and the `chakra-provider-vtsls`
+  precise provider for TypeScript (issue #27, Part B, ADR-0032): precise
+  definitions/references/callers with bounded readiness, revision-scoped
+  synchronization, cancellation, restart, and orphan-free shutdown; additive
+  `Provenance::Vtsls`. TypeScript is advertised first-class.
 
 ## [0.1.1] - 2026-08-18
 

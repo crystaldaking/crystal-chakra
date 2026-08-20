@@ -487,6 +487,9 @@ pub fn source_language(path: &str) -> Option<Language> {
         Some(extension) if matches!(extension.to_str(), Some("ts" | "tsx" | "mts" | "cts")) => {
             Some(Language::TypeScript)
         }
+        Some(extension) if matches!(extension.to_str(), Some("py" | "pyi")) => {
+            Some(Language::Python)
+        }
         _ => None,
     }
 }
@@ -586,7 +589,9 @@ fn workspace_inventory_from_git_output(
             || raw.ends_with(b".ts")
             || raw.ends_with(b".tsx")
             || raw.ends_with(b".mts")
-            || raw.ends_with(b".cts");
+            || raw.ends_with(b".cts")
+            || raw.ends_with(b".py")
+            || raw.ends_with(b".pyi");
         let metadata_input = raw_is_metadata_input(raw);
         if !source && !metadata_input {
             continue;
@@ -602,9 +607,19 @@ fn workspace_inventory_from_git_output(
             continue;
         }
         let path = RepoRelativePath::new(raw)?;
-        if source_language(raw).is_some() {
-            inventory.sources.push(path);
-        } else if metadata_input {
+        let is_source = source_language(raw).is_some();
+        if is_source {
+            inventory.sources.push(path.clone());
+        }
+        // A `setup.py` is both a Python source and a project-scope manifest:
+        // it joins the source inventory and is still a metadata input.
+        if metadata_input
+            && (!is_source
+                || raw == "setup.py"
+                || raw
+                    .strip_suffix("setup.py")
+                    .is_some_and(|p| p.ends_with('/')))
+        {
             inventory.metadata_inputs.push(path);
         }
     }
@@ -622,6 +637,9 @@ fn raw_is_metadata_input(raw: &[u8]) -> bool {
         b"composer.json".as_slice(),
         b"package.json".as_slice(),
         b"tsconfig.json".as_slice(),
+        b"pyproject.toml".as_slice(),
+        b"setup.py".as_slice(),
+        b"setup.cfg".as_slice(),
         b".cargo/config".as_slice(),
         b".cargo/config.toml".as_slice(),
         b"rust-toolchain".as_slice(),
@@ -868,6 +886,35 @@ mod tests {
         assert_eq!(rust.len(), 1);
         let all = discover_source_files(repository.path())?;
         assert_eq!(all.len(), 5);
+        Ok(())
+    }
+
+    #[test]
+    fn discovers_python_extensions_and_setup_py_metadata_without_mixing()
+    -> Result<(), Box<dyn Error>> {
+        let repository = repository()?;
+        for (path, source) in [
+            ("src/service.py", "def pay():\n    pass\n"),
+            ("src/service.pyi", "def pay() -> None: ...\n"),
+            ("setup.py", "from setuptools import setup\nsetup()\n"),
+        ] {
+            fs::write(repository.path().join(path), source)?;
+        }
+
+        let python = discover_language_files(repository.path(), Language::Python)?;
+        let paths: Vec<&str> = python.iter().map(RepoRelativePath::as_str).collect();
+        assert_eq!(paths, ["setup.py", "src/service.py", "src/service.pyi"]);
+        let rust = discover_language_files(repository.path(), Language::Rust)?;
+        assert_eq!(rust.len(), 1);
+        let classified = crate::discover_classified_sources(repository.path(), Language::Python)?;
+        let setup = classified
+            .iter()
+            .find(|source| source.path.as_str() == "setup.py")
+            .ok_or("setup.py missing from classified sources")?;
+        assert_eq!(
+            setup.metadata.classification,
+            chakra_domain::source::SourceClassification::PyprojectMetadata
+        );
         Ok(())
     }
 }

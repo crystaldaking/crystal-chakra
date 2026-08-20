@@ -26,6 +26,7 @@ notify = "8.2"
 nix = { version = "0.31", default-features = false, features = ["signal"] }
 tree-sitter = "0.26"
 tree-sitter-php = "0.24.2"
+tree-sitter-python = "0.25.0"
 tree-sitter-rust = "0.24"
 tree-sitter-typescript = "0.23.2"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync"] }

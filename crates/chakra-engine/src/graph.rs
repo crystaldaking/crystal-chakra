@@ -22,8 +22,38 @@ use chakra_domain::symbol::{
 use rpds::{HashTrieMapSync, RedBlackTreeMapSync};
 use thiserror::Error;
 
-const TYPESCRIPT_ENTITY_ID_BASE: u64 = 1_u64 << 62;
-const PHP_ENTITY_ID_BASE: u64 = 1_u64 << 63;
+/// Revision-local entity ids are partitioned per language through an
+/// explicit slot registry (ADR-0033): a 4-bit slot tag in bits 60..64
+/// (`slot << 60`) plus a 60-bit per-language counter. The v0.1 graph is
+/// in-memory only — no id is ever persisted — so the slot layout may change
+/// between releases as long as it is consistent within one process.
+/// Explicit slot assignment: Rust = 0, Php = 1, TypeScript = 2, Python = 3;
+/// 12 slots remain. Adding a language means assigning it the next free slot
+/// in `language_entity_slot` and appending it to `ENTITY_SLOT_LANGUAGES` —
+/// nothing else in the id machinery changes.
+const ENTITY_ID_SLOT_COUNT: usize = 16;
+const ENTITY_ID_SLOT_SHIFT: u64 = 60;
+const ENTITY_ID_COUNTER_LIMIT: u64 = 1 << ENTITY_ID_SLOT_SHIFT;
+
+/// Registered languages in entity-slot order, iterated wherever per-language
+/// graph state must be visited deterministically.
+const ENTITY_SLOT_LANGUAGES: &[Language] = &[
+    Language::Rust,
+    Language::Php,
+    Language::TypeScript,
+    Language::Python,
+];
+
+/// The entity-id slot a language owns; see the slot registry above.
+fn language_entity_slot(language: Language) -> usize {
+    match language {
+        Language::Rust => 0,
+        Language::Php => 1,
+        Language::TypeScript => 2,
+        Language::Python => 3,
+    }
+}
+
 const CANCELLATION_POLL_ITEMS: usize = 256;
 
 /// Why a graph mutation was rejected.
@@ -395,13 +425,11 @@ pub struct SymbolGraph {
     /// retained compactly and bounded only when a query expands them, so
     /// current language indexes keep this at zero.
     truncated_call_sites: u64,
-    next_rust_entity_id: u64,
-    next_php_entity_id: u64,
-    next_typescript_entity_id: u64,
+    /// Per-slot next entity id, indexed by `language_entity_slot`.
+    next_entity_ids: [u64; ENTITY_ID_SLOT_COUNT],
     next_call_site_id: u64,
-    rust_symbol_count: u64,
-    php_symbol_count: u64,
-    typescript_symbol_count: u64,
+    /// Per-slot live symbol counts, indexed by `language_entity_slot`.
+    symbol_counts: [u64; ENTITY_ID_SLOT_COUNT],
     adjacency_entries_copied: u64,
 }
 
@@ -456,15 +484,11 @@ impl SymbolGraph {
             }
             return languages;
         }
-        let mut languages = Vec::with_capacity(3);
-        if self.rust_symbol_count != 0 {
-            languages.push(Language::Rust);
-        }
-        if self.php_symbol_count != 0 {
-            languages.push(Language::Php);
-        }
-        if self.typescript_symbol_count != 0 {
-            languages.push(Language::TypeScript);
+        let mut languages = Vec::with_capacity(ENTITY_SLOT_LANGUAGES.len());
+        for (slot, language) in ENTITY_SLOT_LANGUAGES.iter().enumerate() {
+            if self.symbol_counts[slot] != 0 {
+                languages.push(*language);
+            }
         }
         languages
     }
@@ -586,48 +610,15 @@ impl SymbolGraph {
                 location_path: location.file().as_str().to_owned(),
             });
         }
-        let id = match key.language {
-            Language::Rust => {
-                if self.next_rust_entity_id >= TYPESCRIPT_ENTITY_ID_BASE {
-                    return Err(GraphError::EntityIdSpaceExhausted(Language::Rust));
-                }
-                let id = EntityId(self.next_rust_entity_id);
-                self.next_rust_entity_id += 1;
-                id
-            }
-            Language::Php => {
-                let Some(raw) = PHP_ENTITY_ID_BASE.checked_add(self.next_php_entity_id) else {
-                    return Err(GraphError::EntityIdSpaceExhausted(Language::Php));
-                };
-                let id = EntityId(raw);
-                self.next_php_entity_id = self
-                    .next_php_entity_id
-                    .checked_add(1)
-                    .ok_or(GraphError::EntityIdSpaceExhausted(Language::Php))?;
-                id
-            }
-            Language::TypeScript => {
-                let Some(raw) = TYPESCRIPT_ENTITY_ID_BASE
-                    .checked_add(self.next_typescript_entity_id)
-                    .filter(|raw| *raw < PHP_ENTITY_ID_BASE)
-                else {
-                    return Err(GraphError::EntityIdSpaceExhausted(Language::TypeScript));
-                };
-                let id = EntityId(raw);
-                self.next_typescript_entity_id = self
-                    .next_typescript_entity_id
-                    .checked_add(1)
-                    .ok_or(GraphError::EntityIdSpaceExhausted(Language::TypeScript))?;
-                id
-            }
-        };
-        match key.language {
-            Language::Rust => self.rust_symbol_count = self.rust_symbol_count.saturating_add(1),
-            Language::Php => self.php_symbol_count = self.php_symbol_count.saturating_add(1),
-            Language::TypeScript => {
-                self.typescript_symbol_count = self.typescript_symbol_count.saturating_add(1);
-            }
+        let slot = language_entity_slot(key.language);
+        let counter = self.next_entity_ids[slot];
+        if counter >= ENTITY_ID_COUNTER_LIMIT {
+            return Err(GraphError::EntityIdSpaceExhausted(key.language));
         }
+        // slot < 16 and counter < 2^60, so the tagged id always fits u64.
+        let id = EntityId(((slot as u64) << ENTITY_ID_SLOT_SHIFT) + counter);
+        self.next_entity_ids[slot] = counter + 1;
+        self.symbol_counts[slot] = self.symbol_counts[slot].saturating_add(1);
         let symbol = Symbol {
             id,
             key,
@@ -859,13 +850,8 @@ impl SymbolGraph {
                     break;
                 }
             }
-            match symbol.key.language {
-                Language::Rust => self.rust_symbol_count = self.rust_symbol_count.saturating_sub(1),
-                Language::Php => self.php_symbol_count = self.php_symbol_count.saturating_sub(1),
-                Language::TypeScript => {
-                    self.typescript_symbol_count = self.typescript_symbol_count.saturating_sub(1);
-                }
-            }
+            let slot = language_entity_slot(symbol.key.language);
+            self.symbol_counts[slot] = self.symbol_counts[slot].saturating_sub(1);
             self.symbols.remove_mut(id);
         }
         self.files.remove_mut(path);
@@ -1241,6 +1227,9 @@ impl SymbolGraph {
                     coverage.package_json_metadata_files = coverage
                         .package_json_metadata_files
                         .saturating_add(part.package_json_metadata_files);
+                    coverage.pyproject_metadata_files = coverage
+                        .pyproject_metadata_files
+                        .saturating_add(part.pyproject_metadata_files);
                     coverage.path_fallback_files = coverage
                         .path_fallback_files
                         .saturating_add(part.path_fallback_files);
@@ -1257,6 +1246,9 @@ impl SymbolGraph {
                 SourceClassification::ComposerMetadata => coverage.composer_metadata_files += 1,
                 SourceClassification::PackageJsonMetadata => {
                     coverage.package_json_metadata_files += 1;
+                }
+                SourceClassification::PyprojectMetadata => {
+                    coverage.pyproject_metadata_files += 1;
                 }
                 SourceClassification::PathFallback => coverage.path_fallback_files += 1,
             }
@@ -2489,6 +2481,7 @@ fn provenance_rank(provenance: Provenance) -> u8 {
     match provenance {
         Provenance::RustAnalyzer => 0,
         Provenance::Vtsls => 0,
+        Provenance::Pyright => 0,
         Provenance::ChakraResolver => 0,
         Provenance::TreeSitter => 1,
         Provenance::Git => 2,
@@ -3271,7 +3264,7 @@ mod tests {
             Provenance::TreeSitter,
             Precision::Syntax,
         )?;
-        assert!(php_id.0 >= PHP_ENTITY_ID_BASE);
+        assert_eq!(php_id.0 >> ENTITY_ID_SLOT_SHIFT, 1);
 
         let combined = SymbolGraph::merge([rust.clone(), php.clone()])?;
         assert_eq!(combined.symbol_count(), 2);
