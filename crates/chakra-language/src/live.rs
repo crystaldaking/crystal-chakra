@@ -1268,14 +1268,19 @@ fn reconcile(
     let dropped_event_advanced = dropped_events > *reconciled_dropped_events;
     let force_full = requires_full_reconciliation(ReconciliationPolicy {
         cache_initialized: source_cache.initialized,
-        watcher_degraded: *watcher_degraded,
+        watcher_health_degraded: *watcher_degraded,
         watcher_error_advanced,
         dropped_event_advanced,
         uncertain_hint,
         reconciliations_since_full: *reconciliations_since_full,
         full_reconcile_interval: options.full_reconcile_interval,
     });
-    let force_reinstall_watches = *watcher_degraded || watcher_error_advanced;
+    // A stable partial watch set (for example after the 4,096-directory cap)
+    // degrades notification coverage, not authoritative reconciliation.
+    // RequireFresh still verifies the complete Git inventory and every file
+    // identity, so only a newly observed watcher error requires reinstalling
+    // watches and forcing a full body reread.
+    let force_reinstall_watches = watcher_error_advanced;
     let mut watch_set_dirty = false;
     let result = (|| {
         for _ in 0..MAX_STABLE_SCAN_ATTEMPTS {
@@ -1394,7 +1399,10 @@ fn reconcile(
 #[derive(Debug, Clone, Copy)]
 struct ReconciliationPolicy {
     cache_initialized: bool,
-    watcher_degraded: bool,
+    /// Current watcher coverage may stay degraded after a stable directory
+    /// cap. Only a newly advanced error counter is reconciliation
+    /// uncertainty; the current health flag remains lifecycle metadata.
+    watcher_health_degraded: bool,
     watcher_error_advanced: bool,
     dropped_event_advanced: bool,
     uncertain_hint: bool,
@@ -1403,8 +1411,8 @@ struct ReconciliationPolicy {
 }
 
 fn requires_full_reconciliation(policy: ReconciliationPolicy) -> bool {
+    let _watcher_health_degraded = policy.watcher_health_degraded;
     !policy.cache_initialized
-        || policy.watcher_degraded
         || policy.watcher_error_advanced
         || policy.dropped_event_advanced
         || policy.uncertain_hint
@@ -1636,10 +1644,9 @@ fn refresh_watches(
 ) -> Result<bool, WorkspaceIndexError> {
     let (desired, mut degraded) = desired_watch_directories(repository_root, indexed_paths);
     if degraded {
-        metrics.watcher_errors.fetch_add(1, Ordering::Relaxed);
         warn!(
             maximum = MAX_WATCHED_DIRECTORIES,
-            "watch directory bound reached; freshness barriers remain authoritative"
+            "watch directory bound reached; notifications are partial and freshness barriers remain authoritative"
         );
     }
     let removed = if force_reinstall {
@@ -1833,7 +1840,7 @@ mod tests {
     fn full_reconciliation_policy_covers_uncertainty_and_checkpoints() {
         let baseline = ReconciliationPolicy {
             cache_initialized: true,
-            watcher_degraded: false,
+            watcher_health_degraded: false,
             watcher_error_advanced: false,
             dropped_event_advanced: false,
             uncertain_hint: false,
@@ -1845,8 +1852,8 @@ mod tests {
             cache_initialized: false,
             ..baseline
         }));
-        assert!(requires_full_reconciliation(ReconciliationPolicy {
-            watcher_degraded: true,
+        assert!(!requires_full_reconciliation(ReconciliationPolicy {
+            watcher_health_degraded: true,
             ..baseline
         }));
         assert!(requires_full_reconciliation(ReconciliationPolicy {

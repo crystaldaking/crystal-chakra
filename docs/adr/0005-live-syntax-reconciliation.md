@@ -23,7 +23,7 @@ over native filesystem mechanisms:
 
 - Use workspace-managed `notify` 8.2.0 and `recommended_watcher`, selecting
   the current stable release rather than a release candidate. Watch only the
-  repository root and the existing ancestor directories of indexed Rust/PHP
+  repository root and the existing ancestor directories of indexed source
   files, non-recursively. This avoids recursive watches inside `.git`,
   `target`, ignored, and generated trees. The directory set is capped at
   4,096; exceeding the cap degrades watcher health but does not disable exact
@@ -72,10 +72,10 @@ over native filesystem mechanisms:
   quiet window short, so write/metadata/rename sequences converge to one latest
   state without requiring a caller sleep.
 - Reconcile from one Git-aware tracked plus untracked non-ignored inventory.
-  It contains admitted Rust/PHP sources and the Git-visible Cargo/Composer
-  manifests, lockfiles, toolchain files, and Cargo configuration that can
+  It contains admitted registered-language sources and the Git-visible
+  ecosystem manifests, lockfiles, toolchain files, and configuration that can
   change query-visible classification. Partition its source set by language;
-  do not rediscover either language or its metadata separately. A stable
+  do not rediscover a language or its metadata separately. A stable
   reconciliation has two identical shared-inventory checkpoints around one
   content/classification snapshot, unchanged watcher epoch, and identical
   pre/post filesystem identities for every admitted source and metadata input.
@@ -91,16 +91,19 @@ over native filesystem mechanisms:
   reparsed. Platforms without that identity strength conservatively reread
   admitted bodies rather than weakening `RequireFresh`.
 - Force a full bounded body reread when the cache is uninitialized, a watcher
-  error/degradation or dropped event advanced, an uncovered watcher epoch is
+  error or dropped event advanced, an uncovered watcher epoch is
   non-contiguous/reordered, an event hint is uncertain, a Git inventory
   checkpoint is uncertain, or the configurable periodic
   checkpoint is due. `LiveIndexOptions` defaults the checkpoint interval to
   256 successful reconciliations and rejects zero. Ordinary known changes and
-  no-op barriers use non-full paths. Watch directories are recomputed only
-  when the indexed path set changes or watcher recovery requires
-  reinstallation.
+  no-op barriers use non-full paths. A stable partial watch set caused by the
+  4,096-directory cap keeps lifecycle status degraded but does not itself
+  force full body rereads or repeated watch reinstallation: every fresh
+  barrier still verifies the complete Git inventory and every retained source
+  identity. Watch directories are recomputed only when the indexed path set
+  changes or a newly observed watcher error requires reinstallation.
 - Reconciliation reuses the initial revision's validated indexing budgets and
-  one shared Rust/PHP/metadata Git inventory per scan (ADR-011). Budget
+  one shared source/metadata Git inventory per scan (ADR-011). Budget
   coverage and degradation are published atomically with changed graph
   contents. A reconciled budget-limited graph is truthfully `Degraded` and `Fresh`; adding
   an over-budget file may publish metadata without pretending it was indexed.
