@@ -125,7 +125,7 @@ impl Worker {
     ) -> Self {
         let known_revision = initial_workspace.revision;
         let (workspace_documents, workspace_source_bytes) =
-            initial_workspace.document_stats(Language::TypeScript);
+            initial_workspace.document_stats_matching(vtsls_language);
         let root = initial_workspace.repository_root.clone();
         Self {
             commands,
@@ -502,9 +502,9 @@ impl Worker {
             documents_examined,
             source_body_comparisons,
         } = workspace
-            .delta_since(
+            .delta_since_matching(
                 &self.known_workspace,
-                Language::TypeScript,
+                vtsls_language,
                 self.active_operation
                     .as_ref()
                     .ok_or(ProviderError::Cancelled)?,
@@ -515,7 +515,7 @@ impl Worker {
             })?;
         let target_document = workspace
             .document(target.file())
-            .filter(|document| document.language == Language::TypeScript)
+            .filter(|document| vtsls_language(document.language))
             .ok_or(ProviderError::InvalidPosition)?;
         let target_needs_open = !self.opened_versions.contains_key(target.file());
         if !deleted.is_empty() || !created.is_empty() || !changed.is_empty() || target_needs_open {
@@ -617,8 +617,8 @@ impl Worker {
         self.known_workspace = workspace.clone();
         self.known_revision = workspace.revision;
         let (workspace_documents, workspace_source_bytes) = workspace
-            .document_stats_with_context(
-                Language::TypeScript,
+            .document_stats_with_context_matching(
+                vtsls_language,
                 self.active_operation
                     .as_ref()
                     .ok_or(ProviderError::Cancelled)?,
@@ -976,9 +976,17 @@ impl Worker {
     }
 }
 
+/// Languages synchronized through the shared vtsls session: the underlying
+/// server handles TypeScript and JavaScript natively.
+fn vtsls_language(language: Language) -> bool {
+    matches!(language, Language::TypeScript | Language::JavaScript)
+}
+
 fn language_id(path: &RepoRelativePath) -> &'static str {
     match path.as_str().rsplit('.').next() {
         Some("tsx") => "typescriptreact",
+        Some("jsx") => "javascriptreact",
+        Some("js" | "mjs" | "cjs") => "javascript",
         _ => "typescript",
     }
 }
@@ -1000,6 +1008,22 @@ mod tests {
         assert_eq!(
             language_id(&RepoRelativePath::new("src/a.mts")?),
             "typescript"
+        );
+        assert_eq!(
+            language_id(&RepoRelativePath::new("src/a.js")?),
+            "javascript"
+        );
+        assert_eq!(
+            language_id(&RepoRelativePath::new("src/a.jsx")?),
+            "javascriptreact"
+        );
+        assert_eq!(
+            language_id(&RepoRelativePath::new("src/a.mjs")?),
+            "javascript"
+        );
+        assert_eq!(
+            language_id(&RepoRelativePath::new("src/a.cjs")?),
+            "javascript"
         );
         Ok(())
     }

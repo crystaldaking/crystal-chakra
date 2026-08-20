@@ -12,6 +12,7 @@ publish = false
 chakra-domain = { path = "../chakra-domain", version = "0.1.1" }
 chakra-engine = { path = "../chakra-engine", version = "0.1.1" }
 chakra-git = { path = "../chakra-git", version = "0.1.1" }
+chakra-language-javascript = { path = "../chakra-language-javascript", version = "0.1.1" }
 chakra-language-php = { path = "../chakra-language-php", version = "0.1.1" }
 chakra-language-python = { path = "../chakra-language-python", version = "0.1.1" }
 chakra-language-rust = { path = "../chakra-language-rust", version = "0.1.1" }

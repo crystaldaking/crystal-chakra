@@ -63,6 +63,7 @@ fn main() -> io::Result<()> {
     let count_path = executable.with_extension("count");
     let cancelled_path = executable.with_extension("cancelled");
     let opened_path = executable.with_extension("opened");
+    let last_open_path = executable.with_extension("lastopen");
     let changed_path = executable.with_extension("changed");
     let watched_path = executable.with_extension("watched");
     let child_path = executable.with_extension("child");
@@ -115,6 +116,7 @@ fn main() -> io::Result<()> {
             }
         } else if body.contains("\"method\":\"textDocument/didOpen\"") {
             bump(&opened_path)?;
+            fs::write(&last_open_path, body.as_bytes())?;
             if let Some(uri) = request_uri(&body) {
                 last_uri = uri.to_owned();
             }
@@ -270,6 +272,58 @@ fn precise_incoming_call_carries_vtsls_provenance() -> Result<(), Box<dyn Error>
     assert_eq!(relation.occurrence_count, 1);
     assert_eq!(relation.call_sites.len(), 1);
     assert_eq!(provider.state_for(Revision(1)), ProviderState::Ready);
+    provider.shutdown()?;
+    Ok(())
+}
+
+#[test]
+fn javascript_document_syncs_with_the_javascript_language_id() -> Result<(), Box<dyn Error>> {
+    let repository = tempfile::tempdir()?;
+    let executable = compile_fake_server(repository.path(), "fake-vtsls-javascript")?;
+    let path = RepoRelativePath::new("src/index.js")?;
+    fs::create_dir_all(repository.path().join("src"))?;
+    fs::write(repository.path().join(path.as_str()), TARGET_SOURCE)?;
+    let request = PreciseQueryRequest {
+        workspace: workspace(
+            repository.path(),
+            Revision(1),
+            vec![ProviderDocument {
+                path: path.clone(),
+                source: Arc::from(TARGET_SOURCE),
+                language: Language::JavaScript,
+            }],
+        )?,
+        symbol: ProviderSymbol {
+            name: "target".to_owned(),
+            declaration: SourceRange::new(
+                path,
+                TextPosition::new(1, 1)?,
+                TextPosition::new(1, 29)?,
+            )?,
+            language: Language::JavaScript,
+        },
+        directions: CallHierarchyDirections {
+            incoming: true,
+            outgoing: false,
+        },
+        limit: 20,
+    };
+    let provider = VtslsProvider::start(request.workspace.clone(), config(&executable))?;
+
+    let result = provider.enrich(request);
+    assert_eq!(
+        result.state,
+        ProviderState::Ready,
+        "last_error={:?}",
+        provider.last_error()
+    );
+    assert_eq!(result.incoming.len(), 1);
+    assert_eq!(result.incoming[0].provenance, Provenance::Vtsls);
+    let opened = fs::read_to_string(executable.with_extension("lastopen"))?;
+    assert!(
+        opened.contains("\"languageId\":\"javascript\""),
+        "didOpen must carry the javascript language id: {opened}"
+    );
     provider.shutdown()?;
     Ok(())
 }

@@ -547,8 +547,8 @@ fn manifest_directory(manifest: &RepoRelativePath, file_name: &str) -> Option<Re
 
 /// Collects npm-style package scopes. Every `package.json` is a package
 /// root (workspaces are covered because each workspace member carries its
-/// own manifest); a `tsconfig.json` without a sibling `package.json` is a
-/// project boundary named after its directory.
+/// own manifest); a `tsconfig.json` or `jsconfig.json` without a sibling
+/// `package.json` is a project boundary named after its directory.
 fn package_json_packages(
     root: &Path,
     metadata_inputs: &[RepoRelativePath],
@@ -582,24 +582,26 @@ fn package_json_packages(
             },
         });
     }
-    for tsconfig in manifests_named(metadata_inputs, "tsconfig.json")
-        .iter()
-        .take(MAX_PACKAGE_JSON_MANIFESTS)
-    {
-        operation.check()?;
-        let Some(directory) = manifest_directory(tsconfig, "tsconfig.json") else {
-            continue;
-        };
-        if covered.contains(&directory) {
-            continue;
+    for boundary in ["tsconfig.json", "jsconfig.json"] {
+        for config in manifests_named(metadata_inputs, boundary)
+            .iter()
+            .take(MAX_PACKAGE_JSON_MANIFESTS)
+        {
+            operation.check()?;
+            let Some(directory) = manifest_directory(config, boundary) else {
+                continue;
+            };
+            if covered.contains(&directory) {
+                continue;
+            }
+            covered.insert(directory.clone());
+            packages.push(PackageJsonRoot {
+                package: SourcePackage {
+                    name: directory.as_str().to_owned(),
+                    root: Some(directory),
+                },
+            });
         }
-        covered.insert(directory.clone());
-        packages.push(PackageJsonRoot {
-            package: SourcePackage {
-                name: directory.as_str().to_owned(),
-                root: Some(directory),
-            },
-        });
     }
     operation.check()?;
     Ok(packages)
@@ -725,8 +727,9 @@ fn pyproject_packages(
     Ok(packages)
 }
 
-/// TypeScript test conventions beyond the language-neutral path fallback:
-/// `__tests__/` directories and `*.test.*` / `*.spec.*` file stems.
+/// TypeScript and JavaScript test conventions beyond the language-neutral
+/// path fallback: `__tests__/` directories and `*.test.*` / `*.spec.*` file
+/// stems.
 fn typescript_path_role(path: &RepoRelativePath) -> SourceRole {
     let fallback = SourceMetadata::path_fallback(path);
     if fallback.role != SourceRole::Production {
@@ -925,7 +928,7 @@ pub fn classify_discovered_sources_with_context(
     } else {
         None
     };
-    let package_json = if language == Language::TypeScript {
+    let package_json = if matches!(language, Language::TypeScript | Language::JavaScript) {
         Some(package_json_packages(root, metadata_inputs, operation)?)
     } else {
         None
@@ -942,7 +945,7 @@ pub fn classify_discovered_sources_with_context(
             metadata: match language {
                 Language::Rust => classify_rust(&path, cargo.as_deref().unwrap_or_default()),
                 Language::Php => classify_php(&path, composer.as_deref().unwrap_or_default()),
-                Language::TypeScript => {
+                Language::TypeScript | Language::JavaScript => {
                     classify_typescript(&path, package_json.as_deref().unwrap_or_default())
                 }
                 Language::Python => {
@@ -1283,6 +1286,120 @@ mod tests {
             Some(("chakra/monorepo", None)),
             "the workspace root package.json scopes files without a nearer package"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn package_json_scopes_and_javascript_test_conventions() -> Result<(), Box<dyn Error>> {
+        let repository = repository()?;
+        let root = repository.path();
+        write(
+            root,
+            "package.json",
+            r#"{"name": "chakra/monorepo", "workspaces": ["packages/*"]}"#,
+        )?;
+        write(
+            root,
+            "packages/web/package.json",
+            r#"{"name": "@chakra/web"}"#,
+        )?;
+        write(root, "packages/cli/jsconfig.json", "{}\n")?;
+        for (path, source) in [
+            ("packages/web/src/app.js", "export function app() {}\n"),
+            (
+                "packages/web/src/view.jsx",
+                "export function View() { return null; }\n",
+            ),
+            (
+                "packages/web/src/app.test.js",
+                "export function appTest() {}\n",
+            ),
+            (
+                "packages/web/src/__tests__/hook.js",
+                "export function hook() {}\n",
+            ),
+            ("packages/cli/src/main.cjs", "module.exports = {};\n"),
+            ("scripts/tool.mjs", "export function tool() {}\n"),
+        ] {
+            write(root, path, source)?;
+        }
+
+        let classified = discover_classified_sources(root, Language::JavaScript)?;
+        let by_path: BTreeMap<_, _> = classified
+            .into_iter()
+            .map(|source| (source.path, source.metadata))
+            .collect();
+        let app = &by_path[&RepoRelativePath::new("packages/web/src/app.js")?];
+        assert_eq!(
+            app.classification,
+            SourceClassification::PackageJsonMetadata
+        );
+        assert_eq!(app.role, SourceRole::Production);
+        assert_eq!(
+            app.package.as_ref().map(|package| (
+                package.name.as_str(),
+                package.root.as_ref().map(RepoRelativePath::as_str)
+            )),
+            Some(("@chakra/web", Some("packages/web")))
+        );
+        let view = &by_path[&RepoRelativePath::new("packages/web/src/view.jsx")?];
+        assert_eq!(view.role, SourceRole::Production);
+        for path in [
+            "packages/web/src/app.test.js",
+            "packages/web/src/__tests__/hook.js",
+        ] {
+            let source = &by_path[&RepoRelativePath::new(path)?];
+            assert_eq!(
+                source.classification,
+                SourceClassification::PackageJsonMetadata
+            );
+            assert_eq!(source.role, SourceRole::Test, "{path} must be a test role");
+        }
+        let cli = &by_path[&RepoRelativePath::new("packages/cli/src/main.cjs")?];
+        assert_eq!(
+            cli.classification,
+            SourceClassification::PackageJsonMetadata,
+            "jsconfig.json without a sibling package.json is a project boundary"
+        );
+        assert_eq!(
+            cli.package.as_ref().map(|package| package.name.as_str()),
+            Some("packages/cli")
+        );
+        let tool = &by_path[&RepoRelativePath::new("scripts/tool.mjs")?];
+        assert_eq!(
+            tool.classification,
+            SourceClassification::PackageJsonMetadata
+        );
+        assert_eq!(
+            tool.package.as_ref().map(|package| (
+                package.name.as_str(),
+                package.root.as_ref().map(RepoRelativePath::as_str)
+            )),
+            Some(("chakra/monorepo", None)),
+            "the workspace root package.json scopes files without a nearer package"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn javascript_without_manifests_uses_test_conventions_and_fallback()
+    -> Result<(), Box<dyn Error>> {
+        let repository = repository()?;
+        let root = repository.path();
+        write(root, "src/util.js", "export function util() {}\n")?;
+        write(root, "src/util.spec.js", "export function utilSpec() {}\n")?;
+
+        let classified = discover_classified_sources(root, Language::JavaScript)?;
+        let by_path: BTreeMap<_, _> = classified
+            .into_iter()
+            .map(|source| (source.path, source.metadata))
+            .collect();
+        let util = &by_path[&RepoRelativePath::new("src/util.js")?];
+        assert_eq!(util.classification, SourceClassification::PathFallback);
+        assert_eq!(util.role, SourceRole::Production);
+        let spec = &by_path[&RepoRelativePath::new("src/util.spec.js")?];
+        assert_eq!(spec.classification, SourceClassification::PathFallback);
+        assert_eq!(spec.role, SourceRole::Test);
         Ok(())
     }
 

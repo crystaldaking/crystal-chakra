@@ -1061,6 +1061,12 @@ fn file_language(path: &RepoRelativePath) -> Option<Language> {
         Some(Language::TypeScript)
     } else if value.ends_with(".py") || value.ends_with(".pyi") {
         Some(Language::Python)
+    } else if value.ends_with(".js")
+        || value.ends_with(".jsx")
+        || value.ends_with(".mjs")
+        || value.ends_with(".cjs")
+    {
+        Some(Language::JavaScript)
     } else {
         None
     }

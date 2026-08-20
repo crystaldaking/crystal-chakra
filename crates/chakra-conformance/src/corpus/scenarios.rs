@@ -311,6 +311,7 @@ impl ProbePlan {
             "php" => "php",
             "typescript" => "ts",
             "python" => "py",
+            "javascript" => "js",
             other => return Err(failure(format!("no probe plan for language `{other}`")).into()),
         };
         let mut paths: Vec<String> = cold
@@ -368,6 +369,11 @@ impl ProbePlan {
                 "\ndef chakra_corpus_probe_one():\n    pass\n".to_owned(),
                 "\ndef chakra_corpus_probe_two():\n    pass\n".to_owned(),
                 "\ndef chakra_corpus_broken(:\n".to_owned(),
+            ),
+            "javascript" => (
+                "\nexport function chakra_corpus_probe_one() {}\n".to_owned(),
+                "\nexport function chakra_corpus_probe_two() {}\n".to_owned(),
+                "\nexport function chakra_corpus_broken( {\n".to_owned(),
             ),
             other => return Err(failure(format!("no probe plan for language `{other}`")).into()),
         };
@@ -665,6 +671,7 @@ fn record_cold_index(
     builder.measure("php_files", cold.metrics.php_files);
     builder.measure("typescript_files", cold.metrics.typescript_files);
     builder.measure("python_files", cold.metrics.python_files);
+    builder.measure("javascript_files", cold.metrics.javascript_files);
     builder.measure("source_bytes", cold.metrics.indexing.coverage.source_bytes);
     builder.measure("degraded", cold.metrics.indexing.is_degraded());
     builder.measure(

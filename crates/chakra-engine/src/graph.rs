@@ -27,8 +27,9 @@ use thiserror::Error;
 /// (`slot << 60`) plus a 60-bit per-language counter. The v0.1 graph is
 /// in-memory only — no id is ever persisted — so the slot layout may change
 /// between releases as long as it is consistent within one process.
-/// Explicit slot assignment: Rust = 0, Php = 1, TypeScript = 2, Python = 3;
-/// 12 slots remain. Adding a language means assigning it the next free slot
+/// Explicit slot assignment: Rust = 0, Php = 1, TypeScript = 2, Python = 3,
+/// JavaScript = 4; 11 slots remain. Adding a language means assigning it
+/// the next free slot
 /// in `language_entity_slot` and appending it to `ENTITY_SLOT_LANGUAGES` —
 /// nothing else in the id machinery changes.
 const ENTITY_ID_SLOT_COUNT: usize = 16;
@@ -42,6 +43,7 @@ const ENTITY_SLOT_LANGUAGES: &[Language] = &[
     Language::Php,
     Language::TypeScript,
     Language::Python,
+    Language::JavaScript,
 ];
 
 /// The entity-id slot a language owns; see the slot registry above.
@@ -51,6 +53,7 @@ fn language_entity_slot(language: Language) -> usize {
         Language::Php => 1,
         Language::TypeScript => 2,
         Language::Python => 3,
+        Language::JavaScript => 4,
     }
 }
 
