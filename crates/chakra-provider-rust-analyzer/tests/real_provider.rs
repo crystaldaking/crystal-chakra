@@ -62,6 +62,7 @@ fn current_rust_analyzer_returns_precise_incoming_call() -> Result<(), Box<dyn E
             outgoing: false,
         },
         limit: 20,
+        priority: chakra_engine::ProviderRequestPriority::Normal,
     });
     let initial_elapsed = initial_started.elapsed();
     assert_eq!(
@@ -111,6 +112,7 @@ fn current_rust_analyzer_returns_precise_incoming_call() -> Result<(), Box<dyn E
             outgoing: false,
         },
         limit: 20,
+        priority: chakra_engine::ProviderRequestPriority::Normal,
     });
     let changed_elapsed = changed_started.elapsed();
     assert_eq!(

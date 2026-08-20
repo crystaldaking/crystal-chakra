@@ -568,7 +568,7 @@ impl ChakraMcpServer {
 
 #[tool_handler(
     name = "chakra",
-    instructions = "Chakra Rust and PHP code intelligence: inspect status and repo_map, search indexed source, resolve ambiguous names through symbol_search, request context or callers for one entity, and use diff_context for current worktree or branch-relative changes. Results are bounded and carry language, revision, freshness, provider state and capabilities, provenance, and precision.",
+    instructions = "Chakra multi-language code intelligence: inspect status and repo_map, search indexed source, resolve ambiguous names through symbol_search, request context or callers for one entity, and use diff_context for current worktree or branch-relative changes. Results are bounded and carry language, revision, freshness, provider state and capabilities, provenance, and precision.",
     router = self.tool_router
 )]
 impl ServerHandler for ChakraMcpServer {}

@@ -144,7 +144,7 @@ async fn status_tool_is_listed_and_callable() -> Result<(), Box<dyn Error + Send
         .instructions
         .as_deref()
         .ok_or("server instructions missing")?;
-    assert!(instructions.contains("Rust and PHP code intelligence"));
+    assert!(instructions.contains("multi-language code intelligence"));
 
     let tools = client.list_all_tools().await?;
     let mut tool_names: Vec<&str> = tools.iter().map(|tool| tool.name.as_ref()).collect();

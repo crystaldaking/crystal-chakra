@@ -227,6 +227,7 @@ fn request(root: &Path, revision: Revision) -> Result<PreciseQueryRequest, Box<d
             outgoing: false,
         },
         limit: 20,
+        priority: chakra_engine::ProviderRequestPriority::Normal,
     })
 }
 

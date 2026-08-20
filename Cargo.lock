@@ -149,7 +149,10 @@ dependencies = [
  "chakra-git",
  "chakra-language",
  "chakra-mcp",
+ "chakra-provider-pool",
+ "chakra-provider-pyright",
  "chakra-provider-rust-analyzer",
+ "chakra-provider-vtsls",
  "clap",
  "tokio",
  "tracing",
@@ -331,6 +334,16 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "chakra-provider-pool"
+version = "0.1.1"
+dependencies = [
+ "chakra-domain",
+ "chakra-engine",
+ "tempfile",
+ "thiserror",
 ]
 
 [[package]]

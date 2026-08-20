@@ -19,7 +19,10 @@ use chakra_domain::operation::OperationContext;
 use chakra_domain::query::{ProviderMetrics, ProviderProgress};
 use chakra_domain::revision::Revision;
 use chakra_domain::state::ProviderState;
-use chakra_engine::{PreciseProvider, PreciseQueryRequest, PreciseQueryResult, ProviderWorkspace};
+use chakra_engine::{
+    PreciseProvider, PreciseQueryRequest, PreciseQueryResult, ProviderShutdownError,
+    ProviderWorkspace,
+};
 use crossbeam_channel::{SendTimeoutError, Sender, bounded};
 use thiserror::Error;
 
@@ -28,7 +31,7 @@ use crate::worker::Worker;
 const DEFAULT_COMMAND_CAPACITY: usize = 8;
 const DEFAULT_CACHE_CAPACITY: usize = 128;
 const DEFAULT_CACHE_BYTES: usize = 8 * 1024 * 1024;
-const DEFAULT_QUERY_WAIT_TIMEOUT: Duration = Duration::from_secs(1);
+pub const DEFAULT_QUERY_WAIT_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// Process and bounded-wait settings for the optional provider.
 #[derive(Debug, Clone)]
@@ -253,6 +256,11 @@ impl PreciseProvider for RustAnalyzerProvider {
         Some(self.config.query_wait_timeout)
     }
 
+    fn shutdown(&self) -> Result<(), ProviderShutdownError> {
+        RustAnalyzerProvider::shutdown(self)
+            .map_err(|error| ProviderShutdownError::new(error.to_string()))
+    }
+
     fn enrich(&self, request: PreciseQueryRequest) -> PreciseQueryResult {
         self.enrich_with_context(request, &OperationContext::unbounded())
     }
@@ -436,6 +444,7 @@ mod tests {
                 outgoing: false,
             },
             limit: 20,
+            priority: chakra_engine::ProviderRequestPriority::Normal,
         });
         assert_eq!(result.state, ProviderState::Degraded);
         provider.shutdown()?;

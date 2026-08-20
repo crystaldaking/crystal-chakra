@@ -485,6 +485,7 @@ impl Worker {
                     return Ok(PreciseQueryResult {
                         revision: request.workspace.revision,
                         state: ProviderState::Ready,
+                        fallback_cause: None,
                         incoming: Vec::new(),
                         outgoing: Vec::new(),
                         incoming_truncated: false,
@@ -554,6 +555,7 @@ impl Worker {
         Ok(PreciseQueryResult {
             revision: request.workspace.revision,
             state: ProviderState::Ready,
+            fallback_cause: None,
             incoming,
             outgoing,
             incoming_truncated,
@@ -1392,6 +1394,7 @@ impl Worker {
             shared.metrics = ProviderMetrics {
                 cache: self.cache.metrics(),
                 document_sync: self.sync_metrics.clone(),
+                ..ProviderMetrics::default()
             };
         }
     }
@@ -1412,6 +1415,7 @@ impl Worker {
             shared.metrics = ProviderMetrics {
                 cache: self.cache.metrics(),
                 document_sync: self.sync_metrics.clone(),
+                ..ProviderMetrics::default()
             };
         }
     }
@@ -1534,6 +1538,7 @@ mod tests {
         let result = |name: &str| PreciseQueryResult {
             revision: Revision(1),
             state: ProviderState::Ready,
+            fallback_cause: None,
             incoming: vec![chakra_engine::PreciseRelation {
                 name: name.to_owned(),
                 declaration: range.clone(),

@@ -47,7 +47,8 @@ client record: ADR-0032.
   process lifecycle: bounded readiness, restart, cancellation, and shutdown
   without orphan processes. When pyright is absent, crashed, or not ready,
   queries degrade to syntax intelligence with explicit provenance and
-  `status` reports no provider entry. Real pyright 1.1.413 was probed
+  `status` reports the configured provider as `dormant` before first use and
+  `degraded` after a failed activation. Real pyright 1.1.413 was probed
   locally: it advertises definition, references, and callHierarchy on a bare
   `initialize` (no `initializationOptions` required).
 

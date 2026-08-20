@@ -19,12 +19,15 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use chakra_domain::operation::OperationContext;
+use chakra_domain::operation::{OperationAbort, OperationContext};
 use chakra_domain::query::{ProviderMetrics, ProviderProgress};
 use chakra_domain::revision::Revision;
 use chakra_domain::state::ProviderState;
 use chakra_domain::symbol::Language;
-use chakra_engine::{PreciseProvider, PreciseQueryRequest, PreciseQueryResult, ProviderWorkspace};
+use chakra_engine::{
+    PreciseProvider, PreciseQueryRequest, PreciseQueryResult, ProviderShutdownError,
+    ProviderWorkspace,
+};
 use crossbeam_channel::{SendTimeoutError, Sender, bounded};
 use thiserror::Error;
 
@@ -32,8 +35,8 @@ use crate::worker::Worker;
 
 const DEFAULT_COMMAND_CAPACITY: usize = 8;
 const DEFAULT_MAX_MESSAGE_BYTES: usize = 32 * 1024 * 1024;
-const DEFAULT_QUERY_WAIT_TIMEOUT: Duration = Duration::from_secs(1);
-const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(5);
+pub const DEFAULT_QUERY_WAIT_TIMEOUT: Duration = Duration::from_secs(1);
+pub const COMMAND_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Resolved pyright invocation. `pyright-langserver --stdio` when the
 /// npm/pip-installed binary is used directly, or
@@ -70,23 +73,38 @@ impl PyrightCommand {
     /// `None` when neither is available; callers then start the provider
     /// degraded.
     pub fn discover() -> Option<Self> {
+        Self::discover_with_context(&OperationContext::unbounded())
+            .ok()
+            .flatten()
+    }
+
+    pub fn discover_with_context(
+        operation: &OperationContext,
+    ) -> Result<Option<Self>, OperationAbort> {
+        operation.check()?;
         if let Some(executable) = find_on_path("pyright-langserver") {
-            return Some(Self::stdio(executable.into_os_string()));
+            return Ok(Some(Self::stdio(executable.into_os_string())));
         }
-        let node = find_on_path("node")?;
-        let npm = find_on_path("npm")?;
-        let root = npm_global_root(&npm)?;
+        let Some(node) = find_on_path("node") else {
+            return Ok(None);
+        };
+        let Some(npm) = find_on_path("npm") else {
+            return Ok(None);
+        };
+        let Some(root) = npm_global_root(&npm, operation)? else {
+            return Ok(None);
+        };
         let bundle = root
             .join("pyright")
             .join("dist")
             .join("pyright-langserver.js");
         if bundle.is_file() {
-            return Some(Self::node_bundle(
+            return Ok(Some(Self::node_bundle(
                 node.into_os_string(),
                 bundle.into_os_string(),
-            ));
+            )));
         }
-        None
+        Ok(None)
     }
 }
 
@@ -121,36 +139,52 @@ fn is_executable_file(path: &std::path::Path) -> bool {
     path.is_file()
 }
 
-fn npm_global_root(npm: &PathBuf) -> Option<PathBuf> {
-    let mut child = std::process::Command::new(npm)
+fn npm_global_root(
+    npm: &PathBuf,
+    operation: &OperationContext,
+) -> Result<Option<PathBuf>, OperationAbort> {
+    operation.check()?;
+    let child = std::process::Command::new(npm)
         .args(["root", "-g"])
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
-        .spawn()
-        .ok()?;
-    let deadline = Instant::now() + DISCOVERY_TIMEOUT;
+        .spawn();
+    let Ok(mut child) = child else {
+        return Ok(None);
+    };
+    let deadline = Instant::now() + COMMAND_DISCOVERY_TIMEOUT;
     loop {
+        if let Err(abort) = operation.check() {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(abort);
+        }
         match child.try_wait() {
             Ok(Some(_)) => break,
             Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(20)),
             Ok(None) | Err(_) => {
                 let _ = child.kill();
                 let _ = child.wait();
-                return None;
+                return Ok(None);
             }
         }
     }
-    let output = child.wait_with_output().ok()?;
+    operation.check()?;
+    let Ok(output) = child.wait_with_output() else {
+        return Ok(None);
+    };
     if !output.status.success() {
-        return None;
+        return Ok(None);
     }
-    let root = String::from_utf8(output.stdout).ok()?;
+    let Ok(root) = String::from_utf8(output.stdout) else {
+        return Ok(None);
+    };
     let root = root.trim();
     if root.is_empty() {
-        return None;
+        return Ok(None);
     }
-    Some(PathBuf::from(root))
+    Ok(Some(PathBuf::from(root)))
 }
 
 /// Process and bounded-wait settings for the optional provider.
@@ -170,8 +204,7 @@ pub struct PyrightConfig {
 impl Default for PyrightConfig {
     fn default() -> Self {
         Self {
-            command: PyrightCommand::discover()
-                .unwrap_or_else(|| PyrightCommand::stdio(OsString::from("pyright-langserver"))),
+            command: PyrightCommand::stdio(OsString::from("pyright-langserver")),
             startup_timeout: Duration::from_secs(20),
             request_timeout: Duration::from_secs(5),
             barrier_timeout: Duration::from_millis(750),
@@ -380,6 +413,11 @@ impl PreciseProvider for PyrightProvider {
         Some(self.config.query_wait_timeout)
     }
 
+    fn shutdown(&self) -> Result<(), ProviderShutdownError> {
+        PyrightProvider::shutdown(self)
+            .map_err(|error| ProviderShutdownError::new(error.to_string()))
+    }
+
     fn enrich(&self, request: PreciseQueryRequest) -> PreciseQueryResult {
         self.enrich_with_context(request, &OperationContext::unbounded())
     }
@@ -441,10 +479,19 @@ impl Drop for PyrightProvider {
 /// `pyright-langserver`/npm discovery on `PATH`. Exposed for CLI wiring and
 /// diagnostics.
 pub fn resolve_command(explicit: Option<&OsStr>) -> PyrightCommand {
+    resolve_command_with_context(explicit, &OperationContext::unbounded())
+        .unwrap_or_else(|_| PyrightCommand::stdio(OsString::from("pyright-langserver")))
+}
+
+pub fn resolve_command_with_context(
+    explicit: Option<&OsStr>,
+    operation: &OperationContext,
+) -> Result<PyrightCommand, OperationAbort> {
+    operation.check()?;
     match explicit {
-        Some(path) => PyrightCommand::stdio(path.to_owned()),
-        None => PyrightCommand::discover()
-            .unwrap_or_else(|| PyrightCommand::stdio(OsString::from("pyright-langserver"))),
+        Some(path) => Ok(PyrightCommand::stdio(path.to_owned())),
+        None => Ok(PyrightCommand::discover_with_context(operation)?
+            .unwrap_or_else(|| PyrightCommand::stdio(OsString::from("pyright-langserver")))),
     }
 }
 
@@ -453,6 +500,24 @@ mod tests {
     use super::*;
     use chakra_domain::location::{RepoRelativePath, SourceRange, TextPosition};
     use chakra_engine::{CallHierarchyDirections, ProviderDocument};
+
+    #[test]
+    fn default_config_uses_a_side_effect_free_command_fallback() {
+        let config = PyrightConfig::default();
+        assert_eq!(
+            config.command,
+            PyrightCommand::stdio(OsString::from("pyright-langserver"))
+        );
+    }
+
+    #[test]
+    fn command_discovery_observes_the_caller_deadline() {
+        let operation = OperationContext::with_timeout(Duration::ZERO);
+        assert_eq!(
+            resolve_command_with_context(None, &operation),
+            Err(OperationAbort::DeadlineExceeded)
+        );
+    }
 
     #[test]
     fn missing_executable_degrades_without_failing_queries()
@@ -492,6 +557,7 @@ mod tests {
                 outgoing: false,
             },
             limit: 20,
+            priority: chakra_engine::ProviderRequestPriority::Normal,
         });
         assert_eq!(result.state, ProviderState::Degraded);
         assert_eq!(provider.name(), "pyright");

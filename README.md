@@ -69,10 +69,14 @@ chakra serve --repo /absolute/path/to/a/git-worktree
 ```
 
 Logging goes to stderr (`RUST_LOG=debug` for more detail). Stdout is reserved
-for the MCP protocol stream. Use `--no-rust-analyzer` for deterministic
-syntax-only operation, or `--rust-analyzer-path /absolute/path/to/rust-analyzer`
-when the provider is not on `PATH`. Chakra does not start rust-analyzer for a
-workspace with no indexed Rust sources.
+for the MCP protocol stream. rust-analyzer, vtsls (TypeScript/JavaScript), and
+pyright (Python) are registered as dormant routes by default and start lazily
+on the first precise query, including for a language added after server
+startup. Explicit executable controls are `--rust-analyzer-path`,
+`--vtsls-path`, and `--pyright-path`. Use all three
+`--no-rust-analyzer --no-vtsls --no-pyright` flags for deterministic
+syntax-only operation. `chakra serve --help` lists the bounded active-provider,
+memory-reservation, concurrent-query, queue, and idle-timeout controls.
 
 ## Connect Codex
 
@@ -121,7 +125,7 @@ when a name is ambiguous. For current changes:
 {"limit":20}
 ```
 
-with `diff_context` summarizes changed Rust/PHP files, current declarations in
+with `diff_context` summarizes changed supported-language files, current declarations in
 those files, and bounded related callers/tests/call candidates.
 
 For Laravel worktrees, `context` and `diff_context` include a bounded
@@ -243,16 +247,26 @@ authoritative Git/filesystem reconciliation and waits on a deterministic
 barrier; callers do not need to sleep after editing. One immutable workspace
 revision is pinned for the complete response. rust-analyzer is queried only
 for Rust symbols and its data is accepted as precise only for that same
-revision; otherwise current syntax facts are
-returned with `catching_up` or `degraded` provider metadata.
-Optional precision has its own one-second wait budget inside the 30-second MCP
-deadline. `context.data.provider` and `callers.data.provider` explain whether a
+revision; otherwise current syntax facts are returned with `dormant`,
+`catching_up`, or `degraded` provider metadata.
+Optional precision reports its complete pool-admission plus activation/query
+wait budget inside the 30-second MCP deadline. `context.data.provider` and `callers.data.provider` explain whether a
 syntax fallback was used, the current provider stage, whether that stage came
-directly from rust-analyzer or was inferred by Chakra, and the wait budget.
+directly from its language adapter or was inferred by Chakra, and the wait budget.
 `status.data.providers[].metrics` reports document-delta traffic and the
-entry/byte-bounded precise cache.
+entry/byte-bounded precise cache plus provider-pool capacity, lifecycle,
+saturation, queue/activation timeout, cancellation, and shutdown-failure
+counters.
 
-Provider startup no longer opens every Rust file. A precise query opens the
+The provider pool routes each language to exactly one adapter and admits
+interactive work ahead of normal/background waiters while preserving FIFO
+within a priority. It starts no language-server process at MCP startup, keeps
+at most three providers active by default, and reclaims only providers with no
+in-flight query. Deterministic memory values are admission reservations rather
+than measured RSS. Saturation, activation failure, or idle shutdown never
+removes syntax intelligence.
+
+Provider startup does not open every source file. A precise query opens the
 selected target from its pinned snapshot; unchanged callers remain disk-backed.
 Later revisions send full text only for documents Chakra already opened and
 use watched-file events for other exact create/change/delete deltas. Provider
@@ -283,11 +297,11 @@ bounded to five seconds and execution to a 30-second end-to-end deadline.
 Cancellation before dispatch removes queued work; cancellation after dispatch
 cooperatively interrupts freshness, graph traversal, Git, and optional provider
 work while the request retains its slot through cleanup. Timed-out or cancelled
-rust-analyzer requests send `$/cancelRequest`. `status.data.query_execution`
+LSP-provider requests send `$/cancelRequest`. `status.data.query_execution`
 reports queued/running work, outcomes, and permit hold time without itself
 entering the expensive-query pool.
 
-Indexing defaults to 100,000 Git-discovered Rust/PHP files, 8 MiB per source,
+Indexing defaults to 100,000 Git-discovered supported source files, 8 MiB per source,
 128 MiB total source, 500,000 symbols, 1,000,000 relationships, and 1,000,000
 compact call sites. Cold-start and phase-sampled resident-memory targets default
 to 120 seconds and 2 GiB. Initial parsing may use up to eight worker-local
@@ -304,9 +318,10 @@ possible: files, text search, and retained declarations remain queryable. Every
 query envelope reports exact indexing budgets, corpus coverage, capability
 completeness, affected capabilities, omission cause, phase measurements, and
 best-effort CPU/RSS samples. Scheduling metadata reports configured, available,
-memory-limited, and effective workers plus queue depth. Schema v4 carries these
-facts together with v3 graph-publication reuse/copy metrics. Ordinary edits use
-persistent file-owned graph deltas and shallow Rust/PHP composition, so old
+memory-limited, and effective workers plus queue depth. Schema v8 carries these
+facts together with graph-publication reuse/copy and provider-pool metrics.
+Ordinary edits use persistent file-owned graph deltas and shallow
+language-partition composition, so old
 snapshot readers remain immutable without a second complete combined-graph
 copy. Calls are never resolved against a truncated symbol catalog. Time/RSS
 targets are observable warnings rather than nondeterministic inputs to graph
@@ -342,8 +357,8 @@ Every scope then applies the same materialized-worktree rules:
 - staged and unstaged tracked edits are combined; final worktree content wins;
 - commits between the selected baseline and `HEAD` are included for explicit
   base scopes (and therefore visible in a clean feature branch);
-- untracked, non-ignored Rust/PHP files are included;
-- deleted tracked Rust/PHP files are reported by their former path;
+- untracked, non-ignored supported source files are included;
+- deleted tracked supported source files are reported by their former path;
 - Git-detected staged renames carry `previous_path` and heuristic precision;
 - an unstaged move remains delete plus add when Git cannot prove a rename;
 - ignored files, `target/`, unsupported-language files, and skipped symlinks are excluded.
@@ -415,11 +430,17 @@ release, or hotfix branches and pull requests. Direct post-v0.1.0 commits to
 - `crates/chakra-domain` — core types and MCP-independent query contracts.
 - `crates/chakra-engine` — in-memory graph, atomic revisions, query layer.
 - `crates/chakra-git` — Git-aware source discovery and typed current-worktree diff adapter.
-- `crates/chakra-language` — Rust/PHP graph composition, watching, and reconciliation.
+- `crates/chakra-language` — language-adapter registry, graph composition, watching, and reconciliation.
 - `crates/chakra-language-rust` — Tree-sitter Rust syntax adapter.
 - `crates/chakra-language-php` — Tree-sitter PHP syntax adapter.
+- `crates/chakra-language-typescript` — Tree-sitter TypeScript/TSX syntax adapter.
+- `crates/chakra-language-python` — Tree-sitter Python syntax adapter.
+- `crates/chakra-language-javascript` — Tree-sitter JavaScript/JSX syntax adapter.
 - `crates/chakra-mcp` — thin stdio MCP adapter.
+- `crates/chakra-provider-pool` — bounded lazy provider orchestration.
 - `crates/chakra-provider-rust-analyzer` — optional precise provider adapter.
+- `crates/chakra-provider-vtsls` — optional TypeScript/JavaScript precise provider adapter.
+- `crates/chakra-provider-pyright` — optional Python precise provider adapter.
 - `fixtures/rust/controller-service-provider` — integration fixture/test oracle.
 - `fixtures/php/controller-service-provider` — PHP integration fixture/test oracle.
 - `docs/SPEC.md` — architectural source of truth.

@@ -7,6 +7,17 @@ version tags prefixed with `v`.
 
 ### Added
 
+- Bounded multi-provider orchestration (issue #26, ADR-0035):
+  rust-analyzer, vtsls (shared by TypeScript/JavaScript), and pyright now
+  coexist through strict language routing and start only on the first precise
+  query. Deterministic active-provider, memory-reservation, concurrent-query,
+  and queue limits provide priority/FIFO admission with observable syntax
+  fallback under saturation. Idle/LRU eviction, activation backoff,
+  cancellation, and owned pool/provider shutdown prevent unbounded work or
+  orphan processes; failed eviction cleanup retains its reservation and is
+  retried observably. Provider status distinguishes `dormant` from
+  `not_configured` and reports pool lifecycle/capacity metrics; the response
+  envelope schema advances to version 8.
 - First-class JavaScript/JSX support (issue #29): a
   `chakra-language-javascript` adapter crate (tree-sitter-javascript
   0.25.0, `.js`/`.jsx`/`.mjs`/`.cjs`; the single grammar parses JSX

@@ -54,8 +54,9 @@ client record: ADR-0032; CommonJS fact model: ADR-0034.
   lifecycle: bounded readiness, restart, cancellation, and shutdown without
   orphan processes. When vtsls is absent, crashed, or not ready, queries
   degrade to syntax intelligence with explicit provenance and `status`
-  reports no provider entry. The provider binary is shared with the
-  TypeScript support; no JavaScript-specific server is needed.
+  reports the configured provider as `dormant` before first use and
+  `degraded` after a failed activation. The provider binary is shared with
+  the TypeScript support; no JavaScript-specific server is needed.
 
 ## Precision tiers
 

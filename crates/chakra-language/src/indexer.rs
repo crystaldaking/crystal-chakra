@@ -788,7 +788,7 @@ pub fn index_repository_with_options(
         effective_worker_limit = metrics.indexing.scheduling.effective_worker_limit,
         peak_active_workers = metrics.indexing.scheduling.peak_active_workers,
         elapsed_micros = elapsed.as_micros(),
-        "bounded Rust/PHP syntax index completed"
+        "bounded multi-language syntax index completed"
     );
     Ok(IndexReport {
         repository_root,

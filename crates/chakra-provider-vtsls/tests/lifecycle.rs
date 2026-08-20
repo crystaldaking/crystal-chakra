@@ -230,6 +230,7 @@ fn request(root: &Path, revision: Revision) -> Result<PreciseQueryRequest, Box<d
             outgoing: false,
         },
         limit: 20,
+        priority: chakra_engine::ProviderRequestPriority::Normal,
     })
 }
 
@@ -307,6 +308,7 @@ fn javascript_document_syncs_with_the_javascript_language_id() -> Result<(), Box
             outgoing: false,
         },
         limit: 20,
+        priority: chakra_engine::ProviderRequestPriority::Normal,
     };
     let provider = VtslsProvider::start(request.workspace.clone(), config(&executable))?;
 

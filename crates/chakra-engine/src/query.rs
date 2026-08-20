@@ -25,11 +25,11 @@ use chakra_domain::query::{
     ChangedSymbolBasis, ContextData, ContextRequest, DEFAULT_QUERY_LIMIT, DiffCallSite,
     DiffContextData, DiffContextRequest, DiffDirectedRelatedSymbol, DiffRelatedSymbol, DiffScope,
     DirectedRelatedSymbol, FileSummary, IndexCounts, MAX_QUERY_LIMIT, MAX_STATUS_DIAGNOSTICS,
-    ProviderCapability, ProviderInfo, ProviderQueryInfo, QueryError, QueryService, RelatedSymbol,
-    RelationDirection, RepoMapCursor, RepoMapData, RepoMapGroup, RepoMapGroupKind, RepoMapRequest,
-    RepoMapScope, SearchData, SearchRequest, SourceFilter, SourceSnippet, StatusData,
-    StatusRequest, SymbolRef, SymbolSearchData, SymbolSearchRequest, SymbolView,
-    SyntaxDiagnosticSummary, TextMatch,
+    ProviderCapability, ProviderFallbackCause, ProviderInfo, ProviderQueryInfo, QueryError,
+    QueryService, RelatedSymbol, RelationDirection, RepoMapCursor, RepoMapData, RepoMapGroup,
+    RepoMapGroupKind, RepoMapRequest, RepoMapScope, SearchData, SearchRequest, SourceFilter,
+    SourceSnippet, StatusData, StatusRequest, SymbolRef, SymbolSearchData, SymbolSearchRequest,
+    SymbolView, SyntaxDiagnosticSummary, TextMatch,
 };
 use chakra_domain::revision::Revision;
 use chakra_domain::source::{SourceClassification, SourceMetadata, SourceRole};
@@ -42,8 +42,8 @@ use serde::Serialize;
 use crate::engine::{WorkspaceEngine, WorkspaceSnapshot};
 use crate::graph::{GraphFileSummary, SymbolGraph};
 use crate::precise::{
-    CallHierarchyDirections, PreciseQueryRequest, PreciseRelation, ProviderSymbol,
-    ProviderWorkspace,
+    CallHierarchyDirections, PreciseQueryRequest, PreciseRelation, ProviderRequestPriority,
+    ProviderSymbol, ProviderWorkspace,
 };
 use crate::{DiffWorkspace, WorkspaceDiff};
 
@@ -1568,11 +1568,23 @@ fn incoming_call_candidates(
 }
 
 fn provider_state_for(engine: &WorkspaceEngine, snapshot: &WorkspaceSnapshot) -> ProviderState {
-    engine
-        .precise_provider()
-        .map_or(snapshot.provider_state(), |provider| {
-            provider.state_for(snapshot.revision())
-        })
+    let providers = engine.precise_providers();
+    providers
+        .iter()
+        .map(|provider| provider.state_for(snapshot.revision()))
+        .max_by_key(|state| provider_state_severity(*state))
+        .unwrap_or_else(|| snapshot.provider_state())
+}
+
+fn provider_state_severity(state: ProviderState) -> u8 {
+    match state {
+        ProviderState::NotConfigured => 0,
+        ProviderState::Ready => 1,
+        ProviderState::Dormant => 2,
+        ProviderState::Initializing => 3,
+        ProviderState::CatchingUp => 4,
+        ProviderState::Degraded => 5,
+    }
 }
 
 fn provider_state_for_language(
@@ -1581,8 +1593,7 @@ fn provider_state_for_language(
     language: chakra_domain::symbol::Language,
 ) -> ProviderState {
     engine
-        .precise_provider()
-        .filter(|provider| provider.supports(language))
+        .precise_provider_for(language)
         .map_or(ProviderState::NotConfigured, |provider| {
             provider.state_for(snapshot.revision())
         })
@@ -1592,16 +1603,43 @@ fn provider_query_info(
     engine: &WorkspaceEngine,
     language: chakra_domain::symbol::Language,
     state: ProviderState,
+    fallback_cause: Option<ProviderFallbackCause>,
     freshness: FreshnessRequirement,
 ) -> Option<ProviderQueryInfo> {
-    let provider = engine
-        .precise_provider()
-        .filter(|provider| provider.supports(language))?;
-    let fallback_reason = if freshness == FreshnessRequirement::AllowStale
+    let provider = engine.precise_provider_for(language)?;
+    let fallback_reason = if let Some(cause) = fallback_cause {
+        Some(
+            match cause {
+                ProviderFallbackCause::QueueSaturated => {
+                    "provider pool queue was full; syntax facts were retained"
+                }
+                ProviderFallbackCause::QueueTimedOut => {
+                    "provider pool admission timed out; syntax facts were retained"
+                }
+                ProviderFallbackCause::ActivationCapacity => {
+                    "provider pool had no safely reclaimable process or memory capacity; syntax facts were retained"
+                }
+                ProviderFallbackCause::ActivationFailed => {
+                    "provider activation failed or is in backoff; syntax facts were retained"
+                }
+                ProviderFallbackCause::ActivationTimedOut => {
+                    "provider activation exceeded the caller deadline; syntax facts were retained"
+                }
+                ProviderFallbackCause::Cancelled => {
+                    "provider work was cancelled; syntax facts were retained"
+                }
+                ProviderFallbackCause::ProviderStopped => {
+                    "provider pool is stopping; syntax facts were retained"
+                }
+            }
+            .to_owned(),
+        )
+    } else if freshness == FreshnessRequirement::AllowStale
         && matches!(
             state,
             ProviderState::CatchingUp | ProviderState::Initializing
-        ) {
+        )
+    {
         Some(
             "allow_stale preserves low-latency syntax semantics and skips the post-provider freshness proof"
                 .to_owned(),
@@ -1609,6 +1647,10 @@ fn provider_query_info(
     } else {
         match state {
             ProviderState::Ready => None,
+            ProviderState::Dormant => Some(
+                "provider is configured and will start on demand; syntax facts were retained"
+                    .to_owned(),
+            ),
             ProviderState::CatchingUp | ProviderState::Initializing => Some(
                 "provider did not prove readiness for the pinned revision within the wait budget; syntax facts were retained"
                     .to_owned(),
@@ -1626,9 +1668,11 @@ fn provider_query_info(
         name: provider.name().to_owned(),
         state,
         fallback_used: state != ProviderState::Ready,
+        fallback_cause,
         fallback_reason,
         last_error: provider.last_error(),
         progress: provider.progress(),
+        metrics: provider.metrics(),
         wait_budget_millis: provider
             .query_wait_budget()
             .map(|budget| u64::try_from(budget.as_millis()).unwrap_or(u64::MAX)),
@@ -2194,20 +2238,18 @@ impl QueryService for WorkspaceEngine {
             unresolved_call_sites: snapshot.graph().unresolved_call_site_count(),
             call_sites_with_truncated_candidates: snapshot.graph().truncated_call_sites(),
         };
-        let provider = self.precise_provider();
+        let precise_providers = self.precise_providers();
         // Report a provider entry only when an adapter is actually installed,
         // with its real name and supported languages; an unconfigured engine
         // reports an empty provider list instead of a fabricated entry.
-        let providers: Vec<ProviderInfo> = provider
+        let providers: Vec<ProviderInfo> = precise_providers
+            .iter()
             .map(|provider| ProviderInfo {
                 name: provider.name().to_owned(),
-                languages: [
-                    chakra_domain::symbol::Language::Rust,
-                    chakra_domain::symbol::Language::Php,
-                ]
-                .into_iter()
-                .filter(|language| provider.supports(*language))
-                .collect(),
+                languages: Language::ALL
+                    .into_iter()
+                    .filter(|language| provider.supports(*language))
+                    .collect(),
                 capabilities: vec![
                     ProviderCapability::IncomingCalls,
                     ProviderCapability::OutgoingCalls,
@@ -2216,7 +2258,7 @@ impl QueryService for WorkspaceEngine {
                     ProviderCapability::RevisionDeltaSynchronization,
                     ProviderCapability::CacheMetrics,
                 ],
-                state: provider_state,
+                state: provider.state_for(snapshot.revision()),
                 last_error: provider.last_error(),
                 progress: provider.progress(),
                 metrics: provider.metrics(),
@@ -2224,7 +2266,6 @@ impl QueryService for WorkspaceEngine {
                     .query_wait_budget()
                     .map(|budget| u64::try_from(budget.as_millis()).unwrap_or(u64::MAX)),
             })
-            .into_iter()
             .collect();
         let providers = bounded_section(
             providers,
@@ -2668,11 +2709,10 @@ impl QueryService for WorkspaceEngine {
         }
         let mut provider_incoming_truncated = false;
         let mut provider_outgoing_truncated = false;
+        let mut provider_fallback_cause = None;
         if request.freshness == FreshnessRequirement::RequireFresh
             && snapshot.freshness() == Freshness::Fresh
-            && let Some(provider) = self
-                .precise_provider()
-                .filter(|provider| provider.supports(symbol.key.language))
+            && let Some(provider) = self.precise_provider_for(symbol.key.language)
         {
             let provider_started = Instant::now();
             let result = provider.enrich_with_context(
@@ -2688,10 +2728,12 @@ impl QueryService for WorkspaceEngine {
                         outgoing: true,
                     },
                     limit,
+                    priority: ProviderRequestPriority::Interactive,
                 },
                 operation,
             );
             operation.check()?;
+            provider_fallback_cause = result.fallback_cause;
             work_stats.provider_wait_micros = work_stats.provider_wait_micros.saturating_add(
                 u64::try_from(provider_started.elapsed().as_micros()).unwrap_or(u64::MAX),
             );
@@ -3024,6 +3066,7 @@ impl QueryService for WorkspaceEngine {
                 self,
                 symbol.key.language,
                 provider_state,
+                provider_fallback_cause,
                 request.freshness,
             ),
         };
@@ -3088,6 +3131,7 @@ impl QueryService for WorkspaceEngine {
             provider_state = ProviderState::CatchingUp;
         }
         let mut provider_truncated = false;
+        let mut provider_fallback_cause = None;
         let mut candidates_work = SectionWorkBudget::new(limit);
         let candidate_views =
             incoming_call_candidates(graph, target.id, operation, &mut candidates_work)?;
@@ -3095,9 +3139,7 @@ impl QueryService for WorkspaceEngine {
         let mut syntax_candidates = candidate_views.items;
         if request.freshness == FreshnessRequirement::RequireFresh
             && snapshot.freshness() == Freshness::Fresh
-            && let Some(provider) = self
-                .precise_provider()
-                .filter(|provider| provider.supports(target.key.language))
+            && let Some(provider) = self.precise_provider_for(target.key.language)
         {
             let provider_started = Instant::now();
             let result = provider.enrich_with_context(
@@ -3113,10 +3155,12 @@ impl QueryService for WorkspaceEngine {
                         outgoing: false,
                     },
                     limit,
+                    priority: ProviderRequestPriority::Interactive,
                 },
                 operation,
             );
             operation.check()?;
+            provider_fallback_cause = result.fallback_cause;
             work_stats.provider_wait_micros = work_stats.provider_wait_micros.saturating_add(
                 u64::try_from(provider_started.elapsed().as_micros()).unwrap_or(u64::MAX),
             );
@@ -3199,6 +3243,7 @@ impl QueryService for WorkspaceEngine {
                 self,
                 target.key.language,
                 provider_state,
+                provider_fallback_cause,
                 request.freshness,
             ),
         };

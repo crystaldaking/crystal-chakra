@@ -44,7 +44,8 @@ integration record: ADR-0032.
   ADR-0032. Chakra owns the process lifecycle: bounded readiness, restart,
   cancellation, and shutdown without orphan processes. When vtsls is absent,
   crashed, or not ready, queries degrade to syntax intelligence with explicit
-  provenance and `status` reports no provider entry.
+  provenance; `status` reports the configured provider as `dormant` before
+  first use and `degraded` after a failed activation.
 
 ## Precision tiers
 
