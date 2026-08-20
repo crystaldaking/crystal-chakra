@@ -95,6 +95,14 @@ struct ServeArgs {
     #[arg(long, value_name = "PATH")]
     bash_language_server_path: Option<OsString>,
 
+    /// Run without the optional clangd C/C++ provider.
+    #[arg(long)]
+    no_clangd: bool,
+
+    /// Explicit clangd executable; omit for side-effect-free PATH discovery.
+    #[arg(long, value_name = "PATH")]
+    clangd_path: Option<OsString>,
+
     /// Maximum simultaneously active precise providers.
     #[arg(long, default_value_t = 3)]
     max_active_providers: usize,
@@ -204,6 +212,8 @@ async fn serve(args: ServeArgs) -> ExitCode {
         csharp_ls_path,
         no_bash_language_server,
         bash_language_server_path,
+        no_clangd,
+        clangd_path,
         max_active_providers,
         max_provider_reserved_memory_bytes,
         max_concurrent_provider_queries,
@@ -289,6 +299,7 @@ async fn serve(args: ServeArgs) -> ExitCode {
         files = initial_metrics.parsed_files,
         rust_files = initial_metrics.rust_files,
         php_files = initial_metrics.php_files,
+        cpp_files = initial_metrics.cpp_files,
         laravel_detected = initial_metrics.laravel_detected,
         framework_symbols = initial_metrics.framework_symbols,
         framework_edges = initial_metrics.framework_edges,
@@ -547,6 +558,42 @@ async fn serve(args: ServeArgs) -> ExitCode {
     } else {
         tracing::info!("bash-language-server precise enrichment is disabled");
     }
+    if should_register_provider(no_clangd) {
+        let command: OnceLock<chakra_provider_clangd::ClangdCommand> = OnceLock::new();
+        let query_wait_budget = chakra_provider_clangd::DEFAULT_QUERY_WAIT_TIMEOUT;
+        registrations.push(
+            ProviderRegistration::new(
+                "clangd",
+                vec![Language::Cpp],
+                2 * 1024 * 1024 * 1024,
+                move |workspace,
+                      operation|
+                      -> Result<Arc<dyn PreciseProvider>, ProviderStartError> {
+                    let resolved_command = if let Some(command) = command.get() {
+                        command.clone()
+                    } else {
+                        let resolved = chakra_provider_clangd::resolve_command_with_context(
+                            clangd_path.as_deref(),
+                            operation,
+                        )
+                        .map_err(ProviderStartError::from)?;
+                        let _ = command.set(resolved.clone());
+                        resolved
+                    };
+                    let config = chakra_provider_clangd::ClangdConfig {
+                        command: resolved_command,
+                        ..chakra_provider_clangd::ClangdConfig::default()
+                    };
+                    chakra_provider_clangd::ClangdProvider::start(workspace, config)
+                        .map(|provider| provider as Arc<dyn PreciseProvider>)
+                        .map_err(|error| ProviderStartError::new(error.to_string()))
+                },
+            )
+            .with_additional_wait_budget(query_wait_budget),
+        );
+    } else {
+        tracing::info!("clangd precise enrichment is disabled");
+    }
     let provider_pool = match ProviderPool::start(
         ProviderPoolConfig {
             max_active_providers,
@@ -656,6 +703,8 @@ mod tests {
                 && args.csharp_ls_path.is_none()
                 && !args.no_bash_language_server
                 && args.bash_language_server_path.is_none()
+                && !args.no_clangd
+                && args.clangd_path.is_none()
                 && args.max_active_providers == 3
                 && args.max_index_files == DEFAULT_MAX_INDEX_FILES
                 && args.max_index_symbols == DEFAULT_MAX_INDEX_SYMBOLS
@@ -688,6 +737,9 @@ mod tests {
             "--no-bash-language-server",
             "--bash-language-server-path",
             "/opt/bin/bash-language-server",
+            "--no-clangd",
+            "--clangd-path",
+            "/opt/bin/clangd",
         ]);
         assert!(matches!(
             cli,
@@ -710,6 +762,9 @@ mod tests {
                 && args.no_bash_language_server
                 && args.bash_language_server_path.as_deref()
                     == Some(std::ffi::OsStr::new("/opt/bin/bash-language-server"))
+                && args.no_clangd
+                && args.clangd_path.as_deref()
+                    == Some(std::ffi::OsStr::new("/opt/bin/clangd"))
         ));
     }
 

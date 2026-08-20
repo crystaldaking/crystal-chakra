@@ -47,11 +47,13 @@ pub enum Language {
     CSharp,
     #[serde(rename = "shell")]
     Shell,
+    #[serde(rename = "cpp")]
+    Cpp,
 }
 
 impl Language {
     /// Languages understood by the current Chakra build, in stable display order.
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 9] = [
         Self::Rust,
         Self::Php,
         Self::TypeScript,
@@ -60,6 +62,7 @@ impl Language {
         Self::Java,
         Self::CSharp,
         Self::Shell,
+        Self::Cpp,
     ];
 }
 

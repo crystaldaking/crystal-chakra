@@ -6,6 +6,8 @@ Measured values vary by machine and run; these artifacts are committed deliberat
 
 | Language | Repository | SHA | Status | Cold index (s) | Peak RSS (MiB) | Symbols | Edges | Warm no-op (ms) | Scenarios failed |
 |---|---|---|---|---|---|---|---|---|---|
+| cpp | nlohmann/json | `cdf52ae9bef7` | pass | 0.42 | 102 | 11451 | 11880 | 21 | 0 |
+| cpp | protocolbuffers/protobuf | `720e5468cebb` | pass | 3.15 | 891 | 138697 | 154549 | 79 | 0 |
 | csharp | dotnet/runtime | `663c457b86cc` | pass | 82.18 | 2353 | 325078 | 506840 | 801 | 0 |
 | java | apache/kafka | `aa502fb153d9` | pass | 5.94 | 1996 | 216644 | 241836 | 156 | 0 |
 | java | spring-projects/spring-boot | `e3d4b1ceb6d8` | pass | 3.49 | 956 | 161758 | 102723 | 452 | 0 |

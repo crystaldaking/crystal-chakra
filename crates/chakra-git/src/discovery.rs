@@ -498,6 +498,16 @@ pub fn source_language(path: &str) -> Option<Language> {
         Some(extension) if matches!(extension.to_str(), Some("sh" | "bash" | "zsh" | "ksh")) => {
             Some(Language::Shell)
         }
+        Some(extension)
+            if matches!(
+                extension.to_str(),
+                Some(
+                    "c" | "h" | "cc" | "cpp" | "cxx" | "hh" | "hpp" | "hxx" | "ipp" | "tpp" | "inc"
+                )
+            ) =>
+        {
+            Some(Language::Cpp)
+        }
         _ => None,
     }
 }
@@ -609,7 +619,18 @@ fn workspace_inventory_from_git_output(
             || raw.ends_with(b".sh")
             || raw.ends_with(b".bash")
             || raw.ends_with(b".zsh")
-            || raw.ends_with(b".ksh");
+            || raw.ends_with(b".ksh")
+            || raw.ends_with(b".c")
+            || raw.ends_with(b".h")
+            || raw.ends_with(b".cc")
+            || raw.ends_with(b".cpp")
+            || raw.ends_with(b".cxx")
+            || raw.ends_with(b".hh")
+            || raw.ends_with(b".hpp")
+            || raw.ends_with(b".hxx")
+            || raw.ends_with(b".ipp")
+            || raw.ends_with(b".tpp")
+            || raw.ends_with(b".inc");
         let metadata_input = raw_is_metadata_input(raw);
         if !source && !metadata_input {
             continue;
@@ -680,6 +701,13 @@ fn raw_is_metadata_input(raw: &[u8]) -> bool {
         b"global.json".as_slice(),
         b".shellcheckrc".as_slice(),
         b"shellcheckrc".as_slice(),
+        b"compile_commands.json".as_slice(),
+        b"compile_flags.txt".as_slice(),
+        b"CMakeLists.txt".as_slice(),
+        b"meson.build".as_slice(),
+        b"BUILD".as_slice(),
+        b"BUILD.bazel".as_slice(),
+        b".clangd".as_slice(),
         b".cargo/config".as_slice(),
         b".cargo/config.toml".as_slice(),
         b"rust-toolchain".as_slice(),
@@ -1100,6 +1128,50 @@ mod tests {
             .filter(|path| path.contains("shellcheck"))
             .collect();
         assert_eq!(metadata, [".shellcheckrc", "shellcheckrc"]);
+        Ok(())
+    }
+
+    #[test]
+    fn discovers_cpp_translation_units_headers_and_build_metadata() -> Result<(), Box<dyn Error>> {
+        let repository = repository()?;
+        let root = repository.path();
+        fs::create_dir_all(root.join("include"))?;
+        fs::create_dir_all(root.join("src"))?;
+        for (path, source) in [
+            ("include/service.hpp", "void pay();\n"),
+            ("src/service.cpp", "void pay() {}\n"),
+            ("src/compat.c", "void compat(void) {}\n"),
+            ("src/detail.ipp", "template<class T> void detail(T) {}\n"),
+            ("ignored.cc", "void ignored() {}\n"),
+        ] {
+            fs::write(root.join(path), source)?;
+        }
+        fs::write(root.join("compile_commands.json"), "[]\n")?;
+        fs::write(root.join("CMakeLists.txt"), "project(chakra)\n")?;
+        fs::write(root.join(".gitignore"), "ignored.cc\ntarget/\n")?;
+
+        let cpp = discover_language_files(root, Language::Cpp)?;
+        let paths: Vec<&str> = cpp.iter().map(RepoRelativePath::as_str).collect();
+        assert_eq!(
+            paths,
+            [
+                "include/service.hpp",
+                "src/compat.c",
+                "src/detail.ipp",
+                "src/service.cpp"
+            ]
+        );
+        let inventory = discover_workspace_inventory_in_worktree_with_context(
+            root,
+            &OperationContext::unbounded(),
+        )?;
+        let metadata: Vec<&str> = inventory
+            .metadata_inputs
+            .iter()
+            .map(RepoRelativePath::as_str)
+            .filter(|path| *path == "CMakeLists.txt" || *path == "compile_commands.json")
+            .collect();
+        assert_eq!(metadata, ["CMakeLists.txt", "compile_commands.json"]);
         Ok(())
     }
 }

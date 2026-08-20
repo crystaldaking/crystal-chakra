@@ -451,6 +451,9 @@ fn language_from_path(path: &str) -> Option<Language> {
         Some("java") => Some(Language::Java),
         Some("cs") => Some(Language::CSharp),
         Some("sh" | "bash" | "zsh" | "ksh") => Some(Language::Shell),
+        Some("c" | "h" | "cc" | "cpp" | "cxx" | "hh" | "hpp" | "hxx" | "ipp" | "tpp" | "inc") => {
+            Some(Language::Cpp)
+        }
         _ => None,
     }
 }
@@ -465,8 +468,8 @@ mod tests {
     use crate::WorkspaceEngine;
 
     #[test]
-    fn snapshot_backed_workspaces_retain_csharp_and_shell_documents() -> Result<(), Box<dyn Error>>
-    {
+    fn snapshot_backed_workspaces_retain_csharp_shell_and_cpp_documents()
+    -> Result<(), Box<dyn Error>> {
         let root = std::env::current_dir()?;
         let engine = WorkspaceEngine::new(WorkspaceIdentity::for_primary_worktree(&root)?);
         let mut update = engine.begin_update();
@@ -478,11 +481,16 @@ mod tests {
             RepoRelativePath::new("scripts/release.sh")?,
             "release() { true; }\n",
         )?;
+        update.graph_mut().add_file(
+            RepoRelativePath::new("src/payment.cpp")?,
+            "int payment() { return 1; }\n",
+        )?;
         engine.publish(update)?;
 
         let workspace = ProviderWorkspace::from_snapshot(&engine.snapshot());
         assert_eq!(workspace.document_count(Language::CSharp), 1);
         assert_eq!(workspace.document_count(Language::Shell), 1);
+        assert_eq!(workspace.document_count(Language::Cpp), 1);
         assert!(
             workspace
                 .document(&RepoRelativePath::new("src/Program.cs")?)
@@ -491,6 +499,11 @@ mod tests {
         assert!(
             workspace
                 .document(&RepoRelativePath::new("scripts/release.sh")?)
+                .is_some()
+        );
+        assert!(
+            workspace
+                .document(&RepoRelativePath::new("src/payment.cpp")?)
                 .is_some()
         );
         Ok(())

@@ -1,0 +1,241 @@
+{
+  "language": "cpp",
+  "advertised": true,
+  "tier": "first-class",
+  "grammar": {
+    "name": "tree-sitter-cpp",
+    "version": "0.23.4",
+    "adr": "docs/adr/0027-grammar-and-provider-selection.md"
+  },
+  "precise_provider": {
+    "name": "clangd",
+    "adr": "docs/adr/0039-clangd-workspace-enrichment.md",
+    "status": "integrated"
+  },
+  "capabilities": {
+    "DISC-01": {
+      "status": "pass",
+      "mechanism": "chakra-git discovery for C/C++ translation units and headers",
+      "evidence": [
+        "crates/chakra-language-cpp/tests/fixture_index.rs",
+        "crates/chakra-git/src/discovery.rs"
+      ]
+    },
+    "DISC-02": {
+      "status": "pass",
+      "mechanism": "nearest compile database/build metadata project scope with path fallback",
+      "evidence": [
+        "crates/chakra-git/src/source_metadata.rs",
+        "docs/support/conformance/cpp.json"
+      ]
+    },
+    "DISC-03": {
+      "status": "pass",
+      "mechanism": "language-neutral test/vendor/generated roles plus C++ filename conventions",
+      "evidence": [
+        "crates/chakra-language-cpp/tests/fixture_index.rs",
+        "docs/support/conformance/cpp.json"
+      ]
+    },
+    "SYNTAX-01": {
+      "status": "pass",
+      "mechanism": "tree-sitter-cpp 0.23.4",
+      "evidence": [
+        "Cargo.toml"
+      ]
+    },
+    "SYNTAX-02": {
+      "status": "pass",
+      "mechanism": "tree-sitter",
+      "evidence": [
+        "crates/chakra-language-cpp/tests/fixture_index.rs"
+      ]
+    },
+    "SYNTAX-03": {
+      "status": "pass",
+      "mechanism": "tree-sitter translation units, namespaces, types, functions, methods, fields, aliases, and concepts",
+      "evidence": [
+        "crates/chakra-language-cpp/tests/fixture_index.rs"
+      ]
+    },
+    "SYNTAX-04": {
+      "status": "pass",
+      "mechanism": "tree-sitter preprocessor include facts",
+      "evidence": [
+        "crates/chakra-language-cpp/tests/fixture_index.rs",
+        "docs/support/conformance/cpp.json"
+      ]
+    },
+    "SYNTAX-05": {
+      "status": "pass",
+      "mechanism": "tree-sitter byte-accurate ranges",
+      "evidence": [
+        "crates/chakra-language-cpp/tests/fixture_index.rs"
+      ]
+    },
+    "SYNTAX-06": {
+      "status": "pass",
+      "mechanism": "tree-sitter plus common C++ test macro and file conventions",
+      "evidence": [
+        "crates/chakra-language-cpp/tests/fixture_index.rs",
+        "docs/support/conformance/cpp.json"
+      ]
+    },
+    "SYNTAX-07": {
+      "status": "pass",
+      "mechanism": "tree-sitter diagnostics (ADR-0022)",
+      "evidence": [
+        "crates/chakra-language-cpp/tests/fixture_index.rs"
+      ]
+    },
+    "SYNTAX-08": {
+      "status": "pass",
+      "mechanism": "bounded static call candidates, qualified-call resolution, and inheritance relations",
+      "evidence": [
+        "crates/chakra-language-cpp/tests/fixture_index.rs",
+        "docs/support/conformance/cpp.json"
+      ]
+    },
+    "PRECISE-01": {
+      "status": "pass",
+      "mechanism": "recorded provider selection: clangd 21+/22.x with optional compilation database",
+      "evidence": [
+        "docs/adr/0027-grammar-and-provider-selection.md",
+        "docs/adr/0039-clangd-workspace-enrichment.md"
+      ]
+    },
+    "PRECISE-02": {
+      "status": "pass",
+      "mechanism": "clangd call hierarchy over shared chakra-lsp client",
+      "evidence": [
+        "crates/chakra-provider-clangd/tests/lifecycle.rs",
+        "crates/chakra-provider-clangd/tests/real_provider.rs"
+      ]
+    },
+    "PRECISE-03": {
+      "status": "pass",
+      "mechanism": "owned lifecycle, revision-scoped C/C++ document synchronization, restart, cancellation, and orphan-free shutdown",
+      "evidence": [
+        "crates/chakra-provider-clangd/tests/lifecycle.rs",
+        "crates/chakra-lsp/tests/lifecycle.rs",
+        "docs/adr/0039-clangd-workspace-enrichment.md"
+      ]
+    },
+    "PRECISE-04": {
+      "status": "pass",
+      "mechanism": "capability-gated call-hierarchy enrichment through PreciseProvider",
+      "evidence": [
+        "crates/chakra-provider-clangd/tests/lifecycle.rs",
+        "crates/chakra-provider-clangd/tests/real_provider.rs"
+      ]
+    },
+    "PRECISE-05": {
+      "status": "pass",
+      "mechanism": "graceful absence, missing-capability, crash, timeout, and cancellation degradation",
+      "evidence": [
+        "crates/chakra-provider-clangd/tests/lifecycle.rs",
+        "docs/support/conformance/cpp.json"
+      ]
+    },
+    "QUERY-01": {
+      "status": "pass",
+      "mechanism": "chakra-engine QueryService",
+      "evidence": [
+        "crates/chakra-language-cpp/tests/fixture_index.rs"
+      ]
+    },
+    "QUERY-02": {
+      "status": "pass",
+      "mechanism": "chakra-mcp structured tools",
+      "evidence": [
+        "crates/chakra-mcp/tests/contract.rs"
+      ]
+    },
+    "QUERY-03": {
+      "status": "pass",
+      "mechanism": "chakra-git current-worktree and base-ref diff provider",
+      "evidence": [
+        "docs/support/conformance/cpp.json",
+        "crates/chakra-git/src/lib.rs"
+      ]
+    },
+    "FRESH-01": {
+      "status": "pass",
+      "mechanism": "atomic revision publication (ADR-0001)",
+      "evidence": [
+        "crates/chakra-engine/tests/atomic_revisions.rs"
+      ]
+    },
+    "FRESH-02": {
+      "status": "pass",
+      "mechanism": "C++ live freshness barrier and language-partition reconciliation",
+      "evidence": [
+        "crates/chakra-language/tests/live_updates.rs"
+      ]
+    },
+    "PROV-01": {
+      "status": "pass",
+      "mechanism": "domain provenance model including Clangd",
+      "evidence": [
+        "crates/chakra-language-cpp/tests/fixture_index.rs",
+        "crates/chakra-provider-clangd/tests/lifecycle.rs"
+      ]
+    },
+    "AMBIG-01": {
+      "status": "pass",
+      "mechanism": "query-layer typed ambiguity reporting",
+      "evidence": [
+        "docs/support/conformance/cpp.json"
+      ]
+    },
+    "BUDGET-01": {
+      "status": "pass",
+      "mechanism": "query/index work budgets and calibrated public-corpus limits",
+      "evidence": [
+        "docs/support/conformance/cpp.json",
+        "docs/support/corpus/results/cpp-protocolbuffers__protobuf.json"
+      ]
+    },
+    "CANCEL-01": {
+      "status": "pass",
+      "mechanism": "cooperative syntax and provider cancellation",
+      "evidence": [
+        "crates/chakra-language-cpp/src/indexer.rs",
+        "crates/chakra-provider-clangd/tests/lifecycle.rs"
+      ]
+    },
+    "DEGRADE-01": {
+      "status": "pass",
+      "mechanism": "bounded degradation (ADR-0011)",
+      "evidence": [
+        "docs/support/conformance/cpp.json",
+        "docs/adr/0039-clangd-workspace-enrichment.md"
+      ]
+    },
+    "CONFORM-01": {
+      "status": "pass",
+      "mechanism": "chakra-conformance harness",
+      "evidence": [
+        "docs/support/conformance/cpp.json"
+      ]
+    },
+    "CORPUS-01": {
+      "status": "pass",
+      "mechanism": "pinned nlohmann/json and protocolbuffers/protobuf public-corpus evaluation",
+      "evidence": [
+        "docs/support/corpus/results/cpp-nlohmann__json.json",
+        "docs/support/corpus/results/cpp-protocolbuffers__protobuf.json"
+      ]
+    },
+    "DOCS-01": {
+      "status": "pass",
+      "mechanism": "per-language documentation",
+      "evidence": [
+        "docs/languages/cpp.md"
+      ]
+    }
+  },
+  "conformance_results": "docs/support/conformance/cpp.json",
+  "corpus_results": "docs/support/corpus/results/cpp-nlohmann__json.json",
+  "docs": "docs/languages/cpp.md"
+}

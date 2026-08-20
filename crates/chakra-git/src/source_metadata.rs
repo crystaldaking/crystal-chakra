@@ -34,6 +34,7 @@ const MAX_JAVA_BUILD_MANIFEST_BYTES: usize = 1024 * 1024;
 const MAX_DOTNET_PROJECT_MANIFESTS: usize = 512;
 const MAX_DOTNET_PROJECT_MANIFEST_BYTES: usize = 1024 * 1024;
 const MAX_SHELL_PROJECT_MANIFESTS: usize = 256;
+const MAX_CPP_PROJECT_MANIFESTS: usize = 256;
 
 /// One discovered source plus deterministic query metadata.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -126,6 +127,12 @@ struct DotnetRoot {
 /// Shell project scope from a Git-visible ShellCheck configuration boundary.
 #[derive(Debug, Clone)]
 struct ShellRoot {
+    package: SourcePackage,
+}
+
+/// C/C++ project scope from a compilation database or common build boundary.
+#[derive(Debug, Clone)]
+struct CppRoot {
     package: SourcePackage,
 }
 
@@ -1295,6 +1302,87 @@ fn classify_shell(path: &RepoRelativePath, projects: &[ShellRoot]) -> SourceMeta
     }
 }
 
+fn cpp_projects(
+    metadata_inputs: &[RepoRelativePath],
+    operation: &OperationContext,
+) -> Result<Vec<CppRoot>, OperationAbort> {
+    let mut projects = Vec::new();
+    let mut covered = BTreeSet::new();
+    let mut examined = 0_usize;
+    'boundaries: for boundary in [
+        "compile_commands.json",
+        "compile_flags.txt",
+        "CMakeLists.txt",
+        "meson.build",
+        "BUILD.bazel",
+        "BUILD",
+        ".clangd",
+    ] {
+        for manifest in manifests_named(metadata_inputs, boundary) {
+            if examined == MAX_CPP_PROJECT_MANIFESTS {
+                break 'boundaries;
+            }
+            examined += 1;
+            operation.check()?;
+            let directory = manifest_directory(&manifest, boundary);
+            if !covered.insert(directory.clone()) {
+                continue;
+            }
+            let name = directory
+                .as_ref()
+                .map_or_else(|| "repository".to_owned(), |root| root.as_str().to_owned());
+            projects.push(CppRoot {
+                package: SourcePackage {
+                    name,
+                    root: directory,
+                },
+            });
+        }
+    }
+    operation.check()?;
+    Ok(projects)
+}
+
+fn classify_cpp(path: &RepoRelativePath, projects: &[CppRoot]) -> SourceMetadata {
+    let mut fallback = SourceMetadata::path_fallback(path);
+    if fallback.role == SourceRole::Production {
+        let file = path.as_str().rsplit('/').next().unwrap_or_default();
+        let stem = file.rsplit_once('.').map_or(file, |(stem, _)| stem);
+        let lower = stem.to_ascii_lowercase();
+        if lower.ends_with("_test")
+            || lower.ends_with("_tests")
+            || lower.ends_with("_unittest")
+            || lower.ends_with("_spec")
+        {
+            fallback.role = SourceRole::Test;
+        } else if lower.ends_with(".pb")
+            || lower.ends_with(".generated")
+            || lower.ends_with(".gen")
+            || lower.ends_with(".moc")
+        {
+            fallback.role = SourceRole::Generated;
+        }
+    }
+    let project = projects
+        .iter()
+        .filter(|project| is_inside(path, project.package.root.as_ref()))
+        .max_by_key(|project| {
+            project
+                .package
+                .root
+                .as_ref()
+                .map_or(0, |root| root.as_str().len())
+        });
+    let Some(project) = project else {
+        return fallback;
+    };
+    SourceMetadata {
+        role: fallback.role,
+        classification: SourceClassification::CppProjectMetadata,
+        package: Some(project.package.clone()),
+    }
+}
+
 fn classify_rust(path: &RepoRelativePath, packages: &[CargoPackage]) -> SourceMetadata {
     let fallback = SourceMetadata::path_fallback(path);
     let package = packages
@@ -1419,6 +1507,11 @@ pub fn classify_discovered_sources_with_context(
     } else {
         None
     };
+    let cpp = if language == Language::Cpp {
+        Some(cpp_projects(metadata_inputs, operation)?)
+    } else {
+        None
+    };
     let mut classified = Vec::with_capacity(files.len());
     for path in files {
         operation.check()?;
@@ -1435,6 +1528,7 @@ pub fn classify_discovered_sources_with_context(
                 Language::Java => classify_java(&path, java.as_deref().unwrap_or_default()),
                 Language::CSharp => classify_csharp(&path, dotnet.as_deref().unwrap_or_default()),
                 Language::Shell => classify_shell(&path, shell.as_deref().unwrap_or_default()),
+                Language::Cpp => classify_cpp(&path, cpp.as_deref().unwrap_or_default()),
             },
             path,
             language,
@@ -2337,6 +2431,56 @@ mod tests {
                     package.root.as_ref().map(RepoRelativePath::as_str)
                 )),
                 Some(("tools", Some("tools")))
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn cpp_build_boundary_scopes_roles_and_leaves_outside_files_on_fallback()
+    -> Result<(), Box<dyn Error>> {
+        let repository = repository()?;
+        let root = repository.path();
+        write(root, "native/CMakeLists.txt", "project(native)\n")?;
+        for (path, source) in [
+            ("standalone/root.cpp", "void root_task() {}\n"),
+            ("native/src/run.cpp", "void run() {}\n"),
+            ("native/tests/payment_test.cc", "void test_payment() {}\n"),
+            ("native/vendor/external.c", "void external(void) {}\n"),
+            ("native/generated/schema.pb.cc", "void schema() {}\n"),
+            ("native/include/payment.hpp", "void payment();\n"),
+        ] {
+            write(root, path, source)?;
+        }
+
+        let classified = discover_classified_sources(root, Language::Cpp)?;
+        let by_path: BTreeMap<_, _> = classified
+            .into_iter()
+            .map(|source| (source.path, source.metadata))
+            .collect();
+        let outside = &by_path[&RepoRelativePath::new("standalone/root.cpp")?];
+        assert_eq!(outside.classification, SourceClassification::PathFallback);
+        assert!(outside.package.is_none());
+
+        for (path, role) in [
+            ("native/src/run.cpp", SourceRole::Production),
+            ("native/tests/payment_test.cc", SourceRole::Test),
+            ("native/vendor/external.c", SourceRole::Vendor),
+            ("native/generated/schema.pb.cc", SourceRole::Generated),
+            ("native/include/payment.hpp", SourceRole::Production),
+        ] {
+            let source = &by_path[&RepoRelativePath::new(path)?];
+            assert_eq!(
+                source.classification,
+                SourceClassification::CppProjectMetadata
+            );
+            assert_eq!(source.role, role);
+            assert_eq!(
+                source.package.as_ref().map(|package| (
+                    package.name.as_str(),
+                    package.root.as_ref().map(RepoRelativePath::as_str)
+                )),
+                Some(("native", Some("native")))
             );
         }
         Ok(())

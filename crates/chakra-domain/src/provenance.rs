@@ -50,6 +50,8 @@ pub enum Provenance {
     CsharpLs,
     /// bash-language-server (live reference provider for Shell, ADR-0027).
     BashLanguageServer,
+    /// clangd (live precise provider for C/C++, ADR-0027).
+    Clangd,
     /// Chakra-owned static resolver producing precise-tier facts from an
     /// explicit, deterministic evidence rule (ADR-0030).
     ChakraResolver,
@@ -116,6 +118,7 @@ mod tests {
             serde_json::to_string(&Provenance::BashLanguageServer)?,
             "\"bash_language_server\""
         );
+        assert_eq!(serde_json::to_string(&Provenance::Clangd)?, "\"clangd\"");
         Ok(())
     }
 }

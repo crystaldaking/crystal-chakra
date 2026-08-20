@@ -75,6 +75,9 @@ pub enum SourceClassification {
     /// Project ownership came from the nearest Git-visible `.shellcheckrc`
     /// or `shellcheckrc` boundary.
     ShellProjectMetadata,
+    /// Project ownership came from the nearest Git-visible C/C++ compilation
+    /// database or build-system boundary.
+    CppProjectMetadata,
     /// No applicable package metadata was available; deterministic path
     /// conventions supplied the role.
     PathFallback,
@@ -123,6 +126,7 @@ pub struct SourceMetadataCoverage {
     pub gradle_metadata_files: u64,
     pub dotnet_project_metadata_files: u64,
     pub shell_project_metadata_files: u64,
+    pub cpp_project_metadata_files: u64,
     pub path_fallback_files: u64,
 }
 

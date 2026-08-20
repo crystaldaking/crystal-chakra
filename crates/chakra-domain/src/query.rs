@@ -434,6 +434,7 @@ pub enum RepoMapGroupKind {
     GradleProject,
     DotnetProject,
     ShellProject,
+    CppProject,
 }
 
 /// Overlapping structural aggregation used by the first repository-map page.

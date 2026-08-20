@@ -1077,6 +1077,19 @@ fn file_language(path: &RepoRelativePath) -> Option<Language> {
         || value.ends_with(".ksh")
     {
         Some(Language::Shell)
+    } else if value.ends_with(".c")
+        || value.ends_with(".h")
+        || value.ends_with(".cc")
+        || value.ends_with(".cpp")
+        || value.ends_with(".cxx")
+        || value.ends_with(".hh")
+        || value.ends_with(".hpp")
+        || value.ends_with(".hxx")
+        || value.ends_with(".ipp")
+        || value.ends_with(".tpp")
+        || value.ends_with(".inc")
+    {
+        Some(Language::Cpp)
     } else {
         None
     }
@@ -1128,6 +1141,7 @@ fn repo_map_overview(files: &[(GraphFileSummary, Language)]) -> Vec<RepoMapGroup
             SourceClassification::GradleMetadata => Some(RepoMapGroupKind::GradleProject),
             SourceClassification::DotnetProjectMetadata => Some(RepoMapGroupKind::DotnetProject),
             SourceClassification::ShellProjectMetadata => Some(RepoMapGroupKind::ShellProject),
+            SourceClassification::CppProjectMetadata => Some(RepoMapGroupKind::CppProject),
             SourceClassification::PathFallback => None,
         };
         if let (Some(kind), Some(package)) = (kind, &file.metadata.package) {

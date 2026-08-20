@@ -557,7 +557,18 @@ fn raw_is_supported_source(raw: &[u8]) -> Result<bool, WorkspaceDiffError> {
         || raw.ends_with(b".sh")
         || raw.ends_with(b".bash")
         || raw.ends_with(b".zsh")
-        || raw.ends_with(b".ksh");
+        || raw.ends_with(b".ksh")
+        || raw.ends_with(b".c")
+        || raw.ends_with(b".h")
+        || raw.ends_with(b".cc")
+        || raw.ends_with(b".cpp")
+        || raw.ends_with(b".cxx")
+        || raw.ends_with(b".hh")
+        || raw.ends_with(b".hpp")
+        || raw.ends_with(b".hxx")
+        || raw.ends_with(b".ipp")
+        || raw.ends_with(b".tpp")
+        || raw.ends_with(b".inc");
     if !looks_supported {
         return Ok(false);
     }
@@ -1641,6 +1652,34 @@ mod tests {
         assert_eq!(changes["src/service.sh"], ChangeKind::Modified);
         assert_eq!(changes["src/deleted.zsh"], ChangeKind::Deleted);
         assert_eq!(changes["src/untracked.ksh"], ChangeKind::Added);
+        Ok(())
+    }
+
+    #[test]
+    fn cpp_modify_untracked_and_delete_use_the_same_diff_scope() -> Result<(), Box<dyn Error>> {
+        let repository = TempDir::new()?;
+        let root = repository.path();
+        git(root, &["init", "--quiet"])?;
+        git(root, &["config", "user.email", "tests@example.invalid"])?;
+        git(root, &["config", "user.name", "Chakra Tests"])?;
+        write(root, "src/service.cpp", "void pay() {}\n")?;
+        write(root, "include/deleted.hpp", "void removed();\n")?;
+        git(root, &["add", "src", "include"])?;
+        git(root, &["commit", "--quiet", "-m", "base"])?;
+
+        write(root, "src/service.cpp", "void pay_now() {}\n")?;
+        fs::remove_file(root.join("include/deleted.hpp"))?;
+        write(root, "src/untracked.cc", "void added() {}\n")?;
+        let workspace = workspace(root, &["src/service.cpp", "src/untracked.cc"])?;
+        let diff = GitWorkspaceDiff.diff(workspace)?;
+        let changes: BTreeMap<_, _> = diff
+            .files
+            .iter()
+            .map(|change| (change.path.as_str(), change.change))
+            .collect();
+        assert_eq!(changes["src/service.cpp"], ChangeKind::Modified);
+        assert_eq!(changes["include/deleted.hpp"], ChangeKind::Deleted);
+        assert_eq!(changes["src/untracked.cc"], ChangeKind::Added);
         Ok(())
     }
 }

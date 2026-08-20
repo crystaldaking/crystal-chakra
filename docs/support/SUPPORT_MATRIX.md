@@ -9,6 +9,7 @@ Target list reviewed: 2026-08 (GitHub Octoverse 2025 top languages plus pre-exis
 
 | Language | Tier | Advertised | Grammar | Precise provider |
 |----------|------|-----------|---------|------------------|
+| cpp | first-class | yes | tree-sitter-cpp 0.23.4 | clangd (integrated) |
 | csharp | first-class | yes | tree-sitter-c-sharp 0.23.5 | csharp-ls (integrated) |
 | java | first-class | yes | tree-sitter-java 0.23.5 | jdtls (integrated) |
 | javascript | first-class | yes | tree-sitter-javascript 0.25.0 | vtsls (integrated) |
@@ -19,6 +20,40 @@ Target list reviewed: 2026-08 (GitHub Octoverse 2025 top languages plus pre-exis
 | typescript | first-class | yes | tree-sitter-typescript 0.23.2 | vtsls (integrated) |
 
 ## Capability detail
+
+### cpp
+
+| Capability | Status | Mechanism |
+|------------|--------|-----------|
+| AMBIG-01 | pass | query-layer typed ambiguity reporting |
+| BUDGET-01 | pass | query/index work budgets and calibrated public-corpus limits |
+| CANCEL-01 | pass | cooperative syntax and provider cancellation |
+| CONFORM-01 | pass | chakra-conformance harness |
+| CORPUS-01 | pass | pinned nlohmann/json and protocolbuffers/protobuf public-corpus evaluation |
+| DEGRADE-01 | pass | bounded degradation (ADR-0011) |
+| DISC-01 | pass | chakra-git discovery for C/C++ translation units and headers |
+| DISC-02 | pass | nearest compile database/build metadata project scope with path fallback |
+| DISC-03 | pass | language-neutral test/vendor/generated roles plus C++ filename conventions |
+| DOCS-01 | pass | per-language documentation |
+| FRESH-01 | pass | atomic revision publication (ADR-0001) |
+| FRESH-02 | pass | C++ live freshness barrier and language-partition reconciliation |
+| PRECISE-01 | pass | recorded provider selection: clangd 21+/22.x with optional compilation database |
+| PRECISE-02 | pass | clangd call hierarchy over shared chakra-lsp client |
+| PRECISE-03 | pass | owned lifecycle, revision-scoped C/C++ document synchronization, restart, cancellation, and orphan-free shutdown |
+| PRECISE-04 | pass | capability-gated call-hierarchy enrichment through PreciseProvider |
+| PRECISE-05 | pass | graceful absence, missing-capability, crash, timeout, and cancellation degradation |
+| PROV-01 | pass | domain provenance model including Clangd |
+| QUERY-01 | pass | chakra-engine QueryService |
+| QUERY-02 | pass | chakra-mcp structured tools |
+| QUERY-03 | pass | chakra-git current-worktree and base-ref diff provider |
+| SYNTAX-01 | pass | tree-sitter-cpp 0.23.4 |
+| SYNTAX-02 | pass | tree-sitter |
+| SYNTAX-03 | pass | tree-sitter translation units, namespaces, types, functions, methods, fields, aliases, and concepts |
+| SYNTAX-04 | pass | tree-sitter preprocessor include facts |
+| SYNTAX-05 | pass | tree-sitter byte-accurate ranges |
+| SYNTAX-06 | pass | tree-sitter plus common C++ test macro and file conventions |
+| SYNTAX-07 | pass | tree-sitter diagnostics (ADR-0022) |
+| SYNTAX-08 | pass | bounded static call candidates, qualified-call resolution, and inheritance relations |
 
 ### csharp
 

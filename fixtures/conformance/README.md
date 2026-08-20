@@ -24,6 +24,8 @@ Each language has its own directory:
   and CommonJS).
 - `java/` — a small Maven-layout Java project (`src/main/java` plus
   `src/test/java`, with a `pom.xml` project manifest).
+- `cpp/` — a small CMake-layout C++ project (`include/`, `src/`, and `tests/`
+  with a `CMakeLists.txt` project boundary).
 
 Inside each language directory:
 

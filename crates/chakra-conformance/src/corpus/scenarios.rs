@@ -319,6 +319,9 @@ impl ProbePlan {
             "java" => &["java"],
             "csharp" => &["cs"],
             "shell" => &["sh", "bash", "zsh", "ksh"],
+            "cpp" => &[
+                "c", "h", "cc", "cpp", "cxx", "hh", "hpp", "hxx", "ipp", "tpp", "inc",
+            ],
             other => return Err(failure(format!("no probe plan for language `{other}`")).into()),
         };
         let mut paths: Vec<RepoRelativePath> = cold
@@ -438,6 +441,14 @@ impl ProbePlan {
                     "\nchakra_corpus_probe_one() { true; }\n".to_owned(),
                     "\nchakra_corpus_probe_two() { true; }\n".to_owned(),
                     "\nchakra_corpus_broken() { if true; then\n".to_owned(),
+                ),
+                "cpp" => (
+                    "chakra_corpus_probe",
+                    "chakra_corpus_probe_one",
+                    "chakra_corpus_probe_two",
+                    "\nvoid chakra_corpus_probe_one() {}\n".to_owned(),
+                    "\nvoid chakra_corpus_probe_two() {}\n".to_owned(),
+                    "\nclass chakra_corpus_broken {\n".to_owned(),
                 ),
                 other => {
                     return Err(failure(format!("no probe plan for language `{other}`")).into());
@@ -761,6 +772,7 @@ fn record_cold_index(
     builder.measure("java_files", cold.metrics.java_files);
     builder.measure("csharp_files", cold.metrics.csharp_files);
     builder.measure("shell_files", cold.metrics.shell_files);
+    builder.measure("cpp_files", cold.metrics.cpp_files);
     builder.measure("source_bytes", cold.metrics.indexing.coverage.source_bytes);
     builder.measure("degraded", cold.metrics.indexing.is_degraded());
     builder.measure(

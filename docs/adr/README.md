@@ -61,5 +61,6 @@ Accepted decisions:
 - ADR-036: jdtls workspace data directory and readiness bound
 - ADR-037: csharp-ls workspace-only enrichment
 - ADR-038: bash-language-server reference enrichment
+- ADR-039: clangd workspace enrichment
 
 Do not pre-create empty ADRs merely to satisfy a list.

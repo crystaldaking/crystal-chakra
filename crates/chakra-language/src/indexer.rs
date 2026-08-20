@@ -267,6 +267,7 @@ pub struct IndexMetrics {
     pub java_files: u64,
     pub csharp_files: u64,
     pub shell_files: u64,
+    pub cpp_files: u64,
     pub laravel_detected: bool,
     pub framework_symbols: u64,
     pub framework_edges: u64,
@@ -309,6 +310,8 @@ pub enum WorkspaceIndexError {
     CSharp(#[from] chakra_language_csharp::CSharpIndexError),
     #[error(transparent)]
     Shell(#[from] chakra_language_shell::ShellIndexError),
+    #[error(transparent)]
+    Cpp(#[from] chakra_language_cpp::CppIndexError),
     #[error(transparent)]
     Graph(#[from] GraphError),
     #[error("constructed workspace syntax graph is inconsistent: {0}")]
@@ -749,6 +752,7 @@ pub fn index_repository_with_options(
     let java_files = language_files(Language::Java);
     let csharp_files = language_files(Language::CSharp);
     let shell_files = language_files(Language::Shell);
+    let cpp_files = language_files(Language::Cpp);
     let mut framework = AdapterFrameworkMetrics::default();
     for metrics in &built_metrics {
         framework.detected |= metrics.framework.detected;
@@ -785,6 +789,7 @@ pub fn index_repository_with_options(
         java_files,
         csharp_files,
         shell_files,
+        cpp_files,
         laravel_detected: framework.detected,
         framework_symbols: framework.symbols,
         framework_edges: framework.edges,
