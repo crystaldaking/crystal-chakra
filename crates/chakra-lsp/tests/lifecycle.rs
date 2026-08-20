@@ -5,6 +5,7 @@ use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
@@ -142,6 +143,38 @@ fn compile_fake_server(root: &Path, name: &str) -> Result<PathBuf, Box<dyn Error
     Ok(executable)
 }
 
+struct SharedFakeServer {
+    _scratch: tempfile::TempDir,
+    executable: PathBuf,
+}
+
+fn shared_fake_server() -> Result<&'static Path, Box<dyn Error>> {
+    static SERVER: OnceLock<Result<SharedFakeServer, String>> = OnceLock::new();
+
+    match SERVER.get_or_init(|| {
+        let scratch = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let executable = compile_fake_server(scratch.path(), "fake-lsp-shared")
+            .map_err(|error| error.to_string())?;
+        Ok(SharedFakeServer {
+            _scratch: scratch,
+            executable,
+        })
+    }) {
+        Ok(server) => Ok(&server.executable),
+        Err(message) => Err(std::io::Error::other(message.clone()).into()),
+    }
+}
+
+fn materialize_fake_server(root: &Path, name: &str) -> Result<PathBuf, Box<dyn Error>> {
+    let executable = root.join(if cfg!(windows) {
+        format!("{name}.exe")
+    } else {
+        name.to_owned()
+    });
+    fs::copy(shared_fake_server()?, &executable)?;
+    Ok(executable)
+}
+
 fn config() -> ClientConfig {
     ClientConfig {
         transport: TransportConfig {
@@ -171,7 +204,7 @@ fn initialize(client: &mut Client) -> Result<(), Box<dyn Error>> {
 #[test]
 fn handshake_and_echo_round_trip() -> Result<(), Box<dyn Error>> {
     let scratch = tempfile::tempdir()?;
-    let executable = compile_fake_server(scratch.path(), "fake-lsp-echo")?;
+    let executable = materialize_fake_server(scratch.path(), "fake-lsp-echo")?;
     let mut client = spawn(&executable, scratch.path())?;
     let initialize = client.initialize(&serde_json::json!({"capabilities": {}}), &mut |_| {})?;
     assert_eq!(
@@ -195,7 +228,7 @@ fn handshake_and_echo_round_trip() -> Result<(), Box<dyn Error>> {
 #[test]
 fn server_notifications_are_interleaved_while_waiting() -> Result<(), Box<dyn Error>> {
     let scratch = tempfile::tempdir()?;
-    let executable = compile_fake_server(scratch.path(), "fake-lsp-progress")?;
+    let executable = materialize_fake_server(scratch.path(), "fake-lsp-progress")?;
     let mut client = spawn(&executable, scratch.path())?;
     initialize(&mut client)?;
     let mut events = Vec::new();
@@ -222,7 +255,7 @@ fn server_notifications_are_interleaved_while_waiting() -> Result<(), Box<dyn Er
 #[test]
 fn timed_out_request_is_cancelled() -> Result<(), Box<dyn Error>> {
     let scratch = tempfile::tempdir()?;
-    let executable = compile_fake_server(scratch.path(), "fake-lsp-hang")?;
+    let executable = materialize_fake_server(scratch.path(), "fake-lsp-hang")?;
     let mut client = spawn(&executable, scratch.path())?;
     initialize(&mut client)?;
     let deadline = Instant::now() + Duration::from_millis(250);
@@ -246,7 +279,7 @@ fn timed_out_request_is_cancelled() -> Result<(), Box<dyn Error>> {
 #[test]
 fn caller_cancellation_is_forwarded() -> Result<(), Box<dyn Error>> {
     let scratch = tempfile::tempdir()?;
-    let executable = compile_fake_server(scratch.path(), "fake-lsp-hang-cancel")?;
+    let executable = materialize_fake_server(scratch.path(), "fake-lsp-hang-cancel")?;
     let mut client = spawn(&executable, scratch.path())?;
     initialize(&mut client)?;
     let cancelled = AtomicBool::new(true);
@@ -271,7 +304,7 @@ fn caller_cancellation_is_forwarded() -> Result<(), Box<dyn Error>> {
 #[test]
 fn oversized_server_message_closes_the_transport() -> Result<(), Box<dyn Error>> {
     let scratch = tempfile::tempdir()?;
-    let executable = compile_fake_server(scratch.path(), "fake-lsp-big")?;
+    let executable = materialize_fake_server(scratch.path(), "fake-lsp-big")?;
     let mut client = spawn(&executable, scratch.path())?;
     // The oversized blob follows the initialize response, so the handshake
     // completes; the next pump observes the bounded-read closure.
@@ -297,7 +330,7 @@ fn oversized_server_message_closes_the_transport() -> Result<(), Box<dyn Error>>
 #[test]
 fn shutdown_reaps_process_group_descendants() -> Result<(), Box<dyn Error>> {
     let scratch = tempfile::tempdir()?;
-    let executable = compile_fake_server(scratch.path(), "fake-lsp-spawn-child")?;
+    let executable = materialize_fake_server(scratch.path(), "fake-lsp-spawn-child")?;
     let mut client = spawn(&executable, scratch.path())?;
     initialize(&mut client)?;
     let child = fs::read_to_string(executable.with_extension("child"))?;
@@ -317,7 +350,7 @@ fn shutdown_reaps_process_group_descendants() -> Result<(), Box<dyn Error>> {
 #[test]
 fn kill_fallback_terminates_a_server_that_ignores_shutdown() -> Result<(), Box<dyn Error>> {
     let scratch = tempfile::tempdir()?;
-    let executable = compile_fake_server(scratch.path(), "fake-lsp-ignore-shutdown")?;
+    let executable = materialize_fake_server(scratch.path(), "fake-lsp-ignore-shutdown")?;
     let mut client = spawn(&executable, scratch.path())?;
     initialize(&mut client)?;
     let deadline = Instant::now() + Duration::from_secs(2);
