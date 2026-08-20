@@ -27,6 +27,8 @@ const MAX_COMPOSER_MANIFESTS: usize = 64;
 const MAX_COMPOSER_MANIFEST_BYTES: usize = 1024 * 1024;
 const MAX_PACKAGE_JSON_MANIFESTS: usize = 256;
 const MAX_PACKAGE_JSON_MANIFEST_BYTES: usize = 1024 * 1024;
+const MAX_PYPROJECT_MANIFESTS: usize = 256;
+const MAX_PYPROJECT_MANIFEST_BYTES: usize = 1024 * 1024;
 
 /// One discovered source plus deterministic query metadata.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -83,6 +85,13 @@ struct ComposerRoot {
 /// project boundary without a sibling `package.json`).
 #[derive(Debug, Clone)]
 struct PackageJsonRoot {
+    package: SourcePackage,
+}
+
+/// Python package scope from a `pyproject.toml` (or a `setup.py`/`setup.cfg`
+/// project boundary without a sibling `pyproject.toml`).
+#[derive(Debug, Clone)]
+struct PyprojectRoot {
     package: SourcePackage,
 }
 
@@ -596,6 +605,126 @@ fn package_json_packages(
     Ok(packages)
 }
 
+fn read_text_manifest(root: &Path, manifest: &RepoRelativePath) -> Option<String> {
+    let manifest_path = root.join(manifest.as_str());
+    let file = fs::File::open(&manifest_path).ok()?;
+    let mut bytes = Vec::new();
+    if file
+        .take((MAX_PYPROJECT_MANIFEST_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)
+        .is_err()
+        || bytes.len() > MAX_PYPROJECT_MANIFEST_BYTES
+    {
+        return None;
+    }
+    String::from_utf8(bytes).ok()
+}
+
+/// Minimal `[project]` `name` extraction from `pyproject.toml` text. A full
+/// TOML parser is deliberately not a dependency for one bounded string
+/// field; anything unparseable falls back to the directory name.
+fn pyproject_name(text: &str) -> Option<&str> {
+    let mut in_project = false;
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') {
+            in_project = trimmed == "[project]";
+            continue;
+        }
+        if !in_project {
+            continue;
+        }
+        let Some(value) = trimmed.strip_prefix("name") else {
+            continue;
+        };
+        let Some(value) = value.trim_start().strip_prefix('=') else {
+            continue;
+        };
+        let name = value.trim().trim_matches('"').trim_matches('\'').trim();
+        if !name.is_empty() {
+            return Some(name);
+        }
+    }
+    None
+}
+
+/// Collects Python package scopes. Every `pyproject.toml` is a package root
+/// (PEP 621 `[project].name` when parseable); a `setup.py` or `setup.cfg`
+/// without a sibling `pyproject.toml` is a project boundary named after its
+/// directory.
+fn pyproject_packages(
+    root: &Path,
+    metadata_inputs: &[RepoRelativePath],
+    operation: &OperationContext,
+) -> Result<Vec<PyprojectRoot>, OperationAbort> {
+    let mut packages = Vec::new();
+    let mut covered = BTreeSet::new();
+    for manifest in manifests_named(metadata_inputs, "pyproject.toml")
+        .iter()
+        .take(MAX_PYPROJECT_MANIFESTS)
+    {
+        operation.check()?;
+        let directory = manifest_directory(manifest, "pyproject.toml");
+        if let Some(directory) = &directory {
+            covered.insert(directory.clone());
+        }
+        let fallback_name = manifest
+            .as_str()
+            .strip_suffix("/pyproject.toml")
+            .unwrap_or("repository");
+        let text = read_text_manifest(root, manifest);
+        let name = text
+            .as_deref()
+            .and_then(pyproject_name)
+            .unwrap_or(fallback_name);
+        packages.push(PyprojectRoot {
+            package: SourcePackage {
+                name: name.to_owned(),
+                root: directory,
+            },
+        });
+    }
+    let mut root_covered = packages
+        .iter()
+        .any(|package| package.package.root.is_none());
+    for boundary in ["setup.py", "setup.cfg"] {
+        for manifest in manifests_named(metadata_inputs, boundary)
+            .iter()
+            .take(MAX_PYPROJECT_MANIFESTS)
+        {
+            operation.check()?;
+            match manifest_directory(manifest, boundary) {
+                Some(directory) => {
+                    if covered.contains(&directory) {
+                        continue;
+                    }
+                    covered.insert(directory.clone());
+                    packages.push(PyprojectRoot {
+                        package: SourcePackage {
+                            name: directory.as_str().to_owned(),
+                            root: Some(directory),
+                        },
+                    });
+                }
+                None => {
+                    if root_covered {
+                        continue;
+                    }
+                    root_covered = true;
+                    packages.push(PyprojectRoot {
+                        package: SourcePackage {
+                            name: "repository".to_owned(),
+                            root: None,
+                        },
+                    });
+                }
+            }
+        }
+    }
+    operation.check()?;
+    Ok(packages)
+}
+
 /// TypeScript test conventions beyond the language-neutral path fallback:
 /// `__tests__/` directories and `*.test.*` / `*.spec.*` file stems.
 fn typescript_path_role(path: &RepoRelativePath) -> SourceRole {
@@ -644,6 +773,55 @@ fn classify_typescript(path: &RepoRelativePath, packages: &[PackageJsonRoot]) ->
     SourceMetadata {
         role,
         classification: SourceClassification::PackageJsonMetadata,
+        package: Some(package.package.clone()),
+    }
+}
+
+/// Python test conventions beyond the language-neutral path fallback:
+/// `test_*.py` and `*_test.py` file stems (pytest/unittest discovery rules).
+fn python_path_role(path: &RepoRelativePath) -> SourceRole {
+    let fallback = SourceMetadata::path_fallback(path);
+    if fallback.role != SourceRole::Production {
+        return fallback.role;
+    }
+    let is_test_stem = path
+        .as_str()
+        .rsplit('/')
+        .next()
+        .and_then(|file| {
+            file.strip_suffix(".py")
+                .or_else(|| file.strip_suffix(".pyi"))
+        })
+        .is_some_and(|stem| stem.starts_with("test_") || stem.ends_with("_test"));
+    if is_test_stem {
+        SourceRole::Test
+    } else {
+        SourceRole::Production
+    }
+}
+
+fn classify_python(path: &RepoRelativePath, packages: &[PyprojectRoot]) -> SourceMetadata {
+    let role = python_path_role(path);
+    let package = packages
+        .iter()
+        .filter(|package| is_inside(path, package.package.root.as_ref()))
+        .max_by_key(|package| {
+            package
+                .package
+                .root
+                .as_ref()
+                .map_or(0, |root| root.as_str().len())
+        });
+    let Some(package) = package else {
+        return SourceMetadata {
+            role,
+            classification: SourceClassification::PathFallback,
+            package: None,
+        };
+    };
+    SourceMetadata {
+        role,
+        classification: SourceClassification::PyprojectMetadata,
         package: Some(package.package.clone()),
     }
 }
@@ -752,6 +930,11 @@ pub fn classify_discovered_sources_with_context(
     } else {
         None
     };
+    let pyproject = if language == Language::Python {
+        Some(pyproject_packages(root, metadata_inputs, operation)?)
+    } else {
+        None
+    };
     let mut classified = Vec::with_capacity(files.len());
     for path in files {
         operation.check()?;
@@ -761,6 +944,9 @@ pub fn classify_discovered_sources_with_context(
                 Language::Php => classify_php(&path, composer.as_deref().unwrap_or_default()),
                 Language::TypeScript => {
                     classify_typescript(&path, package_json.as_deref().unwrap_or_default())
+                }
+                Language::Python => {
+                    classify_python(&path, pyproject.as_deref().unwrap_or_default())
                 }
             },
             path,
@@ -1123,6 +1309,127 @@ mod tests {
         let spec = &by_path[&RepoRelativePath::new("src/util.spec.ts")?];
         assert_eq!(spec.classification, SourceClassification::PathFallback);
         assert_eq!(spec.role, SourceRole::Test);
+        Ok(())
+    }
+
+    #[test]
+    fn pyproject_scopes_and_python_test_conventions() -> Result<(), Box<dyn Error>> {
+        let repository = repository()?;
+        let root = repository.path();
+        write(
+            root,
+            "pyproject.toml",
+            "[project]\nname = \"chakra-python-monorepo\"\n",
+        )?;
+        write(
+            root,
+            "packages/web/pyproject.toml",
+            "[project]\nname = \"chakra-web\"\n",
+        )?;
+        write(
+            root,
+            "packages/cli/setup.cfg",
+            "[metadata]\nname = chakra-cli\n",
+        )?;
+        write(
+            root,
+            "packages/legacy/setup.py",
+            "from setuptools import setup\n",
+        )?;
+        for (path, source) in [
+            ("packages/web/src/app.py", "def app():\n    pass\n"),
+            (
+                "packages/web/tests/test_app.py",
+                "def test_app():\n    pass\n",
+            ),
+            (
+                "packages/web/src/app_test.py",
+                "def app_test():\n    pass\n",
+            ),
+            ("packages/cli/src/main.py", "def cli_main():\n    pass\n"),
+            ("packages/legacy/src/old.py", "def old():\n    pass\n"),
+            ("scripts/tool.py", "def tool():\n    pass\n"),
+        ] {
+            write(root, path, source)?;
+        }
+
+        let classified = discover_classified_sources(root, Language::Python)?;
+        let by_path: BTreeMap<_, _> = classified
+            .into_iter()
+            .map(|source| (source.path, source.metadata))
+            .collect();
+        let app = &by_path[&RepoRelativePath::new("packages/web/src/app.py")?];
+        assert_eq!(app.classification, SourceClassification::PyprojectMetadata);
+        assert_eq!(app.role, SourceRole::Production);
+        assert_eq!(
+            app.package.as_ref().map(|package| (
+                package.name.as_str(),
+                package.root.as_ref().map(RepoRelativePath::as_str)
+            )),
+            Some(("chakra-web", Some("packages/web")))
+        );
+        for path in [
+            "packages/web/tests/test_app.py",
+            "packages/web/src/app_test.py",
+        ] {
+            let source = &by_path[&RepoRelativePath::new(path)?];
+            assert_eq!(
+                source.classification,
+                SourceClassification::PyprojectMetadata
+            );
+            assert_eq!(source.role, SourceRole::Test, "{path} must be a test role");
+        }
+        let cli = &by_path[&RepoRelativePath::new("packages/cli/src/main.py")?];
+        assert_eq!(
+            cli.classification,
+            SourceClassification::PyprojectMetadata,
+            "setup.cfg without a sibling pyproject.toml is a project boundary"
+        );
+        assert_eq!(
+            cli.package.as_ref().map(|package| package.name.as_str()),
+            Some("packages/cli")
+        );
+        let legacy = &by_path[&RepoRelativePath::new("packages/legacy/src/old.py")?];
+        assert_eq!(
+            legacy.classification,
+            SourceClassification::PyprojectMetadata,
+            "setup.py without a sibling pyproject.toml is a project boundary"
+        );
+        assert_eq!(
+            legacy.package.as_ref().map(|package| package.name.as_str()),
+            Some("packages/legacy")
+        );
+        let tool = &by_path[&RepoRelativePath::new("scripts/tool.py")?];
+        assert_eq!(tool.classification, SourceClassification::PyprojectMetadata);
+        assert_eq!(
+            tool.package.as_ref().map(|package| (
+                package.name.as_str(),
+                package.root.as_ref().map(RepoRelativePath::as_str)
+            )),
+            Some(("chakra-python-monorepo", None)),
+            "the workspace root pyproject.toml scopes files without a nearer package"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn python_without_manifests_uses_test_conventions_and_fallback() -> Result<(), Box<dyn Error>> {
+        let repository = repository()?;
+        let root = repository.path();
+        write(root, "src/util.py", "def util():\n    pass\n")?;
+        write(root, "tests/test_util.py", "def test_util():\n    pass\n")?;
+
+        let classified = discover_classified_sources(root, Language::Python)?;
+        let by_path: BTreeMap<_, _> = classified
+            .into_iter()
+            .map(|source| (source.path, source.metadata))
+            .collect();
+        let util = &by_path[&RepoRelativePath::new("src/util.py")?];
+        assert_eq!(util.classification, SourceClassification::PathFallback);
+        assert_eq!(util.role, SourceRole::Production);
+        let test = &by_path[&RepoRelativePath::new("tests/test_util.py")?];
+        assert_eq!(test.classification, SourceClassification::PathFallback);
+        assert_eq!(test.role, SourceRole::Test);
         Ok(())
     }
 

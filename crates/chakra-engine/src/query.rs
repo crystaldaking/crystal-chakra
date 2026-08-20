@@ -1059,6 +1059,8 @@ fn file_language(path: &RepoRelativePath) -> Option<Language> {
         || value.ends_with(".cts")
     {
         Some(Language::TypeScript)
+    } else if value.ends_with(".py") || value.ends_with(".pyi") {
+        Some(Language::Python)
     } else {
         None
     }
@@ -1105,6 +1107,7 @@ fn repo_map_overview(files: &[(GraphFileSummary, Language)]) -> Vec<RepoMapGroup
             SourceClassification::CargoMetadata => Some(RepoMapGroupKind::CargoPackage),
             SourceClassification::ComposerMetadata => Some(RepoMapGroupKind::ComposerPsr4),
             SourceClassification::PackageJsonMetadata => Some(RepoMapGroupKind::NpmPackage),
+            SourceClassification::PyprojectMetadata => Some(RepoMapGroupKind::PyprojectPackage),
             SourceClassification::PathFallback => None,
         };
         if let (Some(kind), Some(package)) = (kind, &file.metadata.package) {

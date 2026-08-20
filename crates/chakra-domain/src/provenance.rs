@@ -41,6 +41,8 @@ pub enum Provenance {
     RustAnalyzer,
     /// vtsls (live precise provider for TypeScript, ADR-0027/0032).
     Vtsls,
+    /// pyright (live precise provider for Python, ADR-0027).
+    Pyright,
     /// Chakra-owned static resolver producing precise-tier facts from an
     /// explicit, deterministic evidence rule (ADR-0030).
     ChakraResolver,
@@ -84,6 +86,11 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<Provenance>("\"vtsls\"")?,
             Provenance::Vtsls
+        );
+        assert_eq!(serde_json::to_string(&Provenance::Pyright)?, "\"pyright\"");
+        assert_eq!(
+            serde_json::from_str::<Provenance>("\"pyright\"")?,
+            Provenance::Pyright
         );
         Ok(())
     }

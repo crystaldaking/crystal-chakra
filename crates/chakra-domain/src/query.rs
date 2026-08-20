@@ -387,6 +387,7 @@ pub enum RepoMapGroupKind {
     CargoPackage,
     ComposerPsr4,
     NpmPackage,
+    PyprojectPackage,
 }
 
 /// Overlapping structural aggregation used by the first repository-map page.
