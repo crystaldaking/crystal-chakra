@@ -600,6 +600,9 @@ impl Extraction<'_> {
         let Some(mut target) = self.call_target(function) else {
             return Ok(());
         };
+        if target.name.trim().is_empty() {
+            return Ok(());
+        }
         if target.form == CallForm::Function
             && target.target_kind == CallTargetKind::Function
             && self
@@ -623,14 +626,20 @@ impl Extraction<'_> {
 
     fn call_target<'tree>(&self, node: Node<'tree>) -> Option<CallTarget<'tree>> {
         match node.kind() {
-            "identifier" | "field_identifier" => Some(CallTarget {
-                form: CallForm::Function,
-                target_kind: CallTargetKind::Function,
-                name: self.text(node)?.trim().to_owned(),
-                qualifier: None,
-                receiver_hint: None,
-                location: node,
-            }),
+            "identifier" | "field_identifier" => {
+                let name = self.text(node)?.trim();
+                if name.is_empty() {
+                    return None;
+                }
+                Some(CallTarget {
+                    form: CallForm::Function,
+                    target_kind: CallTargetKind::Function,
+                    name: name.to_owned(),
+                    qualifier: None,
+                    receiver_hint: None,
+                    location: node,
+                })
+            }
             "qualified_identifier" => {
                 let raw = self.scoped_name(node)?;
                 let (qualifier, name) = raw.rsplit_once("::")?;
@@ -646,10 +655,14 @@ impl Extraction<'_> {
             "field_expression" => {
                 let field = node.child_by_field_name("field")?;
                 let object = node.child_by_field_name("argument")?;
+                let name = self.text(field)?.trim();
+                if name.is_empty() {
+                    return None;
+                }
                 Some(CallTarget {
                     form: CallForm::Member,
                     target_kind: CallTargetKind::Method,
-                    name: self.text(field)?.trim().to_owned(),
+                    name: name.to_owned(),
                     qualifier: None,
                     receiver_hint: self.text(object).and_then(bounded_receiver_hint),
                     location: field,
@@ -676,7 +689,11 @@ impl Extraction<'_> {
             | "type_identifier"
             | "statement_identifier"
             | "destructor_name"
-            | "operator_name" => self.text(node).map(str::trim).map(str::to_owned),
+            | "operator_name" => self
+                .text(node)
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+                .map(str::to_owned),
             "qualified_identifier" | "nested_namespace_specifier" => self
                 .text(node)
                 .map(str::trim)
@@ -1021,7 +1038,9 @@ TEST(PaymentService, Refunds) { normalize(1); }
         let path = RepoRelativePath::new("src/broken.cpp")?;
         let parsed = CppParser::new()?.parse(
             path,
-            Arc::<str>::from("int retained_marker() { return 1; }\nclass Broken {\n"),
+            Arc::<str>::from(
+                "int retained_marker() { return 1; }\nvoid broken() { (); target.(); }\nclass Broken {\n",
+            ),
         )?;
         assert!(parsed.has_errors);
         assert!(parsed.diagnostic_count > 0);
@@ -1032,6 +1051,7 @@ TEST(PaymentService, Refunds) { normalize(1); }
                 .iter()
                 .any(|symbol| simple_name(symbol) == "retained_marker")
         );
+        assert!(parsed.calls.iter().all(|call| !call.name.trim().is_empty()));
         Ok(())
     }
 }

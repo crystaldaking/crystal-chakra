@@ -321,7 +321,11 @@ impl Extraction<'_> {
     /// Normalizes a C# qualified or generic type/name to Chakra `::` form.
     fn scoped_name(&self, node: Node<'_>) -> Option<String> {
         match node.kind() {
-            "identifier" | "predefined_type" => self.text(node).map(str::to_owned),
+            "identifier" | "predefined_type" => self
+                .text(node)
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+                .map(str::to_owned),
             "generic_name" => {
                 let mut cursor = node.walk();
                 node.named_children(&mut cursor)
@@ -820,6 +824,7 @@ impl Extraction<'_> {
         }
         if node.kind() == "invocation_expression"
             && let Some(target) = self.call_target(node, current_container)
+            && !target.name.trim().is_empty()
         {
             self.calls.push(CallDraft {
                 caller,
@@ -1266,6 +1271,7 @@ mod tests {
         assert!(parsed.has_errors);
         assert!(parsed.diagnostic_count > 0);
         assert!(parsed.diagnostics.len() <= MAX_SYNTAX_DIAGNOSTICS_PER_FILE);
+        assert!(parsed.calls.iter().all(|call| !call.name.trim().is_empty()));
         Ok(())
     }
 }

@@ -1,13 +1,12 @@
 //! Git-aware Cpp syntax indexing adapter.
 //!
-//! The adapter extracts syntax-tier Cpp facts through the official
-//! Tree-sitter Cpp grammar (ADR-0027): one grammar covers `.cpp` sources.
-//! Extraction covers classes, interfaces, enums, records, and annotation
-//! types with their methods, fields, and constructors; package and
-//! nested-class containers; `import`/`import static`/wildcard import facts;
-//! JUnit 4/5 `@Test` hints; byte-accurate ranges; diagnostics; and bounded
-//! lazy call candidates. The adapter has no dependency on an LSP
-//! implementation and publishes only language-neutral Chakra graph types.
+//! The adapter extracts syntax-tier C/C++ facts through the official
+//! Tree-sitter C++ grammar (ADR-0027) across translation units and headers.
+//! Extraction covers namespaces, classes, structs, unions, enums, templates,
+//! aliases, functions, methods, fields, constructors, includes, common C/C++
+//! test macros, byte-accurate ranges, diagnostics, and bounded lazy call
+//! candidates. The adapter has no dependency on an LSP implementation and
+//! publishes only language-neutral Chakra graph types.
 
 mod discovery;
 mod indexer;

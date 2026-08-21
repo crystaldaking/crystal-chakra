@@ -10,7 +10,8 @@
   "precise_provider": {
     "name": "jdtls",
     "adr": "docs/adr/0036-jdtls-workspace-data-dir-and-readiness-bound.md",
-    "status": "integrated"
+    "status": "runtime-integrated",
+    "runtime_evidence": ["crates/chakra-cli/src/main.rs", "crates/chakra-provider-jdtls/tests/lifecycle.rs"]
   },
   "capabilities": {
     "DISC-01": {"status": "pass", "mechanism": "chakra-git discovery (.java)", "evidence": ["crates/chakra-language-java/tests/fixture_index.rs", "crates/chakra-git/src/discovery.rs"]},

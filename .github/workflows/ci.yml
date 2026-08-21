@@ -33,6 +33,16 @@ jobs:
         env:
           RUSTDOCFLAGS: -D warnings
 
+  watcher-macos:
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      # Exercise Chakra's native kqueue selection and owned watcher lifecycle.
+      - uses: dtolnay/rust-toolchain@1.97.1
+      - run: cargo test --locked -p chakra-language --lib
+      - run: cargo test --locked -p chakra-language --test live_updates
+
   deny:
     runs-on: ubuntu-latest
     timeout-minutes: 15

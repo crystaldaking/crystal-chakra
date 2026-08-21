@@ -1,13 +1,13 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "language": "java",
   "repository": "apache/kafka",
   "sha": "aa502fb153d9915283cf911d8efa1aa2c0d5f3cd",
   "status": "evaluated",
   "skip_reason": "",
-  "provider_phase": "not-configured",
-  "scenario_count": 11,
-  "passed": 11,
+  "provider_phase": "hermetic-startup-failure-restart",
+  "scenario_count": 12,
+  "passed": 12,
   "failed": 0,
   "skipped": 0,
   "scenarios": [
@@ -18,19 +18,19 @@
       "phases": [
         {
           "name": "GitInventory",
-          "wall_micros": 134646
+          "wall_micros": 200325
         },
         {
           "name": "SourceRead",
-          "wall_micros": 523323
+          "wall_micros": 554338
         },
         {
           "name": "ParseExtraction/Rust",
-          "wall_micros": 1
+          "wall_micros": 2
         },
         {
           "name": "SymbolCatalog/Rust",
-          "wall_micros": 2
+          "wall_micros": 1
         },
         {
           "name": "Relationships/Rust",
@@ -38,7 +38,7 @@
         },
         {
           "name": "GraphMaterialization/Rust",
-          "wall_micros": 4
+          "wall_micros": 5
         },
         {
           "name": "ParseExtraction/Php",
@@ -46,7 +46,7 @@
         },
         {
           "name": "SymbolCatalog/Php",
-          "wall_micros": 6
+          "wall_micros": 0
         },
         {
           "name": "Relationships/Php",
@@ -54,7 +54,7 @@
         },
         {
           "name": "GraphMaterialization/Php",
-          "wall_micros": 2
+          "wall_micros": 4
         },
         {
           "name": "ParseExtraction/TypeScript",
@@ -62,7 +62,7 @@
         },
         {
           "name": "SymbolCatalog/TypeScript",
-          "wall_micros": 0
+          "wall_micros": 1
         },
         {
           "name": "Relationships/TypeScript",
@@ -70,31 +70,31 @@
         },
         {
           "name": "GraphMaterialization/TypeScript",
-          "wall_micros": 2
-        },
-        {
-          "name": "ParseExtraction/Python",
-          "wall_micros": 24636
-        },
-        {
-          "name": "SymbolCatalog/Python",
-          "wall_micros": 1094
-        },
-        {
-          "name": "Relationships/Python",
-          "wall_micros": 817
-        },
-        {
-          "name": "GraphMaterialization/Python",
-          "wall_micros": 25404
-        },
-        {
-          "name": "ParseExtraction/JavaScript",
           "wall_micros": 1
         },
         {
+          "name": "ParseExtraction/Python",
+          "wall_micros": 55345
+        },
+        {
+          "name": "SymbolCatalog/Python",
+          "wall_micros": 1521
+        },
+        {
+          "name": "Relationships/Python",
+          "wall_micros": 429
+        },
+        {
+          "name": "GraphMaterialization/Python",
+          "wall_micros": 31509
+        },
+        {
+          "name": "ParseExtraction/JavaScript",
+          "wall_micros": 2
+        },
+        {
           "name": "SymbolCatalog/JavaScript",
-          "wall_micros": 0
+          "wall_micros": 1
         },
         {
           "name": "Relationships/JavaScript",
@@ -102,68 +102,153 @@
         },
         {
           "name": "GraphMaterialization/JavaScript",
-          "wall_micros": 4
+          "wall_micros": 2
         },
         {
           "name": "ParseExtraction/Java",
-          "wall_micros": 1101271
+          "wall_micros": 2433425
         },
         {
           "name": "SymbolCatalog/Java",
-          "wall_micros": 53146
+          "wall_micros": 150937
         },
         {
           "name": "Relationships/Java",
-          "wall_micros": 12127
+          "wall_micros": 29992
         },
         {
           "name": "GraphMaterialization/Java",
-          "wall_micros": 2718004
+          "wall_micros": 3690328
+        },
+        {
+          "name": "ParseExtraction/CSharp",
+          "wall_micros": 2
+        },
+        {
+          "name": "SymbolCatalog/CSharp",
+          "wall_micros": 1
+        },
+        {
+          "name": "Relationships/CSharp",
+          "wall_micros": 0
+        },
+        {
+          "name": "GraphMaterialization/CSharp",
+          "wall_micros": 3
+        },
+        {
+          "name": "ParseExtraction/Shell",
+          "wall_micros": 1414
+        },
+        {
+          "name": "SymbolCatalog/Shell",
+          "wall_micros": 35
+        },
+        {
+          "name": "Relationships/Shell",
+          "wall_micros": 38
+        },
+        {
+          "name": "GraphMaterialization/Shell",
+          "wall_micros": 319
+        },
+        {
+          "name": "ParseExtraction/Cpp",
+          "wall_micros": 1
+        },
+        {
+          "name": "SymbolCatalog/Cpp",
+          "wall_micros": 1
+        },
+        {
+          "name": "Relationships/Cpp",
+          "wall_micros": 0
+        },
+        {
+          "name": "GraphMaterialization/Cpp",
+          "wall_micros": 2
+        },
+        {
+          "name": "ParseExtraction/Hcl",
+          "wall_micros": 0
+        },
+        {
+          "name": "SymbolCatalog/Hcl",
+          "wall_micros": 1
+        },
+        {
+          "name": "Relationships/Hcl",
+          "wall_micros": 0
+        },
+        {
+          "name": "GraphMaterialization/Hcl",
+          "wall_micros": 2
+        },
+        {
+          "name": "ParseExtraction/Go",
+          "wall_micros": 2
+        },
+        {
+          "name": "SymbolCatalog/Go",
+          "wall_micros": 2
+        },
+        {
+          "name": "Relationships/Go",
+          "wall_micros": 0
+        },
+        {
+          "name": "GraphMaterialization/Go",
+          "wall_micros": 2
         },
         {
           "name": "LanguageComposition",
-          "wall_micros": 5
+          "wall_micros": 7
         },
         {
           "name": "GraphValidation",
-          "wall_micros": 1272258
+          "wall_micros": 1156181
         },
         {
           "name": "total",
-          "wall_micros": 5937958
+          "wall_micros": 8392920
         }
       ],
       "measurements": {
-        "ambiguous_call_sites": 81018,
-        "call_sites": 754230,
+        "ambiguous_call_sites": 80313,
+        "call_sites": 749998,
+        "cpp_files": 0,
+        "csharp_files": 0,
         "degradations": 0,
         "degraded": false,
-        "discovered_files": 6349,
-        "edges": 241836,
+        "discovered_files": 6410,
+        "edges": 241541,
+        "go_files": 0,
+        "hcl_files": 0,
         "java_files": 6165,
         "javascript_files": 0,
-        "parsed_files": 6349,
-        "peak_rss_bytes": 2092892160,
+        "parsed_files": 6410,
+        "peak_rss_bytes": 1637859328,
         "php_files": 0,
         "python_files": 184,
         "rust_files": 0,
-        "source_bytes": 72552697,
-        "symbols": 216644,
+        "shell_files": 61,
+        "source_bytes": 72653135,
+        "symbols": 216728,
         "syntax_error_files": 3,
         "typescript_files": 0,
-        "unresolved_call_sites": 580711,
-        "wall_micros": 5937958
+        "unresolved_call_sites": 577454,
+        "wall_micros": 8392920
       },
       "budget_verdicts": [
         {
           "budget": "cold_index_peak_rss_bytes",
-          "observed": 2092892160,
+          "observed": 1637859328,
           "limit": 8589934592,
           "status": "pass"
         },
         {
           "budget": "cold_index_wall_micros",
-          "observed": 5937958,
+          "observed": 8392920,
           "limit": 250000000,
           "status": "pass"
         }
@@ -176,19 +261,19 @@
       "phases": [
         {
           "name": "fresh_barrier",
-          "wall_micros": 155997
+          "wall_micros": 236135
         }
       ],
       "measurements": {
-        "files_inspected": 12697,
+        "files_inspected": 12819,
         "git_subprocesses": 2,
         "no_op_reconciliations": 1,
-        "wall_micros": 155997
+        "wall_micros": 236135
       },
       "budget_verdicts": [
         {
           "budget": "warm_noop_wall_micros",
-          "observed": 155998,
+          "observed": 236137,
           "limit": 30000000,
           "status": "pass"
         }
@@ -201,13 +286,13 @@
       "phases": [
         {
           "name": "reindex",
-          "wall_micros": 5874987
+          "wall_micros": 7519887
         }
       ],
       "measurements": {
-        "fingerprint": "10aa68b32e979ad4",
-        "rerun_edges": 241836,
-        "rerun_symbols": 216644
+        "fingerprint": "dee930e2b884c071",
+        "rerun_edges": 241541,
+        "rerun_symbols": 216728
       },
       "budget_verdicts": []
     },
@@ -218,13 +303,13 @@
       "phases": [
         {
           "name": "edit_and_barrier",
-          "wall_micros": 4474049
+          "wall_micros": 4504411
         }
       ],
       "measurements": {
         "files_reparsed": 1,
         "full_reconciliations": 0,
-        "wall_micros": 4474050
+        "wall_micros": 4504412
       },
       "budget_verdicts": []
     },
@@ -235,13 +320,13 @@
       "phases": [
         {
           "name": "replace_and_barrier",
-          "wall_micros": 4438494
+          "wall_micros": 10128231
         }
       ],
       "measurements": {
         "files_reparsed": 1,
         "full_reconciliations": 0,
-        "wall_micros": 4438495
+        "wall_micros": 10128231
       },
       "budget_verdicts": []
     },
@@ -252,13 +337,13 @@
       "phases": [
         {
           "name": "rename_delete_and_barrier",
-          "wall_micros": 3550728
+          "wall_micros": 5787208
         }
       ],
       "measurements": {
         "created_files": 1,
         "deleted_files": 2,
-        "wall_micros": 3550729
+        "wall_micros": 5787208
       },
       "budget_verdicts": []
     },
@@ -269,7 +354,7 @@
       "phases": [
         {
           "name": "break_and_barrier",
-          "wall_micros": 4198107
+          "wall_micros": 5964423
         }
       ],
       "measurements": {
@@ -284,11 +369,11 @@
       "phases": [
         {
           "name": "clean_diff",
-          "wall_micros": 12952282
+          "wall_micros": 20891736
         },
         {
           "name": "dirty_diff",
-          "wall_micros": 428329
+          "wall_micros": 503470
         }
       ],
       "measurements": {
@@ -309,7 +394,7 @@
             "previous_path": null
           }
         ],
-        "clean_diff_wall_micros": 487723
+        "clean_diff_wall_micros": 469183
       },
       "budget_verdicts": []
     },
@@ -320,34 +405,34 @@
       "phases": [
         {
           "name": "symbol_search",
-          "wall_micros": 186
+          "wall_micros": 233
         },
         {
           "name": "callers",
-          "wall_micros": 7833
+          "wall_micros": 11631
         },
         {
           "name": "context",
-          "wall_micros": 4632
+          "wall_micros": 5915
         }
       ],
       "measurements": {
         "callers_returned": 5,
         "target": "org::apache::kafka::common::Uuid::randomUuid",
-        "target_incoming_calls": 2202,
+        "target_incoming_calls": 1191,
         "target_precision": "TreeSitter/Syntax",
         "targets": [
           {
-            "incoming_calls": 2202,
+            "incoming_calls": 1191,
             "qualified_name": "org::apache::kafka::common::Uuid::randomUuid"
           },
           {
-            "incoming_calls": 2188,
+            "incoming_calls": 867,
             "qualified_name": "org::apache::kafka::common::serialization::Serdes::String"
           },
           {
-            "incoming_calls": 2104,
-            "qualified_name": "org::apache::kafka::common::utils::Utils::mkEntry"
+            "incoming_calls": 583,
+            "qualified_name": "org::apache::kafka::common::utils::Utils::mkMap"
           }
         ]
       },
@@ -360,15 +445,15 @@
       "phases": [
         {
           "name": "cancelled_cold_index",
-          "wall_micros": 6
+          "wall_micros": 4
         },
         {
           "name": "cancelled_query",
-          "wall_micros": 0
+          "wall_micros": 1
         }
       ],
       "measurements": {
-        "cancelled_index_wall_micros": 6
+        "cancelled_index_wall_micros": 5
       },
       "budget_verdicts": []
     },
@@ -378,6 +463,31 @@
       "details": "checkout restored to the pinned SHA with a clean worktree",
       "phases": [],
       "measurements": {},
+      "budget_verdicts": []
+    },
+    {
+      "id": "provider-lifecycle",
+      "status": "pass",
+      "details": "real corpus graph: provider absent, failed start with explicit fallback, then provenance-tagged precise restart",
+      "phases": [
+        {
+          "name": "provider_absent",
+          "wall_micros": 2586
+        },
+        {
+          "name": "provider_failure",
+          "wall_micros": 159670
+        },
+        {
+          "name": "provider_restart",
+          "wall_micros": 315653
+        }
+      ],
+      "measurements": {
+        "fallback_callers": 20,
+        "precise_callers": 1,
+        "target": "org::apache::kafka::common::Uuid::randomUuid"
+      },
       "budget_verdicts": []
     }
   ]

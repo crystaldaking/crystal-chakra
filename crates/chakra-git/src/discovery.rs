@@ -473,11 +473,59 @@ fn is_excluded(path: &Path) -> bool {
     )
 }
 
+/// Single extension-to-language catalog shared by source discovery and the
+/// raw Git diff prefilter. Keep special filename exclusions in
+/// [`source_language`], after the path has been decoded and validated.
+const SOURCE_EXTENSIONS: &[(&str, Language)] = &[
+    ("rs", Language::Rust),
+    ("php", Language::Php),
+    ("ts", Language::TypeScript),
+    ("tsx", Language::TypeScript),
+    ("mts", Language::TypeScript),
+    ("cts", Language::TypeScript),
+    ("py", Language::Python),
+    ("pyi", Language::Python),
+    ("js", Language::JavaScript),
+    ("jsx", Language::JavaScript),
+    ("mjs", Language::JavaScript),
+    ("cjs", Language::JavaScript),
+    ("java", Language::Java),
+    ("cs", Language::CSharp),
+    ("sh", Language::Shell),
+    ("bash", Language::Shell),
+    ("zsh", Language::Shell),
+    ("ksh", Language::Shell),
+    ("c", Language::Cpp),
+    ("h", Language::Cpp),
+    ("cc", Language::Cpp),
+    ("cpp", Language::Cpp),
+    ("cxx", Language::Cpp),
+    ("hh", Language::Cpp),
+    ("hpp", Language::Cpp),
+    ("hxx", Language::Cpp),
+    ("ipp", Language::Cpp),
+    ("tpp", Language::Cpp),
+    ("inc", Language::Cpp),
+    ("tf", Language::Hcl),
+    ("tfvars", Language::Hcl),
+    ("hcl", Language::Hcl),
+    ("go", Language::Go),
+];
+
+pub(crate) fn raw_may_be_source(raw: &[u8]) -> bool {
+    let Some(dot) = raw.iter().rposition(|byte| *byte == b'.') else {
+        return false;
+    };
+    let extension = &raw[dot.saturating_add(1)..];
+    SOURCE_EXTENSIONS
+        .iter()
+        .any(|(candidate, _)| extension == candidate.as_bytes())
+}
+
 /// Recognizes a v0.1 source language without interpreting `target` build
 /// output as source. Git administration is resolved separately through Git
 /// and is never inferred from a literal worktree path.
 pub fn source_language(path: &str) -> Option<Language> {
-    let raw_path = path;
     let path = Path::new(path);
     if is_excluded(path) {
         return None;
@@ -486,39 +534,10 @@ pub fn source_language(path: &str) -> Option<Language> {
     if matches!(file_name, ".terraform.lock.hcl" | ".opentofu.lock.hcl") {
         return None;
     }
-    if raw_path.ends_with(".tf") || raw_path.ends_with(".tfvars") || raw_path.ends_with(".hcl") {
-        return Some(Language::Hcl);
-    }
-    match path.extension() {
-        Some(extension) if extension == OsStr::new("rs") => Some(Language::Rust),
-        Some(extension) if extension == OsStr::new("php") => Some(Language::Php),
-        Some(extension) if matches!(extension.to_str(), Some("ts" | "tsx" | "mts" | "cts")) => {
-            Some(Language::TypeScript)
-        }
-        Some(extension) if matches!(extension.to_str(), Some("py" | "pyi")) => {
-            Some(Language::Python)
-        }
-        Some(extension) if matches!(extension.to_str(), Some("js" | "jsx" | "mjs" | "cjs")) => {
-            Some(Language::JavaScript)
-        }
-        Some(extension) if extension == OsStr::new("java") => Some(Language::Java),
-        Some(extension) if extension == OsStr::new("cs") => Some(Language::CSharp),
-        Some(extension) if extension == OsStr::new("go") => Some(Language::Go),
-        Some(extension) if matches!(extension.to_str(), Some("sh" | "bash" | "zsh" | "ksh")) => {
-            Some(Language::Shell)
-        }
-        Some(extension)
-            if matches!(
-                extension.to_str(),
-                Some(
-                    "c" | "h" | "cc" | "cpp" | "cxx" | "hh" | "hpp" | "hxx" | "ipp" | "tpp" | "inc"
-                )
-            ) =>
-        {
-            Some(Language::Cpp)
-        }
-        _ => None,
-    }
+    let extension = path.extension().and_then(OsStr::to_str)?;
+    SOURCE_EXTENSIONS
+        .iter()
+        .find_map(|(candidate, language)| (*candidate == extension).then_some(*language))
 }
 
 /// Returns tracked plus untracked, non-ignored files for one supported
@@ -611,39 +630,7 @@ fn workspace_inventory_from_git_output(
         if raw.is_empty() {
             continue;
         }
-        let source = raw.ends_with(b".rs")
-            || raw.ends_with(b".php")
-            || raw.ends_with(b".ts")
-            || raw.ends_with(b".tsx")
-            || raw.ends_with(b".mts")
-            || raw.ends_with(b".cts")
-            || raw.ends_with(b".py")
-            || raw.ends_with(b".pyi")
-            || raw.ends_with(b".js")
-            || raw.ends_with(b".jsx")
-            || raw.ends_with(b".mjs")
-            || raw.ends_with(b".cjs")
-            || raw.ends_with(b".java")
-            || raw.ends_with(b".cs")
-            || raw.ends_with(b".sh")
-            || raw.ends_with(b".bash")
-            || raw.ends_with(b".zsh")
-            || raw.ends_with(b".ksh")
-            || raw.ends_with(b".c")
-            || raw.ends_with(b".h")
-            || raw.ends_with(b".cc")
-            || raw.ends_with(b".cpp")
-            || raw.ends_with(b".cxx")
-            || raw.ends_with(b".hh")
-            || raw.ends_with(b".hpp")
-            || raw.ends_with(b".hxx")
-            || raw.ends_with(b".ipp")
-            || raw.ends_with(b".tpp")
-            || raw.ends_with(b".inc")
-            || raw.ends_with(b".tf")
-            || raw.ends_with(b".tfvars")
-            || raw.ends_with(b".hcl")
-            || raw.ends_with(b".go");
+        let source = raw_may_be_source(raw);
         let metadata_input = raw_is_metadata_input(raw);
         if !source && !metadata_input {
             continue;
@@ -682,7 +669,31 @@ fn workspace_inventory_from_git_output(
     Ok(inventory)
 }
 
+const RUST_METADATA_LANGUAGES: &[Language] = &[Language::Rust];
+const PHP_METADATA_LANGUAGES: &[Language] = &[Language::Php];
+const TYPESCRIPT_METADATA_LANGUAGES: &[Language] = &[Language::TypeScript];
+const JAVASCRIPT_METADATA_LANGUAGES: &[Language] = &[Language::JavaScript];
+const WEB_METADATA_LANGUAGES: &[Language] = &[Language::TypeScript, Language::JavaScript];
+const PYTHON_METADATA_LANGUAGES: &[Language] = &[Language::Python];
+const JAVA_METADATA_LANGUAGES: &[Language] = &[Language::Java];
+const CSHARP_METADATA_LANGUAGES: &[Language] = &[Language::CSharp];
+const SHELL_METADATA_LANGUAGES: &[Language] = &[Language::Shell];
+const CPP_METADATA_LANGUAGES: &[Language] = &[Language::Cpp];
+const HCL_METADATA_LANGUAGES: &[Language] = &[Language::Hcl];
+const GO_METADATA_LANGUAGES: &[Language] = &[Language::Go];
+
+/// Languages whose provider workspace semantics may change when `path`
+/// changes. The mapping is shared by discovery and the atomically published
+/// provider-input catalog so adapters receive only relevant metadata events.
+pub fn metadata_languages(path: &str) -> &'static [Language] {
+    raw_metadata_languages(path.as_bytes())
+}
+
 fn raw_is_metadata_input(raw: &[u8]) -> bool {
+    !raw_metadata_languages(raw).is_empty()
+}
+
+fn raw_metadata_languages(raw: &[u8]) -> &'static [Language] {
     if [
         b".csproj".as_slice(),
         b".sln".as_slice(),
@@ -691,59 +702,106 @@ fn raw_is_metadata_input(raw: &[u8]) -> bool {
     .into_iter()
     .any(|suffix| raw.ends_with(suffix))
     {
-        return true;
+        return CSHARP_METADATA_LANGUAGES;
     }
-    [
-        b"Cargo.toml".as_slice(),
-        b"Cargo.lock".as_slice(),
-        b"composer.json".as_slice(),
-        b"package.json".as_slice(),
-        b"tsconfig.json".as_slice(),
-        b"jsconfig.json".as_slice(),
-        b"pyproject.toml".as_slice(),
-        b"setup.py".as_slice(),
-        b"setup.cfg".as_slice(),
-        b"pom.xml".as_slice(),
-        b"build.gradle".as_slice(),
-        b"build.gradle.kts".as_slice(),
-        b"settings.gradle".as_slice(),
-        b"settings.gradle.kts".as_slice(),
-        b"Directory.Build.props".as_slice(),
-        b"Directory.Build.targets".as_slice(),
-        b"Directory.Packages.props".as_slice(),
-        b"global.json".as_slice(),
-        b".shellcheckrc".as_slice(),
-        b"shellcheckrc".as_slice(),
-        b"compile_commands.json".as_slice(),
-        b"compile_flags.txt".as_slice(),
-        b"CMakeLists.txt".as_slice(),
-        b"meson.build".as_slice(),
-        b"BUILD".as_slice(),
-        b"BUILD.bazel".as_slice(),
-        b".clangd".as_slice(),
-        b".terraform.lock.hcl".as_slice(),
-        b".opentofu.lock.hcl".as_slice(),
-        b".terraform-version".as_slice(),
-        b".opentofu-version".as_slice(),
-        b".terraformrc".as_slice(),
-        b"terraform.rc".as_slice(),
-        b"tofu.rc".as_slice(),
-        b"go.mod".as_slice(),
-        b"go.sum".as_slice(),
-        b"go.work".as_slice(),
-        b"go.work.sum".as_slice(),
-        b".cargo/config".as_slice(),
-        b".cargo/config.toml".as_slice(),
-        b"rust-toolchain".as_slice(),
-        b"rust-toolchain.toml".as_slice(),
-    ]
-    .into_iter()
-    .any(|name| {
+    let matches_name = |name: &[u8]| {
         raw == name
             || raw
                 .strip_suffix(name)
                 .is_some_and(|prefix| prefix.ends_with(b"/"))
-    })
+    };
+    for (names, languages) in [
+        (
+            &[
+                b"Cargo.toml".as_slice(),
+                b"Cargo.lock".as_slice(),
+                b".cargo/config".as_slice(),
+                b".cargo/config.toml".as_slice(),
+                b"rust-toolchain".as_slice(),
+                b"rust-toolchain.toml".as_slice(),
+            ][..],
+            RUST_METADATA_LANGUAGES,
+        ),
+        (&[b"composer.json".as_slice()][..], PHP_METADATA_LANGUAGES),
+        (&[b"package.json".as_slice()][..], WEB_METADATA_LANGUAGES),
+        (
+            &[b"tsconfig.json".as_slice()][..],
+            TYPESCRIPT_METADATA_LANGUAGES,
+        ),
+        (
+            &[b"jsconfig.json".as_slice()][..],
+            JAVASCRIPT_METADATA_LANGUAGES,
+        ),
+        (
+            &[
+                b"pyproject.toml".as_slice(),
+                b"setup.py".as_slice(),
+                b"setup.cfg".as_slice(),
+            ][..],
+            PYTHON_METADATA_LANGUAGES,
+        ),
+        (
+            &[
+                b"pom.xml".as_slice(),
+                b"build.gradle".as_slice(),
+                b"build.gradle.kts".as_slice(),
+                b"settings.gradle".as_slice(),
+                b"settings.gradle.kts".as_slice(),
+            ][..],
+            JAVA_METADATA_LANGUAGES,
+        ),
+        (
+            &[
+                b"Directory.Build.props".as_slice(),
+                b"Directory.Build.targets".as_slice(),
+                b"Directory.Packages.props".as_slice(),
+                b"global.json".as_slice(),
+            ][..],
+            CSHARP_METADATA_LANGUAGES,
+        ),
+        (
+            &[b".shellcheckrc".as_slice(), b"shellcheckrc".as_slice()][..],
+            SHELL_METADATA_LANGUAGES,
+        ),
+        (
+            &[
+                b"compile_commands.json".as_slice(),
+                b"compile_flags.txt".as_slice(),
+                b"CMakeLists.txt".as_slice(),
+                b"meson.build".as_slice(),
+                b"BUILD".as_slice(),
+                b"BUILD.bazel".as_slice(),
+                b".clangd".as_slice(),
+            ][..],
+            CPP_METADATA_LANGUAGES,
+        ),
+        (
+            &[
+                b".terraform.lock.hcl".as_slice(),
+                b".opentofu.lock.hcl".as_slice(),
+                b".terraform-version".as_slice(),
+                b".opentofu-version".as_slice(),
+                b".terraformrc".as_slice(),
+                b"terraform.rc".as_slice(),
+                b"tofu.rc".as_slice(),
+            ][..],
+            HCL_METADATA_LANGUAGES,
+        ),
+        (
+            &[
+                b"go.mod".as_slice(),
+                b"go.sum".as_slice(),
+                b"go.work".as_slice(),
+                b"go.work.sum".as_slice(),
+            ][..],
+            GO_METADATA_LANGUAGES,
+        ),
+    ] {
+        if names.iter().copied().any(matches_name) {
+            return languages;
+        }
+    }
+    &[]
 }
 
 #[cfg(test)]
@@ -783,6 +841,21 @@ mod tests {
         git(repository.path(), &["add", "src/lib.rs", ".gitignore"])?;
         git(repository.path(), &["commit", "--quiet", "-m", "fixture"])?;
         Ok(repository)
+    }
+
+    #[test]
+    fn raw_git_prefilter_and_typed_source_catalog_share_every_extension() {
+        for (extension, language) in SOURCE_EXTENSIONS {
+            let path = format!("src/example.{extension}");
+            assert!(
+                raw_may_be_source(path.as_bytes()),
+                "missing raw {extension}"
+            );
+            assert_eq!(source_language(&path), Some(*language), "wrong {extension}");
+        }
+        assert!(!raw_may_be_source(b"src/example.unsupported"));
+        assert_eq!(source_language("target/example.rs"), None);
+        assert_eq!(source_language(".terraform.lock.hcl"), None);
     }
 
     #[test]

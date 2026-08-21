@@ -21,13 +21,14 @@ use chakra_domain::envelope::TruncationSection;
 use chakra_domain::indexing::{IndexBudgetKind, IndexBudgets, IndexCancellation};
 use chakra_domain::location::RepoRelativePath;
 use chakra_domain::operation::OperationContext;
+use chakra_domain::provenance::{Precision, Provenance};
 use chakra_domain::query::{
     CallersRequest, ChangeKind, ContextRequest, DiffContextRequest, QueryError, QueryService,
     RepoMapRequest, StatusRequest, SymbolRef, SymbolSearchRequest,
 };
-use chakra_domain::state::{Freshness, FreshnessRequirement, WorkspaceStatus};
+use chakra_domain::state::{Freshness, FreshnessRequirement, ProviderState, WorkspaceStatus};
 use chakra_domain::symbol::{EdgeKind, SymbolKind};
-use chakra_engine::{SymbolGraph, WorkspaceEngine};
+use chakra_engine::{PreciseRelation, SymbolGraph, WorkspaceEngine};
 use chakra_language::{
     IndexOptions, IndexReport, LiveIndex, LiveIndexMetrics, WorkspaceIndexError, index_repository,
     index_repository_with_options, start_live_index,
@@ -39,7 +40,7 @@ use super::report::{
     PhaseTiming, RepoStatus, reject,
 };
 use super::{SCENARIO_IDS, supported_languages};
-use crate::{Check, failure};
+use crate::{Check, FlakyProvider, failure};
 
 /// Untracked metadata file written by `tools/fetch_corpus.py`; excluded from
 /// the clean-worktree assertion.
@@ -82,6 +83,47 @@ pub fn evaluate_language(
         .iter()
         .map(|repo| evaluate_repository(language, repo, budgets, cache_root))
         .collect())
+}
+
+/// Evaluates exactly one named repository. The CLI uses this entry point in
+/// an isolated child process so memory samples belong to one repository.
+pub fn evaluate_named_repository(
+    language: &str,
+    repository: &str,
+    manifest: &CorpusManifest,
+    budgets: &CorpusBudgets,
+    cache_root: &Path,
+) -> Check<CorpusRepoReport> {
+    let entry = manifest.languages.get(language).ok_or_else(|| {
+        failure(format!(
+            "language `{language}` is not in the corpus manifest"
+        ))
+    })?;
+    let repo = entry
+        .repositories
+        .iter()
+        .find(|repo| repo.name == repository)
+        .ok_or_else(|| {
+            failure(format!(
+                "repository `{repository}` is not registered for language `{language}`"
+            ))
+        })?;
+    if !supported_languages()
+        .iter()
+        .any(|supported| supported == language)
+    {
+        return Ok(skipped_repo(
+            language,
+            repo,
+            format!("unsupported language: `{language}` has no chakra-language adapter yet"),
+        ));
+    }
+    Ok(evaluate_repository(
+        language,
+        repo,
+        budgets.for_language(language),
+        cache_root,
+    ))
 }
 
 fn skipped_repo(language: &str, repo: &CorpusRepository, reason: String) -> CorpusRepoReport {
@@ -623,6 +665,7 @@ fn evaluate_repository(
                 "diff-context",
                 "queries",
                 "cancellation",
+                "provider-lifecycle",
             ] {
                 slots.skip(id, &reason);
             }
@@ -736,8 +779,121 @@ fn evaluate_repository(
         Ok(())
     });
 
+    // --- provider-lifecycle ----------------------------------------------
+    slots.run("provider-lifecycle", |scenario| {
+        run_provider_lifecycle_scenario(scenario, &workspace, &facts)
+    });
+
     workspace.shutdown();
     finish_repo(language, repo, slots)
+}
+
+fn run_provider_lifecycle_scenario(
+    scenario: &mut ScenarioBuilder,
+    workspace: &LiveWorkspace,
+    facts: &WorkspaceFacts,
+) -> Check<()> {
+    let (qualified, _) = facts
+        .targets
+        .first()
+        .ok_or_else(|| failure("index contains no uniquely named provider-lifecycle target"))?;
+    let target = simple_name(qualified);
+
+    let startup_started = Instant::now();
+    let initial_status = workspace.engine.status(StatusRequest)?;
+    scenario.phase("provider_absent", startup_started);
+    reject(
+        initial_status.data.providers.is_empty()
+            && initial_status.provider_state == ProviderState::NotConfigured,
+        "corpus workspace unexpectedly had a precise provider before lifecycle setup",
+    )?;
+
+    let provider = Arc::new(FlakyProvider::crashed());
+    workspace
+        .engine
+        .install_precise_provider(provider.clone())?;
+    let failure_started = Instant::now();
+    let degraded = workspace.engine.callers(CallersRequest {
+        symbol: Some(SymbolRef::ByName(target.to_owned())),
+        freshness: FreshnessRequirement::RequireFresh,
+        ..CallersRequest::default()
+    })?;
+    scenario.phase("provider_failure", failure_started);
+    let degraded_info = degraded
+        .data
+        .provider
+        .as_ref()
+        .ok_or_else(|| failure("degraded provider info missing"))?;
+    reject(
+        degraded_info.state == ProviderState::Degraded
+            && degraded_info.fallback_used
+            && degraded_info.fallback_reason.is_some()
+            && degraded_info.last_error.is_some(),
+        "provider failure did not report degraded state and explicit syntax fallback",
+    )?;
+    let syntax_caller = degraded
+        .data
+        .callers
+        .first()
+        .ok_or_else(|| failure("syntax caller disappeared while provider was degraded"))?;
+    let caller_location = syntax_caller.symbol.location.clone();
+    let caller_name = syntax_caller.symbol.name.clone();
+    scenario.measure("target", qualified.clone());
+    scenario.measure(
+        "fallback_callers",
+        u64::try_from(degraded.data.callers.len()).unwrap_or(u64::MAX),
+    );
+
+    let restart_started = Instant::now();
+    provider.restart(vec![PreciseRelation {
+        name: caller_name,
+        declaration: caller_location.clone(),
+        occurrence_count: 1,
+        call_sites: vec![caller_location],
+        provenance: Provenance::ChakraResolver,
+    }]);
+    let recovered = workspace.engine.callers(CallersRequest {
+        symbol: Some(SymbolRef::ByName(target.to_owned())),
+        freshness: FreshnessRequirement::RequireFresh,
+        ..CallersRequest::default()
+    })?;
+    scenario.phase("provider_restart", restart_started);
+    let recovered_info = recovered
+        .data
+        .provider
+        .as_ref()
+        .ok_or_else(|| failure("recovered provider info missing"))?;
+    reject(
+        recovered_info.state == ProviderState::Ready && !recovered_info.fallback_used,
+        "restarted provider did not become ready without fallback",
+    )?;
+    reject(
+        provider.start_attempts() == 2,
+        "provider double did not record failed start plus restart",
+    )?;
+    reject(
+        recovered.data.callers.iter().any(|caller| {
+            caller.precision == Precision::Precise
+                && caller.provenance == Provenance::ChakraResolver
+        }),
+        "restarted provider did not contribute provenance-tagged precise facts",
+    )?;
+    scenario.measure(
+        "precise_callers",
+        u64::try_from(
+            recovered
+                .data
+                .callers
+                .iter()
+                .filter(|caller| caller.precision == Precision::Precise)
+                .count(),
+        )
+        .unwrap_or(u64::MAX),
+    );
+    scenario.note(
+        "real corpus graph: provider absent, failed start with explicit fallback, then provenance-tagged precise restart",
+    );
+    Ok(())
 }
 
 fn finish_repo(language: &str, repo: &CorpusRepository, slots: Slots) -> CorpusRepoReport {
@@ -831,6 +987,7 @@ fn start_live_workspace(checkout: &Path, report: IndexReport) -> Check<LiveWorks
     let engine = Arc::new(WorkspaceEngine::new(identity));
     engine.install_diff_provider(Arc::new(chakra_git::GitWorkspaceDiff))?;
     let mut update = engine.begin_update();
+    update.set_provider_inputs(report.provider_inputs.clone());
     update.replace_graph(report.graph);
     update.set_indexing(report.metrics.indexing);
     update.set_status(WorkspaceStatus::Indexing);
@@ -904,8 +1061,10 @@ fn collect_facts(engine: &Arc<WorkspaceEngine>, plan: &ProbePlan) -> WorkspaceFa
     }
 }
 
-/// Top uniquely-named callees by incoming `Calls` edges, chosen from the
-/// index itself (deterministic: count desc, then qualified name asc).
+/// Top uniquely-named callees by distinct incoming caller symbols, chosen
+/// from the index itself (deterministic: count desc, then qualified name asc).
+/// Multiple call sites from one caller do not imply pagination in the
+/// deduplicated `callers` response.
 fn high_degree_targets(graph: &SymbolGraph, count: usize) -> Vec<(String, u64)> {
     let mut scored: Vec<(u64, String)> = graph
         .symbols()
@@ -921,13 +1080,14 @@ fn high_degree_targets(graph: &SymbolGraph, count: usize) -> Vec<(String, u64)> 
             )
         })
         .map(|symbol| {
-            let callers = graph
+            let callers: HashSet<_> = graph
                 .incoming_edges(symbol.id)
                 .iter()
                 .filter(|edge| edge.kind == EdgeKind::Calls)
-                .count();
+                .map(|edge| edge.from)
+                .collect();
             (
-                u64::try_from(callers).unwrap_or(u64::MAX),
+                u64::try_from(callers.len()).unwrap_or(u64::MAX),
                 symbol.key.qualified_name.clone(),
             )
         })

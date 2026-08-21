@@ -62,6 +62,12 @@ over native filesystem mechanisms:
   temporary-file and rename-over-target save sequences without unbounded
   delay or queue growth. Parsing, Git subprocesses, and filesystem reads do
   not block Tokio runtime workers.
+- Bound watcher construction and initial registration with a typed startup
+  timeout. `LiveIndexOptions` defaults to 30 seconds and the CLI exposes
+  `--live-index-startup-timeout-millis`; zero is rejected. Timeout, setup
+  failure, barrier-install failure, and shutdown all signal the single owner,
+  stop registration cooperatively, and join it before returning, so a failed
+  start cannot detach a watcher thread.
 - Make `FreshnessBarrier` a small language-neutral engine contract. The
   `chakra-language` workspace owner implements it with monotonic
   request/completion generations plus a
@@ -214,6 +220,10 @@ over native filesystem mechanisms:
 - A macOS-only unit test pins `RecommendedWatcher` to kqueue, and the parallel
   conformance suite exercises repeated owned watcher startup and shutdown
   without the former FSEvents registration stall (issue #65).
+- A deterministic unit regression holds startup behind a cooperative gate,
+  reaches the configured deadline, and proves the owned worker is cancelled
+  and joined before `StartupTimeout` is returned. macOS CI runs the watcher
+  and live-update suites on the native backend.
 - The pinned Java Spring Boot corpus exceeds the non-recursive watch-directory
   cap. Its freshness scenarios prove that stable partial notification coverage
   remains bounded and degraded while fresh barriers complete through

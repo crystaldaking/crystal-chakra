@@ -25,6 +25,6 @@ pub use graph::{
 };
 pub use precise::{
     CallHierarchyDirections, PreciseProvider, PreciseQueryRequest, PreciseQueryResult,
-    PreciseRelation, ProviderDocument, ProviderRequestPriority, ProviderShutdownError,
-    ProviderSymbol, ProviderWorkspace, ProviderWorkspaceDelta,
+    PreciseRelation, ProviderDocument, ProviderInput, ProviderRequestPriority,
+    ProviderShutdownError, ProviderSymbol, ProviderWorkspace, ProviderWorkspaceDelta,
 };

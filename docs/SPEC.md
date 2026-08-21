@@ -601,7 +601,7 @@ Conceptual fields:
 
 ```json
 {
-  "schema_version": 8,
+  "schema_version": 13,
   "workspace_id": "...",
   "revision": 42,
   "freshness": "fresh",

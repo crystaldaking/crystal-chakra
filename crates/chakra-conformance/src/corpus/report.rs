@@ -17,7 +17,7 @@ use super::{Check, SCENARIO_IDS};
 use crate::failure;
 
 /// Current corpus result-file schema version.
-pub const CORPUS_SCHEMA_VERSION: u32 = 1;
+pub const CORPUS_SCHEMA_VERSION: u32 = 2;
 
 /// Repository-level outcome.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -89,9 +89,8 @@ pub struct CorpusRepoReport {
     pub status: RepoStatus,
     /// Empty unless `status` is `skipped`.
     pub skip_reason: String,
-    /// Precise-provider phase coverage. `not-configured` in v0.1: provider
-    /// startup/failure/restart scenarios live in the conformance suite with a
-    /// double; the corpus runner never requires a language server.
+    /// Precise-provider phase coverage. Evaluated repositories use a
+    /// hermetic double so the corpus runner never requires a language server.
     pub provider_phase: String,
     pub scenario_count: usize,
     pub passed: usize,
@@ -123,7 +122,10 @@ impl CorpusRepoReport {
             sha: sha.to_owned(),
             status,
             skip_reason,
-            provider_phase: "not-configured".to_owned(),
+            provider_phase: match status {
+                RepoStatus::Evaluated => "hermetic-startup-failure-restart".to_owned(),
+                RepoStatus::Skipped => "not-run".to_owned(),
+            },
             scenario_count: scenarios.len(),
             passed: count(CorpusScenarioStatus::Pass),
             failed: count(CorpusScenarioStatus::Fail),
@@ -253,6 +255,17 @@ fn verify_one(path: &Path, manifest: &CorpusManifest, problems: &mut Vec<String>
     if report.status == RepoStatus::Skipped && report.skip_reason.is_empty() {
         problems.push(format!("{}: skipped without a skip_reason", label()));
     }
+    let expected_provider_phase = match report.status {
+        RepoStatus::Evaluated => "hermetic-startup-failure-restart",
+        RepoStatus::Skipped => "not-run",
+    };
+    if report.provider_phase != expected_provider_phase {
+        problems.push(format!(
+            "{}: provider_phase {:?} != {expected_provider_phase:?}",
+            label(),
+            report.provider_phase
+        ));
+    }
     if report.status == RepoStatus::Evaluated {
         let ids: Vec<&str> = report
             .scenarios
@@ -328,7 +341,7 @@ pub fn render_results_md(reports: &[CorpusRepoReport], machine: &str, date: &str
     let mut page = String::new();
     page.push_str("# Public corpus evaluation results (issue #25)\n\n");
     page.push_str(&format!(
-        "Produced by `cargo run -p chakra-conformance -- corpus --emit docs/support/corpus/results` \
+        "Produced by `cargo run --release -p chakra-conformance -- corpus --emit docs/support/corpus/results` \
          on {machine}, {date}.\n\n"
     ));
     page.push_str(
@@ -440,6 +453,7 @@ mod tests {
         assert_eq!(report.scenario_count, SCENARIO_IDS.len());
         assert_eq!(report.passed, SCENARIO_IDS.len());
         assert_eq!(report.failed, 0);
+        assert_eq!(report.provider_phase, "hermetic-startup-failure-restart");
         assert_eq!(report.file_name(), "rust-tokio-rs__tokio.json");
         Ok(())
     }

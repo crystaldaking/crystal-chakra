@@ -6,6 +6,7 @@
 //! matches is rejected with [`PublishError::Conflict`], so a slow update can
 //! never overwrite a newer revision.
 
+use std::collections::BTreeMap;
 use std::sync::{Arc, OnceLock, RwLock};
 
 use arc_swap::ArcSwap;
@@ -19,7 +20,7 @@ use thiserror::Error;
 
 use crate::diff::WorkspaceDiffProvider;
 use crate::graph::SymbolGraph;
-use crate::precise::{PreciseProvider, ProviderWorkspace};
+use crate::precise::{PreciseProvider, ProviderInput, ProviderWorkspace};
 
 /// One immutable, atomically published workspace state.
 #[derive(Debug)]
@@ -33,6 +34,7 @@ pub struct WorkspaceSnapshot {
     provider_state: ProviderState,
     indexing: Arc<IndexingStatus>,
     graph: Arc<SymbolGraph>,
+    provider_inputs: Arc<BTreeMap<chakra_domain::location::RepoRelativePath, ProviderInput>>,
 }
 
 impl WorkspaceSnapshot {
@@ -66,6 +68,19 @@ impl WorkspaceSnapshot {
 
     pub(crate) fn graph_arc(&self) -> Arc<SymbolGraph> {
         self.graph.clone()
+    }
+
+    pub(crate) fn provider_inputs_arc(
+        &self,
+    ) -> Arc<BTreeMap<chakra_domain::location::RepoRelativePath, ProviderInput>> {
+        self.provider_inputs.clone()
+    }
+
+    /// Whether the ordered provider-input catalog matches a privately built
+    /// reconciliation candidate without allocating a second catalog.
+    pub fn provider_inputs_match(&self, inputs: &[ProviderInput]) -> bool {
+        self.provider_inputs.len() == inputs.len()
+            && self.provider_inputs.values().eq(inputs.iter())
     }
 }
 
@@ -146,6 +161,7 @@ pub struct UpdateBuilder {
     provider_state: ProviderState,
     indexing: Arc<IndexingStatus>,
     graph: Arc<SymbolGraph>,
+    provider_inputs: Arc<BTreeMap<chakra_domain::location::RepoRelativePath, ProviderInput>>,
 }
 
 impl UpdateBuilder {
@@ -204,6 +220,17 @@ impl UpdateBuilder {
     pub fn set_indexing(&mut self, indexing: IndexingStatus) {
         self.indexing = Arc::new(indexing);
     }
+
+    /// Attaches non-source provider freshness inputs to the same atomic
+    /// revision as the syntax graph and indexing metadata.
+    pub fn set_provider_inputs(&mut self, inputs: impl IntoIterator<Item = ProviderInput>) {
+        self.provider_inputs = Arc::new(
+            inputs
+                .into_iter()
+                .map(|input| (input.path.clone(), input))
+                .collect(),
+        );
+    }
 }
 
 /// Owns and atomically publishes workspace revisions.
@@ -231,6 +258,7 @@ impl WorkspaceEngine {
             provider_state: ProviderState::NotConfigured,
             indexing: Arc::new(IndexingStatus::default()),
             graph: Arc::new(SymbolGraph::new()),
+            provider_inputs: Arc::new(BTreeMap::new()),
         };
         Self {
             current: ArcSwap::from_pointee(snapshot),
@@ -362,6 +390,7 @@ impl WorkspaceEngine {
             provider_state: base.provider_state,
             indexing: base.indexing.clone(),
             graph: base.graph.clone(),
+            provider_inputs: base.provider_inputs.clone(),
         }
     }
 
@@ -385,6 +414,7 @@ impl WorkspaceEngine {
             provider_state: update.provider_state,
             indexing: update.indexing,
             graph: update.graph,
+            provider_inputs: update.provider_inputs,
         });
         // Compare-and-publish: only swap if the slot still holds the
         // revision we validated. A concurrent winner makes this fail and the

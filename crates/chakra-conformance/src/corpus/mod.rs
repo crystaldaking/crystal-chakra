@@ -7,7 +7,8 @@
 //! SHA-mismatched checkouts are recorded as skipped repositories. Edit
 //! scenarios mutate the cached checkout and always restore it afterwards;
 //! the `cache-restore` scenario proves the cache still matches the pinned
-//! SHA with a clean worktree.
+//! SHA with a clean worktree. A hermetic provider double then verifies the
+//! startup/failure/restart contract against symbols from that real graph.
 
 mod manifest;
 mod report;
@@ -22,13 +23,13 @@ pub use report::{
     BudgetStatus, BudgetVerdict, CORPUS_SCHEMA_VERSION, CorpusRepoReport, CorpusScenarioReport,
     CorpusScenarioStatus, PhaseTiming, RepoStatus, load_results, render_results_md, verify_results,
 };
-pub use scenarios::evaluate_language;
+pub use scenarios::{evaluate_language, evaluate_named_repository};
 
 use crate::Check;
 
 /// The corpus scenario catalog, in emitted-report order. `cache-restore`
-/// closes the catalog: edit scenarios mutate the cached checkout, and this
-/// scenario proves the mutation was fully reverted.
+/// closes the mutating part of the catalog; provider lifecycle is hermetic
+/// and only observes the restored graph.
 pub const SCENARIO_IDS: &[&str] = &[
     "cold-index",
     "warm-noop",
@@ -41,6 +42,7 @@ pub const SCENARIO_IDS: &[&str] = &[
     "queries",
     "cancellation",
     "cache-restore",
+    "provider-lifecycle",
 ];
 
 /// Languages with a registered `chakra-language` adapter (ADR-0031).

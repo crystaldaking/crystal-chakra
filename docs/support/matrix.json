@@ -29,7 +29,11 @@
       "precise_provider": {
         "name": "clangd",
         "adr": "docs/adr/0039-clangd-workspace-enrichment.md",
-        "status": "integrated"
+        "status": "runtime-integrated",
+        "runtime_evidence": [
+          "crates/chakra-cli/src/main.rs",
+          "crates/chakra-provider-clangd/tests/lifecycle.rs"
+        ]
       },
       "capabilities": {
         "DISC-01": {
@@ -270,7 +274,11 @@
       "precise_provider": {
         "name": "csharp-ls",
         "adr": "docs/adr/0037-csharp-ls-workspace-only-enrichment.md",
-        "status": "integrated"
+        "status": "runtime-integrated",
+        "runtime_evidence": [
+          "crates/chakra-cli/src/main.rs",
+          "crates/chakra-provider-csharp-ls/tests/lifecycle.rs"
+        ]
       },
       "capabilities": {
         "DISC-01": {
@@ -372,11 +380,12 @@
         },
         "PRECISE-03": {
           "status": "pass",
-          "mechanism": "owned lifecycle, source-document synchronization, restart, orphan-free shutdown, and workspace-only result boundary (ADR-0037; non-source delta limitation #71)",
+          "mechanism": "owned lifecycle, revision-bound source and project-input synchronization, restart, orphan-free shutdown, and workspace-only result boundary (ADR-0037; ADR-0042)",
           "evidence": [
             "crates/chakra-provider-csharp-ls/tests/lifecycle.rs",
             "crates/chakra-lsp/tests/lifecycle.rs",
-            "docs/adr/0037-csharp-ls-workspace-only-enrichment.md"
+            "docs/adr/0037-csharp-ls-workspace-only-enrichment.md",
+            "docs/adr/0042-revision-bound-provider-input-deltas.md"
           ]
         },
         "PRECISE-04": {
@@ -503,7 +512,11 @@
       "precise_provider": {
         "name": "gopls",
         "adr": "docs/adr/0041-gopls-workspace-enrichment.md",
-        "status": "integrated"
+        "status": "runtime-integrated",
+        "runtime_evidence": [
+          "crates/chakra-cli/src/main.rs",
+          "crates/chakra-provider-gopls/tests/lifecycle.rs"
+        ]
       },
       "capabilities": {
         "DISC-01": {
@@ -748,7 +761,11 @@
       "precise_provider": {
         "name": "terraform-ls",
         "adr": "docs/adr/0040-terraform-ls-reference-enrichment.md",
-        "status": "integrated"
+        "status": "runtime-integrated",
+        "runtime_evidence": [
+          "crates/chakra-cli/src/main.rs",
+          "crates/chakra-provider-terraform-ls/tests/lifecycle.rs"
+        ]
       },
       "capabilities": {
         "DISC-01": {
@@ -994,7 +1011,11 @@
       "precise_provider": {
         "name": "jdtls",
         "adr": "docs/adr/0036-jdtls-workspace-data-dir-and-readiness-bound.md",
-        "status": "integrated"
+        "status": "runtime-integrated",
+        "runtime_evidence": [
+          "crates/chakra-cli/src/main.rs",
+          "crates/chakra-provider-jdtls/tests/lifecycle.rs"
+        ]
       },
       "capabilities": {
         "DISC-01": {
@@ -1225,7 +1246,11 @@
       "precise_provider": {
         "name": "vtsls",
         "adr": "docs/adr/0032-shared-lsp-client-and-vtsls-provider.md",
-        "status": "integrated"
+        "status": "runtime-integrated",
+        "runtime_evidence": [
+          "crates/chakra-cli/src/main.rs",
+          "crates/chakra-provider-vtsls/tests/lifecycle.rs"
+        ]
       },
       "capabilities": {
         "DISC-01": {
@@ -1675,7 +1700,11 @@
       "precise_provider": {
         "name": "pyright",
         "adr": "docs/adr/0027-grammar-and-provider-selection.md",
-        "status": "integrated"
+        "status": "runtime-integrated",
+        "runtime_evidence": [
+          "crates/chakra-cli/src/main.rs",
+          "crates/chakra-provider-pyright/tests/lifecycle.rs"
+        ]
       },
       "capabilities": {
         "DISC-01": {
@@ -1902,7 +1931,11 @@
       "precise_provider": {
         "name": "rust-analyzer",
         "adr": "docs/adr/0006-rust-analyzer-precise-enrichment.md",
-        "status": "integrated"
+        "status": "runtime-integrated",
+        "runtime_evidence": [
+          "crates/chakra-cli/src/main.rs",
+          "crates/chakra-provider-rust-analyzer/tests/lifecycle.rs"
+        ]
       },
       "capabilities": {
         "DISC-01": {
@@ -2129,7 +2162,11 @@
       "precise_provider": {
         "name": "bash-language-server",
         "adr": "docs/adr/0038-bash-language-server-reference-enrichment.md",
-        "status": "integrated"
+        "status": "runtime-integrated",
+        "runtime_evidence": [
+          "crates/chakra-cli/src/main.rs",
+          "crates/chakra-provider-bash-language-server/tests/lifecycle.rs"
+        ]
       },
       "capabilities": {
         "DISC-01": {
@@ -2366,7 +2403,11 @@
       "precise_provider": {
         "name": "vtsls",
         "adr": "docs/adr/0032-shared-lsp-client-and-vtsls-provider.md",
-        "status": "integrated"
+        "status": "runtime-integrated",
+        "runtime_evidence": [
+          "crates/chakra-cli/src/main.rs",
+          "crates/chakra-provider-vtsls/tests/lifecycle.rs"
+        ]
       },
       "capabilities": {
         "DISC-01": {

@@ -10,7 +10,8 @@
   "precise_provider": {
     "name": "terraform-ls",
     "adr": "docs/adr/0040-terraform-ls-reference-enrichment.md",
-    "status": "integrated"
+    "status": "runtime-integrated",
+    "runtime_evidence": ["crates/chakra-cli/src/main.rs", "crates/chakra-provider-terraform-ls/tests/lifecycle.rs"]
   },
   "capabilities": {
     "DISC-01": {

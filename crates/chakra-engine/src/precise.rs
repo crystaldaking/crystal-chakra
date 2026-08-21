@@ -6,9 +6,13 @@
 //! revision. A mismatch is treated as catching up by the query layer.
 
 use std::collections::BTreeMap;
+use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
+
+#[cfg(unix)]
+use std::os::unix::fs::MetadataExt;
 
 use chakra_domain::location::{RepoRelativePath, SourceRange};
 use chakra_domain::operation::{OperationAbort, OperationContext};
@@ -28,6 +32,95 @@ pub struct ProviderDocument {
     pub language: Language,
 }
 
+/// One non-source workspace input captured in the same published revision as
+/// the syntax graph. Providers receive path-level watched-file changes for
+/// these inputs without reading mutable filesystem state through the engine.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderInput {
+    pub path: RepoRelativePath,
+    languages: Vec<Language>,
+    identity: ProviderInputIdentity,
+}
+
+impl ProviderInput {
+    /// Captures the exact filesystem identity already validated by the
+    /// indexing/reconciliation owner. An empty language set is not a provider
+    /// input and is rejected.
+    pub fn from_metadata(
+        path: RepoRelativePath,
+        languages: impl IntoIterator<Item = Language>,
+        metadata: &fs::Metadata,
+    ) -> Option<Self> {
+        let mut languages: Vec<_> = languages.into_iter().collect();
+        languages.sort();
+        languages.dedup();
+        if languages.is_empty() {
+            return None;
+        }
+        Some(Self {
+            path,
+            languages,
+            identity: ProviderInputIdentity::from_metadata(metadata),
+        })
+    }
+
+    fn matches_language(&self, include: &impl Fn(Language) -> bool) -> bool {
+        self.languages.iter().copied().any(include)
+    }
+}
+
+/// Strong identity on Unix. Other platforms conservatively report a metadata
+/// change on every new revision because their portable metadata does not
+/// provide an equivalent change-time/inode proof.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ProviderInputIdentity {
+    len: u64,
+    modified: Option<std::time::SystemTime>,
+    created: Option<std::time::SystemTime>,
+    #[cfg(unix)]
+    device: u64,
+    #[cfg(unix)]
+    inode: u64,
+    #[cfg(unix)]
+    mode: u32,
+    #[cfg(unix)]
+    modified_seconds: i64,
+    #[cfg(unix)]
+    modified_nanoseconds: i64,
+    #[cfg(unix)]
+    changed_seconds: i64,
+    #[cfg(unix)]
+    changed_nanoseconds: i64,
+}
+
+impl ProviderInputIdentity {
+    fn from_metadata(metadata: &fs::Metadata) -> Self {
+        Self {
+            len: metadata.len(),
+            modified: metadata.modified().ok(),
+            created: metadata.created().ok(),
+            #[cfg(unix)]
+            device: metadata.dev(),
+            #[cfg(unix)]
+            inode: metadata.ino(),
+            #[cfg(unix)]
+            mode: metadata.mode(),
+            #[cfg(unix)]
+            modified_seconds: metadata.mtime(),
+            #[cfg(unix)]
+            modified_nanoseconds: metadata.mtime_nsec(),
+            #[cfg(unix)]
+            changed_seconds: metadata.ctime(),
+            #[cfg(unix)]
+            changed_nanoseconds: metadata.ctime_nsec(),
+        }
+    }
+
+    fn trustworthy_for_delta(&self) -> bool {
+        cfg!(unix)
+    }
+}
+
 #[derive(Debug, Clone)]
 enum ProviderDocuments {
     Snapshot(Arc<SymbolGraph>),
@@ -41,6 +134,7 @@ pub struct ProviderWorkspace {
     pub repository_root: PathBuf,
     pub revision: Revision,
     documents: ProviderDocuments,
+    inputs: Arc<BTreeMap<RepoRelativePath, ProviderInput>>,
 }
 
 impl ProviderWorkspace {
@@ -49,6 +143,7 @@ impl ProviderWorkspace {
             repository_root: snapshot.identity().root.clone(),
             revision: snapshot.revision(),
             documents: ProviderDocuments::Snapshot(snapshot.graph_arc()),
+            inputs: snapshot.provider_inputs_arc(),
         }
     }
 
@@ -61,6 +156,7 @@ impl ProviderWorkspace {
             repository_root: snapshot.identity().root.clone(),
             revision: snapshot.revision(),
             documents: ProviderDocuments::Snapshot(snapshot.graph_arc()),
+            inputs: snapshot.provider_inputs_arc(),
         })
     }
 
@@ -80,7 +176,26 @@ impl ProviderWorkspace {
             repository_root,
             revision,
             documents: ProviderDocuments::Owned(Arc::new(documents)),
+            inputs: Arc::new(BTreeMap::new()),
         }
+    }
+
+    /// Builds a detached provider workspace with non-source inputs for
+    /// adapter and freshness contract tests.
+    pub fn from_documents_and_inputs(
+        repository_root: PathBuf,
+        revision: Revision,
+        documents: Vec<ProviderDocument>,
+        inputs: Vec<ProviderInput>,
+    ) -> Self {
+        let mut workspace = Self::from_documents(repository_root, revision, documents);
+        workspace.inputs = Arc::new(
+            inputs
+                .into_iter()
+                .map(|input| (input.path.clone(), input))
+                .collect(),
+        );
+        workspace
     }
 
     pub fn document(&self, path: &RepoRelativePath) -> Option<ProviderDocument> {
@@ -169,65 +284,133 @@ impl ProviderWorkspace {
         include: impl Fn(Language) -> bool,
         operation: &OperationContext,
     ) -> Result<ProviderWorkspaceDelta, OperationAbort> {
-        if self.shares_document_catalog_with(previous) {
+        if self.shares_document_catalog_with(previous)
+            && Arc::ptr_eq(&self.inputs, &previous.inputs)
+        {
             operation.check()?;
             return Ok(ProviderWorkspaceDelta::default());
         }
-        let current = self.document_catalog(operation)?;
-        let previous = previous.document_catalog(operation)?;
-        let mut current = current
-            .into_iter()
-            .filter(|document| include(document.language))
-            .peekable();
-        let mut previous = previous
-            .into_iter()
-            .filter(|document| include(document.language))
-            .peekable();
         let mut delta = ProviderWorkspaceDelta::default();
+        if !self.shares_document_catalog_with(previous) {
+            let current = self.document_catalog(operation)?;
+            let previous_documents = previous.document_catalog(operation)?;
+            let mut current = current
+                .into_iter()
+                .filter(|document| include(document.language))
+                .peekable();
+            let mut previous_documents = previous_documents
+                .into_iter()
+                .filter(|document| include(document.language))
+                .peekable();
+            loop {
+                operation.check()?;
+                match (current.peek(), previous_documents.peek()) {
+                    (Some(now), Some(before)) if now.path < before.path => {
+                        if let Some(document) = current.next() {
+                            delta.created.push(document);
+                        }
+                    }
+                    (Some(now), Some(before)) if before.path < now.path => {
+                        if let Some(document) = previous_documents.next() {
+                            delta.deleted.push(document.path);
+                        }
+                    }
+                    (Some(_), Some(_)) => {
+                        let Some(now) = current.next() else {
+                            break;
+                        };
+                        let Some(before) = previous_documents.next() else {
+                            break;
+                        };
+                        delta.documents_examined = delta.documents_examined.saturating_add(1);
+                        if !Arc::ptr_eq(&now.source, &before.source) {
+                            delta.source_body_comparisons =
+                                delta.source_body_comparisons.saturating_add(1);
+                            if now.source.as_ref() != before.source.as_ref() {
+                                delta.changed.push(now);
+                            }
+                        }
+                    }
+                    (Some(_), None) => {
+                        delta.created.extend(current);
+                        break;
+                    }
+                    (None, Some(_)) => {
+                        delta
+                            .deleted
+                            .extend(previous_documents.map(|document| document.path));
+                        break;
+                    }
+                    (None, None) => break,
+                }
+            }
+            delta.documents_examined = delta
+                .documents_examined
+                .saturating_add(delta.created.len() as u64)
+                .saturating_add(delta.deleted.len() as u64);
+        }
+        let current_inputs: Vec<_> = self
+            .inputs
+            .values()
+            .filter(|input| input.matches_language(&include))
+            .cloned()
+            .collect();
+        let previous_inputs: Vec<_> = previous
+            .inputs
+            .values()
+            .filter(|input| input.matches_language(&include))
+            .cloned()
+            .collect();
+        let mut current_inputs = current_inputs.into_iter().peekable();
+        let mut previous_inputs = previous_inputs.into_iter().peekable();
         loop {
             operation.check()?;
-            match (current.peek(), previous.peek()) {
+            match (current_inputs.peek(), previous_inputs.peek()) {
                 (Some(now), Some(before)) if now.path < before.path => {
-                    if let Some(document) = current.next() {
-                        delta.created.push(document);
+                    if let Some(input) = current_inputs.next() {
+                        delta.inputs_created.push(input.path);
                     }
                 }
                 (Some(now), Some(before)) if before.path < now.path => {
-                    if let Some(document) = previous.next() {
-                        delta.deleted.push(document.path);
+                    if let Some(input) = previous_inputs.next() {
+                        delta.inputs_deleted.push(input.path);
                     }
                 }
                 (Some(_), Some(_)) => {
-                    let Some(now) = current.next() else {
+                    let Some(now) = current_inputs.next() else {
                         break;
                     };
-                    let Some(before) = previous.next() else {
+                    let Some(before) = previous_inputs.next() else {
                         break;
                     };
-                    delta.documents_examined = delta.documents_examined.saturating_add(1);
-                    if !Arc::ptr_eq(&now.source, &before.source) {
-                        delta.source_body_comparisons =
-                            delta.source_body_comparisons.saturating_add(1);
-                        if now.source.as_ref() != before.source.as_ref() {
-                            delta.changed.push(now);
-                        }
+                    delta.inputs_examined = delta.inputs_examined.saturating_add(1);
+                    if !now.identity.trustworthy_for_delta()
+                        || !before.identity.trustworthy_for_delta()
+                        || now.identity != before.identity
+                        || now.languages != before.languages
+                    {
+                        delta.inputs_changed.push(now.path);
                     }
                 }
                 (Some(_), None) => {
-                    delta.created.extend(current);
+                    delta
+                        .inputs_created
+                        .extend(current_inputs.map(|input| input.path));
                     break;
                 }
                 (None, Some(_)) => {
-                    delta.deleted.extend(previous.map(|document| document.path));
+                    delta
+                        .inputs_deleted
+                        .extend(previous_inputs.map(|input| input.path));
                     break;
                 }
                 (None, None) => break,
             }
         }
-        delta.documents_examined = delta
-            .documents_examined
-            .saturating_add(delta.created.len() as u64)
-            .saturating_add(delta.deleted.len() as u64);
+        delta.inputs_examined = delta
+            .inputs_examined
+            .saturating_add(delta.inputs_created.len() as u64)
+            .saturating_add(delta.inputs_deleted.len() as u64);
         operation.check()?;
         Ok(delta)
     }
@@ -283,6 +466,10 @@ pub struct ProviderWorkspaceDelta {
     pub deleted: Vec<RepoRelativePath>,
     pub documents_examined: u64,
     pub source_body_comparisons: u64,
+    pub inputs_created: Vec<RepoRelativePath>,
+    pub inputs_changed: Vec<RepoRelativePath>,
+    pub inputs_deleted: Vec<RepoRelativePath>,
+    pub inputs_examined: u64,
 }
 
 /// Syntax declaration selected by the caller before precise enrichment.
@@ -528,6 +715,71 @@ mod tests {
                 .document(&RepoRelativePath::new("infra/main.tf")?)
                 .is_some()
         );
+        Ok(())
+    }
+
+    #[test]
+    fn metadata_only_delta_is_language_scoped_and_revision_exact() -> Result<(), Box<dyn Error>> {
+        let root = std::env::current_dir()?;
+        let cargo_toml = fs::metadata(root.join("Cargo.toml"))?;
+        let lib_rs = fs::metadata(root.join("src/lib.rs"))?;
+        let document = ProviderDocument {
+            path: RepoRelativePath::new("src/lib.rs")?,
+            source: Arc::<str>::from("pub fn chakra() {}\n"),
+            language: Language::Rust,
+        };
+        let before = ProviderWorkspace::from_documents_and_inputs(
+            root.clone(),
+            Revision(1),
+            vec![document],
+            vec![
+                ProviderInput::from_metadata(
+                    RepoRelativePath::new("Cargo.toml")?,
+                    [Language::Rust],
+                    &cargo_toml,
+                )
+                .ok_or("Rust provider input missing")?,
+            ],
+        );
+        let mut after = before.clone();
+        after.revision = Revision(2);
+        after.inputs = Arc::new(
+            vec![
+                ProviderInput::from_metadata(
+                    RepoRelativePath::new("Cargo.toml")?,
+                    [Language::Rust],
+                    &lib_rs,
+                )
+                .ok_or("changed Rust provider input missing")?,
+                ProviderInput::from_metadata(
+                    RepoRelativePath::new("pyproject.toml")?,
+                    [Language::Python],
+                    &cargo_toml,
+                )
+                .ok_or("Python provider input missing")?,
+            ]
+            .into_iter()
+            .map(|input| (input.path.clone(), input))
+            .collect(),
+        );
+
+        let rust = after.delta_since(&before, Language::Rust, &OperationContext::unbounded())?;
+        assert!(rust.created.is_empty());
+        assert!(rust.changed.is_empty());
+        assert!(rust.deleted.is_empty());
+        assert_eq!(rust.documents_examined, 0);
+        assert_eq!(rust.source_body_comparisons, 0);
+        assert_eq!(rust.inputs_changed, [RepoRelativePath::new("Cargo.toml")?]);
+        assert!(rust.inputs_created.is_empty());
+        assert!(rust.inputs_deleted.is_empty());
+
+        let python =
+            after.delta_since(&before, Language::Python, &OperationContext::unbounded())?;
+        assert_eq!(
+            python.inputs_created,
+            [RepoRelativePath::new("pyproject.toml")?]
+        );
+        assert!(python.inputs_changed.is_empty());
         Ok(())
     }
 }

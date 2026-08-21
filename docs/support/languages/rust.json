@@ -10,7 +10,8 @@
   "precise_provider": {
     "name": "rust-analyzer",
     "adr": "docs/adr/0006-rust-analyzer-precise-enrichment.md",
-    "status": "integrated"
+    "status": "runtime-integrated",
+    "runtime_evidence": ["crates/chakra-cli/src/main.rs", "crates/chakra-provider-rust-analyzer/tests/lifecycle.rs"]
   },
   "capabilities": {
     "DISC-01": {"status": "pass", "mechanism": "chakra-git discovery", "evidence": ["crates/chakra-language-rust/tests/fixture_index.rs"]},

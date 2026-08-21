@@ -26,10 +26,9 @@ version tags prefixed with `v`.
   readiness bound for the slow first project import (ADR-0036). Conformance
   fixture (14/14 scenarios) and the pinned spring-projects/spring-boot plus
   apache/kafka corpus evaluations. Java is advertised first-class. On macOS,
-  live indexing now coalesces nested source directories into recursive
-  FSEvents watches at their indexed top-level roots instead of redundantly
-  registering every ancestor; live conformance suites serialize watcher
-  ownership to avoid backend registration storms.
+  live indexing uses notify's kqueue backend with bounded, non-recursive
+  source-directory registration, avoiding the FSEvents startup path that can
+  block during repeated registration.
 - Bounded multi-provider orchestration (issue #26, ADR-0035):
   rust-analyzer, vtsls (shared by TypeScript/JavaScript), pyright, and jdtls
   now coexist through strict language routing and start only on the first
@@ -55,7 +54,7 @@ version tags prefixed with `v`.
   serves JavaScript documents (`javascript`/`javascriptreact` language
   ids, shared `Provenance::Vtsls`, no new provider crate). Conformance
   fixture (14/14 scenarios) and the pinned react/react corpus evaluation
-  (11/11, no degradations). JavaScript is advertised first-class.
+  (12/12, no degradations). JavaScript is advertised first-class.
 - First-class Python support (issue #28): a `chakra-language-python`
   adapter crate (tree-sitter-python 0.25.0, `.py`/`.pyi`) registered in the
   ADR-0031 adapter registry after TypeScript; `import`/`from ... import`
@@ -68,7 +67,7 @@ version tags prefixed with `v`.
   `chakra-provider-pyright` precise provider over the shared chakra-lsp
   client (additive `Provenance::Pyright`); conformance fixture (14/14
   scenarios) and the pinned django/django + apache/airflow corpus
-  evaluations (11/11 each, no degradations). Revision-local entity ids now
+  evaluations (12/12 each, no degradations). Revision-local entity ids now
   use the ADR-0033 slot registry (4-bit language slot + 60-bit counter)
   instead of hardcoded per-language bases; ids remain in-memory only.
 - First-class TypeScript/TSX syntax support (issue #27, Part A): a
@@ -80,7 +79,7 @@ version tags prefixed with `v`.
   relative-import resolution, and actionable syntax diagnostics.
   package.json/tsconfig.json project scopes plus `*.test.*`/`*.spec.*`/
   `__tests__/` source roles; conformance fixture (14/14 scenarios) and the
-  pinned microsoft/vscode corpus evaluation (11/11, degraded as designed by
+  pinned microsoft/vscode corpus evaluation (12/12, degraded as designed by
   the workspace source-byte and symbol budgets).
 - Shared `chakra-lsp` stdio client crate and the `chakra-provider-vtsls`
   precise provider for TypeScript (issue #27, Part B, ADR-0032): precise

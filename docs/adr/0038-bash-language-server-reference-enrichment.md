@@ -70,7 +70,7 @@ and outgoing syntax results.
 ## Validation / follow-up
 
 - Shell conformance passes 14/14 scenarios.
-- The pinned ohmyzsh and nvm public corpora each pass 11/11 scenarios within
+- The pinned ohmyzsh and nvm public corpora each pass 12/12 scenarios within
   committed budgets.
 - Provider contract evidence lives in
   `crates/chakra-provider-bash-language-server/tests/lifecycle.rs`.

@@ -14,7 +14,7 @@ use chakra_domain::revision::Revision;
 use chakra_domain::state::ProviderState;
 use chakra_domain::symbol::Language;
 use chakra_engine::{
-    CallHierarchyDirections, PreciseProvider, PreciseQueryRequest, ProviderDocument,
+    CallHierarchyDirections, PreciseProvider, PreciseQueryRequest, ProviderDocument, ProviderInput,
     ProviderSymbol, ProviderWorkspace,
 };
 use chakra_provider_csharp_ls::{CsharpLsCommand, CsharpLsConfig, CsharpLsProvider};
@@ -235,6 +235,20 @@ fn workspace(
     ))
 }
 
+fn workspace_with_inputs(
+    root: &Path,
+    revision: Revision,
+    documents: Vec<ProviderDocument>,
+    inputs: Vec<ProviderInput>,
+) -> Result<ProviderWorkspace, Box<dyn Error>> {
+    Ok(ProviderWorkspace::from_documents_and_inputs(
+        fs::canonicalize(root)?,
+        revision,
+        documents,
+        inputs,
+    ))
+}
+
 fn request(root: &Path, revision: Revision) -> Result<PreciseQueryRequest, Box<dyn Error>> {
     let path = RepoRelativePath::new("src/index.cs")?;
     fs::create_dir_all(root.join("src"))?;
@@ -392,6 +406,66 @@ fn revision_delta_syncs_only_opened_documents_with_full_text() -> Result<(), Box
     let metrics = provider.metrics().ok_or("provider metrics unavailable")?;
     assert_eq!(metrics.document_sync.revision, Some(Revision(3)));
     assert_eq!(metrics.document_sync.total_text_documents_sent, 2);
+    provider.shutdown()?;
+    Ok(())
+}
+
+#[test]
+fn metadata_only_revision_notifies_csharp_ls_before_becoming_ready() -> Result<(), Box<dyn Error>> {
+    let repository = tempfile::tempdir()?;
+    let executable = materialize_fake_server(repository.path(), "fake-csharp-ls-metadata")?;
+    let mut request = request(repository.path(), Revision(1))?;
+    let project_path = RepoRelativePath::new("Sample.csproj")?;
+    fs::write(
+        repository.path().join(project_path.as_str()),
+        "<Project />\n",
+    )?;
+    let before_input = ProviderInput::from_metadata(
+        project_path.clone(),
+        [Language::CSharp],
+        &fs::metadata(repository.path().join(project_path.as_str()))?,
+    )
+    .ok_or("C# project input missing")?;
+    request.workspace = workspace_with_inputs(
+        repository.path(),
+        Revision(1),
+        vec![document(
+            &RepoRelativePath::new("src/index.cs")?,
+            TARGET_SOURCE,
+        )],
+        vec![before_input],
+    )?;
+    let provider = CsharpLsProvider::start(request.workspace.clone(), config(&executable))?;
+    assert_eq!(provider.enrich(request.clone()).state, ProviderState::Ready);
+    assert_eq!(counter(&executable, "watched"), "0");
+
+    fs::write(
+        repository.path().join(project_path.as_str()),
+        "<Project><PropertyGroup /></Project>\n",
+    )?;
+    let after_input = ProviderInput::from_metadata(
+        project_path,
+        [Language::CSharp],
+        &fs::metadata(repository.path().join("Sample.csproj"))?,
+    )
+    .ok_or("changed C# project input missing")?;
+    let revision_two = PreciseQueryRequest {
+        workspace: workspace_with_inputs(
+            repository.path(),
+            Revision(2),
+            vec![document(
+                &RepoRelativePath::new("src/index.cs")?,
+                TARGET_SOURCE,
+            )],
+            vec![after_input],
+        )?,
+        ..request
+    };
+    let result = provider.enrich(revision_two);
+    assert_eq!(result.state, ProviderState::Ready);
+    assert_eq!(result.revision, Revision(2));
+    assert_eq!(counter(&executable, "changed"), "0");
+    assert_eq!(counter(&executable, "watched"), "1");
     provider.shutdown()?;
     Ok(())
 }

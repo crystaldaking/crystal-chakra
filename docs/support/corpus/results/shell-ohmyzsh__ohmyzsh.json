@@ -1,13 +1,13 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "language": "shell",
   "repository": "ohmyzsh/ohmyzsh",
   "sha": "97e11051e2f8053b1d694788d1cb4b0dbb1e2365",
   "status": "evaluated",
   "skip_reason": "",
-  "provider_phase": "not-configured",
-  "scenario_count": 11,
-  "passed": 11,
+  "provider_phase": "hermetic-startup-failure-restart",
+  "scenario_count": 12,
+  "passed": 12,
   "failed": 0,
   "skipped": 0,
   "scenarios": [
@@ -18,19 +18,19 @@
       "phases": [
         {
           "name": "GitInventory",
-          "wall_micros": 20948
+          "wall_micros": 22783
         },
         {
           "name": "SourceRead",
-          "wall_micros": 9706
+          "wall_micros": 30050
         },
         {
           "name": "ParseExtraction/Rust",
-          "wall_micros": 11
+          "wall_micros": 1
         },
         {
           "name": "SymbolCatalog/Rust",
-          "wall_micros": 10
+          "wall_micros": 1
         },
         {
           "name": "Relationships/Rust",
@@ -38,15 +38,15 @@
         },
         {
           "name": "GraphMaterialization/Rust",
-          "wall_micros": 23
+          "wall_micros": 5
         },
         {
           "name": "ParseExtraction/Php",
-          "wall_micros": 22
+          "wall_micros": 0
         },
         {
           "name": "SymbolCatalog/Php",
-          "wall_micros": 11
+          "wall_micros": 0
         },
         {
           "name": "Relationships/Php",
@@ -54,15 +54,15 @@
         },
         {
           "name": "GraphMaterialization/Php",
-          "wall_micros": 1
+          "wall_micros": 3
         },
         {
           "name": "ParseExtraction/TypeScript",
-          "wall_micros": 11
+          "wall_micros": 1
         },
         {
           "name": "SymbolCatalog/TypeScript",
-          "wall_micros": 11
+          "wall_micros": 1
         },
         {
           "name": "Relationships/TypeScript",
@@ -70,31 +70,31 @@
         },
         {
           "name": "GraphMaterialization/TypeScript",
-          "wall_micros": 11
+          "wall_micros": 2
         },
         {
           "name": "ParseExtraction/Python",
-          "wall_micros": 5946
+          "wall_micros": 4800
         },
         {
           "name": "SymbolCatalog/Python",
-          "wall_micros": 61
+          "wall_micros": 47
         },
         {
           "name": "Relationships/Python",
-          "wall_micros": 18
+          "wall_micros": 16
         },
         {
           "name": "GraphMaterialization/Python",
-          "wall_micros": 966
+          "wall_micros": 792
         },
         {
           "name": "ParseExtraction/JavaScript",
-          "wall_micros": 0
+          "wall_micros": 2
         },
         {
           "name": "SymbolCatalog/JavaScript",
-          "wall_micros": 10
+          "wall_micros": 1
         },
         {
           "name": "Relationships/JavaScript",
@@ -102,15 +102,15 @@
         },
         {
           "name": "GraphMaterialization/JavaScript",
-          "wall_micros": 10
+          "wall_micros": 1
         },
         {
           "name": "ParseExtraction/Java",
-          "wall_micros": 10
+          "wall_micros": 1
         },
         {
           "name": "SymbolCatalog/Java",
-          "wall_micros": 25
+          "wall_micros": 1
         },
         {
           "name": "Relationships/Java",
@@ -118,15 +118,15 @@
         },
         {
           "name": "GraphMaterialization/Java",
-          "wall_micros": 1
+          "wall_micros": 3
         },
         {
           "name": "ParseExtraction/CSharp",
-          "wall_micros": 9
+          "wall_micros": 1
         },
         {
           "name": "SymbolCatalog/CSharp",
-          "wall_micros": 9
+          "wall_micros": 1
         },
         {
           "name": "Relationships/CSharp",
@@ -134,49 +134,100 @@
         },
         {
           "name": "GraphMaterialization/CSharp",
-          "wall_micros": 10
+          "wall_micros": 1
         },
         {
           "name": "ParseExtraction/Shell",
-          "wall_micros": 26645
+          "wall_micros": 25925
         },
         {
           "name": "SymbolCatalog/Shell",
-          "wall_micros": 473
+          "wall_micros": 522
         },
         {
           "name": "Relationships/Shell",
-          "wall_micros": 315
+          "wall_micros": 353
         },
         {
           "name": "GraphMaterialization/Shell",
-          "wall_micros": 11125
+          "wall_micros": 12469
+        },
+        {
+          "name": "ParseExtraction/Cpp",
+          "wall_micros": 1
+        },
+        {
+          "name": "SymbolCatalog/Cpp",
+          "wall_micros": 1
+        },
+        {
+          "name": "Relationships/Cpp",
+          "wall_micros": 0
+        },
+        {
+          "name": "GraphMaterialization/Cpp",
+          "wall_micros": 2
+        },
+        {
+          "name": "ParseExtraction/Hcl",
+          "wall_micros": 1
+        },
+        {
+          "name": "SymbolCatalog/Hcl",
+          "wall_micros": 1
+        },
+        {
+          "name": "Relationships/Hcl",
+          "wall_micros": 0
+        },
+        {
+          "name": "GraphMaterialization/Hcl",
+          "wall_micros": 3
+        },
+        {
+          "name": "ParseExtraction/Go",
+          "wall_micros": 1
+        },
+        {
+          "name": "SymbolCatalog/Go",
+          "wall_micros": 2
+        },
+        {
+          "name": "Relationships/Go",
+          "wall_micros": 0
+        },
+        {
+          "name": "GraphMaterialization/Go",
+          "wall_micros": 1
         },
         {
           "name": "LanguageComposition",
-          "wall_micros": 15
+          "wall_micros": 8
         },
         {
           "name": "GraphValidation",
-          "wall_micros": 8044
+          "wall_micros": 9623
         },
         {
           "name": "total",
-          "wall_micros": 120503
+          "wall_micros": 144747
         }
       ],
       "measurements": {
         "ambiguous_call_sites": 60,
         "call_sites": 2720,
+        "cpp_files": 0,
         "csharp_files": 0,
         "degradations": 0,
         "degraded": false,
         "discovered_files": 382,
         "edges": 4236,
+        "go_files": 0,
+        "hcl_files": 0,
         "java_files": 0,
         "javascript_files": 0,
         "parsed_files": 382,
-        "peak_rss_bytes": 40927232,
+        "peak_rss_bytes": 36388864,
         "php_files": 0,
         "python_files": 8,
         "rust_files": 0,
@@ -186,18 +237,18 @@
         "syntax_error_files": 232,
         "typescript_files": 0,
         "unresolved_call_sites": 1819,
-        "wall_micros": 120503
+        "wall_micros": 144747
       },
       "budget_verdicts": [
         {
           "budget": "cold_index_peak_rss_bytes",
-          "observed": 40927232,
+          "observed": 36388864,
           "limit": 2147483648,
           "status": "pass"
         },
         {
           "budget": "cold_index_wall_micros",
-          "observed": 120503,
+          "observed": 144747,
           "limit": 60000000,
           "status": "pass"
         }
@@ -210,19 +261,19 @@
       "phases": [
         {
           "name": "fresh_barrier",
-          "wall_micros": 22864
+          "wall_micros": 25989
         }
       ],
       "measurements": {
         "files_inspected": 764,
         "git_subprocesses": 2,
         "no_op_reconciliations": 1,
-        "wall_micros": 22864
+        "wall_micros": 25989
       },
       "budget_verdicts": [
         {
           "budget": "warm_noop_wall_micros",
-          "observed": 22865,
+          "observed": 25990,
           "limit": 10000000,
           "status": "pass"
         }
@@ -235,7 +286,7 @@
       "phases": [
         {
           "name": "reindex",
-          "wall_micros": 93697
+          "wall_micros": 104401
         }
       ],
       "measurements": {
@@ -252,13 +303,13 @@
       "phases": [
         {
           "name": "edit_and_barrier",
-          "wall_micros": 46499
+          "wall_micros": 29555
         }
       ],
       "measurements": {
         "files_reparsed": 1,
         "full_reconciliations": 0,
-        "wall_micros": 46499
+        "wall_micros": 29555
       },
       "budget_verdicts": []
     },
@@ -269,13 +320,13 @@
       "phases": [
         {
           "name": "replace_and_barrier",
-          "wall_micros": 69571
+          "wall_micros": 117231
         }
       ],
       "measurements": {
         "files_reparsed": 1,
         "full_reconciliations": 0,
-        "wall_micros": 69572
+        "wall_micros": 117231
       },
       "budget_verdicts": []
     },
@@ -286,24 +337,24 @@
       "phases": [
         {
           "name": "rename_delete_and_barrier",
-          "wall_micros": 60780
+          "wall_micros": 101074
         }
       ],
       "measurements": {
         "created_files": 1,
         "deleted_files": 2,
-        "wall_micros": 60780
+        "wall_micros": 101074
       },
       "budget_verdicts": []
     },
     {
       "id": "syntax-error",
       "status": "pass",
-      "details": "last-good revision: `__gitcomp` stays queryable; temporary syntax error: attributed diagnostics; restore returns to baseline on a newer revision",
+      "details": "last-good revision: `__gitcomp_builtin` stays queryable; temporary syntax error: attributed diagnostics; restore returns to baseline on a newer revision",
       "phases": [
         {
           "name": "break_and_barrier",
-          "wall_micros": 46626
+          "wall_micros": 29460
         }
       ],
       "measurements": {
@@ -318,11 +369,11 @@
       "phases": [
         {
           "name": "clean_diff",
-          "wall_micros": 269034
+          "wall_micros": 355661
         },
         {
           "name": "dirty_diff",
-          "wall_micros": 99738
+          "wall_micros": 110551
         }
       ],
       "measurements": {
@@ -343,7 +394,7 @@
             "previous_path": null
           }
         ],
-        "clean_diff_wall_micros": 91684
+        "clean_diff_wall_micros": 106962
       },
       "budget_verdicts": []
     },
@@ -354,34 +405,34 @@
       "phases": [
         {
           "name": "symbol_search",
-          "wall_micros": 145
+          "wall_micros": 138
         },
         {
           "name": "callers",
-          "wall_micros": 70
+          "wall_micros": 57
         },
         {
           "name": "context",
-          "wall_micros": 57
+          "wall_micros": 50
         }
       ],
       "measurements": {
         "callers_returned": 5,
-        "target": "plugins::gitfast::git-completion::__gitcomp",
-        "target_incoming_calls": 85,
+        "target": "plugins::gitfast::git-completion::__gitcomp_builtin",
+        "target_incoming_calls": 44,
         "target_precision": "TreeSitter/Syntax",
         "targets": [
           {
-            "incoming_calls": 85,
-            "qualified_name": "plugins::gitfast::git-completion::__gitcomp"
-          },
-          {
-            "incoming_calls": 55,
+            "incoming_calls": 44,
             "qualified_name": "plugins::gitfast::git-completion::__gitcomp_builtin"
           },
           {
-            "incoming_calls": 45,
-            "qualified_name": "plugins::gitfast::git-completion::__git_complete_refs"
+            "incoming_calls": 37,
+            "qualified_name": "plugins::gitfast::git-completion::__gitcomp"
+          },
+          {
+            "incoming_calls": 25,
+            "qualified_name": "plugins::gitfast::git-completion::__git"
           }
         ]
       },
@@ -394,7 +445,7 @@
       "phases": [
         {
           "name": "cancelled_cold_index",
-          "wall_micros": 1
+          "wall_micros": 2
         },
         {
           "name": "cancelled_query",
@@ -412,6 +463,31 @@
       "details": "checkout restored to the pinned SHA with a clean worktree",
       "phases": [],
       "measurements": {},
+      "budget_verdicts": []
+    },
+    {
+      "id": "provider-lifecycle",
+      "status": "pass",
+      "details": "real corpus graph: provider absent, failed start with explicit fallback, then provenance-tagged precise restart",
+      "phases": [
+        {
+          "name": "provider_absent",
+          "wall_micros": 174
+        },
+        {
+          "name": "provider_failure",
+          "wall_micros": 24422
+        },
+        {
+          "name": "provider_restart",
+          "wall_micros": 50001
+        }
+      ],
+      "measurements": {
+        "fallback_callers": 20,
+        "precise_callers": 1,
+        "target": "plugins::gitfast::git-completion::__gitcomp_builtin"
+      },
       "budget_verdicts": []
     }
   ]

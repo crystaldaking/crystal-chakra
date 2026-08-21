@@ -32,17 +32,29 @@ Checkouts are shallow clones of the exact pinned SHA, cached under
 ## Running the evaluation
 
 ```sh
-cargo run -p chakra-conformance -- corpus --language rust
-cargo run -p chakra-conformance -- corpus --emit docs/support/corpus/results
+cargo run --release -p chakra-conformance -- corpus --language rust
+cargo run --release -p chakra-conformance -- corpus --emit docs/support/corpus/results
 ```
+
+Evaluation intentionally refuses an unoptimized binary: the committed
+performance and freshness evidence must describe a release build rather than
+debug-only code-generation overhead. Artifact verification remains available
+in ordinary CI builds.
+
+When more than one repository is selected, the CLI evaluates each repository
+in a fresh child process. This prevents allocator retention or peak-RSS
+samples from a previous large graph from contaminating the next repository's
+memory evidence. `--language <name> --repository <owner/repo>` selects one
+entry for diagnosis.
 
 For every repository of a supported language present in the local cache the
 runner verifies the checkout HEAD against the pinned SHA (mismatches are
 refused), then runs the scenario catalog: `cold-index`, `warm-noop`,
 `fingerprint`, `one-file-edit`, `atomic-replace`, `rename-delete`,
 `syntax-error`, `diff-context`, `queries`, `cancellation`, and
-`cache-restore`. Missing checkouts and languages without a `chakra-language`
-adapter are recorded as skipped repositories, not errors.
+`cache-restore`, followed by `provider-lifecycle`. Missing checkouts and
+languages without a `chakra-language` adapter are recorded as skipped
+repositories, not errors.
 
 Edit scenarios mutate the cached checkout in place and always restore it
 (`git checkout -- .` plus explicit removal of runner-created files; the
@@ -54,11 +66,12 @@ Peak RSS is reported from the indexer's phase-boundary samples
 (`observed_phase_peak_rss_bytes`), which work on Linux (`/proc/self/status`)
 and macOS (`ps`); on platforms without a sampler the artifact records
 `"unavailable"`. These are phase-boundary samples, not an OS high-water
-claim. Precise-provider phases are recorded as `not-configured`: provider
-startup/failure/restart behavior is covered by the conformance suite with a
-double, and corpus evaluation never requires a language server.
+claim. `provider-lifecycle` uses the same hermetic precise-provider double as
+the conformance suite against a real symbol and graph from each corpus repo.
+It proves provider absence, a failed start with explicit syntax fallback, and
+a provenance-tagged precise restart without requiring a language server.
 
-## Artifact schema (version 1)
+## Artifact schema (version 2)
 
 Each result file contains: `schema_version`, `language`, `repository`,
 `sha`, `status` (`evaluated`/`skipped` + `skip_reason`), `provider_phase`,

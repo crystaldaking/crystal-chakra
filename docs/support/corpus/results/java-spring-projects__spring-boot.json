@@ -1,13 +1,13 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "language": "java",
   "repository": "spring-projects/spring-boot",
   "sha": "e3d4b1ceb6d8971936f484bae39c7d6659a81c7f",
   "status": "evaluated",
   "skip_reason": "",
-  "provider_phase": "not-configured",
-  "scenario_count": 11,
-  "passed": 11,
+  "provider_phase": "hermetic-startup-failure-restart",
+  "scenario_count": 12,
+  "passed": 12,
   "failed": 0,
   "skipped": 0,
   "scenarios": [
@@ -18,19 +18,19 @@
       "phases": [
         {
           "name": "GitInventory",
-          "wall_micros": 507226
+          "wall_micros": 447184
         },
         {
           "name": "SourceRead",
-          "wall_micros": 745270
+          "wall_micros": 775380
         },
         {
           "name": "ParseExtraction/Rust",
-          "wall_micros": 0
+          "wall_micros": 2
         },
         {
           "name": "SymbolCatalog/Rust",
-          "wall_micros": 18
+          "wall_micros": 1
         },
         {
           "name": "Relationships/Rust",
@@ -38,11 +38,11 @@
         },
         {
           "name": "GraphMaterialization/Rust",
-          "wall_micros": 10
+          "wall_micros": 5
         },
         {
           "name": "ParseExtraction/Php",
-          "wall_micros": 0
+          "wall_micros": 1
         },
         {
           "name": "SymbolCatalog/Php",
@@ -54,15 +54,15 @@
         },
         {
           "name": "GraphMaterialization/Php",
-          "wall_micros": 1
+          "wall_micros": 4
         },
         {
           "name": "ParseExtraction/TypeScript",
-          "wall_micros": 9
+          "wall_micros": 1
         },
         {
           "name": "SymbolCatalog/TypeScript",
-          "wall_micros": 9
+          "wall_micros": 1
         },
         {
           "name": "Relationships/TypeScript",
@@ -74,11 +74,11 @@
         },
         {
           "name": "ParseExtraction/Python",
-          "wall_micros": 9
+          "wall_micros": 2
         },
         {
           "name": "SymbolCatalog/Python",
-          "wall_micros": 9
+          "wall_micros": 1
         },
         {
           "name": "Relationships/Python",
@@ -90,80 +90,165 @@
         },
         {
           "name": "ParseExtraction/JavaScript",
-          "wall_micros": 26859
+          "wall_micros": 26251
         },
         {
           "name": "SymbolCatalog/JavaScript",
-          "wall_micros": 171
+          "wall_micros": 155
         },
         {
           "name": "Relationships/JavaScript",
-          "wall_micros": 17
+          "wall_micros": 28
         },
         {
           "name": "GraphMaterialization/JavaScript",
-          "wall_micros": 507
+          "wall_micros": 590
         },
         {
           "name": "ParseExtraction/Java",
-          "wall_micros": 473977
+          "wall_micros": 567399
         },
         {
           "name": "SymbolCatalog/Java",
-          "wall_micros": 49338
+          "wall_micros": 70155
         },
         {
           "name": "Relationships/Java",
-          "wall_micros": 11894
+          "wall_micros": 18326
         },
         {
           "name": "GraphMaterialization/Java",
-          "wall_micros": 899732
+          "wall_micros": 1145347
+        },
+        {
+          "name": "ParseExtraction/CSharp",
+          "wall_micros": 2
+        },
+        {
+          "name": "SymbolCatalog/CSharp",
+          "wall_micros": 1
+        },
+        {
+          "name": "Relationships/CSharp",
+          "wall_micros": 0
+        },
+        {
+          "name": "GraphMaterialization/CSharp",
+          "wall_micros": 3
+        },
+        {
+          "name": "ParseExtraction/Shell",
+          "wall_micros": 526
+        },
+        {
+          "name": "SymbolCatalog/Shell",
+          "wall_micros": 3
+        },
+        {
+          "name": "Relationships/Shell",
+          "wall_micros": 4
+        },
+        {
+          "name": "GraphMaterialization/Shell",
+          "wall_micros": 37
+        },
+        {
+          "name": "ParseExtraction/Cpp",
+          "wall_micros": 1
+        },
+        {
+          "name": "SymbolCatalog/Cpp",
+          "wall_micros": 1
+        },
+        {
+          "name": "Relationships/Cpp",
+          "wall_micros": 0
+        },
+        {
+          "name": "GraphMaterialization/Cpp",
+          "wall_micros": 2
+        },
+        {
+          "name": "ParseExtraction/Hcl",
+          "wall_micros": 1
+        },
+        {
+          "name": "SymbolCatalog/Hcl",
+          "wall_micros": 1
+        },
+        {
+          "name": "Relationships/Hcl",
+          "wall_micros": 0
+        },
+        {
+          "name": "GraphMaterialization/Hcl",
+          "wall_micros": 3
+        },
+        {
+          "name": "ParseExtraction/Go",
+          "wall_micros": 1
+        },
+        {
+          "name": "SymbolCatalog/Go",
+          "wall_micros": 2
+        },
+        {
+          "name": "Relationships/Go",
+          "wall_micros": 0
+        },
+        {
+          "name": "GraphMaterialization/Go",
+          "wall_micros": 1
         },
         {
           "name": "LanguageComposition",
-          "wall_micros": 8
+          "wall_micros": 10
         },
         {
           "name": "GraphValidation",
-          "wall_micros": 710946
+          "wall_micros": 871237
         },
         {
           "name": "total",
-          "wall_micros": 3489020
+          "wall_micros": 3995636
         }
       ],
       "measurements": {
-        "ambiguous_call_sites": 23366,
-        "call_sites": 224393,
+        "ambiguous_call_sites": 23328,
+        "call_sites": 223702,
+        "cpp_files": 0,
+        "csharp_files": 0,
         "degradations": 3,
         "degraded": true,
-        "discovered_files": 8670,
-        "edges": 102723,
+        "discovered_files": 8673,
+        "edges": 102692,
+        "go_files": 0,
+        "hcl_files": 0,
         "java_files": 8667,
         "javascript_files": 3,
-        "parsed_files": 8670,
-        "peak_rss_bytes": 1002012672,
+        "parsed_files": 8673,
+        "peak_rss_bytes": 1003405312,
         "php_files": 0,
         "python_files": 0,
         "rust_files": 0,
-        "source_bytes": 31308668,
-        "symbols": 161758,
+        "shell_files": 3,
+        "source_bytes": 31312376,
+        "symbols": 161763,
         "syntax_error_files": 8,
         "typescript_files": 0,
-        "unresolved_call_sites": 184576,
-        "wall_micros": 3489020
+        "unresolved_call_sites": 183950,
+        "wall_micros": 3995636
       },
       "budget_verdicts": [
         {
           "budget": "cold_index_peak_rss_bytes",
-          "observed": 1002012672,
+          "observed": 1003405312,
           "limit": 8589934592,
           "status": "pass"
         },
         {
           "budget": "cold_index_wall_micros",
-          "observed": 3489020,
+          "observed": 3995636,
           "limit": 250000000,
           "status": "pass"
         }
@@ -176,19 +261,19 @@
       "phases": [
         {
           "name": "fresh_barrier",
-          "wall_micros": 451898
+          "wall_micros": 596512
         }
       ],
       "measurements": {
-        "files_inspected": 17340,
+        "files_inspected": 17346,
         "git_subprocesses": 2,
         "no_op_reconciliations": 1,
-        "wall_micros": 451898
+        "wall_micros": 596512
       },
       "budget_verdicts": [
         {
           "budget": "warm_noop_wall_micros",
-          "observed": 451902,
+          "observed": 596514,
           "limit": 30000000,
           "status": "pass"
         }
@@ -201,13 +286,13 @@
       "phases": [
         {
           "name": "reindex",
-          "wall_micros": 2626505
+          "wall_micros": 3705893
         }
       ],
       "measurements": {
-        "fingerprint": "3c1d14f1c6d518b0",
-        "rerun_edges": 102723,
-        "rerun_symbols": 161758
+        "fingerprint": "6f28310d0aed6ac2",
+        "rerun_edges": 102692,
+        "rerun_symbols": 161763
       },
       "budget_verdicts": []
     },
@@ -218,13 +303,13 @@
       "phases": [
         {
           "name": "edit_and_barrier",
-          "wall_micros": 1061444
+          "wall_micros": 612699
         }
       ],
       "measurements": {
         "files_reparsed": 1,
         "full_reconciliations": 0,
-        "wall_micros": 1061444
+        "wall_micros": 612699
       },
       "budget_verdicts": []
     },
@@ -235,13 +320,13 @@
       "phases": [
         {
           "name": "replace_and_barrier",
-          "wall_micros": 1482203
+          "wall_micros": 1668111
         }
       ],
       "measurements": {
         "files_reparsed": 1,
         "full_reconciliations": 0,
-        "wall_micros": 1482203
+        "wall_micros": 1668111
       },
       "budget_verdicts": []
     },
@@ -252,13 +337,13 @@
       "phases": [
         {
           "name": "rename_delete_and_barrier",
-          "wall_micros": 3838769
+          "wall_micros": 2433812
         }
       ],
       "measurements": {
         "created_files": 1,
         "deleted_files": 2,
-        "wall_micros": 3838769
+        "wall_micros": 2433812
       },
       "budget_verdicts": []
     },
@@ -269,7 +354,7 @@
       "phases": [
         {
           "name": "break_and_barrier",
-          "wall_micros": 1578747
+          "wall_micros": 1238847
         }
       ],
       "measurements": {
@@ -284,11 +369,11 @@
       "phases": [
         {
           "name": "clean_diff",
-          "wall_micros": 7740305
+          "wall_micros": 6165011
         },
         {
           "name": "dirty_diff",
-          "wall_micros": 1360850
+          "wall_micros": 1322142
         }
       ],
       "measurements": {
@@ -309,7 +394,7 @@
             "previous_path": null
           }
         ],
-        "clean_diff_wall_micros": 1357110
+        "clean_diff_wall_micros": 1449624
       },
       "budget_verdicts": []
     },
@@ -320,15 +405,15 @@
       "phases": [
         {
           "name": "symbol_search",
-          "wall_micros": 293
+          "wall_micros": 217
         },
         {
           "name": "callers",
-          "wall_micros": 558
+          "wall_micros": 231
         },
         {
           "name": "context",
-          "wall_micros": 228
+          "wall_micros": 255
         }
       ],
       "measurements": {
@@ -342,12 +427,12 @@
             "qualified_name": "org::springframework::boot::test::json::JsonContentAssertTests::forJson"
           },
           {
-            "incoming_calls": 100,
+            "incoming_calls": 63,
             "qualified_name": "org::springframework::boot::build::antora::Contribution::getProject"
           },
           {
-            "incoming_calls": 74,
-            "qualified_name": "org::springframework::boot::actuate::endpoint::SanitizingFunctionTests::sanitizedValue"
+            "incoming_calls": 54,
+            "qualified_name": "org::springframework::boot::build::architecture::ArchitectureCheckTests::prepareTask"
           }
         ]
       },
@@ -360,7 +445,7 @@
       "phases": [
         {
           "name": "cancelled_cold_index",
-          "wall_micros": 5
+          "wall_micros": 4
         },
         {
           "name": "cancelled_query",
@@ -368,7 +453,7 @@
         }
       ],
       "measurements": {
-        "cancelled_index_wall_micros": 5
+        "cancelled_index_wall_micros": 4
       },
       "budget_verdicts": []
     },
@@ -378,6 +463,31 @@
       "details": "checkout restored to the pinned SHA with a clean worktree",
       "phases": [],
       "measurements": {},
+      "budget_verdicts": []
+    },
+    {
+      "id": "provider-lifecycle",
+      "status": "pass",
+      "details": "real corpus graph: provider absent, failed start with explicit fallback, then provenance-tagged precise restart",
+      "phases": [
+        {
+          "name": "provider_absent",
+          "wall_micros": 491
+        },
+        {
+          "name": "provider_failure",
+          "wall_micros": 557544
+        },
+        {
+          "name": "provider_restart",
+          "wall_micros": 1055653
+        }
+      ],
+      "measurements": {
+        "fallback_callers": 20,
+        "precise_callers": 1,
+        "target": "org::springframework::boot::test::json::JsonContentAssertTests::forJson"
+      },
       "budget_verdicts": []
     }
   ]
