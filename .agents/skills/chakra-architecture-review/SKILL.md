@@ -17,7 +17,9 @@ Run this before commit when the change touches any of:
 ## References
 
 - `docs/SPEC.md` — architectural source of truth.
-- `docs/roadmap/v0.1.md` — scope authority; wins over SPEC on "implement now" questions.
+- `docs/roadmap/v0.1.md` — baseline v0.1 scope authority.
+- For post-v0.1.0 work, the accepted GitHub milestone, issue acceptance
+  criteria, and relevant ADRs define the incremental release scope.
 - `docs/adr/` — existing decisions; a conflicting change needs a new or amended ADR.
 
 ## Checks
@@ -28,7 +30,7 @@ Run this before commit when the change touches any of:
 4. **Snapshot semantics** — commit snapshots are not treated as precise LSP indexes; `CommitSnapshot + WorktreeOverlay + WorkspaceEnrichment` separation is preserved.
 5. **Identity** — symbol/file/repository identity rules are not silently changed.
 6. **Concurrency** — background work has owners, cancellation, bounded queues; the Tokio executor is not blocked by CPU-heavy work.
-7. **Scope** — the change stays within the Rust/PHP v0.1 slice and does not pull deferred items (multi-worktree, persistence, cross-repo, embeddings, web UI) into v0.1.
+7. **Scope** — the change stays within the active milestone and does not pull deferred items (multi-worktree, persistence, cross-repo, embeddings, web UI) into v0.1.x.
 8. **Surface** — public APIs stay small, typed, explicit; no arbitrary command execution added to the MCP surface.
 9. **ADR need** — if this is a durable architectural decision or reverses one, an ADR in `docs/adr/` must accompany it.
 
@@ -38,3 +40,19 @@ Run this before commit when the change touches any of:
 - **Notes** for acceptable trade-offs that should be recorded.
 
 No blocking findings means the change is architecturally clear to proceed.
+
+## Chakra dogfooding
+
+When reviewing Chakra itself and a current Chakra MCP/binary is available:
+
+1. Use `status` and `repo_map` to establish revision and coverage, then use
+   `symbol_search`, `context`, `callers`, and `diff_context` where they fit the
+   review. Git, the filesystem, compiler output, and tests remain canonical.
+2. If Chakra fails, is stale, omits expected facts, mislabels precision, or
+   gives unusable output, capture the version/revision, exact input, expected
+   result, actual result, and fallback evidence.
+3. Search existing GitHub issues. When GitHub writes are authorized, create or
+   update a reproducible issue; otherwise include an issue-ready report in the
+   review. Continue with repository tools so dogfooding does not block work.
+4. Close a reported issue only after its fix and current-worktree validation
+   pass.

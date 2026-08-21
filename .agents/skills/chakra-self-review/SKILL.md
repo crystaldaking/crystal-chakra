@@ -17,7 +17,7 @@ Run this before **every** commit, after staging the intended files.
 Review the patch against every applicable item. This is not a formatting pass.
 
 1. **Architecture and dependency direction** — no domain/query layer depending on MCP, LSP, storage, or other adapter types; no new crate dependency that points the wrong way.
-2. **v0.1 scope** — nothing beyond `docs/roadmap/v0.1.md`; no premature future crates, persistence, multi-worktree, or semantic search.
+2. **v0.1.x scope** — the patch matches the active milestone, issue acceptance criteria, roadmap baseline, and ADRs; no premature persistence, multi-worktree, cross-repo, or semantic search.
 3. **Stale or partially published state** — updates are built privately and published atomically; no query can observe hybrid state.
 4. **Accidental full-reindex paths** — a normal file change must not trigger whole-repository reindexing.
 5. **Provenance/precision correctness** — textual/heuristic results never labeled `precise`; precision and provenance preserved end to end.
@@ -36,3 +36,19 @@ Review the patch against every applicable item. This is not a formatting pass.
 - **Non-blocking notes**: may be deferred; say so explicitly.
 
 If there are no blocking findings, state that the change is clear to proceed to validation.
+
+## Chakra dogfooding
+
+When reviewing Chakra itself and a current Chakra MCP/binary is available:
+
+1. Use `status` and `repo_map` to establish revision and coverage, then use
+   `symbol_search`, `context`, `callers`, and `diff_context` where they fit the
+   review. Git, the filesystem, compiler output, and tests remain canonical.
+2. If Chakra fails, is stale, omits expected facts, mislabels precision, or
+   gives unusable output, capture the version/revision, exact input, expected
+   result, actual result, and fallback evidence.
+3. Search existing GitHub issues. When GitHub writes are authorized, create or
+   update a reproducible issue; otherwise include an issue-ready report in the
+   review. Continue with repository tools so dogfooding does not block work.
+4. Close a reported issue only after its fix and current-worktree validation
+   pass.
