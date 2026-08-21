@@ -376,6 +376,10 @@ Provider capabilities differ by language and tool.
 
 It does **not** mean identical semantic precision across languages.
 
+The testable pass/fail definition of first-class support, its capability
+catalog, and the machine-readable support matrix live in
+`docs/language-parity-contract.md` (ADR-0026).
+
 ## 16. Rust provider
 
 The initial precise provider is rust-analyzer.
@@ -399,23 +403,25 @@ must ignore PHP documents, and the query layer must not send PHP symbols to it.
 PHP remains fully usable through current Tree-sitter syntax intelligence when
 no precise PHP provider is configured.
 
-## 17. Future multi-worktree provider resource model
+## 17. Provider resource model and future multi-worktree orchestration
 
 Long term, precise language providers are logically worktree-scoped because uncommitted worktree states must not leak into each other.
 
 However, running one heavyweight language server per worktree without bounds is unacceptable.
 
-Future provider orchestration must include a resource manager with concepts such as:
+Provider orchestration includes a resource manager with:
 
 - maximum active providers;
 - memory/process budget;
 - idle timeout;
 - LRU/idle eviction;
-- warm/cold states;
+- active/dormant states;
 - on-demand activation;
 - graceful fallback to syntax intelligence.
 
-Multi-worktree provider orchestration is deferred beyond v0.1.
+The current implementation applies those bounds to the one active
+materialized worktree and routes each language to exactly one adapter.
+Multi-worktree ownership and scheduling remain deferred beyond v0.1.
 
 ## 18. Syntax intelligence
 
@@ -595,7 +601,7 @@ Conceptual fields:
 
 ```json
 {
-  "schema_version": 7,
+  "schema_version": 13,
   "workspace_id": "...",
   "revision": 42,
   "freshness": "fresh",

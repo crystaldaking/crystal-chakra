@@ -1,0 +1,3 @@
+colliding_helper() {
+  true
+}

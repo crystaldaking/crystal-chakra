@@ -1,0 +1,17 @@
+{
+  "source": "GitHub Octoverse 2025 top languages plus pre-existing Chakra support",
+  "reviewed_at": "2026-08",
+  "languages": [
+    "typescript",
+    "javascript",
+    "python",
+    "java",
+    "csharp",
+    "php",
+    "shell",
+    "cpp",
+    "hcl",
+    "go",
+    "rust"
+  ]
+}

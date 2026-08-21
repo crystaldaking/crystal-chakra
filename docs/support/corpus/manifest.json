@@ -1,0 +1,242 @@
+{
+  "schema_version": 1,
+  "selected_at": "2026-08-18",
+  "selection_criteria": "Per language: large, actively maintained (pushed within days of selection), permissive license, primary-language share matching the target language per GitHub linguist, and complementary project shapes (library/tool plus application/framework/monorepo). Stars alone were not used. Every entry is pinned to an immutable commit SHA; a refresh requires review and must not silently change baselines.",
+  "redistribution": "Sources are fetched into a local cache for evaluation only and are never redistributed as fixtures. All selected licenses permit local use.",
+  "languages": {
+    "rust": {
+      "repositories": [
+        {
+          "name": "tokio-rs/tokio",
+          "url": "https://github.com/tokio-rs/tokio",
+          "branch": "master",
+          "sha": "625954f365727668cb02d04172b34f1149637728",
+          "license": "MIT",
+          "size_kb": 17315,
+          "primary_language": "Rust",
+          "rationale": "Workspace-of-crates async runtime; exercises Cargo workspaces, macros, and high fan-in."
+        },
+        {
+          "name": "BurntSushi/ripgrep",
+          "url": "https://github.com/BurntSushi/ripgrep",
+          "branch": "master",
+          "sha": "3fce3b5bb0236da2df6d99672afb8a719642eca7",
+          "license": "Unlicense",
+          "size_kb": 5700,
+          "primary_language": "Rust",
+          "rationale": "Single-binary CLI tool shape; complements tokio's library workspace shape."
+        }
+      ]
+    },
+    "php": {
+      "repositories": [
+        {
+          "name": "laravel/framework",
+          "url": "https://github.com/laravel/framework",
+          "branch": "13.x",
+          "sha": "faf45dd2b1549ff451993e9b20047ff0bf093033",
+          "license": "MIT",
+          "size_kb": 103899,
+          "primary_language": "PHP",
+          "rationale": "Large framework with deep namespace hierarchies and heavy magic-method surface; matches Chakra's Laravel enrichment path."
+        },
+        {
+          "name": "symfony/symfony",
+          "url": "https://github.com/symfony/symfony",
+          "branch": "8.2",
+          "sha": "add4ddb9867ba5dc5adc58d41f75b751caa5edd1",
+          "license": "MIT",
+          "size_kb": 335997,
+          "primary_language": "PHP",
+          "rationale": "Monorepo of many components; exercises package boundaries and cross-component references."
+        }
+      ]
+    },
+    "typescript": {
+      "repositories": [
+        {
+          "name": "microsoft/vscode",
+          "url": "https://github.com/microsoft/vscode",
+          "branch": "main",
+          "sha": "4d9c292ee3e255ad0185c3228416c231d773d364",
+          "license": "MIT",
+          "size_kb": 1368674,
+          "primary_language": "TypeScript",
+          "rationale": "Very large product codebase; exercises project references, layered src structure, and high-degree symbols."
+        }
+      ]
+    },
+    "javascript": {
+      "repositories": [
+        {
+          "name": "react/react",
+          "url": "https://github.com/react/react",
+          "branch": "main",
+          "sha": "eb8feb71096eec5c885b2a4c7d8d030d3622f265",
+          "license": "MIT",
+          "size_kb": 1065740,
+          "primary_language": "JavaScript",
+          "rationale": "Monorepo of packages with mixed JS/Flow-era shapes and heavy test trees."
+        }
+      ]
+    },
+    "python": {
+      "repositories": [
+        {
+          "name": "django/django",
+          "url": "https://github.com/django/django",
+          "branch": "main",
+          "sha": "d92b0209014021350af0383983315bf0a05ffac0",
+          "license": "BSD-3-Clause",
+          "size_kb": 282032,
+          "primary_language": "Python",
+          "rationale": "Large mature framework with deep package nesting and an extensive in-tree test suite."
+        },
+        {
+          "name": "apache/airflow",
+          "url": "https://github.com/apache/airflow",
+          "branch": "main",
+          "sha": "f8b8461e8191f88e72ad8c05b248e0385c21db99",
+          "license": "Apache-2.0",
+          "size_kb": 693782,
+          "primary_language": "Python",
+          "rationale": "Very large application monorepo; exercises plugin/provider layout and generated boundaries."
+        }
+      ]
+    },
+    "java": {
+      "repositories": [
+        {
+          "name": "spring-projects/spring-boot",
+          "url": "https://github.com/spring-projects/spring-boot",
+          "branch": "main",
+          "sha": "e3d4b1ceb6d8971936f484bae39c7d6659a81c7f",
+          "license": "Apache-2.0",
+          "size_kb": 218081,
+          "primary_language": "Java",
+          "rationale": "Multi-module Maven/Gradle build; exercises module scopes and annotation-heavy code."
+        },
+        {
+          "name": "apache/kafka",
+          "url": "https://github.com/apache/kafka",
+          "branch": "trunk",
+          "sha": "aa502fb153d9915283cf911d8efa1aa2c0d5f3cd",
+          "license": "Apache-2.0",
+          "size_kb": 306273,
+          "primary_language": "Java",
+          "rationale": "Large Gradle project with generated sources and mixed Scala boundaries."
+        }
+      ]
+    },
+    "csharp": {
+      "repositories": [
+        {
+          "name": "dotnet/runtime",
+          "url": "https://github.com/dotnet/runtime",
+          "branch": "main",
+          "sha": "663c457b86ccd35743374676a69de5ed97bc3b14",
+          "license": "MIT",
+          "size_kb": 1182791,
+          "primary_language": "C#",
+          "rationale": "Flagship large solution-of-projects layout; exercises csproj boundaries and high-degree references."
+        }
+      ]
+    },
+    "shell": {
+      "repositories": [
+        {
+          "name": "ohmyzsh/ohmyzsh",
+          "url": "https://github.com/ohmyzsh/ohmyzsh",
+          "branch": "master",
+          "sha": "97e11051e2f8053b1d694788d1cb4b0dbb1e2365",
+          "license": "MIT",
+          "size_kb": 13785,
+          "primary_language": "Shell",
+          "rationale": "Many small scripts in plugin directories; exercises discovery and function graphs at scale."
+        },
+        {
+          "name": "nvm-sh/nvm",
+          "url": "https://github.com/nvm-sh/nvm",
+          "branch": "master",
+          "sha": "6798d1dbc99e879f36a7d2eb2231104dc7e78e77",
+          "license": "MIT",
+          "size_kb": 4329,
+          "primary_language": "Shell",
+          "rationale": "Single large entrypoint script plus test tree; complements ohmyzsh's many-small-files shape."
+        }
+      ]
+    },
+    "cpp": {
+      "repositories": [
+        {
+          "name": "nlohmann/json",
+          "url": "https://github.com/nlohmann/json",
+          "branch": "develop",
+          "sha": "cdf52ae9bef77a0844e02e42df6d2df83a55c4b9",
+          "license": "MIT",
+          "size_kb": 275234,
+          "primary_language": "C++",
+          "rationale": "Header-heavy library; exercises template-heavy parsing and include graphs."
+        },
+        {
+          "name": "protocolbuffers/protobuf",
+          "url": "https://github.com/protocolbuffers/protobuf",
+          "branch": "main",
+          "sha": "720e5468cebbb124e23c72080b28f2a41c4134a2",
+          "license": "BSD-3-Clause (GitHub reports NOASSERTION)",
+          "size_kb": 237505,
+          "primary_language": "C++",
+          "rationale": "Large mixed C++/generated-code tree; exercises generated/vendor boundaries."
+        }
+      ]
+    },
+    "hcl": {
+      "repositories": [
+        {
+          "name": "terraform-aws-modules/terraform-aws-vpc",
+          "url": "https://github.com/terraform-aws-modules/terraform-aws-vpc",
+          "branch": "master",
+          "sha": "0a36bd54069c64be2da788b2afb5df0a8e8e7398",
+          "license": "Apache-2.0",
+          "size_kb": 1241,
+          "primary_language": "HCL",
+          "rationale": "Canonical module shape with variables/outputs/locals reference graphs."
+        },
+        {
+          "name": "terraform-aws-modules/terraform-aws-eks",
+          "url": "https://github.com/terraform-aws-modules/terraform-aws-eks",
+          "branch": "master",
+          "sha": "48a429f63cf96361ea2f4b42677d0cc8a9a656e0",
+          "license": "Apache-2.0",
+          "size_kb": 5138,
+          "primary_language": "HCL",
+          "rationale": "Larger module with nested submodules; exercises module composition and cross-file references."
+        }
+      ]
+    },
+    "go": {
+      "repositories": [
+        {
+          "name": "prometheus/prometheus",
+          "url": "https://github.com/prometheus/prometheus",
+          "branch": "main",
+          "sha": "98c983239715d0d81b8acf3560d47aba2a6d1649",
+          "license": "Apache-2.0",
+          "size_kb": 287525,
+          "primary_language": "Go",
+          "rationale": "Large single-module application with heavy interface usage and test trees."
+        },
+        {
+          "name": "kubernetes/kubernetes",
+          "url": "https://github.com/kubernetes/kubernetes",
+          "branch": "master",
+          "sha": "c44d2a82ef7f87c8b4278cd13af0a55614ed2a53",
+          "license": "Apache-2.0",
+          "size_kb": 1510685,
+          "primary_language": "Go",
+          "rationale": "Very large staging-module monorepo; exercises vendor boundaries and extreme symbol counts."
+        }
+      ]
+    }
+  }
+}

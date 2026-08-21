@@ -1,4 +1,4 @@
-//! Bounded Cargo/Composer-aware source classification with path fallback.
+//! Bounded ecosystem-aware source classification with path fallback.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
@@ -25,6 +25,18 @@ const COMMAND_POLL_INTERVAL: Duration = Duration::from_millis(1);
 const MAX_CARGO_METADATA_INVOCATIONS: usize = 64;
 const MAX_COMPOSER_MANIFESTS: usize = 64;
 const MAX_COMPOSER_MANIFEST_BYTES: usize = 1024 * 1024;
+const MAX_PACKAGE_JSON_MANIFESTS: usize = 256;
+const MAX_PACKAGE_JSON_MANIFEST_BYTES: usize = 1024 * 1024;
+const MAX_PYPROJECT_MANIFESTS: usize = 256;
+const MAX_TEXT_MANIFEST_BYTES: usize = 1024 * 1024;
+const MAX_JAVA_BUILD_MANIFESTS: usize = 512;
+const MAX_JAVA_BUILD_MANIFEST_BYTES: usize = 1024 * 1024;
+const MAX_DOTNET_PROJECT_MANIFESTS: usize = 512;
+const MAX_DOTNET_PROJECT_MANIFEST_BYTES: usize = 1024 * 1024;
+const MAX_SHELL_PROJECT_MANIFESTS: usize = 256;
+const MAX_CPP_PROJECT_MANIFESTS: usize = 256;
+const MAX_TERRAFORM_MODULES: usize = 512;
+const MAX_GO_MODULE_MANIFESTS: usize = 512;
 
 /// One discovered source plus deterministic query metadata.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -75,6 +87,68 @@ struct CargoPackage {
 struct ComposerRoot {
     package: SourcePackage,
     role: SourceRole,
+}
+
+/// npm-style package scope from a `package.json` (or a `tsconfig.json`
+/// project boundary without a sibling `package.json`).
+#[derive(Debug, Clone)]
+struct PackageJsonRoot {
+    package: SourcePackage,
+}
+
+/// Python package scope from a `pyproject.toml` (or a `setup.py`/`setup.cfg`
+/// project boundary without a sibling `pyproject.toml`).
+#[derive(Debug, Clone)]
+struct PyprojectRoot {
+    package: SourcePackage,
+}
+
+/// Which Java build tool contributed a project scope.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum JavaBuildKind {
+    Maven,
+    Gradle,
+}
+
+/// Java project scope from a Maven `pom.xml` or a Gradle
+/// `settings.gradle(.kts)` (or a `build.gradle(.kts)` project boundary
+/// without one).
+#[derive(Debug, Clone)]
+struct JavaRoot {
+    package: SourcePackage,
+    build: JavaBuildKind,
+}
+
+/// C# project scope from a Git-visible `*.csproj`.
+#[derive(Debug, Clone)]
+struct DotnetRoot {
+    package: SourcePackage,
+    is_test: bool,
+}
+
+/// Shell project scope from a Git-visible ShellCheck configuration boundary.
+#[derive(Debug, Clone)]
+struct ShellRoot {
+    package: SourcePackage,
+}
+
+/// C/C++ project scope from a compilation database or common build boundary.
+#[derive(Debug, Clone)]
+struct CppRoot {
+    package: SourcePackage,
+}
+
+/// Terraform/OpenTofu module scope derived from a directory containing a
+/// Git-visible `.tf` configuration file.
+#[derive(Debug, Clone)]
+struct TerraformRoot {
+    package: SourcePackage,
+}
+
+/// Go module or workspace scope from a Git-visible `go.mod` or `go.work`.
+#[derive(Debug, Clone)]
+struct GoRoot {
+    package: SourcePackage,
 }
 
 fn read_bounded(mut reader: impl Read, limit: usize) -> io::Result<BoundedRead> {
@@ -506,6 +580,1013 @@ fn is_inside(path: &RepoRelativePath, root: Option<&RepoRelativePath>) -> bool {
             .is_some_and(|suffix| suffix.starts_with('/'))
 }
 
+fn read_json_manifest(root: &Path, manifest: &RepoRelativePath) -> Option<serde_json::Value> {
+    let manifest_path = root.join(manifest.as_str());
+    let file = fs::File::open(&manifest_path).ok()?;
+    let mut bytes = Vec::new();
+    if file
+        .take((MAX_PACKAGE_JSON_MANIFEST_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)
+        .is_err()
+        || bytes.len() > MAX_PACKAGE_JSON_MANIFEST_BYTES
+    {
+        return None;
+    }
+    serde_json::from_slice::<serde_json::Value>(&bytes).ok()
+}
+
+fn manifest_directory(manifest: &RepoRelativePath, file_name: &str) -> Option<RepoRelativePath> {
+    let suffix = format!("/{file_name}");
+    let directory = manifest.as_str().strip_suffix(suffix.as_str())?;
+    RepoRelativePath::new(directory).ok()
+}
+
+/// Collects npm-style package scopes. Every `package.json` is a package
+/// root (workspaces are covered because each workspace member carries its
+/// own manifest); a `tsconfig.json` or `jsconfig.json` without a sibling
+/// `package.json` is a project boundary named after its directory.
+fn package_json_packages(
+    root: &Path,
+    metadata_inputs: &[RepoRelativePath],
+    operation: &OperationContext,
+) -> Result<Vec<PackageJsonRoot>, OperationAbort> {
+    let package_manifests = manifests_named(metadata_inputs, "package.json");
+    let mut packages = Vec::new();
+    let mut covered = BTreeSet::new();
+    for manifest in package_manifests.iter().take(MAX_PACKAGE_JSON_MANIFESTS) {
+        operation.check()?;
+        let directory = manifest_directory(manifest, "package.json");
+        if let Some(directory) = &directory {
+            covered.insert(directory.clone());
+        }
+        let metadata = read_json_manifest(root, manifest);
+        let fallback_name = manifest
+            .as_str()
+            .strip_suffix("/package.json")
+            .unwrap_or("repository");
+        let name = metadata
+            .as_ref()
+            .and_then(|metadata| metadata.get("name"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .unwrap_or(fallback_name);
+        packages.push(PackageJsonRoot {
+            package: SourcePackage {
+                name: name.to_owned(),
+                root: directory,
+            },
+        });
+    }
+    for boundary in ["tsconfig.json", "jsconfig.json"] {
+        for config in manifests_named(metadata_inputs, boundary)
+            .iter()
+            .take(MAX_PACKAGE_JSON_MANIFESTS)
+        {
+            operation.check()?;
+            let Some(directory) = manifest_directory(config, boundary) else {
+                continue;
+            };
+            if covered.contains(&directory) {
+                continue;
+            }
+            covered.insert(directory.clone());
+            packages.push(PackageJsonRoot {
+                package: SourcePackage {
+                    name: directory.as_str().to_owned(),
+                    root: Some(directory),
+                },
+            });
+        }
+    }
+    operation.check()?;
+    Ok(packages)
+}
+
+fn read_text_manifest(root: &Path, manifest: &RepoRelativePath) -> Option<String> {
+    let manifest_path = root.join(manifest.as_str());
+    let file = fs::File::open(&manifest_path).ok()?;
+    let mut bytes = Vec::new();
+    if file
+        .take((MAX_TEXT_MANIFEST_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)
+        .is_err()
+        || bytes.len() > MAX_TEXT_MANIFEST_BYTES
+    {
+        return None;
+    }
+    String::from_utf8(bytes).ok()
+}
+
+/// Minimal `[project]` `name` extraction from `pyproject.toml` text. A full
+/// TOML parser is deliberately not a dependency for one bounded string
+/// field; anything unparseable falls back to the directory name.
+fn pyproject_name(text: &str) -> Option<&str> {
+    let mut in_project = false;
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') {
+            in_project = trimmed == "[project]";
+            continue;
+        }
+        if !in_project {
+            continue;
+        }
+        let Some(value) = trimmed.strip_prefix("name") else {
+            continue;
+        };
+        let Some(value) = value.trim_start().strip_prefix('=') else {
+            continue;
+        };
+        let name = value.trim().trim_matches('"').trim_matches('\'').trim();
+        if !name.is_empty() {
+            return Some(name);
+        }
+    }
+    None
+}
+
+/// Collects Python package scopes. Every `pyproject.toml` is a package root
+/// (PEP 621 `[project].name` when parseable); a `setup.py` or `setup.cfg`
+/// without a sibling `pyproject.toml` is a project boundary named after its
+/// directory.
+fn pyproject_packages(
+    root: &Path,
+    metadata_inputs: &[RepoRelativePath],
+    operation: &OperationContext,
+) -> Result<Vec<PyprojectRoot>, OperationAbort> {
+    let mut packages = Vec::new();
+    let mut covered = BTreeSet::new();
+    for manifest in manifests_named(metadata_inputs, "pyproject.toml")
+        .iter()
+        .take(MAX_PYPROJECT_MANIFESTS)
+    {
+        operation.check()?;
+        let directory = manifest_directory(manifest, "pyproject.toml");
+        if let Some(directory) = &directory {
+            covered.insert(directory.clone());
+        }
+        let fallback_name = manifest
+            .as_str()
+            .strip_suffix("/pyproject.toml")
+            .unwrap_or("repository");
+        let text = read_text_manifest(root, manifest);
+        let name = text
+            .as_deref()
+            .and_then(pyproject_name)
+            .unwrap_or(fallback_name);
+        packages.push(PyprojectRoot {
+            package: SourcePackage {
+                name: name.to_owned(),
+                root: directory,
+            },
+        });
+    }
+    let mut root_covered = packages
+        .iter()
+        .any(|package| package.package.root.is_none());
+    for boundary in ["setup.py", "setup.cfg"] {
+        for manifest in manifests_named(metadata_inputs, boundary)
+            .iter()
+            .take(MAX_PYPROJECT_MANIFESTS)
+        {
+            operation.check()?;
+            match manifest_directory(manifest, boundary) {
+                Some(directory) => {
+                    if covered.contains(&directory) {
+                        continue;
+                    }
+                    covered.insert(directory.clone());
+                    packages.push(PyprojectRoot {
+                        package: SourcePackage {
+                            name: directory.as_str().to_owned(),
+                            root: Some(directory),
+                        },
+                    });
+                }
+                None => {
+                    if root_covered {
+                        continue;
+                    }
+                    root_covered = true;
+                    packages.push(PyprojectRoot {
+                        package: SourcePackage {
+                            name: "repository".to_owned(),
+                            root: None,
+                        },
+                    });
+                }
+            }
+        }
+    }
+    operation.check()?;
+    Ok(packages)
+}
+
+/// TypeScript and JavaScript test conventions beyond the language-neutral
+/// path fallback: `__tests__/` directories and `*.test.*` / `*.spec.*` file
+/// stems.
+fn typescript_path_role(path: &RepoRelativePath) -> SourceRole {
+    let fallback = SourceMetadata::path_fallback(path);
+    if fallback.role != SourceRole::Production {
+        return fallback.role;
+    }
+    if path
+        .as_str()
+        .split('/')
+        .any(|component| component.eq_ignore_ascii_case("__tests__"))
+    {
+        return SourceRole::Test;
+    }
+    let is_test_stem = path
+        .as_str()
+        .rsplit('/')
+        .next()
+        .is_some_and(|file| file.contains(".test.") || file.contains(".spec."));
+    if is_test_stem {
+        SourceRole::Test
+    } else {
+        SourceRole::Production
+    }
+}
+
+fn classify_typescript(path: &RepoRelativePath, packages: &[PackageJsonRoot]) -> SourceMetadata {
+    let role = typescript_path_role(path);
+    let package = packages
+        .iter()
+        .filter(|package| is_inside(path, package.package.root.as_ref()))
+        .max_by_key(|package| {
+            package
+                .package
+                .root
+                .as_ref()
+                .map_or(0, |root| root.as_str().len())
+        });
+    let Some(package) = package else {
+        return SourceMetadata {
+            role,
+            classification: SourceClassification::PathFallback,
+            package: None,
+        };
+    };
+    SourceMetadata {
+        role,
+        classification: SourceClassification::PackageJsonMetadata,
+        package: Some(package.package.clone()),
+    }
+}
+
+/// Python test conventions beyond the language-neutral path fallback:
+/// `test_*.py` and `*_test.py` file stems (pytest/unittest discovery rules).
+fn python_path_role(path: &RepoRelativePath) -> SourceRole {
+    let fallback = SourceMetadata::path_fallback(path);
+    if fallback.role != SourceRole::Production {
+        return fallback.role;
+    }
+    let is_test_stem = path
+        .as_str()
+        .rsplit('/')
+        .next()
+        .and_then(|file| {
+            file.strip_suffix(".py")
+                .or_else(|| file.strip_suffix(".pyi"))
+        })
+        .is_some_and(|stem| stem.starts_with("test_") || stem.ends_with("_test"));
+    if is_test_stem {
+        SourceRole::Test
+    } else {
+        SourceRole::Production
+    }
+}
+
+fn classify_python(path: &RepoRelativePath, packages: &[PyprojectRoot]) -> SourceMetadata {
+    let role = python_path_role(path);
+    let package = packages
+        .iter()
+        .filter(|package| is_inside(path, package.package.root.as_ref()))
+        .max_by_key(|package| {
+            package
+                .package
+                .root
+                .as_ref()
+                .map_or(0, |root| root.as_str().len())
+        });
+    let Some(package) = package else {
+        return SourceMetadata {
+            role,
+            classification: SourceClassification::PathFallback,
+            package: None,
+        };
+    };
+    SourceMetadata {
+        role,
+        classification: SourceClassification::PyprojectMetadata,
+        package: Some(package.package.clone()),
+    }
+}
+
+/// Minimal `<artifactId>` extraction from `pom.xml` text with the `<parent>`
+/// block excluded. A full XML parser is deliberately not a dependency for
+/// one bounded string field; anything unparseable falls back to the
+/// directory name.
+fn pom_artifact_id(text: &str) -> Option<&str> {
+    let parent = text.find("<parent>").zip(text.find("</parent>"));
+    let search_from = match parent {
+        Some((_, end)) => end + "</parent>".len(),
+        None => 0,
+    };
+    let rest = text.get(search_from..)?;
+    let start = rest.find("<artifactId>")? + "<artifactId>".len();
+    let end = rest[start..].find("</artifactId>")?;
+    let name = rest[start..start + end].trim();
+    (!name.is_empty()).then_some(name)
+}
+
+/// Minimal `rootProject.name` extraction from a `settings.gradle(.kts)`:
+/// `rootProject.name = "x"` (or single quotes). Anything unparseable falls
+/// back to the directory name.
+fn gradle_root_project_name(text: &str) -> Option<&str> {
+    for line in text.lines() {
+        let line = line.trim();
+        let Some(value) = line.strip_prefix("rootProject.name") else {
+            continue;
+        };
+        let Some(value) = value.trim_start().strip_prefix('=') else {
+            continue;
+        };
+        let name = value.trim().trim_matches('"').trim_matches('\'').trim();
+        if !name.is_empty() {
+            return Some(name);
+        }
+    }
+    None
+}
+
+fn read_java_build_manifest(root: &Path, manifest: &RepoRelativePath) -> Option<String> {
+    let manifest_path = root.join(manifest.as_str());
+    let file = fs::File::open(&manifest_path).ok()?;
+    let mut bytes = Vec::new();
+    if file
+        .take((MAX_JAVA_BUILD_MANIFEST_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)
+        .is_err()
+        || bytes.len() > MAX_JAVA_BUILD_MANIFEST_BYTES
+    {
+        return None;
+    }
+    String::from_utf8(bytes).ok()
+}
+
+/// Collects Java project scopes. Every `pom.xml` is a Maven module root
+/// (`<artifactId>` when parseable); every `settings.gradle(.kts)` is a Gradle
+/// project root (`rootProject.name` when parseable); a
+/// `build.gradle(.kts)` in a directory without a Gradle settings file is a
+/// project boundary named after its directory.
+fn java_packages(
+    root: &Path,
+    metadata_inputs: &[RepoRelativePath],
+    operation: &OperationContext,
+) -> Result<Vec<JavaRoot>, OperationAbort> {
+    let mut packages = Vec::new();
+    let mut gradle_covered = BTreeSet::new();
+    for manifest in manifests_named(metadata_inputs, "pom.xml")
+        .iter()
+        .take(MAX_JAVA_BUILD_MANIFESTS)
+    {
+        operation.check()?;
+        let directory = manifest_directory(manifest, "pom.xml");
+        let fallback_name = manifest
+            .as_str()
+            .strip_suffix("/pom.xml")
+            .unwrap_or("repository");
+        let text = read_java_build_manifest(root, manifest);
+        let name = text
+            .as_deref()
+            .and_then(pom_artifact_id)
+            .unwrap_or(fallback_name);
+        packages.push(JavaRoot {
+            package: SourcePackage {
+                name: name.to_owned(),
+                root: directory,
+            },
+            build: JavaBuildKind::Maven,
+        });
+    }
+    for settings in ["settings.gradle", "settings.gradle.kts"] {
+        for manifest in manifests_named(metadata_inputs, settings)
+            .iter()
+            .take(MAX_JAVA_BUILD_MANIFESTS)
+        {
+            operation.check()?;
+            let directory = manifest_directory(manifest, settings);
+            if let Some(directory) = &directory {
+                gradle_covered.insert(directory.clone());
+            }
+            let fallback_name = manifest
+                .as_str()
+                .strip_suffix(&format!("/{settings}"))
+                .unwrap_or("repository");
+            let text = read_java_build_manifest(root, manifest);
+            let name = text
+                .as_deref()
+                .and_then(gradle_root_project_name)
+                .unwrap_or(fallback_name);
+            packages.push(JavaRoot {
+                package: SourcePackage {
+                    name: name.to_owned(),
+                    root: directory,
+                },
+                build: JavaBuildKind::Gradle,
+            });
+        }
+    }
+    let mut root_covered = packages
+        .iter()
+        .any(|package| package.build == JavaBuildKind::Gradle && package.package.root.is_none());
+    for build in ["build.gradle", "build.gradle.kts"] {
+        for manifest in manifests_named(metadata_inputs, build)
+            .iter()
+            .take(MAX_JAVA_BUILD_MANIFESTS)
+        {
+            operation.check()?;
+            match manifest_directory(manifest, build) {
+                Some(directory) => {
+                    if gradle_covered.contains(&directory) {
+                        continue;
+                    }
+                    gradle_covered.insert(directory.clone());
+                    packages.push(JavaRoot {
+                        package: SourcePackage {
+                            name: directory.as_str().to_owned(),
+                            root: Some(directory),
+                        },
+                        build: JavaBuildKind::Gradle,
+                    });
+                }
+                None => {
+                    if root_covered {
+                        continue;
+                    }
+                    root_covered = true;
+                    packages.push(JavaRoot {
+                        package: SourcePackage {
+                            name: "repository".to_owned(),
+                            root: None,
+                        },
+                        build: JavaBuildKind::Gradle,
+                    });
+                }
+            }
+        }
+    }
+    operation.check()?;
+    Ok(packages)
+}
+
+/// Java test conventions beyond the language-neutral path fallback: the
+/// Maven/Gradle `src/test/java` source root and the JUnit `Test*.java` /
+/// `*Test.java` / `*Tests.java` file-name conventions.
+fn java_path_role(path: &RepoRelativePath) -> SourceRole {
+    let fallback = SourceMetadata::path_fallback(path);
+    if fallback.role != SourceRole::Production {
+        return fallback.role;
+    }
+    let components: Vec<&str> = path.as_str().split('/').collect();
+    if components.starts_with(&["src", "test", "java"]) {
+        return SourceRole::Test;
+    }
+    let is_test_stem = path
+        .as_str()
+        .rsplit('/')
+        .next()
+        .and_then(|file| file.strip_suffix(".java"))
+        .is_some_and(|stem| {
+            stem.starts_with("Test") || stem.ends_with("Test") || stem.ends_with("Tests")
+        });
+    if is_test_stem {
+        SourceRole::Test
+    } else {
+        SourceRole::Production
+    }
+}
+
+fn classify_java(path: &RepoRelativePath, packages: &[JavaRoot]) -> SourceMetadata {
+    let role = java_path_role(path);
+    let package = packages
+        .iter()
+        .filter(|package| is_inside(path, package.package.root.as_ref()))
+        .max_by_key(|package| {
+            package
+                .package
+                .root
+                .as_ref()
+                .map_or(0, |root| root.as_str().len())
+        });
+    let Some(package) = package else {
+        return SourceMetadata {
+            role,
+            classification: SourceClassification::PathFallback,
+            package: None,
+        };
+    };
+    SourceMetadata {
+        role,
+        classification: match package.build {
+            JavaBuildKind::Maven => SourceClassification::MavenMetadata,
+            JavaBuildKind::Gradle => SourceClassification::GradleMetadata,
+        },
+        package: Some(package.package.clone()),
+    }
+}
+
+fn metadata_inputs_with_suffix(
+    metadata_inputs: &[RepoRelativePath],
+    suffix: &str,
+) -> Vec<RepoRelativePath> {
+    let mut manifests: Vec<_> = metadata_inputs
+        .iter()
+        .filter(|path| path.as_str().ends_with(suffix))
+        .cloned()
+        .collect();
+    manifests.sort_by(|a, b| {
+        a.as_str()
+            .matches('/')
+            .count()
+            .cmp(&b.as_str().matches('/').count())
+            .then(a.cmp(b))
+    });
+    manifests.dedup();
+    manifests
+}
+
+fn dotnet_project_property<'a>(text: &'a str, name: &str) -> Option<&'a str> {
+    let opening = format!("<{name}>");
+    let closing = format!("</{name}>");
+    let start = text.find(&opening)?.saturating_add(opening.len());
+    let end = text.get(start..)?.find(&closing)?.saturating_add(start);
+    let value = text.get(start..end)?.trim();
+    (!value.is_empty()).then_some(value)
+}
+
+fn read_dotnet_project_manifest(root: &Path, manifest: &RepoRelativePath) -> Option<String> {
+    let file = fs::File::open(root.join(manifest.as_str())).ok()?;
+    let mut bytes = Vec::new();
+    if file
+        .take((MAX_DOTNET_PROJECT_MANIFEST_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)
+        .is_err()
+        || bytes.len() > MAX_DOTNET_PROJECT_MANIFEST_BYTES
+    {
+        return None;
+    }
+    String::from_utf8(bytes).ok()
+}
+
+/// Collects bounded .NET project scopes. Every Git-visible `*.csproj` is a
+/// project boundary; `AssemblyName` and `IsTestProject` enrich deterministic
+/// file-name fallbacks without requiring an XML dependency.
+fn dotnet_packages(
+    root: &Path,
+    metadata_inputs: &[RepoRelativePath],
+    operation: &OperationContext,
+) -> Result<Vec<DotnetRoot>, OperationAbort> {
+    let mut packages = Vec::new();
+    for manifest in metadata_inputs_with_suffix(metadata_inputs, ".csproj")
+        .iter()
+        .take(MAX_DOTNET_PROJECT_MANIFESTS)
+    {
+        operation.check()?;
+        let path = manifest.as_str();
+        let file_name = path.rsplit('/').next().unwrap_or(path);
+        let fallback_name = file_name.strip_suffix(".csproj").unwrap_or(file_name);
+        let project_root = path
+            .rsplit_once('/')
+            .and_then(|(directory, _)| RepoRelativePath::new(directory).ok());
+        let text = read_dotnet_project_manifest(root, manifest);
+        let name = text
+            .as_deref()
+            .and_then(|text| dotnet_project_property(text, "AssemblyName"))
+            .unwrap_or(fallback_name);
+        let declared_test = text
+            .as_deref()
+            .and_then(|text| dotnet_project_property(text, "IsTestProject"))
+            .is_some_and(|value| value.eq_ignore_ascii_case("true"));
+        let lower_name = fallback_name.to_ascii_lowercase();
+        packages.push(DotnetRoot {
+            package: SourcePackage {
+                name: name.to_owned(),
+                root: project_root,
+            },
+            is_test: declared_test
+                || lower_name.ends_with(".test")
+                || lower_name.ends_with(".tests"),
+        });
+    }
+    operation.check()?;
+    Ok(packages)
+}
+
+fn dotnet_path_role(path: &RepoRelativePath) -> SourceRole {
+    if path.as_str().split('/').any(|component| {
+        component.eq_ignore_ascii_case("bin") || component.eq_ignore_ascii_case("obj")
+    }) {
+        return SourceRole::Generated;
+    }
+    let fallback = SourceMetadata::path_fallback(path);
+    if fallback.role != SourceRole::Production {
+        return fallback.role;
+    }
+    let is_test_stem = path
+        .as_str()
+        .rsplit('/')
+        .next()
+        .and_then(|file| file.strip_suffix(".cs"))
+        .is_some_and(|stem| stem.ends_with("Test") || stem.ends_with("Tests"));
+    if is_test_stem {
+        SourceRole::Test
+    } else {
+        SourceRole::Production
+    }
+}
+
+fn classify_csharp(path: &RepoRelativePath, packages: &[DotnetRoot]) -> SourceMetadata {
+    let mut role = dotnet_path_role(path);
+    let nearest_root_length = packages
+        .iter()
+        .filter(|project| is_inside(path, project.package.root.as_ref()))
+        .map(|project| {
+            project
+                .package
+                .root
+                .as_ref()
+                .map_or(0, |root| root.as_str().len())
+        })
+        .max();
+    let Some(nearest_root_length) = nearest_root_length else {
+        return SourceMetadata {
+            role,
+            classification: SourceClassification::PathFallback,
+            package: None,
+        };
+    };
+    let mut nearest = packages.iter().filter(|project| {
+        is_inside(path, project.package.root.as_ref())
+            && project
+                .package
+                .root
+                .as_ref()
+                .map_or(0, |root| root.as_str().len())
+                == nearest_root_length
+    });
+    let Some(project) = nearest.next() else {
+        return SourceMetadata {
+            role,
+            classification: SourceClassification::PathFallback,
+            package: None,
+        };
+    };
+    if nearest.next().is_some() {
+        return SourceMetadata {
+            role,
+            classification: SourceClassification::PathFallback,
+            package: None,
+        };
+    }
+    if role == SourceRole::Production && project.is_test {
+        role = SourceRole::Test;
+    }
+    SourceMetadata {
+        role,
+        classification: SourceClassification::DotnetProjectMetadata,
+        package: Some(project.package.clone()),
+    }
+}
+
+fn shell_projects(
+    metadata_inputs: &[RepoRelativePath],
+    operation: &OperationContext,
+) -> Result<Vec<ShellRoot>, OperationAbort> {
+    let mut projects = Vec::new();
+    let mut covered = BTreeSet::new();
+    let mut examined = 0_usize;
+    'boundaries: for boundary in [".shellcheckrc", "shellcheckrc"] {
+        for manifest in manifests_named(metadata_inputs, boundary) {
+            if examined == MAX_SHELL_PROJECT_MANIFESTS {
+                break 'boundaries;
+            }
+            examined += 1;
+            operation.check()?;
+            let directory = manifest_directory(&manifest, boundary);
+            if !covered.insert(directory.clone()) {
+                continue;
+            }
+            let name = directory
+                .as_ref()
+                .map_or_else(|| "repository".to_owned(), |root| root.as_str().to_owned());
+            projects.push(ShellRoot {
+                package: SourcePackage {
+                    name,
+                    root: directory,
+                },
+            });
+        }
+    }
+    operation.check()?;
+    Ok(projects)
+}
+
+fn classify_shell(path: &RepoRelativePath, projects: &[ShellRoot]) -> SourceMetadata {
+    let fallback = SourceMetadata::path_fallback(path);
+    let project = projects
+        .iter()
+        .filter(|project| is_inside(path, project.package.root.as_ref()))
+        .max_by_key(|project| {
+            project
+                .package
+                .root
+                .as_ref()
+                .map_or(0, |root| root.as_str().len())
+        });
+    let Some(project) = project else {
+        return fallback;
+    };
+    SourceMetadata {
+        role: fallback.role,
+        classification: SourceClassification::ShellProjectMetadata,
+        package: Some(project.package.clone()),
+    }
+}
+
+fn cpp_projects(
+    metadata_inputs: &[RepoRelativePath],
+    operation: &OperationContext,
+) -> Result<Vec<CppRoot>, OperationAbort> {
+    let mut projects = Vec::new();
+    let mut covered = BTreeSet::new();
+    let mut examined = 0_usize;
+    'boundaries: for boundary in [
+        "compile_commands.json",
+        "compile_flags.txt",
+        "CMakeLists.txt",
+        "meson.build",
+        "BUILD.bazel",
+        "BUILD",
+        ".clangd",
+    ] {
+        for manifest in manifests_named(metadata_inputs, boundary) {
+            if examined == MAX_CPP_PROJECT_MANIFESTS {
+                break 'boundaries;
+            }
+            examined += 1;
+            operation.check()?;
+            let directory = manifest_directory(&manifest, boundary);
+            if !covered.insert(directory.clone()) {
+                continue;
+            }
+            let name = directory
+                .as_ref()
+                .map_or_else(|| "repository".to_owned(), |root| root.as_str().to_owned());
+            projects.push(CppRoot {
+                package: SourcePackage {
+                    name,
+                    root: directory,
+                },
+            });
+        }
+    }
+    operation.check()?;
+    Ok(projects)
+}
+
+fn classify_cpp(path: &RepoRelativePath, projects: &[CppRoot]) -> SourceMetadata {
+    let mut fallback = SourceMetadata::path_fallback(path);
+    if fallback.role == SourceRole::Production {
+        let file = path.as_str().rsplit('/').next().unwrap_or_default();
+        let stem = file.rsplit_once('.').map_or(file, |(stem, _)| stem);
+        let lower = stem.to_ascii_lowercase();
+        if lower.ends_with("_test")
+            || lower.ends_with("_tests")
+            || lower.ends_with("_unittest")
+            || lower.ends_with("_spec")
+        {
+            fallback.role = SourceRole::Test;
+        } else if lower.ends_with(".pb")
+            || lower.ends_with(".generated")
+            || lower.ends_with(".gen")
+            || lower.ends_with(".moc")
+        {
+            fallback.role = SourceRole::Generated;
+        }
+    }
+    let project = projects
+        .iter()
+        .filter(|project| is_inside(path, project.package.root.as_ref()))
+        .max_by_key(|project| {
+            project
+                .package
+                .root
+                .as_ref()
+                .map_or(0, |root| root.as_str().len())
+        });
+    let Some(project) = project else {
+        return fallback;
+    };
+    SourceMetadata {
+        role: fallback.role,
+        classification: SourceClassification::CppProjectMetadata,
+        package: Some(project.package.clone()),
+    }
+}
+
+fn terraform_modules(
+    sources: &[RepoRelativePath],
+    operation: &OperationContext,
+) -> Result<Vec<TerraformRoot>, OperationAbort> {
+    let mut roots = BTreeSet::new();
+    for path in sources {
+        operation.check()?;
+        let raw = path.as_str();
+        if !raw.ends_with(".tf") {
+            continue;
+        }
+        let directory = raw
+            .rsplit_once('/')
+            .and_then(|(directory, _)| RepoRelativePath::new(directory).ok());
+        roots.insert(directory);
+        if roots.len() == MAX_TERRAFORM_MODULES {
+            break;
+        }
+    }
+    operation.check()?;
+    Ok(roots
+        .into_iter()
+        .map(|root| {
+            let name = root
+                .as_ref()
+                .map_or_else(|| "repository".to_owned(), |path| path.as_str().to_owned());
+            TerraformRoot {
+                package: SourcePackage { name, root },
+            }
+        })
+        .collect())
+}
+
+fn hcl_path_role(path: &RepoRelativePath) -> SourceRole {
+    if path
+        .as_str()
+        .split('/')
+        .any(|component| matches!(component, ".terraform" | ".terragrunt-cache"))
+    {
+        return SourceRole::Vendor;
+    }
+    let fallback = SourceMetadata::path_fallback(path);
+    if fallback.role != SourceRole::Production {
+        return fallback.role;
+    }
+    if path.as_str().ends_with(".tftest.hcl") {
+        SourceRole::Test
+    } else {
+        SourceRole::Production
+    }
+}
+
+fn classify_hcl(path: &RepoRelativePath, modules: &[TerraformRoot]) -> SourceMetadata {
+    let role = hcl_path_role(path);
+    let module = modules
+        .iter()
+        .filter(|module| is_inside(path, module.package.root.as_ref()))
+        .max_by_key(|module| {
+            module
+                .package
+                .root
+                .as_ref()
+                .map_or(0, |root| root.as_str().len())
+        });
+    let Some(module) = module else {
+        return SourceMetadata {
+            role,
+            classification: SourceClassification::PathFallback,
+            package: None,
+        };
+    };
+    SourceMetadata {
+        role,
+        classification: SourceClassification::TerraformModuleMetadata,
+        package: Some(module.package.clone()),
+    }
+}
+
+fn go_modules(
+    root: &Path,
+    metadata_inputs: &[RepoRelativePath],
+    operation: &OperationContext,
+) -> Result<Vec<GoRoot>, OperationAbort> {
+    let mut modules = Vec::new();
+    let mut covered = BTreeSet::new();
+    for manifest in manifests_named(metadata_inputs, "go.mod")
+        .into_iter()
+        .take(MAX_GO_MODULE_MANIFESTS)
+    {
+        operation.check()?;
+        let directory = manifest_directory(&manifest, "go.mod");
+        if !covered.insert(directory.clone()) {
+            continue;
+        }
+        let name = read_text_manifest(root, &manifest)
+            .and_then(|contents| {
+                contents.lines().find_map(|line| {
+                    let mut fields = line.split_whitespace();
+                    (fields.next() == Some("module"))
+                        .then(|| fields.next())
+                        .flatten()
+                        .filter(|name| !name.is_empty())
+                        .map(str::to_owned)
+                })
+            })
+            .unwrap_or_else(|| {
+                directory
+                    .as_ref()
+                    .map_or_else(|| "repository".to_owned(), |path| path.as_str().to_owned())
+            });
+        modules.push(GoRoot {
+            package: SourcePackage {
+                name,
+                root: directory,
+            },
+        });
+    }
+    for workspace in manifests_named(metadata_inputs, "go.work")
+        .into_iter()
+        .take(MAX_GO_MODULE_MANIFESTS.saturating_sub(modules.len()))
+    {
+        operation.check()?;
+        let directory = manifest_directory(&workspace, "go.work");
+        if !covered.insert(directory.clone()) {
+            continue;
+        }
+        let name = directory.as_ref().map_or_else(
+            || "go-workspace".to_owned(),
+            |path| format!("go-workspace:{}", path.as_str()),
+        );
+        modules.push(GoRoot {
+            package: SourcePackage {
+                name,
+                root: directory,
+            },
+        });
+    }
+    operation.check()?;
+    Ok(modules)
+}
+
+fn go_path_role(path: &RepoRelativePath) -> SourceRole {
+    let raw = path.as_str();
+    if raw.split('/').any(|component| component == "vendor") {
+        return SourceRole::Vendor;
+    }
+    if raw.ends_with("_test.go") {
+        return SourceRole::Test;
+    }
+    let file = raw.rsplit('/').next().unwrap_or_default();
+    let generated = file.ends_with(".pb.go")
+        || file.ends_with("_generated.go")
+        || file.starts_with("zz_generated.")
+        || raw
+            .split('/')
+            .any(|component| matches!(component, "generated" | "gen"));
+    if generated {
+        SourceRole::Generated
+    } else {
+        SourceMetadata::path_fallback(path).role
+    }
+}
+
+fn classify_go(path: &RepoRelativePath, modules: &[GoRoot]) -> SourceMetadata {
+    let role = go_path_role(path);
+    let module = modules
+        .iter()
+        .filter(|module| is_inside(path, module.package.root.as_ref()))
+        .max_by_key(|module| {
+            module
+                .package
+                .root
+                .as_ref()
+                .map_or(0, |root| root.as_str().len())
+        });
+    let Some(module) = module else {
+        return SourceMetadata {
+            role,
+            classification: SourceClassification::PathFallback,
+            package: None,
+        };
+    };
+    SourceMetadata {
+        role,
+        classification: SourceClassification::GoModuleMetadata,
+        package: Some(module.package.clone()),
+    }
+}
+
 fn classify_rust(path: &RepoRelativePath, packages: &[CargoPackage]) -> SourceMetadata {
     let fallback = SourceMetadata::path_fallback(path);
     let package = packages
@@ -557,8 +1638,8 @@ fn classify_php(path: &RepoRelativePath, roots: &[ComposerRoot]) -> SourceMetada
     }
 }
 
-/// Discovers one language and attaches bounded Cargo/Composer/path metadata
-/// without excluding any source role.
+/// Discovers one language and attaches bounded ecosystem/path metadata without
+/// excluding any source role.
 pub fn discover_classified_sources(
     candidate: &Path,
     language: Language,
@@ -605,6 +1686,46 @@ pub fn classify_discovered_sources_with_context(
     } else {
         None
     };
+    let package_json = if matches!(language, Language::TypeScript | Language::JavaScript) {
+        Some(package_json_packages(root, metadata_inputs, operation)?)
+    } else {
+        None
+    };
+    let pyproject = if language == Language::Python {
+        Some(pyproject_packages(root, metadata_inputs, operation)?)
+    } else {
+        None
+    };
+    let java = if language == Language::Java {
+        Some(java_packages(root, metadata_inputs, operation)?)
+    } else {
+        None
+    };
+    let dotnet = if language == Language::CSharp {
+        Some(dotnet_packages(root, metadata_inputs, operation)?)
+    } else {
+        None
+    };
+    let shell = if language == Language::Shell {
+        Some(shell_projects(metadata_inputs, operation)?)
+    } else {
+        None
+    };
+    let cpp = if language == Language::Cpp {
+        Some(cpp_projects(metadata_inputs, operation)?)
+    } else {
+        None
+    };
+    let hcl = if language == Language::Hcl {
+        Some(terraform_modules(sources, operation)?)
+    } else {
+        None
+    };
+    let go = if language == Language::Go {
+        Some(go_modules(root, metadata_inputs, operation)?)
+    } else {
+        None
+    };
     let mut classified = Vec::with_capacity(files.len());
     for path in files {
         operation.check()?;
@@ -612,6 +1733,18 @@ pub fn classify_discovered_sources_with_context(
             metadata: match language {
                 Language::Rust => classify_rust(&path, cargo.as_deref().unwrap_or_default()),
                 Language::Php => classify_php(&path, composer.as_deref().unwrap_or_default()),
+                Language::TypeScript | Language::JavaScript => {
+                    classify_typescript(&path, package_json.as_deref().unwrap_or_default())
+                }
+                Language::Python => {
+                    classify_python(&path, pyproject.as_deref().unwrap_or_default())
+                }
+                Language::Java => classify_java(&path, java.as_deref().unwrap_or_default()),
+                Language::CSharp => classify_csharp(&path, dotnet.as_deref().unwrap_or_default()),
+                Language::Shell => classify_shell(&path, shell.as_deref().unwrap_or_default()),
+                Language::Cpp => classify_cpp(&path, cpp.as_deref().unwrap_or_default()),
+                Language::Hcl => classify_hcl(&path, hcl.as_deref().unwrap_or_default()),
+                Language::Go => classify_go(&path, go.as_deref().unwrap_or_default()),
             },
             path,
             language,
@@ -848,6 +1981,502 @@ mod tests {
     }
 
     #[test]
+    fn package_json_scopes_and_typescript_test_conventions() -> Result<(), Box<dyn Error>> {
+        let repository = repository()?;
+        let root = repository.path();
+        write(
+            root,
+            "package.json",
+            r#"{"name": "chakra/monorepo", "workspaces": ["packages/*"]}"#,
+        )?;
+        write(
+            root,
+            "packages/web/package.json",
+            r#"{"name": "@chakra/web"}"#,
+        )?;
+        write(root, "packages/web/tsconfig.json", "{}\n")?;
+        write(
+            root,
+            "packages/cli/tsconfig.json",
+            "{\"compilerOptions\": {}}\n",
+        )?;
+        for (path, source) in [
+            (
+                "packages/web/src/app.ts",
+                "export function app(): void {}\n",
+            ),
+            (
+                "packages/web/src/view.tsx",
+                "export function View() { return null; }\n",
+            ),
+            (
+                "packages/web/src/app.test.ts",
+                "export function appTest(): void {}\n",
+            ),
+            (
+                "packages/web/src/__tests__/hook.ts",
+                "export function hook(): void {}\n",
+            ),
+            (
+                "packages/cli/src/main.ts",
+                "export function cliMain(): void {}\n",
+            ),
+            ("scripts/tool.ts", "export function tool(): void {}\n"),
+        ] {
+            write(root, path, source)?;
+        }
+
+        let classified = discover_classified_sources(root, Language::TypeScript)?;
+        let by_path: BTreeMap<_, _> = classified
+            .into_iter()
+            .map(|source| (source.path, source.metadata))
+            .collect();
+        let app = &by_path[&RepoRelativePath::new("packages/web/src/app.ts")?];
+        assert_eq!(
+            app.classification,
+            SourceClassification::PackageJsonMetadata
+        );
+        assert_eq!(app.role, SourceRole::Production);
+        assert_eq!(
+            app.package.as_ref().map(|package| (
+                package.name.as_str(),
+                package.root.as_ref().map(RepoRelativePath::as_str)
+            )),
+            Some(("@chakra/web", Some("packages/web")))
+        );
+        let view = &by_path[&RepoRelativePath::new("packages/web/src/view.tsx")?];
+        assert_eq!(view.role, SourceRole::Production);
+        for path in [
+            "packages/web/src/app.test.ts",
+            "packages/web/src/__tests__/hook.ts",
+        ] {
+            let source = &by_path[&RepoRelativePath::new(path)?];
+            assert_eq!(
+                source.classification,
+                SourceClassification::PackageJsonMetadata
+            );
+            assert_eq!(source.role, SourceRole::Test, "{path} must be a test role");
+        }
+        let cli = &by_path[&RepoRelativePath::new("packages/cli/src/main.ts")?];
+        assert_eq!(
+            cli.classification,
+            SourceClassification::PackageJsonMetadata,
+            "tsconfig.json without a sibling package.json is a project boundary"
+        );
+        assert_eq!(
+            cli.package.as_ref().map(|package| package.name.as_str()),
+            Some("packages/cli")
+        );
+        let tool = &by_path[&RepoRelativePath::new("scripts/tool.ts")?];
+        assert_eq!(
+            tool.classification,
+            SourceClassification::PackageJsonMetadata
+        );
+        assert_eq!(
+            tool.package.as_ref().map(|package| (
+                package.name.as_str(),
+                package.root.as_ref().map(RepoRelativePath::as_str)
+            )),
+            Some(("chakra/monorepo", None)),
+            "the workspace root package.json scopes files without a nearer package"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn package_json_scopes_and_javascript_test_conventions() -> Result<(), Box<dyn Error>> {
+        let repository = repository()?;
+        let root = repository.path();
+        write(
+            root,
+            "package.json",
+            r#"{"name": "chakra/monorepo", "workspaces": ["packages/*"]}"#,
+        )?;
+        write(
+            root,
+            "packages/web/package.json",
+            r#"{"name": "@chakra/web"}"#,
+        )?;
+        write(root, "packages/cli/jsconfig.json", "{}\n")?;
+        for (path, source) in [
+            ("packages/web/src/app.js", "export function app() {}\n"),
+            (
+                "packages/web/src/view.jsx",
+                "export function View() { return null; }\n",
+            ),
+            (
+                "packages/web/src/app.test.js",
+                "export function appTest() {}\n",
+            ),
+            (
+                "packages/web/src/__tests__/hook.js",
+                "export function hook() {}\n",
+            ),
+            ("packages/cli/src/main.cjs", "module.exports = {};\n"),
+            ("scripts/tool.mjs", "export function tool() {}\n"),
+        ] {
+            write(root, path, source)?;
+        }
+
+        let classified = discover_classified_sources(root, Language::JavaScript)?;
+        let by_path: BTreeMap<_, _> = classified
+            .into_iter()
+            .map(|source| (source.path, source.metadata))
+            .collect();
+        let app = &by_path[&RepoRelativePath::new("packages/web/src/app.js")?];
+        assert_eq!(
+            app.classification,
+            SourceClassification::PackageJsonMetadata
+        );
+        assert_eq!(app.role, SourceRole::Production);
+        assert_eq!(
+            app.package.as_ref().map(|package| (
+                package.name.as_str(),
+                package.root.as_ref().map(RepoRelativePath::as_str)
+            )),
+            Some(("@chakra/web", Some("packages/web")))
+        );
+        let view = &by_path[&RepoRelativePath::new("packages/web/src/view.jsx")?];
+        assert_eq!(view.role, SourceRole::Production);
+        for path in [
+            "packages/web/src/app.test.js",
+            "packages/web/src/__tests__/hook.js",
+        ] {
+            let source = &by_path[&RepoRelativePath::new(path)?];
+            assert_eq!(
+                source.classification,
+                SourceClassification::PackageJsonMetadata
+            );
+            assert_eq!(source.role, SourceRole::Test, "{path} must be a test role");
+        }
+        let cli = &by_path[&RepoRelativePath::new("packages/cli/src/main.cjs")?];
+        assert_eq!(
+            cli.classification,
+            SourceClassification::PackageJsonMetadata,
+            "jsconfig.json without a sibling package.json is a project boundary"
+        );
+        assert_eq!(
+            cli.package.as_ref().map(|package| package.name.as_str()),
+            Some("packages/cli")
+        );
+        let tool = &by_path[&RepoRelativePath::new("scripts/tool.mjs")?];
+        assert_eq!(
+            tool.classification,
+            SourceClassification::PackageJsonMetadata
+        );
+        assert_eq!(
+            tool.package.as_ref().map(|package| (
+                package.name.as_str(),
+                package.root.as_ref().map(RepoRelativePath::as_str)
+            )),
+            Some(("chakra/monorepo", None)),
+            "the workspace root package.json scopes files without a nearer package"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn javascript_without_manifests_uses_test_conventions_and_fallback()
+    -> Result<(), Box<dyn Error>> {
+        let repository = repository()?;
+        let root = repository.path();
+        write(root, "src/util.js", "export function util() {}\n")?;
+        write(root, "src/util.spec.js", "export function utilSpec() {}\n")?;
+
+        let classified = discover_classified_sources(root, Language::JavaScript)?;
+        let by_path: BTreeMap<_, _> = classified
+            .into_iter()
+            .map(|source| (source.path, source.metadata))
+            .collect();
+        let util = &by_path[&RepoRelativePath::new("src/util.js")?];
+        assert_eq!(util.classification, SourceClassification::PathFallback);
+        assert_eq!(util.role, SourceRole::Production);
+        let spec = &by_path[&RepoRelativePath::new("src/util.spec.js")?];
+        assert_eq!(spec.classification, SourceClassification::PathFallback);
+        assert_eq!(spec.role, SourceRole::Test);
+        Ok(())
+    }
+
+    #[test]
+    fn pom_scopes_and_java_test_conventions() -> Result<(), Box<dyn Error>> {
+        let repository = repository()?;
+        let root = repository.path();
+        write(
+            root,
+            "pom.xml",
+            "<project>\n  <artifactId>chakra-parent</artifactId>\n</project>\n",
+        )?;
+        write(
+            root,
+            "service/pom.xml",
+            "<project>\n  <parent>\n    <artifactId>chakra-parent</artifactId>\n  </parent>\n  <artifactId>chakra-service</artifactId>\n</project>\n",
+        )?;
+        for (path, source) in [
+            (
+                "service/src/main/java/chakra/Service.java",
+                "package chakra;\nclass Service {}\n",
+            ),
+            (
+                "service/src/test/java/chakra/ServiceTest.java",
+                "package chakra;\nclass ServiceTest {}\n",
+            ),
+            (
+                "service/src/main/java/chakra/TestHelper.java",
+                "package chakra;\nclass TestHelper {}\n",
+            ),
+        ] {
+            write(root, path, source)?;
+        }
+
+        let classified = discover_classified_sources(root, Language::Java)?;
+        let by_path: BTreeMap<_, _> = classified
+            .into_iter()
+            .map(|source| (source.path, source.metadata))
+            .collect();
+        let service =
+            &by_path[&RepoRelativePath::new("service/src/main/java/chakra/Service.java")?];
+        assert_eq!(service.classification, SourceClassification::MavenMetadata);
+        assert_eq!(service.role, SourceRole::Production);
+        assert_eq!(
+            service.package.as_ref().map(|package| (
+                package.name.as_str(),
+                package.root.as_ref().map(RepoRelativePath::as_str)
+            )),
+            Some(("chakra-service", Some("service"))),
+            "the module pom scopes its sources; the parent artifactId stays in <parent>"
+        );
+        let test =
+            &by_path[&RepoRelativePath::new("service/src/test/java/chakra/ServiceTest.java")?];
+        assert_eq!(test.classification, SourceClassification::MavenMetadata);
+        assert_eq!(
+            test.role,
+            SourceRole::Test,
+            "src/test/java is the Maven/Gradle test source root"
+        );
+        let helper =
+            &by_path[&RepoRelativePath::new("service/src/main/java/chakra/TestHelper.java")?];
+        assert_eq!(
+            helper.role,
+            SourceRole::Test,
+            "Test*.java is a test convention even under src/main/java"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn gradle_settings_and_build_boundaries_scope_java_sources() -> Result<(), Box<dyn Error>> {
+        let repository = repository()?;
+        let root = repository.path();
+        write(root, "settings.gradle", "rootProject.name = 'chakra-app'\n")?;
+        write(root, "app/build.gradle.kts", "plugins { java }\n")?;
+        write(
+            root,
+            "src/main/java/chakra/App.java",
+            "package chakra;\nclass App {}\n",
+        )?;
+        write(
+            root,
+            "app/src/test/java/chakra/AppTests.java",
+            "package chakra;\nclass AppTests {}\n",
+        )?;
+
+        let classified = discover_classified_sources(root, Language::Java)?;
+        let by_path: BTreeMap<_, _> = classified
+            .into_iter()
+            .map(|source| (source.path, source.metadata))
+            .collect();
+        let app = &by_path[&RepoRelativePath::new("src/main/java/chakra/App.java")?];
+        assert_eq!(app.classification, SourceClassification::GradleMetadata);
+        assert_eq!(
+            app.package.as_ref().map(|package| (
+                package.name.as_str(),
+                package.root.as_ref().map(RepoRelativePath::as_str)
+            )),
+            Some(("chakra-app", None))
+        );
+        let tests = &by_path[&RepoRelativePath::new("app/src/test/java/chakra/AppTests.java")?];
+        assert_eq!(tests.classification, SourceClassification::GradleMetadata);
+        assert_eq!(tests.role, SourceRole::Test);
+        assert_eq!(
+            tests.package.as_ref().map(|package| (
+                package.name.as_str(),
+                package.root.as_ref().map(RepoRelativePath::as_str)
+            )),
+            Some(("app", Some("app"))),
+            "a build.gradle.kts without a sibling settings file is a project boundary"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn java_without_manifests_uses_test_conventions_and_fallback() -> Result<(), Box<dyn Error>> {
+        let repository = repository()?;
+        let root = repository.path();
+        write(root, "src/Util.java", "class Util {}\n")?;
+        write(root, "src/UtilTest.java", "class UtilTest {}\n")?;
+
+        let classified = discover_classified_sources(root, Language::Java)?;
+        let by_path: BTreeMap<_, _> = classified
+            .into_iter()
+            .map(|source| (source.path, source.metadata))
+            .collect();
+        let util = &by_path[&RepoRelativePath::new("src/Util.java")?];
+        assert_eq!(util.classification, SourceClassification::PathFallback);
+        assert_eq!(util.role, SourceRole::Production);
+        let test = &by_path[&RepoRelativePath::new("src/UtilTest.java")?];
+        assert_eq!(test.classification, SourceClassification::PathFallback);
+        assert_eq!(test.role, SourceRole::Test);
+        Ok(())
+    }
+
+    #[test]
+    fn typescript_without_manifests_uses_test_conventions_and_fallback()
+    -> Result<(), Box<dyn Error>> {
+        let repository = repository()?;
+        let root = repository.path();
+        write(root, "src/util.ts", "export function util(): void {}\n")?;
+        write(
+            root,
+            "src/util.spec.ts",
+            "export function utilSpec(): void {}\n",
+        )?;
+
+        let classified = discover_classified_sources(root, Language::TypeScript)?;
+        let by_path: BTreeMap<_, _> = classified
+            .into_iter()
+            .map(|source| (source.path, source.metadata))
+            .collect();
+        let util = &by_path[&RepoRelativePath::new("src/util.ts")?];
+        assert_eq!(util.classification, SourceClassification::PathFallback);
+        assert_eq!(util.role, SourceRole::Production);
+        let spec = &by_path[&RepoRelativePath::new("src/util.spec.ts")?];
+        assert_eq!(spec.classification, SourceClassification::PathFallback);
+        assert_eq!(spec.role, SourceRole::Test);
+        Ok(())
+    }
+
+    #[test]
+    fn pyproject_scopes_and_python_test_conventions() -> Result<(), Box<dyn Error>> {
+        let repository = repository()?;
+        let root = repository.path();
+        write(
+            root,
+            "pyproject.toml",
+            "[project]\nname = \"chakra-python-monorepo\"\n",
+        )?;
+        write(
+            root,
+            "packages/web/pyproject.toml",
+            "[project]\nname = \"chakra-web\"\n",
+        )?;
+        write(
+            root,
+            "packages/cli/setup.cfg",
+            "[metadata]\nname = chakra-cli\n",
+        )?;
+        write(
+            root,
+            "packages/legacy/setup.py",
+            "from setuptools import setup\n",
+        )?;
+        for (path, source) in [
+            ("packages/web/src/app.py", "def app():\n    pass\n"),
+            (
+                "packages/web/tests/test_app.py",
+                "def test_app():\n    pass\n",
+            ),
+            (
+                "packages/web/src/app_test.py",
+                "def app_test():\n    pass\n",
+            ),
+            ("packages/cli/src/main.py", "def cli_main():\n    pass\n"),
+            ("packages/legacy/src/old.py", "def old():\n    pass\n"),
+            ("scripts/tool.py", "def tool():\n    pass\n"),
+        ] {
+            write(root, path, source)?;
+        }
+
+        let classified = discover_classified_sources(root, Language::Python)?;
+        let by_path: BTreeMap<_, _> = classified
+            .into_iter()
+            .map(|source| (source.path, source.metadata))
+            .collect();
+        let app = &by_path[&RepoRelativePath::new("packages/web/src/app.py")?];
+        assert_eq!(app.classification, SourceClassification::PyprojectMetadata);
+        assert_eq!(app.role, SourceRole::Production);
+        assert_eq!(
+            app.package.as_ref().map(|package| (
+                package.name.as_str(),
+                package.root.as_ref().map(RepoRelativePath::as_str)
+            )),
+            Some(("chakra-web", Some("packages/web")))
+        );
+        for path in [
+            "packages/web/tests/test_app.py",
+            "packages/web/src/app_test.py",
+        ] {
+            let source = &by_path[&RepoRelativePath::new(path)?];
+            assert_eq!(
+                source.classification,
+                SourceClassification::PyprojectMetadata
+            );
+            assert_eq!(source.role, SourceRole::Test, "{path} must be a test role");
+        }
+        let cli = &by_path[&RepoRelativePath::new("packages/cli/src/main.py")?];
+        assert_eq!(
+            cli.classification,
+            SourceClassification::PyprojectMetadata,
+            "setup.cfg without a sibling pyproject.toml is a project boundary"
+        );
+        assert_eq!(
+            cli.package.as_ref().map(|package| package.name.as_str()),
+            Some("packages/cli")
+        );
+        let legacy = &by_path[&RepoRelativePath::new("packages/legacy/src/old.py")?];
+        assert_eq!(
+            legacy.classification,
+            SourceClassification::PyprojectMetadata,
+            "setup.py without a sibling pyproject.toml is a project boundary"
+        );
+        assert_eq!(
+            legacy.package.as_ref().map(|package| package.name.as_str()),
+            Some("packages/legacy")
+        );
+        let tool = &by_path[&RepoRelativePath::new("scripts/tool.py")?];
+        assert_eq!(tool.classification, SourceClassification::PyprojectMetadata);
+        assert_eq!(
+            tool.package.as_ref().map(|package| (
+                package.name.as_str(),
+                package.root.as_ref().map(RepoRelativePath::as_str)
+            )),
+            Some(("chakra-python-monorepo", None)),
+            "the workspace root pyproject.toml scopes files without a nearer package"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn python_without_manifests_uses_test_conventions_and_fallback() -> Result<(), Box<dyn Error>> {
+        let repository = repository()?;
+        let root = repository.path();
+        write(root, "src/util.py", "def util():\n    pass\n")?;
+        write(root, "tests/test_util.py", "def test_util():\n    pass\n")?;
+
+        let classified = discover_classified_sources(root, Language::Python)?;
+        let by_path: BTreeMap<_, _> = classified
+            .into_iter()
+            .map(|source| (source.path, source.metadata))
+            .collect();
+        let util = &by_path[&RepoRelativePath::new("src/util.py")?];
+        assert_eq!(util.classification, SourceClassification::PathFallback);
+        assert_eq!(util.role, SourceRole::Production);
+        let test = &by_path[&RepoRelativePath::new("tests/test_util.py")?];
+        assert_eq!(test.classification, SourceClassification::PathFallback);
+        assert_eq!(test.role, SourceRole::Test);
+        Ok(())
+    }
+
+    #[test]
     fn staged_rename_reclassifies_the_current_path() -> Result<(), Box<dyn Error>> {
         let repository = repository()?;
         let root = repository.path();
@@ -898,6 +2527,295 @@ mod tests {
             Some("unlocked")
         );
         assert!(!root.join("Cargo.lock").exists());
+        Ok(())
+    }
+
+    #[test]
+    fn csproj_scopes_csharp_and_classifies_tests_and_generated_sources()
+    -> Result<(), Box<dyn Error>> {
+        let repository = repository()?;
+        let root = repository.path();
+        write(
+            root,
+            "src/Core/Core.csproj",
+            "<Project><PropertyGroup><AssemblyName>Chakra.Core</AssemblyName></PropertyGroup></Project>\n",
+        )?;
+        write(
+            root,
+            "src/Core/Service.cs",
+            "namespace Chakra; class Service {}\n",
+        )?;
+        write(root, "src/Core/obj/Generated.cs", "class Generated {}\n")?;
+        write(
+            root,
+            "tests/Core.Tests/Core.Tests.csproj",
+            "<Project><PropertyGroup><IsTestProject>true</IsTestProject></PropertyGroup><ItemGroup><ProjectReference Include=\"../../src/Core/Core.csproj\" /></ItemGroup></Project>\n",
+        )?;
+        write(root, "tests/Core.Tests/Flow.cs", "class Flow {}\n")?;
+
+        let classified = discover_classified_sources(root, Language::CSharp)?;
+        let by_path: BTreeMap<_, _> = classified
+            .into_iter()
+            .map(|source| (source.path, source.metadata))
+            .collect();
+        let service = &by_path[&RepoRelativePath::new("src/Core/Service.cs")?];
+        assert_eq!(
+            service.classification,
+            SourceClassification::DotnetProjectMetadata
+        );
+        assert_eq!(service.role, SourceRole::Production);
+        assert_eq!(
+            service
+                .package
+                .as_ref()
+                .map(|package| package.name.as_str()),
+            Some("Chakra.Core")
+        );
+        let generated = &by_path[&RepoRelativePath::new("src/Core/obj/Generated.cs")?];
+        assert_eq!(generated.role, SourceRole::Generated);
+        let test = &by_path[&RepoRelativePath::new("tests/Core.Tests/Flow.cs")?];
+        assert_eq!(test.role, SourceRole::Test);
+        assert_eq!(
+            test.package.as_ref().map(|package| package.name.as_str()),
+            Some("Core.Tests")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn duplicate_csproj_roots_do_not_choose_an_arbitrary_project() -> Result<(), Box<dyn Error>> {
+        let repository = repository()?;
+        let root = repository.path();
+        write(root, "src/App/App.csproj", "<Project />\n")?;
+        write(root, "src/App/App.Tests.csproj", "<Project />\n")?;
+        write(root, "src/App/Service.cs", "class Service {}\n")?;
+
+        let classified = discover_classified_sources(root, Language::CSharp)?;
+        let service = classified
+            .iter()
+            .find(|source| source.path.as_str() == "src/App/Service.cs")
+            .ok_or("Service.cs was not discovered")?;
+        assert_eq!(
+            service.metadata.classification,
+            SourceClassification::PathFallback
+        );
+        assert_eq!(service.metadata.role, SourceRole::Production);
+        assert!(service.metadata.package.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn shellcheck_boundary_scopes_shell_roles_and_leaves_outside_files_on_fallback()
+    -> Result<(), Box<dyn Error>> {
+        let repository = repository()?;
+        let root = repository.path();
+        write(root, "tools/.shellcheckrc", "enable=all\n")?;
+        for (path, source) in [
+            ("scripts/root.sh", "root_task() { true; }\n"),
+            ("tools/src/run.bash", "run() { true; }\n"),
+            ("tools/tests/flow.zsh", "test_flow() { true; }\n"),
+            ("tools/vendor/external.ksh", "external() { true; }\n"),
+            ("tools/generated/schema.sh", "schema() { true; }\n"),
+        ] {
+            write(root, path, source)?;
+        }
+
+        let classified = discover_classified_sources(root, Language::Shell)?;
+        let by_path: BTreeMap<_, _> = classified
+            .into_iter()
+            .map(|source| (source.path, source.metadata))
+            .collect();
+        let outside = &by_path[&RepoRelativePath::new("scripts/root.sh")?];
+        assert_eq!(outside.classification, SourceClassification::PathFallback);
+        assert!(outside.package.is_none());
+
+        for (path, role) in [
+            ("tools/src/run.bash", SourceRole::Production),
+            ("tools/tests/flow.zsh", SourceRole::Test),
+            ("tools/vendor/external.ksh", SourceRole::Vendor),
+            ("tools/generated/schema.sh", SourceRole::Generated),
+        ] {
+            let source = &by_path[&RepoRelativePath::new(path)?];
+            assert_eq!(
+                source.classification,
+                SourceClassification::ShellProjectMetadata
+            );
+            assert_eq!(source.role, role);
+            assert_eq!(
+                source.package.as_ref().map(|package| (
+                    package.name.as_str(),
+                    package.root.as_ref().map(RepoRelativePath::as_str)
+                )),
+                Some(("tools", Some("tools")))
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn cpp_build_boundary_scopes_roles_and_leaves_outside_files_on_fallback()
+    -> Result<(), Box<dyn Error>> {
+        let repository = repository()?;
+        let root = repository.path();
+        write(root, "native/CMakeLists.txt", "project(native)\n")?;
+        for (path, source) in [
+            ("standalone/root.cpp", "void root_task() {}\n"),
+            ("native/src/run.cpp", "void run() {}\n"),
+            ("native/tests/payment_test.cc", "void test_payment() {}\n"),
+            ("native/vendor/external.c", "void external(void) {}\n"),
+            ("native/generated/schema.pb.cc", "void schema() {}\n"),
+            ("native/include/payment.hpp", "void payment();\n"),
+        ] {
+            write(root, path, source)?;
+        }
+
+        let classified = discover_classified_sources(root, Language::Cpp)?;
+        let by_path: BTreeMap<_, _> = classified
+            .into_iter()
+            .map(|source| (source.path, source.metadata))
+            .collect();
+        let outside = &by_path[&RepoRelativePath::new("standalone/root.cpp")?];
+        assert_eq!(outside.classification, SourceClassification::PathFallback);
+        assert!(outside.package.is_none());
+
+        for (path, role) in [
+            ("native/src/run.cpp", SourceRole::Production),
+            ("native/tests/payment_test.cc", SourceRole::Test),
+            ("native/vendor/external.c", SourceRole::Vendor),
+            ("native/generated/schema.pb.cc", SourceRole::Generated),
+            ("native/include/payment.hpp", SourceRole::Production),
+        ] {
+            let source = &by_path[&RepoRelativePath::new(path)?];
+            assert_eq!(
+                source.classification,
+                SourceClassification::CppProjectMetadata
+            );
+            assert_eq!(source.role, role);
+            assert_eq!(
+                source.package.as_ref().map(|package| (
+                    package.name.as_str(),
+                    package.root.as_ref().map(RepoRelativePath::as_str)
+                )),
+                Some(("native", Some("native")))
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn terraform_module_boundaries_scope_hcl_roles_and_packages() -> Result<(), Box<dyn Error>> {
+        let repository = repository()?;
+        let root = repository.path();
+        for (path, source) in [
+            ("main.tf", "terraform {}\n"),
+            ("production.tfvars", "region = \"eu-west-1\"\n"),
+            ("tests/flow.tftest.hcl", "run \"flow\" {}\n"),
+            ("modules/shared/main.tf", "terraform {}\n"),
+            ("modules/shared/variables.tf", "variable \"name\" {}\n"),
+            ("vendor/external/main.tf", "terraform {}\n"),
+            ("generated/schema.tf", "resource \"test\" \"schema\" {}\n"),
+        ] {
+            write(root, path, source)?;
+        }
+
+        let classified = discover_classified_sources(root, Language::Hcl)?;
+        let by_path: BTreeMap<_, _> = classified
+            .into_iter()
+            .map(|source| (source.path, source.metadata))
+            .collect();
+        for (path, role, package) in [
+            ("main.tf", SourceRole::Production, "repository"),
+            ("production.tfvars", SourceRole::Production, "repository"),
+            ("tests/flow.tftest.hcl", SourceRole::Test, "repository"),
+            (
+                "modules/shared/variables.tf",
+                SourceRole::Production,
+                "modules/shared",
+            ),
+            (
+                "vendor/external/main.tf",
+                SourceRole::Vendor,
+                "vendor/external",
+            ),
+            ("generated/schema.tf", SourceRole::Generated, "generated"),
+        ] {
+            let source = &by_path[&RepoRelativePath::new(path)?];
+            assert_eq!(
+                source.classification,
+                SourceClassification::TerraformModuleMetadata
+            );
+            assert_eq!(source.role, role);
+            assert_eq!(
+                source.package.as_ref().map(|package| package.name.as_str()),
+                Some(package)
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn go_module_and_workspace_boundaries_scope_roles_and_packages() -> Result<(), Box<dyn Error>> {
+        let repository = repository()?;
+        let root = repository.path();
+        for (path, source) in [
+            ("go.work", "go 1.25\nuse ./services/payments\n"),
+            (
+                "services/payments/go.mod",
+                "module example.com/services/payments\n\ngo 1.25\n",
+            ),
+            ("standalone/main.go", "package standalone\n"),
+            ("services/payments/service.go", "package payments\n"),
+            ("services/payments/service_test.go", "package payments\n"),
+            ("services/payments/vendor/external.go", "package external\n"),
+            (
+                "services/payments/generated/payment.pb.go",
+                "package payments\n",
+            ),
+        ] {
+            write(root, path, source)?;
+        }
+
+        let classified = discover_classified_sources(root, Language::Go)?;
+        let by_path: BTreeMap<_, _> = classified
+            .into_iter()
+            .map(|source| (source.path, source.metadata))
+            .collect();
+        let standalone = &by_path[&RepoRelativePath::new("standalone/main.go")?];
+        assert_eq!(
+            standalone.classification,
+            SourceClassification::GoModuleMetadata
+        );
+        assert_eq!(
+            standalone
+                .package
+                .as_ref()
+                .map(|package| package.name.as_str()),
+            Some("go-workspace")
+        );
+
+        for (path, role) in [
+            ("services/payments/service.go", SourceRole::Production),
+            ("services/payments/service_test.go", SourceRole::Test),
+            ("services/payments/vendor/external.go", SourceRole::Vendor),
+            (
+                "services/payments/generated/payment.pb.go",
+                SourceRole::Generated,
+            ),
+        ] {
+            let source = &by_path[&RepoRelativePath::new(path)?];
+            assert_eq!(
+                source.classification,
+                SourceClassification::GoModuleMetadata
+            );
+            assert_eq!(source.role, role);
+            assert_eq!(
+                source.package.as_ref().map(|package| (
+                    package.name.as_str(),
+                    package.root.as_ref().map(RepoRelativePath::as_str),
+                )),
+                Some(("example.com/services/payments", Some("services/payments"),))
+            );
+        }
         Ok(())
     }
 

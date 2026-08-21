@@ -28,9 +28,9 @@ mod source_metadata;
 pub use discovery::{
     DiscoveryError, WorkspaceInventory, discover_language_files, discover_source_files,
     discover_source_files_in_worktree, discover_source_files_in_worktree_with_context,
-    discover_workspace_inventory_in_worktree_with_context, resolve_git_administrative_paths,
-    resolve_repository_identity, resolve_repository_root, resolve_repository_root_with_context,
-    resolve_workspace_identity, source_language,
+    discover_workspace_inventory_in_worktree_with_context, metadata_languages,
+    resolve_git_administrative_paths, resolve_repository_identity, resolve_repository_root,
+    resolve_repository_root_with_context, resolve_workspace_identity, source_language,
 };
 pub use source_metadata::{
     ClassifiedSource, classify_discovered_sources_with_context, discover_classified_sources,
@@ -540,7 +540,7 @@ fn is_supported_source(path: &str) -> bool {
 }
 
 fn raw_is_supported_source(raw: &[u8]) -> Result<bool, WorkspaceDiffError> {
-    if !raw.ends_with(b".rs") && !raw.ends_with(b".php") {
+    if !discovery::raw_may_be_source(raw) {
         return Ok(false);
     }
     let path = std::str::from_utf8(raw)
@@ -1465,6 +1465,256 @@ mod tests {
         assert_eq!(changes["src/service.php"], ChangeKind::Modified);
         assert_eq!(changes["src/deleted.php"], ChangeKind::Deleted);
         assert_eq!(changes["src/untracked.php"], ChangeKind::Added);
+        Ok(())
+    }
+
+    #[test]
+    fn typescript_modify_untracked_and_delete_use_the_same_diff_scope() -> Result<(), Box<dyn Error>>
+    {
+        let repository = TempDir::new()?;
+        let root = repository.path();
+        git(root, &["init", "--quiet"])?;
+        git(root, &["config", "user.email", "tests@example.invalid"])?;
+        git(root, &["config", "user.name", "Chakra Tests"])?;
+        write(root, "src/service.ts", "export function pay(): void {}\n")?;
+        write(
+            root,
+            "src/deleted.tsx",
+            "export function removed() { return null; }\n",
+        )?;
+        git(root, &["add", "src"])?;
+        git(root, &["commit", "--quiet", "-m", "base"])?;
+
+        write(
+            root,
+            "src/service.ts",
+            "export function payNow(): void {}\n",
+        )?;
+        fs::remove_file(root.join("src/deleted.tsx"))?;
+        write(
+            root,
+            "src/untracked.mts",
+            "export function added(): void {}\n",
+        )?;
+        let workspace = workspace(root, &["src/service.ts", "src/untracked.mts"])?;
+        let diff = GitWorkspaceDiff.diff(workspace)?;
+        let changes: BTreeMap<_, _> = diff
+            .files
+            .iter()
+            .map(|change| (change.path.as_str(), change.change))
+            .collect();
+        assert_eq!(changes["src/service.ts"], ChangeKind::Modified);
+        assert_eq!(changes["src/deleted.tsx"], ChangeKind::Deleted);
+        assert_eq!(changes["src/untracked.mts"], ChangeKind::Added);
+        Ok(())
+    }
+
+    #[test]
+    fn javascript_modify_untracked_and_delete_use_the_same_diff_scope() -> Result<(), Box<dyn Error>>
+    {
+        let repository = TempDir::new()?;
+        let root = repository.path();
+        git(root, &["init", "--quiet"])?;
+        git(root, &["config", "user.email", "tests@example.invalid"])?;
+        git(root, &["config", "user.name", "Chakra Tests"])?;
+        write(root, "src/service.js", "export function pay() {}\n")?;
+        write(root, "src/deleted.jsx", "export function Removed() {}\n")?;
+        git(root, &["add", "src"])?;
+        git(root, &["commit", "--quiet", "-m", "base"])?;
+
+        write(root, "src/service.js", "export function payNow() {}\n")?;
+        fs::remove_file(root.join("src/deleted.jsx"))?;
+        write(root, "src/untracked.mjs", "export function added() {}\n")?;
+        let workspace = workspace(root, &["src/service.js", "src/untracked.mjs"])?;
+        let diff = GitWorkspaceDiff.diff(workspace)?;
+        let changes: BTreeMap<_, _> = diff
+            .files
+            .iter()
+            .map(|change| (change.path.as_str(), change.change))
+            .collect();
+        assert_eq!(changes["src/service.js"], ChangeKind::Modified);
+        assert_eq!(changes["src/deleted.jsx"], ChangeKind::Deleted);
+        assert_eq!(changes["src/untracked.mjs"], ChangeKind::Added);
+        Ok(())
+    }
+
+    #[test]
+    fn java_modify_untracked_and_delete_use_the_same_diff_scope() -> Result<(), Box<dyn Error>> {
+        let repository = TempDir::new()?;
+        let root = repository.path();
+        git(root, &["init", "--quiet"])?;
+        git(root, &["config", "user.email", "tests@example.invalid"])?;
+        git(root, &["config", "user.name", "Chakra Tests"])?;
+        write(root, "src/Service.java", "class Service {}\n")?;
+        write(root, "src/Deleted.java", "class Deleted {}\n")?;
+        git(root, &["add", "src"])?;
+        git(root, &["commit", "--quiet", "-m", "base"])?;
+
+        write(
+            root,
+            "src/Service.java",
+            "class Service { void payNow() {} }\n",
+        )?;
+        fs::remove_file(root.join("src/Deleted.java"))?;
+        write(root, "src/Untracked.java", "class Untracked {}\n")?;
+        let workspace = workspace(root, &["src/Service.java", "src/Untracked.java"])?;
+        let diff = GitWorkspaceDiff.diff(workspace)?;
+        let changes: BTreeMap<_, _> = diff
+            .files
+            .iter()
+            .map(|change| (change.path.as_str(), change.change))
+            .collect();
+        assert_eq!(changes["src/Service.java"], ChangeKind::Modified);
+        assert_eq!(changes["src/Deleted.java"], ChangeKind::Deleted);
+        assert_eq!(changes["src/Untracked.java"], ChangeKind::Added);
+        Ok(())
+    }
+
+    #[test]
+    fn python_modify_untracked_and_delete_use_the_same_diff_scope() -> Result<(), Box<dyn Error>> {
+        let repository = TempDir::new()?;
+        let root = repository.path();
+        git(root, &["init", "--quiet"])?;
+        git(root, &["config", "user.email", "tests@example.invalid"])?;
+        git(root, &["config", "user.name", "Chakra Tests"])?;
+        write(root, "src/service.py", "def pay():\n    pass\n")?;
+        write(root, "src/deleted.pyi", "def removed() -> None: ...\n")?;
+        git(root, &["add", "src"])?;
+        git(root, &["commit", "--quiet", "-m", "base"])?;
+
+        write(root, "src/service.py", "def pay_now():\n    pass\n")?;
+        fs::remove_file(root.join("src/deleted.pyi"))?;
+        write(root, "src/untracked.py", "def added():\n    pass\n")?;
+        let workspace = workspace(root, &["src/service.py", "src/untracked.py"])?;
+        let diff = GitWorkspaceDiff.diff(workspace)?;
+        let changes: BTreeMap<_, _> = diff
+            .files
+            .iter()
+            .map(|change| (change.path.as_str(), change.change))
+            .collect();
+        assert_eq!(changes["src/service.py"], ChangeKind::Modified);
+        assert_eq!(changes["src/deleted.pyi"], ChangeKind::Deleted);
+        assert_eq!(changes["src/untracked.py"], ChangeKind::Added);
+        Ok(())
+    }
+
+    #[test]
+    fn shell_modify_untracked_and_delete_use_the_same_diff_scope() -> Result<(), Box<dyn Error>> {
+        let repository = TempDir::new()?;
+        let root = repository.path();
+        git(root, &["init", "--quiet"])?;
+        git(root, &["config", "user.email", "tests@example.invalid"])?;
+        git(root, &["config", "user.name", "Chakra Tests"])?;
+        write(root, "src/service.sh", "pay() { true; }\n")?;
+        write(root, "src/deleted.zsh", "removed() { true; }\n")?;
+        git(root, &["add", "src"])?;
+        git(root, &["commit", "--quiet", "-m", "base"])?;
+
+        write(root, "src/service.sh", "pay_now() { true; }\n")?;
+        fs::remove_file(root.join("src/deleted.zsh"))?;
+        write(root, "src/untracked.ksh", "added() { true; }\n")?;
+        let workspace = workspace(root, &["src/service.sh", "src/untracked.ksh"])?;
+        let diff = GitWorkspaceDiff.diff(workspace)?;
+        let changes: BTreeMap<_, _> = diff
+            .files
+            .iter()
+            .map(|change| (change.path.as_str(), change.change))
+            .collect();
+        assert_eq!(changes["src/service.sh"], ChangeKind::Modified);
+        assert_eq!(changes["src/deleted.zsh"], ChangeKind::Deleted);
+        assert_eq!(changes["src/untracked.ksh"], ChangeKind::Added);
+        Ok(())
+    }
+
+    #[test]
+    fn cpp_modify_untracked_and_delete_use_the_same_diff_scope() -> Result<(), Box<dyn Error>> {
+        let repository = TempDir::new()?;
+        let root = repository.path();
+        git(root, &["init", "--quiet"])?;
+        git(root, &["config", "user.email", "tests@example.invalid"])?;
+        git(root, &["config", "user.name", "Chakra Tests"])?;
+        write(root, "src/service.cpp", "void pay() {}\n")?;
+        write(root, "include/deleted.hpp", "void removed();\n")?;
+        git(root, &["add", "src", "include"])?;
+        git(root, &["commit", "--quiet", "-m", "base"])?;
+
+        write(root, "src/service.cpp", "void pay_now() {}\n")?;
+        fs::remove_file(root.join("include/deleted.hpp"))?;
+        write(root, "src/untracked.cc", "void added() {}\n")?;
+        let workspace = workspace(root, &["src/service.cpp", "src/untracked.cc"])?;
+        let diff = GitWorkspaceDiff.diff(workspace)?;
+        let changes: BTreeMap<_, _> = diff
+            .files
+            .iter()
+            .map(|change| (change.path.as_str(), change.change))
+            .collect();
+        assert_eq!(changes["src/service.cpp"], ChangeKind::Modified);
+        assert_eq!(changes["include/deleted.hpp"], ChangeKind::Deleted);
+        assert_eq!(changes["src/untracked.cc"], ChangeKind::Added);
+        Ok(())
+    }
+
+    #[test]
+    fn hcl_modify_untracked_and_delete_use_the_same_diff_scope() -> Result<(), Box<dyn Error>> {
+        let repository = TempDir::new()?;
+        let root = repository.path();
+        git(root, &["init", "--quiet"])?;
+        git(root, &["config", "user.email", "tests@example.invalid"])?;
+        git(root, &["config", "user.name", "Chakra Tests"])?;
+        write(root, "main.tf", "terraform {}\n")?;
+        write(root, "deleted.tfvars", "region = \"eu-west-1\"\n")?;
+        git(root, &["add", "main.tf", "deleted.tfvars"])?;
+        git(root, &["commit", "--quiet", "-m", "base"])?;
+
+        write(
+            root,
+            "main.tf",
+            "terraform { required_version = \">= 1.9\" }\n",
+        )?;
+        fs::remove_file(root.join("deleted.tfvars"))?;
+        write(root, "flow.tftest.hcl", "run \"flow\" {}\n")?;
+        let workspace = workspace(root, &["main.tf", "flow.tftest.hcl"])?;
+        let diff = GitWorkspaceDiff.diff(workspace)?;
+        let changes: BTreeMap<_, _> = diff
+            .files
+            .iter()
+            .map(|change| (change.path.as_str(), change.change))
+            .collect();
+        assert_eq!(changes["main.tf"], ChangeKind::Modified);
+        assert_eq!(changes["deleted.tfvars"], ChangeKind::Deleted);
+        assert_eq!(changes["flow.tftest.hcl"], ChangeKind::Added);
+        Ok(())
+    }
+
+    #[test]
+    fn go_modify_untracked_and_delete_use_the_same_diff_scope() -> Result<(), Box<dyn Error>> {
+        let repository = TempDir::new()?;
+        let root = repository.path();
+        git(root, &["init", "--quiet"])?;
+        git(root, &["config", "user.email", "tests@example.invalid"])?;
+        git(root, &["config", "user.name", "Chakra Tests"])?;
+        write(root, "service.go", "package service\nfunc pay() {}\n")?;
+        write(
+            root,
+            "deleted_test.go",
+            "package service\nfunc TestOld() {}\n",
+        )?;
+        git(root, &["add", "service.go", "deleted_test.go"])?;
+        git(root, &["commit", "--quiet", "-m", "base"])?;
+
+        write(root, "service.go", "package service\nfunc payNow() {}\n")?;
+        fs::remove_file(root.join("deleted_test.go"))?;
+        write(root, "added.go", "package service\nfunc added() {}\n")?;
+        let workspace = workspace(root, &["service.go", "added.go"])?;
+        let diff = GitWorkspaceDiff.diff(workspace)?;
+        let changes: BTreeMap<_, _> = diff
+            .files
+            .iter()
+            .map(|change| (change.path.as_str(), change.change))
+            .collect();
+        assert_eq!(changes["service.go"], ChangeKind::Modified);
+        assert_eq!(changes["deleted_test.go"], ChangeKind::Deleted);
+        assert_eq!(changes["added.go"], ChangeKind::Added);
         Ok(())
     }
 }

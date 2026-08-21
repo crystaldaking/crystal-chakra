@@ -54,6 +54,10 @@ type GateResult<T> = Result<T, Box<dyn Error + Send + Sync>>;
 struct DegradedRustProvider;
 
 impl PreciseProvider for DegradedRustProvider {
+    fn name(&self) -> &'static str {
+        "degraded-rust-provider"
+    }
+
     fn supports(&self, language: Language) -> bool {
         language == Language::Rust
     }
@@ -466,7 +470,7 @@ fn edit_summary(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "release-only generated v0.1.1 large-repository gate"]
+#[ignore = "release-only generated multi-language large-repository gate"]
 async fn generated_multi_language_release_gate() -> GateResult<()> {
     require(
         !cfg!(debug_assertions),

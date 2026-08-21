@@ -28,7 +28,8 @@ pub enum Precision {
     Heuristic,
     /// Derived from syntax (Tree-sitter); no type checking.
     Syntax,
-    /// Confirmed by a precise provider such as rust-analyzer.
+    /// Confirmed by a precise provider such as rust-analyzer, or by a
+    /// Chakra-owned resolver whose evidence rule is precise-tier (ADR-0030).
     Precise,
 }
 
@@ -38,6 +39,27 @@ pub enum Precision {
 pub enum Provenance {
     /// rust-analyzer (live precise provider).
     RustAnalyzer,
+    /// vtsls (live precise provider for TypeScript and JavaScript,
+    /// ADR-0027/0032).
+    Vtsls,
+    /// pyright (live precise provider for Python, ADR-0027).
+    Pyright,
+    /// jdtls (live precise provider for Java, ADR-0027/0036).
+    Jdtls,
+    /// csharp-ls (live precise provider for C#, ADR-0027/0037).
+    CsharpLs,
+    /// bash-language-server (live reference provider for Shell, ADR-0027).
+    BashLanguageServer,
+    /// clangd (live precise provider for C/C++, ADR-0027).
+    Clangd,
+    /// terraform-ls (live precise reference provider for HCL/Terraform,
+    /// ADR-0027).
+    TerraformLs,
+    /// gopls (live precise provider for Go, ADR-0027).
+    Gopls,
+    /// Chakra-owned static resolver producing precise-tier facts from an
+    /// explicit, deterministic evidence rule (ADR-0030).
+    ChakraResolver,
     /// Tree-sitter syntax analysis.
     TreeSitter,
     /// Git metadata or diff state.
@@ -66,6 +88,47 @@ mod tests {
             serde_json::to_string(&Provenance::RustAnalyzer)?,
             "\"rust_analyzer\""
         );
+        assert_eq!(
+            serde_json::to_string(&Provenance::ChakraResolver)?,
+            "\"chakra_resolver\""
+        );
+        assert_eq!(
+            serde_json::from_str::<Provenance>("\"chakra_resolver\"")?,
+            Provenance::ChakraResolver
+        );
+        assert_eq!(serde_json::to_string(&Provenance::Vtsls)?, "\"vtsls\"");
+        assert_eq!(
+            serde_json::from_str::<Provenance>("\"vtsls\"")?,
+            Provenance::Vtsls
+        );
+        assert_eq!(serde_json::to_string(&Provenance::Pyright)?, "\"pyright\"");
+        assert_eq!(
+            serde_json::from_str::<Provenance>("\"pyright\"")?,
+            Provenance::Pyright
+        );
+        assert_eq!(serde_json::to_string(&Provenance::Jdtls)?, "\"jdtls\"");
+        assert_eq!(
+            serde_json::from_str::<Provenance>("\"jdtls\"")?,
+            Provenance::Jdtls
+        );
+        assert_eq!(
+            serde_json::to_string(&Provenance::CsharpLs)?,
+            "\"csharp_ls\""
+        );
+        assert_eq!(
+            serde_json::from_str::<Provenance>("\"csharp_ls\"")?,
+            Provenance::CsharpLs
+        );
+        assert_eq!(
+            serde_json::to_string(&Provenance::BashLanguageServer)?,
+            "\"bash_language_server\""
+        );
+        assert_eq!(serde_json::to_string(&Provenance::Clangd)?, "\"clangd\"");
+        assert_eq!(
+            serde_json::to_string(&Provenance::TerraformLs)?,
+            "\"terraform_ls\""
+        );
+        assert_eq!(serde_json::to_string(&Provenance::Gopls)?, "\"gopls\"");
         Ok(())
     }
 }

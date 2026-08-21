@@ -485,6 +485,7 @@ impl Worker {
                     return Ok(PreciseQueryResult {
                         revision: request.workspace.revision,
                         state: ProviderState::Ready,
+                        fallback_cause: None,
                         incoming: Vec::new(),
                         outgoing: Vec::new(),
                         incoming_truncated: false,
@@ -554,6 +555,7 @@ impl Worker {
         Ok(PreciseQueryResult {
             revision: request.workspace.revision,
             state: ProviderState::Ready,
+            fallback_cause: None,
             incoming,
             outgoing,
             incoming_truncated,
@@ -663,6 +665,10 @@ impl Worker {
             deleted,
             documents_examined,
             source_body_comparisons,
+            inputs_created,
+            inputs_changed,
+            inputs_deleted,
+            inputs_examined: _,
         } = workspace
             .delta_since(
                 &self.known_workspace,
@@ -680,7 +686,14 @@ impl Worker {
             .filter(|document| document.language == chakra_domain::symbol::Language::Rust)
             .ok_or(ProviderError::InvalidPosition)?;
         let target_needs_open = !self.opened_versions.contains_key(target.file());
-        if !deleted.is_empty() || !created.is_empty() || !changed.is_empty() || target_needs_open {
+        if !deleted.is_empty()
+            || !created.is_empty()
+            || !changed.is_empty()
+            || !inputs_created.is_empty()
+            || !inputs_changed.is_empty()
+            || !inputs_deleted.is_empty()
+            || target_needs_open
+        {
             self.sync_generation = self
                 .sync_generation
                 .checked_add(1)
@@ -760,6 +773,27 @@ impl Worker {
                 )? as u64);
                 text_documents_sent = text_documents_sent.saturating_add(1);
             }
+        }
+        for path in inputs_deleted {
+            self.check_operation()?;
+            events.push(FileEvent {
+                uri: path_to_uri(&workspace.repository_root, &path)?,
+                typ: FileChangeType::DELETED,
+            });
+        }
+        for path in inputs_created {
+            self.check_operation()?;
+            events.push(FileEvent {
+                uri: path_to_uri(&workspace.repository_root, &path)?,
+                typ: FileChangeType::CREATED,
+            });
+        }
+        for path in inputs_changed {
+            self.check_operation()?;
+            events.push(FileEvent {
+                uri: path_to_uri(&workspace.repository_root, &path)?,
+                typ: FileChangeType::CHANGED,
+            });
         }
         if !self.opened_versions.contains_key(&target_document.path) {
             text_bytes_sent = text_bytes_sent.saturating_add(self.open_or_change(
@@ -1392,6 +1426,7 @@ impl Worker {
             shared.metrics = ProviderMetrics {
                 cache: self.cache.metrics(),
                 document_sync: self.sync_metrics.clone(),
+                ..ProviderMetrics::default()
             };
         }
     }
@@ -1412,6 +1447,7 @@ impl Worker {
             shared.metrics = ProviderMetrics {
                 cache: self.cache.metrics(),
                 document_sync: self.sync_metrics.clone(),
+                ..ProviderMetrics::default()
             };
         }
     }
@@ -1534,6 +1570,7 @@ mod tests {
         let result = |name: &str| PreciseQueryResult {
             revision: Revision(1),
             state: ProviderState::Ready,
+            fallback_cause: None,
             incoming: vec![chakra_engine::PreciseRelation {
                 name: name.to_owned(),
                 declaration: range.clone(),

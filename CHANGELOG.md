@@ -5,6 +5,88 @@ version tags prefixed with `v`.
 
 ## [Unreleased]
 
+### Added
+
+- First-class Java support (issue #30): a `chakra-language-java` adapter
+  crate (tree-sitter-java 0.23.5, `.java`) registered in the ADR-0031
+  adapter registry after JavaScript; class/interface/enum/record/annotation
+  declarations with methods, fields, and constructors (recorded as methods
+  named `constructor`), package and nested-class containers, single-type /
+  static / wildcard import facts, `extends`/`implements` relations, JUnit
+  4/5 `@Test` test hints, bounded lazy call candidates (bare simple-name,
+  `this.`, static-style `Type.`, `new X()` constructors, static-import
+  aliases), and actionable syntax diagnostics. Maven `pom.xml` module
+  scopes and Gradle `settings.gradle(.kts)`/`build.gradle(.kts)` project
+  boundaries plus `src/main/java` vs `src/test/java` and
+  `Test*.java`/`*Test.java`/`*Tests.java` source roles. The new
+  `chakra-provider-jdtls` precise provider over chakra-lsp (additive
+  `Provenance::Jdtls`) owns the jdtls lifecycle: per-workspace data
+  directory under the OS tempdir (workspace-bound defaults and validation
+  reject relative/repository-contained cache paths) and a configurable
+  readiness bound for the slow first project import (ADR-0036). Conformance
+  fixture (14/14 scenarios) and the pinned spring-projects/spring-boot plus
+  apache/kafka corpus evaluations. Java is advertised first-class. On macOS,
+  live indexing uses notify's kqueue backend with bounded, non-recursive
+  source-directory registration, avoiding the FSEvents startup path that can
+  block during repeated registration.
+- Bounded multi-provider orchestration (issue #26, ADR-0035):
+  rust-analyzer, vtsls (shared by TypeScript/JavaScript), pyright, and jdtls
+  now coexist through strict language routing and start only on the first
+  precise query. Deterministic active-provider, memory-reservation,
+  concurrent-query, and queue limits provide priority/FIFO admission with
+  observable syntax fallback under saturation. Idle/LRU eviction, activation
+  backoff, cancellation, and owned pool/provider shutdown prevent unbounded
+  work or orphan processes; failed eviction cleanup retains its reservation
+  and is retried observably. Provider status distinguishes `dormant` from
+  `not_configured` and reports pool lifecycle/capacity metrics; the response
+  envelope schema advances to version 8.
+- First-class JavaScript/JSX support (issue #29): a
+  `chakra-language-javascript` adapter crate (tree-sitter-javascript
+  0.25.0, `.js`/`.jsx`/`.mjs`/`.cjs`; the single grammar parses JSX
+  natively) registered in the ADR-0031 adapter registry after Python; ES
+  module import/export and alias facts, CommonJS `require()` and
+  `module.exports`/`exports` facts (ADR-0034), class/nested-function
+  containers, `extends` relations, jest/vitest/mocha test hints, bounded
+  lazy call candidates with relative-import and require-alias resolution,
+  and actionable syntax diagnostics. package.json project scopes plus
+  jsconfig.json boundaries and `__tests__/`/`*.test.*`/`*.spec.*` source
+  roles; the existing `chakra-provider-vtsls` precise provider now also
+  serves JavaScript documents (`javascript`/`javascriptreact` language
+  ids, shared `Provenance::Vtsls`, no new provider crate). Conformance
+  fixture (14/14 scenarios) and the pinned react/react corpus evaluation
+  (12/12, no degradations). JavaScript is advertised first-class.
+- First-class Python support (issue #28): a `chakra-language-python`
+  adapter crate (tree-sitter-python 0.25.0, `.py`/`.pyi`) registered in the
+  ADR-0031 adapter registry after TypeScript; `import`/`from ... import`
+  and alias facts (including relative imports), module/class/function
+  containers with decorators recorded, base-class relations, pytest/unittest
+  test hints, bounded lazy call candidates (bare, `self.`/`cls.`,
+  module-alias, `ClassName()` constructor, and single-base `super()` calls),
+  and actionable syntax diagnostics. pyproject.toml project scopes plus
+  setup.py/setup.cfg boundaries and `test_*.py`/`*_test.py` source roles; a
+  `chakra-provider-pyright` precise provider over the shared chakra-lsp
+  client (additive `Provenance::Pyright`); conformance fixture (14/14
+  scenarios) and the pinned django/django + apache/airflow corpus
+  evaluations (12/12 each, no degradations). Revision-local entity ids now
+  use the ADR-0033 slot registry (4-bit language slot + 60-bit counter)
+  instead of hardcoded per-language bases; ids remain in-memory only.
+- First-class TypeScript/TSX syntax support (issue #27, Part A): a
+  `chakra-language-typescript` adapter crate (tree-sitter-typescript 0.23.2,
+  TypeScript grammar for `.ts`/`.mts`/`.cts`, TSX grammar for `.tsx`)
+  registered in the ADR-0031 adapter registry after PHP; ES module
+  import/export and alias facts, namespace/class containers, heritage
+  relations, jest/vitest/mocha test hints, bounded lazy call candidates with
+  relative-import resolution, and actionable syntax diagnostics.
+  package.json/tsconfig.json project scopes plus `*.test.*`/`*.spec.*`/
+  `__tests__/` source roles; conformance fixture (14/14 scenarios) and the
+  pinned microsoft/vscode corpus evaluation (12/12, degraded as designed by
+  the workspace source-byte and symbol budgets).
+- Shared `chakra-lsp` stdio client crate and the `chakra-provider-vtsls`
+  precise provider for TypeScript (issue #27, Part B, ADR-0032): precise
+  definitions/references/callers with bounded readiness, revision-scoped
+  synchronization, cancellation, restart, and orphan-free shutdown; additive
+  `Provenance::Vtsls`. TypeScript is advertised first-class.
+
 ## [0.1.1] - 2026-08-18
 
 ### Added

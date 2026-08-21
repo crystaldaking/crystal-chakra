@@ -12,8 +12,17 @@ publish = false
 chakra-domain = { path = "../chakra-domain", version = "0.1.1" }
 chakra-engine = { path = "../chakra-engine", version = "0.1.1" }
 chakra-git = { path = "../chakra-git", version = "0.1.1" }
+chakra-language-java = { path = "../chakra-language-java", version = "0.1.1" }
+chakra-language-csharp = { path = "../chakra-language-csharp", version = "0.1.1" }
+chakra-language-shell = { path = "../chakra-language-shell", version = "0.1.1" }
+chakra-language-cpp = { path = "../chakra-language-cpp", version = "0.1.1" }
+chakra-language-hcl = { path = "../chakra-language-hcl", version = "0.1.1" }
+chakra-language-go = { path = "../chakra-language-go", version = "0.1.1" }
+chakra-language-javascript = { path = "../chakra-language-javascript", version = "0.1.1" }
 chakra-language-php = { path = "../chakra-language-php", version = "0.1.1" }
+chakra-language-python = { path = "../chakra-language-python", version = "0.1.1" }
 chakra-language-rust = { path = "../chakra-language-rust", version = "0.1.1" }
+chakra-language-typescript = { path = "../chakra-language-typescript", version = "0.1.1" }
 notify.workspace = true
 thiserror.workspace = true
 tracing.workspace = true

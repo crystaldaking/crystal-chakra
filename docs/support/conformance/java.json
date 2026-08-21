@@ -1,0 +1,197 @@
+{
+  "schema_version": 1,
+  "language": "java",
+  "scenario_count": 14,
+  "passed": 14,
+  "failed": 0,
+  "scenarios": [
+    {
+      "id": "declarations-containers",
+      "description": "Nested class containers and their contents are declared with correct kinds and are reachable through namespace-prefix filtering.",
+      "capability_ids": [
+        "SYNTAX-02",
+        "SYNTAX-03",
+        "QUERY-01",
+        "PROV-01"
+      ],
+      "status": "pass",
+      "provenance_assertions": [
+        "container/nested declarations: tree_sitter provenance, syntax precision",
+        "nested symbol reachable through namespace_prefix filtering"
+      ],
+      "details": ""
+    },
+    {
+      "id": "imports-aliases",
+      "description": "Single-type imports and static member imports are recorded as import facts with syntax provenance; a static-imported member name resolves bare calls.",
+      "capability_ids": [
+        "SYNTAX-04",
+        "PROV-01"
+      ],
+      "status": "pass",
+      "provenance_assertions": [
+        "import/alias facts: tree_sitter provenance, syntax precision"
+      ],
+      "details": ""
+    },
+    {
+      "id": "source-roles",
+      "description": "Production and test sources are classified by ecosystem path conventions in repo_map.",
+      "capability_ids": [
+        "DISC-03"
+      ],
+      "status": "pass",
+      "provenance_assertions": [
+        "file inventory: git provenance; roles from ecosystem path conventions"
+      ],
+      "details": ""
+    },
+    {
+      "id": "ambiguity",
+      "description": "Duplicate symbol names yield multiple candidates and a typed ambiguity error instead of a silent resolution.",
+      "capability_ids": [
+        "AMBIG-01",
+        "PROV-01"
+      ],
+      "status": "pass",
+      "provenance_assertions": [
+        "duplicate names: every candidate listed; ambiguity is a typed error, never guessed"
+      ],
+      "details": ""
+    },
+    {
+      "id": "syntax-callers",
+      "description": "Definitions, references, and callers are answered at syntax precision (heuristic call edges) without a precise provider.",
+      "capability_ids": [
+        "SYNTAX-08",
+        "QUERY-01",
+        "PROV-01"
+      ],
+      "status": "pass",
+      "provenance_assertions": [
+        "call edges: tree_sitter provenance, heuristic precision, no precise provider"
+      ],
+      "details": ""
+    },
+    {
+      "id": "test-hints",
+      "description": "Test methods are identified per ecosystem conventions (JUnit @Test) and carry the test source role.",
+      "capability_ids": [
+        "SYNTAX-06",
+        "DISC-03"
+      ],
+      "status": "pass",
+      "provenance_assertions": [
+        "test hint: tree_sitter provenance, syntax precision, test source role"
+      ],
+      "details": ""
+    },
+    {
+      "id": "text-search",
+      "description": "Text search finds a needle in exactly one file and labels the hit textual, never syntax or precise.",
+      "capability_ids": [
+        "QUERY-01",
+        "PROV-01"
+      ],
+      "status": "pass",
+      "provenance_assertions": [
+        "text hits: text_search provenance, textual precision"
+      ],
+      "details": ""
+    },
+    {
+      "id": "bounded-responses",
+      "description": "A query exceeding its limit reports truncation explicitly with section and cause.",
+      "capability_ids": [
+        "BUDGET-01"
+      ],
+      "status": "pass",
+      "provenance_assertions": [
+        "limit exceedance: truncated flag plus section/cause detail"
+      ],
+      "details": ""
+    },
+    {
+      "id": "syntax-error-recovery",
+      "description": "A temporary syntax error publishes actionable diagnostics while intact declarations remain queryable, and fixing the file clears diagnostics.",
+      "capability_ids": [
+        "SYNTAX-07",
+        "FRESH-01",
+        "FRESH-02"
+      ],
+      "status": "pass",
+      "provenance_assertions": [
+        "broken file: actionable diagnostics with file attribution; intact declarations stay queryable",
+        "repair: diagnostics cleared on a newer published revision"
+      ],
+      "details": ""
+    },
+    {
+      "id": "file-lifecycle",
+      "description": "Create, modify, atomic-save (temp write plus rename), rename, and delete are each visible to fresh queries without sleeps.",
+      "capability_ids": [
+        "FRESH-01",
+        "FRESH-02",
+        "DISC-01"
+      ],
+      "status": "pass",
+      "provenance_assertions": [
+        "create/modify/atomic-save/rename/delete: each step visible to the next fresh query"
+      ],
+      "details": ""
+    },
+    {
+      "id": "diff-context-scopes",
+      "description": "diff_context attributes changed files correctly for worktree and base-ref scopes.",
+      "capability_ids": [
+        "QUERY-03"
+      ],
+      "status": "pass",
+      "provenance_assertions": [
+        "changed-file facts: git provenance; worktree and base-ref scopes attribute disjoint file sets"
+      ],
+      "details": ""
+    },
+    {
+      "id": "provider-absent-degradation",
+      "description": "Without a precise provider, callers/context still answer with syntax provenance and report the provider as not configured.",
+      "capability_ids": [
+        "PRECISE-05",
+        "DEGRADE-01"
+      ],
+      "status": "pass",
+      "provenance_assertions": [
+        "provider absent: queries answer with syntax provenance, state not_configured, no failure"
+      ],
+      "details": ""
+    },
+    {
+      "id": "provider-crash-recovery",
+      "description": "A failing precise provider degrades to syntax facts with explicit fallback, and a recovered provider contributes precise facts again.",
+      "capability_ids": [
+        "PRECISE-05",
+        "DEGRADE-01",
+        "PROV-01"
+      ],
+      "status": "pass",
+      "provenance_assertions": [
+        "provider crash: explicit fallback, syntax facts retained, precision never upgraded silently",
+        "provider recovery: precise facts merge with precise precision and provider provenance"
+      ],
+      "details": ""
+    },
+    {
+      "id": "high-degree-callers",
+      "description": "A symbol with 56 call sites (55 fan-in callers plus one static-import call) returns complete bounded callers and reports truncation at the default limit.",
+      "capability_ids": [
+        "SYNTAX-08",
+        "BUDGET-01"
+      ],
+      "status": "pass",
+      "provenance_assertions": [
+        "56 call sites: complete heuristic callers at an explicit limit; default limit truncates explicitly"
+      ],
+      "details": ""
+    }
+  ]
+}

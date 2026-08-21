@@ -1,0 +1,165 @@
+{
+  "language": "python",
+  "scenarios": [
+    {
+      "id": "declarations-containers",
+      "description": "Nested class containers and their contents are declared with correct kinds and are reachable through namespace-prefix filtering.",
+      "capability_ids": [
+        "SYNTAX-02",
+        "SYNTAX-03",
+        "QUERY-01",
+        "PROV-01"
+      ]
+    },
+    {
+      "id": "imports-aliases",
+      "description": "Python import statements, including `from ... import ... as` aliases, are recorded as import facts with syntax provenance.",
+      "capability_ids": [
+        "SYNTAX-04",
+        "PROV-01"
+      ]
+    },
+    {
+      "id": "source-roles",
+      "description": "Production and test sources are classified by ecosystem path conventions in repo_map.",
+      "capability_ids": [
+        "DISC-03"
+      ]
+    },
+    {
+      "id": "ambiguity",
+      "description": "Duplicate symbol names yield multiple candidates and a typed ambiguity error instead of a silent resolution.",
+      "capability_ids": [
+        "AMBIG-01",
+        "PROV-01"
+      ]
+    },
+    {
+      "id": "syntax-callers",
+      "description": "Definitions, references, and callers are answered at syntax precision (heuristic call edges) without a precise provider.",
+      "capability_ids": [
+        "SYNTAX-08",
+        "QUERY-01",
+        "PROV-01"
+      ]
+    },
+    {
+      "id": "test-hints",
+      "description": "Test functions are identified per ecosystem conventions and carry the test source role.",
+      "capability_ids": [
+        "SYNTAX-06",
+        "DISC-03"
+      ]
+    },
+    {
+      "id": "text-search",
+      "description": "Text search finds a needle in exactly one file and labels the hit textual, never syntax or precise.",
+      "capability_ids": [
+        "QUERY-01",
+        "PROV-01"
+      ]
+    },
+    {
+      "id": "bounded-responses",
+      "description": "A query exceeding its limit reports truncation explicitly with section and cause.",
+      "capability_ids": [
+        "BUDGET-01"
+      ]
+    },
+    {
+      "id": "syntax-error-recovery",
+      "description": "A temporary syntax error publishes actionable diagnostics while intact declarations remain queryable, and fixing the file clears diagnostics.",
+      "capability_ids": [
+        "SYNTAX-07",
+        "FRESH-01",
+        "FRESH-02"
+      ]
+    },
+    {
+      "id": "file-lifecycle",
+      "description": "Create, modify, atomic-save (temp write plus rename), rename, and delete are each visible to fresh queries without sleeps.",
+      "capability_ids": [
+        "FRESH-01",
+        "FRESH-02",
+        "DISC-01"
+      ]
+    },
+    {
+      "id": "diff-context-scopes",
+      "description": "diff_context attributes changed files correctly for worktree and base-ref scopes.",
+      "capability_ids": [
+        "QUERY-03"
+      ]
+    },
+    {
+      "id": "provider-absent-degradation",
+      "description": "Without a precise provider, callers/context still answer with syntax provenance and report the provider as not configured.",
+      "capability_ids": [
+        "PRECISE-05",
+        "DEGRADE-01"
+      ]
+    },
+    {
+      "id": "provider-crash-recovery",
+      "description": "A failing precise provider degrades to syntax facts with explicit fallback, and a recovered provider contributes precise facts again.",
+      "capability_ids": [
+        "PRECISE-05",
+        "DEGRADE-01",
+        "PROV-01"
+      ]
+    },
+    {
+      "id": "high-degree-callers",
+      "description": "A symbol with 56 call sites (55 fan-in callers plus one import-aliased call) returns complete bounded callers and reports truncation at the default limit.",
+      "capability_ids": [
+        "SYNTAX-08",
+        "BUDGET-01"
+      ]
+    }
+  ],
+  "expectations": {
+    "production_file": "src/service.py",
+    "test_file": "tests/test_conformance_flow.py",
+    "breakable_file": "src/service.py",
+    "ambiguous_name": "colliding_helper",
+    "ambiguous_qualified": [
+      "dup_a::colliding_helper",
+      "dup_b::colliding_helper"
+    ],
+    "nested_prefix": "nested::Outer::Inner",
+    "nested_containers": [
+      {
+        "qualified_name": "nested::Outer",
+        "kind": "class"
+      },
+      {
+        "qualified_name": "nested::Outer::Inner",
+        "kind": "class"
+      }
+    ],
+    "nested_symbol": {
+      "qualified_name": "nested::Outer::Inner::deeply_nested_marker",
+      "kind": "method"
+    },
+    "import_alias": "audit_event",
+    "caller": "service::dispatch_conformance_request",
+    "caller_simple": "dispatch_conformance_request",
+    "callee": "shared::shared_unique_target",
+    "test_symbol": "tests::test_conformance_flow::test_conformance_end_to_end_marker",
+    "text_needle": "CONFORMANCE_TEXT_NEEDLE",
+    "text_needle_file": "src/service.py",
+    "fan_in_target": "shared::record_conformance_event",
+    "fan_in_callers": 56,
+    "diff_second_commit_file": "src/shared.py",
+    "diff_worktree_file": "src/service.py",
+    "lifecycle_file": "src/lifecycle_created.py",
+    "lifecycle_renamed_file": "src/lifecycle_renamed.py",
+    "lifecycle_symbol_prefix": "lifecycle_marker",
+    "lifecycle_decl_prefix": "def ",
+    "lifecycle_decl_suffix": "():\n    pass\n",
+    "snippet_prefix": "def ",
+    "snippet_suffix": "():\n    pass\n",
+    "broken_content": "def conformance_retained_marker():\n    pass\n\n\ndef conformance_broken(:\n",
+    "retained_symbol": "conformance_retained_marker"
+  }
+}

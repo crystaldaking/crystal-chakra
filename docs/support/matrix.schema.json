@@ -1,0 +1,93 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/crystaldaking/crystal-chakra/docs/support/matrix.schema.json",
+  "title": "Chakra language support manifest",
+  "type": "object",
+  "required": ["language", "advertised", "tier", "capabilities"],
+  "additionalProperties": false,
+  "properties": {
+    "language": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]*$",
+      "description": "Lowercase language identifier matching the manifest file name."
+    },
+    "advertised": {
+      "type": "boolean",
+      "description": "True only when the language passes every mandatory capability of docs/language-parity-contract.md."
+    },
+    "tier": {
+      "type": "string",
+      "enum": ["first-class", "in-progress", "syntax", "none"],
+      "description": "first-class == advertised. Other values describe unadvertised work-in-progress states."
+    },
+    "grammar": {
+      "type": "object",
+      "required": ["name", "version"],
+      "additionalProperties": false,
+      "properties": {
+        "name": {"type": "string"},
+        "version": {"type": "string"},
+        "adr": {"type": "string", "description": "ADR recording the selection."}
+      }
+    },
+    "precise_provider": {
+      "type": ["object", "null"],
+      "required": ["name"],
+      "additionalProperties": false,
+      "properties": {
+        "name": {"type": "string"},
+        "version": {"type": "string"},
+        "adr": {"type": "string"},
+        "status": {
+          "type": "string",
+          "enum": ["adapter-ready", "runtime-integrated", "deferred", "equivalent"],
+          "description": "adapter-ready has contract evidence but no shipped activation path; runtime-integrated is discoverable and lifecycle-owned by chakra serve."
+        },
+        "runtime_evidence": {
+          "type": "array",
+          "items": {"type": "string"},
+          "minItems": 1,
+          "description": "Required for runtime-integrated: shipped composition and lifecycle evidence paths."
+        }
+      }
+    },
+    "capabilities": {
+      "type": "object",
+      "description": "Map of capability ID (from the parity contract) to its status record.",
+      "minProperties": 1,
+      "additionalProperties": {
+        "type": "object",
+        "required": ["status"],
+        "additionalProperties": false,
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": ["pass", "fail", "equivalent", "missing", "not-applicable"]
+          },
+          "mechanism": {
+            "type": "string",
+            "description": "How the capability is met: tree-sitter, provider name, chakra-owned equivalent, etc."
+          },
+          "evidence": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Paths or test names proving the capability. Required for pass/equivalent."
+          },
+          "note": {"type": "string"}
+        }
+      }
+    },
+    "conformance_results": {
+      "type": ["string", "null"],
+      "description": "Path to the shared conformance-suite result file for this language."
+    },
+    "corpus_results": {
+      "type": ["string", "null"],
+      "description": "Path to the public-corpus evaluation record for this language."
+    },
+    "docs": {
+      "type": ["string", "null"],
+      "description": "Path to the language install/runtime/limitations documentation."
+    }
+  }
+}
