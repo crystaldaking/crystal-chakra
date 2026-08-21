@@ -1,7 +1,7 @@
 [package]
 name = "chakra-language-python"
 description = "Git-aware Tree-sitter Python syntax index adapter for Chakra"
-version = "0.1.1"
+version = "0.1.2"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -9,9 +9,9 @@ repository.workspace = true
 publish = false
 
 [dependencies]
-chakra-domain = { path = "../chakra-domain", version = "0.1.1" }
-chakra-engine = { path = "../chakra-engine", version = "0.1.1" }
-chakra-git = { path = "../chakra-git", version = "0.1.1" }
+chakra-domain = { path = "../chakra-domain", version = "0.1.2" }
+chakra-engine = { path = "../chakra-engine", version = "0.1.2" }
+chakra-git = { path = "../chakra-git", version = "0.1.2" }
 thiserror.workspace = true
 tracing.workspace = true
 tree-sitter.workspace = true
