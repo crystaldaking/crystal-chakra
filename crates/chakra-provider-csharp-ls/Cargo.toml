@@ -1,7 +1,7 @@
 [package]
 name = "chakra-provider-csharp-ls"
 description = "Optional csharp-ls precise-provider adapter for C# in Chakra"
-version = "0.1.1"
+version = "0.1.2"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -9,9 +9,9 @@ repository.workspace = true
 publish = false
 
 [dependencies]
-chakra-domain = { path = "../chakra-domain", version = "0.1.1" }
-chakra-engine = { path = "../chakra-engine", version = "0.1.1" }
-chakra-lsp = { path = "../chakra-lsp", version = "0.1.1" }
+chakra-domain = { path = "../chakra-domain", version = "0.1.2" }
+chakra-engine = { path = "../chakra-engine", version = "0.1.2" }
+chakra-lsp = { path = "../chakra-lsp", version = "0.1.2" }
 crossbeam-channel.workspace = true
 lsp-types.workspace = true
 serde.workspace = true
