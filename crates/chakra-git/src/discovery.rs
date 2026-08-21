@@ -503,6 +503,7 @@ pub fn source_language(path: &str) -> Option<Language> {
         }
         Some(extension) if extension == OsStr::new("java") => Some(Language::Java),
         Some(extension) if extension == OsStr::new("cs") => Some(Language::CSharp),
+        Some(extension) if extension == OsStr::new("go") => Some(Language::Go),
         Some(extension) if matches!(extension.to_str(), Some("sh" | "bash" | "zsh" | "ksh")) => {
             Some(Language::Shell)
         }
@@ -641,7 +642,8 @@ fn workspace_inventory_from_git_output(
             || raw.ends_with(b".inc")
             || raw.ends_with(b".tf")
             || raw.ends_with(b".tfvars")
-            || raw.ends_with(b".hcl");
+            || raw.ends_with(b".hcl")
+            || raw.ends_with(b".go");
         let metadata_input = raw_is_metadata_input(raw);
         if !source && !metadata_input {
             continue;
@@ -726,6 +728,10 @@ fn raw_is_metadata_input(raw: &[u8]) -> bool {
         b".terraformrc".as_slice(),
         b"terraform.rc".as_slice(),
         b"tofu.rc".as_slice(),
+        b"go.mod".as_slice(),
+        b"go.sum".as_slice(),
+        b"go.work".as_slice(),
+        b"go.work.sum".as_slice(),
         b".cargo/config".as_slice(),
         b".cargo/config.toml".as_slice(),
         b"rust-toolchain".as_slice(),
@@ -1236,6 +1242,41 @@ mod tests {
             .filter(|path| path.contains("lock.hcl"))
             .collect();
         assert_eq!(metadata, [".opentofu.lock.hcl", ".terraform.lock.hcl"]);
+        Ok(())
+    }
+
+    #[test]
+    fn discovers_go_sources_and_module_workspace_metadata() -> Result<(), Box<dyn Error>> {
+        let repository = repository()?;
+        let root = repository.path();
+        fs::create_dir_all(root.join("cmd/tool"))?;
+        fs::write(root.join("main.go"), "package main\n")?;
+        fs::write(root.join("cmd/tool/main.go"), "package main\n")?;
+        fs::write(root.join("ignored.go"), "package ignored\n")?;
+        fs::write(root.join("go.mod"), "module example.com/root\n")?;
+        fs::write(root.join("go.sum"), "example.com/dependency v1.0.0 h1:x\n")?;
+        fs::write(root.join("go.work"), "go 1.25\nuse ./cmd/tool\n")?;
+        fs::write(
+            root.join("go.work.sum"),
+            "example.com/dependency v1.0.0 h1:x\n",
+        )?;
+        fs::write(root.join(".gitignore"), "ignored.go\n")?;
+
+        let go = discover_language_files(root, Language::Go)?;
+        let paths: Vec<&str> = go.iter().map(RepoRelativePath::as_str).collect();
+        assert_eq!(paths, ["cmd/tool/main.go", "main.go"]);
+
+        let inventory = discover_workspace_inventory_in_worktree_with_context(
+            root,
+            &OperationContext::unbounded(),
+        )?;
+        let metadata: Vec<&str> = inventory
+            .metadata_inputs
+            .iter()
+            .map(RepoRelativePath::as_str)
+            .filter(|path| path.starts_with("go."))
+            .collect();
+        assert_eq!(metadata, ["go.mod", "go.sum", "go.work", "go.work.sum"]);
         Ok(())
     }
 }

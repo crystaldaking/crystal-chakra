@@ -81,6 +81,8 @@ pub enum SourceClassification {
     /// Module ownership came from the nearest directory containing a
     /// Git-visible Terraform/OpenTofu configuration file.
     TerraformModuleMetadata,
+    /// Package ownership came from the nearest Git-visible Go module.
+    GoModuleMetadata,
     /// No applicable package metadata was available; deterministic path
     /// conventions supplied the role.
     PathFallback,
@@ -131,6 +133,7 @@ pub struct SourceMetadataCoverage {
     pub shell_project_metadata_files: u64,
     pub cpp_project_metadata_files: u64,
     pub terraform_module_metadata_files: u64,
+    pub go_module_metadata_files: u64,
     pub path_fallback_files: u64,
 }
 

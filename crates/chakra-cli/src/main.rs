@@ -111,6 +111,14 @@ struct ServeArgs {
     #[arg(long, value_name = "PATH")]
     terraform_ls_path: Option<OsString>,
 
+    /// Run without the optional gopls Go provider.
+    #[arg(long)]
+    no_gopls: bool,
+
+    /// Explicit gopls executable; omit for side-effect-free PATH discovery.
+    #[arg(long, value_name = "PATH")]
+    gopls_path: Option<OsString>,
+
     /// Maximum simultaneously active precise providers.
     #[arg(long, default_value_t = 3)]
     max_active_providers: usize,
@@ -224,6 +232,8 @@ async fn serve(args: ServeArgs) -> ExitCode {
         clangd_path,
         no_terraform_ls,
         terraform_ls_path,
+        no_gopls,
+        gopls_path,
         max_active_providers,
         max_provider_reserved_memory_bytes,
         max_concurrent_provider_queries,
@@ -640,6 +650,42 @@ async fn serve(args: ServeArgs) -> ExitCode {
     } else {
         tracing::info!("terraform-ls precise enrichment is disabled");
     }
+    if should_register_provider(no_gopls) {
+        let command: OnceLock<chakra_provider_gopls::GoplsCommand> = OnceLock::new();
+        let query_wait_budget = chakra_provider_gopls::DEFAULT_QUERY_WAIT_TIMEOUT;
+        registrations.push(
+            ProviderRegistration::new(
+                "gopls",
+                vec![Language::Go],
+                768 * 1024 * 1024,
+                move |workspace,
+                      operation|
+                      -> Result<Arc<dyn PreciseProvider>, ProviderStartError> {
+                    let resolved_command = if let Some(command) = command.get() {
+                        command.clone()
+                    } else {
+                        let resolved = chakra_provider_gopls::resolve_command_with_context(
+                            gopls_path.as_deref(),
+                            operation,
+                        )
+                        .map_err(ProviderStartError::from)?;
+                        let _ = command.set(resolved.clone());
+                        resolved
+                    };
+                    let config = chakra_provider_gopls::GoplsConfig {
+                        command: resolved_command,
+                        ..chakra_provider_gopls::GoplsConfig::default()
+                    };
+                    chakra_provider_gopls::GoplsProvider::start(workspace, config)
+                        .map(|provider| provider as Arc<dyn PreciseProvider>)
+                        .map_err(|error| ProviderStartError::new(error.to_string()))
+                },
+            )
+            .with_additional_wait_budget(query_wait_budget),
+        );
+    } else {
+        tracing::info!("gopls precise enrichment is disabled");
+    }
     let provider_pool = match ProviderPool::start(
         ProviderPoolConfig {
             max_active_providers,
@@ -753,6 +799,8 @@ mod tests {
                 && args.clangd_path.is_none()
                 && !args.no_terraform_ls
                 && args.terraform_ls_path.is_none()
+                && !args.no_gopls
+                && args.gopls_path.is_none()
                 && args.max_active_providers == 3
                 && args.max_index_files == DEFAULT_MAX_INDEX_FILES
                 && args.max_index_symbols == DEFAULT_MAX_INDEX_SYMBOLS
@@ -791,6 +839,9 @@ mod tests {
             "--no-terraform-ls",
             "--terraform-ls-path",
             "/opt/bin/terraform-ls",
+            "--no-gopls",
+            "--gopls-path",
+            "/opt/bin/gopls",
         ]);
         assert!(matches!(
             cli,
@@ -819,6 +870,9 @@ mod tests {
                 && args.no_terraform_ls
                 && args.terraform_ls_path.as_deref()
                     == Some(std::ffi::OsStr::new("/opt/bin/terraform-ls"))
+                && args.no_gopls
+                && args.gopls_path.as_deref()
+                    == Some(std::ffi::OsStr::new("/opt/bin/gopls"))
         ));
     }
 

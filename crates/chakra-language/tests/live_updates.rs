@@ -1132,6 +1132,55 @@ fn hcl_edit_is_immediately_fresh_and_does_not_reparse_rust() -> Result<(), Box<d
 }
 
 #[test]
+fn go_edit_is_immediately_fresh_and_does_not_reparse_rust() -> Result<(), Box<dyn Error>> {
+    let repository = repository()?;
+    write(
+        repository.path(),
+        "service.go",
+        "package service\nfunc refund() {}\n",
+    )?;
+    let (engine, live) = start(&repository)?;
+    let baseline = live.metrics();
+
+    write(
+        repository.path(),
+        "service.go",
+        "package service\nfunc refundNow() {}\n",
+    )?;
+    let response = engine.symbol_search(SymbolSearchRequest {
+        query: "refundNow".to_owned(),
+        source: Default::default(),
+        limit: None,
+        freshness: FreshnessRequirement::RequireFresh,
+        ..SymbolSearchRequest::default()
+    })?;
+    assert_eq!(response.freshness, Freshness::Fresh);
+    assert_eq!(response.data.candidates.len(), 1);
+    assert_eq!(response.data.candidates[0].language, Language::Go);
+    assert_eq!(
+        response.data.candidates[0].qualified_name,
+        "service::refundNow"
+    );
+    assert!(
+        engine
+            .snapshot()
+            .graph()
+            .resolve_name("service::refund")
+            .is_empty()
+    );
+
+    let metrics = live.metrics();
+    assert_eq!(metrics.files_reparsed - baseline.files_reparsed, 1);
+    assert_eq!(
+        metrics.relationship_files_recomputed - baseline.relationship_files_recomputed,
+        1
+    );
+    engine.snapshot().graph().validate_consistency()?;
+    live.shutdown()?;
+    Ok(())
+}
+
+#[test]
 fn first_file_of_a_live_language_receives_budget_without_reparsing_other_files()
 -> Result<(), Box<dyn Error>> {
     let repository = repository()?;

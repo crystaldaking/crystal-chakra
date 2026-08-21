@@ -28,7 +28,7 @@ const MAX_COMPOSER_MANIFEST_BYTES: usize = 1024 * 1024;
 const MAX_PACKAGE_JSON_MANIFESTS: usize = 256;
 const MAX_PACKAGE_JSON_MANIFEST_BYTES: usize = 1024 * 1024;
 const MAX_PYPROJECT_MANIFESTS: usize = 256;
-const MAX_PYPROJECT_MANIFEST_BYTES: usize = 1024 * 1024;
+const MAX_TEXT_MANIFEST_BYTES: usize = 1024 * 1024;
 const MAX_JAVA_BUILD_MANIFESTS: usize = 512;
 const MAX_JAVA_BUILD_MANIFEST_BYTES: usize = 1024 * 1024;
 const MAX_DOTNET_PROJECT_MANIFESTS: usize = 512;
@@ -36,6 +36,7 @@ const MAX_DOTNET_PROJECT_MANIFEST_BYTES: usize = 1024 * 1024;
 const MAX_SHELL_PROJECT_MANIFESTS: usize = 256;
 const MAX_CPP_PROJECT_MANIFESTS: usize = 256;
 const MAX_TERRAFORM_MODULES: usize = 512;
+const MAX_GO_MODULE_MANIFESTS: usize = 512;
 
 /// One discovered source plus deterministic query metadata.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -141,6 +142,12 @@ struct CppRoot {
 /// Git-visible `.tf` configuration file.
 #[derive(Debug, Clone)]
 struct TerraformRoot {
+    package: SourcePackage,
+}
+
+/// Go module or workspace scope from a Git-visible `go.mod` or `go.work`.
+#[derive(Debug, Clone)]
+struct GoRoot {
     package: SourcePackage,
 }
 
@@ -661,10 +668,10 @@ fn read_text_manifest(root: &Path, manifest: &RepoRelativePath) -> Option<String
     let file = fs::File::open(&manifest_path).ok()?;
     let mut bytes = Vec::new();
     if file
-        .take((MAX_PYPROJECT_MANIFEST_BYTES + 1) as u64)
+        .take((MAX_TEXT_MANIFEST_BYTES + 1) as u64)
         .read_to_end(&mut bytes)
         .is_err()
-        || bytes.len() > MAX_PYPROJECT_MANIFEST_BYTES
+        || bytes.len() > MAX_TEXT_MANIFEST_BYTES
     {
         return None;
     }
@@ -1469,6 +1476,117 @@ fn classify_hcl(path: &RepoRelativePath, modules: &[TerraformRoot]) -> SourceMet
     }
 }
 
+fn go_modules(
+    root: &Path,
+    metadata_inputs: &[RepoRelativePath],
+    operation: &OperationContext,
+) -> Result<Vec<GoRoot>, OperationAbort> {
+    let mut modules = Vec::new();
+    let mut covered = BTreeSet::new();
+    for manifest in manifests_named(metadata_inputs, "go.mod")
+        .into_iter()
+        .take(MAX_GO_MODULE_MANIFESTS)
+    {
+        operation.check()?;
+        let directory = manifest_directory(&manifest, "go.mod");
+        if !covered.insert(directory.clone()) {
+            continue;
+        }
+        let name = read_text_manifest(root, &manifest)
+            .and_then(|contents| {
+                contents.lines().find_map(|line| {
+                    let mut fields = line.split_whitespace();
+                    (fields.next() == Some("module"))
+                        .then(|| fields.next())
+                        .flatten()
+                        .filter(|name| !name.is_empty())
+                        .map(str::to_owned)
+                })
+            })
+            .unwrap_or_else(|| {
+                directory
+                    .as_ref()
+                    .map_or_else(|| "repository".to_owned(), |path| path.as_str().to_owned())
+            });
+        modules.push(GoRoot {
+            package: SourcePackage {
+                name,
+                root: directory,
+            },
+        });
+    }
+    for workspace in manifests_named(metadata_inputs, "go.work")
+        .into_iter()
+        .take(MAX_GO_MODULE_MANIFESTS.saturating_sub(modules.len()))
+    {
+        operation.check()?;
+        let directory = manifest_directory(&workspace, "go.work");
+        if !covered.insert(directory.clone()) {
+            continue;
+        }
+        let name = directory.as_ref().map_or_else(
+            || "go-workspace".to_owned(),
+            |path| format!("go-workspace:{}", path.as_str()),
+        );
+        modules.push(GoRoot {
+            package: SourcePackage {
+                name,
+                root: directory,
+            },
+        });
+    }
+    operation.check()?;
+    Ok(modules)
+}
+
+fn go_path_role(path: &RepoRelativePath) -> SourceRole {
+    let raw = path.as_str();
+    if raw.split('/').any(|component| component == "vendor") {
+        return SourceRole::Vendor;
+    }
+    if raw.ends_with("_test.go") {
+        return SourceRole::Test;
+    }
+    let file = raw.rsplit('/').next().unwrap_or_default();
+    let generated = file.ends_with(".pb.go")
+        || file.ends_with("_generated.go")
+        || file.starts_with("zz_generated.")
+        || raw
+            .split('/')
+            .any(|component| matches!(component, "generated" | "gen"));
+    if generated {
+        SourceRole::Generated
+    } else {
+        SourceMetadata::path_fallback(path).role
+    }
+}
+
+fn classify_go(path: &RepoRelativePath, modules: &[GoRoot]) -> SourceMetadata {
+    let role = go_path_role(path);
+    let module = modules
+        .iter()
+        .filter(|module| is_inside(path, module.package.root.as_ref()))
+        .max_by_key(|module| {
+            module
+                .package
+                .root
+                .as_ref()
+                .map_or(0, |root| root.as_str().len())
+        });
+    let Some(module) = module else {
+        return SourceMetadata {
+            role,
+            classification: SourceClassification::PathFallback,
+            package: None,
+        };
+    };
+    SourceMetadata {
+        role,
+        classification: SourceClassification::GoModuleMetadata,
+        package: Some(module.package.clone()),
+    }
+}
+
 fn classify_rust(path: &RepoRelativePath, packages: &[CargoPackage]) -> SourceMetadata {
     let fallback = SourceMetadata::path_fallback(path);
     let package = packages
@@ -1603,6 +1721,11 @@ pub fn classify_discovered_sources_with_context(
     } else {
         None
     };
+    let go = if language == Language::Go {
+        Some(go_modules(root, metadata_inputs, operation)?)
+    } else {
+        None
+    };
     let mut classified = Vec::with_capacity(files.len());
     for path in files {
         operation.check()?;
@@ -1621,6 +1744,7 @@ pub fn classify_discovered_sources_with_context(
                 Language::Shell => classify_shell(&path, shell.as_deref().unwrap_or_default()),
                 Language::Cpp => classify_cpp(&path, cpp.as_deref().unwrap_or_default()),
                 Language::Hcl => classify_hcl(&path, hcl.as_deref().unwrap_or_default()),
+                Language::Go => classify_go(&path, go.as_deref().unwrap_or_default()),
             },
             path,
             language,
@@ -2624,6 +2748,72 @@ mod tests {
             assert_eq!(
                 source.package.as_ref().map(|package| package.name.as_str()),
                 Some(package)
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn go_module_and_workspace_boundaries_scope_roles_and_packages() -> Result<(), Box<dyn Error>> {
+        let repository = repository()?;
+        let root = repository.path();
+        for (path, source) in [
+            ("go.work", "go 1.25\nuse ./services/payments\n"),
+            (
+                "services/payments/go.mod",
+                "module example.com/services/payments\n\ngo 1.25\n",
+            ),
+            ("standalone/main.go", "package standalone\n"),
+            ("services/payments/service.go", "package payments\n"),
+            ("services/payments/service_test.go", "package payments\n"),
+            ("services/payments/vendor/external.go", "package external\n"),
+            (
+                "services/payments/generated/payment.pb.go",
+                "package payments\n",
+            ),
+        ] {
+            write(root, path, source)?;
+        }
+
+        let classified = discover_classified_sources(root, Language::Go)?;
+        let by_path: BTreeMap<_, _> = classified
+            .into_iter()
+            .map(|source| (source.path, source.metadata))
+            .collect();
+        let standalone = &by_path[&RepoRelativePath::new("standalone/main.go")?];
+        assert_eq!(
+            standalone.classification,
+            SourceClassification::GoModuleMetadata
+        );
+        assert_eq!(
+            standalone
+                .package
+                .as_ref()
+                .map(|package| package.name.as_str()),
+            Some("go-workspace")
+        );
+
+        for (path, role) in [
+            ("services/payments/service.go", SourceRole::Production),
+            ("services/payments/service_test.go", SourceRole::Test),
+            ("services/payments/vendor/external.go", SourceRole::Vendor),
+            (
+                "services/payments/generated/payment.pb.go",
+                SourceRole::Generated,
+            ),
+        ] {
+            let source = &by_path[&RepoRelativePath::new(path)?];
+            assert_eq!(
+                source.classification,
+                SourceClassification::GoModuleMetadata
+            );
+            assert_eq!(source.role, role);
+            assert_eq!(
+                source.package.as_ref().map(|package| (
+                    package.name.as_str(),
+                    package.root.as_ref().map(RepoRelativePath::as_str),
+                )),
+                Some(("example.com/services/payments", Some("services/payments"),))
             );
         }
         Ok(())

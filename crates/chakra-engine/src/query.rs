@@ -1077,6 +1077,8 @@ fn file_language(path: &RepoRelativePath) -> Option<Language> {
         || value.ends_with(".ksh")
     {
         Some(Language::Shell)
+    } else if value.ends_with(".go") {
+        Some(Language::Go)
     } else if value.ends_with(".c")
         || value.ends_with(".h")
         || value.ends_with(".cc")
@@ -1147,6 +1149,7 @@ fn repo_map_overview(files: &[(GraphFileSummary, Language)]) -> Vec<RepoMapGroup
             SourceClassification::TerraformModuleMetadata => {
                 Some(RepoMapGroupKind::TerraformModule)
             }
+            SourceClassification::GoModuleMetadata => Some(RepoMapGroupKind::GoModule),
             SourceClassification::PathFallback => None,
         };
         if let (Some(kind), Some(package)) = (kind, &file.metadata.package) {

@@ -63,5 +63,6 @@ Accepted decisions:
 - ADR-038: bash-language-server reference enrichment
 - ADR-039: clangd workspace enrichment
 - ADR-040: terraform-ls reference enrichment
+- ADR-041: gopls workspace enrichment
 
 Do not pre-create empty ADRs merely to satisfy a list.

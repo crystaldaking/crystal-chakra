@@ -55,6 +55,8 @@ pub enum Provenance {
     /// terraform-ls (live precise reference provider for HCL/Terraform,
     /// ADR-0027).
     TerraformLs,
+    /// gopls (live precise provider for Go, ADR-0027).
+    Gopls,
     /// Chakra-owned static resolver producing precise-tier facts from an
     /// explicit, deterministic evidence rule (ADR-0030).
     ChakraResolver,
@@ -126,6 +128,7 @@ mod tests {
             serde_json::to_string(&Provenance::TerraformLs)?,
             "\"terraform_ls\""
         );
+        assert_eq!(serde_json::to_string(&Provenance::Gopls)?, "\"gopls\"");
         Ok(())
     }
 }

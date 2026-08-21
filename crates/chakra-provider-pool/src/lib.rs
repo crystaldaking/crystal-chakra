@@ -1236,6 +1236,7 @@ mod tests {
             Language::Shell => "src/main.sh",
             Language::Cpp => "src/main.cpp",
             Language::Hcl => "main.tf",
+            Language::Go => "main.go",
         };
         Ok(PreciseQueryRequest {
             workspace: ProviderWorkspace::from_documents(

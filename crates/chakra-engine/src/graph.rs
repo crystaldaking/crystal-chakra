@@ -49,6 +49,7 @@ const ENTITY_SLOT_LANGUAGES: &[Language] = &[
     Language::Shell,
     Language::Cpp,
     Language::Hcl,
+    Language::Go,
 ];
 
 /// The entity-id slot a language owns; see the slot registry above.
@@ -64,6 +65,7 @@ fn language_entity_slot(language: Language) -> usize {
         Language::Shell => 7,
         Language::Cpp => 8,
         Language::Hcl => 9,
+        Language::Go => 10,
     }
 }
 
@@ -1261,6 +1263,9 @@ impl SymbolGraph {
                     coverage.terraform_module_metadata_files = coverage
                         .terraform_module_metadata_files
                         .saturating_add(part.terraform_module_metadata_files);
+                    coverage.go_module_metadata_files = coverage
+                        .go_module_metadata_files
+                        .saturating_add(part.go_module_metadata_files);
                     coverage.path_fallback_files = coverage
                         .path_fallback_files
                         .saturating_add(part.path_fallback_files);
@@ -1298,6 +1303,9 @@ impl SymbolGraph {
                 }
                 SourceClassification::TerraformModuleMetadata => {
                     coverage.terraform_module_metadata_files += 1;
+                }
+                SourceClassification::GoModuleMetadata => {
+                    coverage.go_module_metadata_files += 1;
                 }
                 SourceClassification::PathFallback => coverage.path_fallback_files += 1,
             }
@@ -2549,6 +2557,7 @@ fn provenance_rank(provenance: Provenance) -> u8 {
         Provenance::BashLanguageServer => 0,
         Provenance::Clangd => 0,
         Provenance::TerraformLs => 0,
+        Provenance::Gopls => 0,
         Provenance::ChakraResolver => 0,
         Provenance::TreeSitter => 1,
         Provenance::Git => 2,

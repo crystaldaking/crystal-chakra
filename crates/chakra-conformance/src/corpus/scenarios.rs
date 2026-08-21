@@ -323,6 +323,7 @@ impl ProbePlan {
                 "c", "h", "cc", "cpp", "cxx", "hh", "hpp", "hxx", "ipp", "tpp", "inc",
             ],
             "hcl" => &["tf", "hcl"],
+            "go" => &["go"],
             other => return Err(failure(format!("no probe plan for language `{other}`")).into()),
         };
         let mut paths: Vec<RepoRelativePath> = cold
@@ -458,6 +459,14 @@ impl ProbePlan {
                     "\nresource \"null_resource\" \"chakra_corpus_probe_one\" {}\n".to_owned(),
                     "\nresource \"null_resource\" \"chakra_corpus_probe_two\" {}\n".to_owned(),
                     "\nresource \"null_resource\" \"chakra_corpus_broken\" {\n".to_owned(),
+                ),
+                "go" => (
+                    "chakraCorpusProbe",
+                    "chakraCorpusProbeOne",
+                    "chakraCorpusProbeTwo",
+                    "\nfunc chakraCorpusProbeOne() {}\n".to_owned(),
+                    "\nfunc chakraCorpusProbeTwo() {}\n".to_owned(),
+                    "\nfunc chakraCorpusBroken( {\n".to_owned(),
                 ),
                 other => {
                     return Err(failure(format!("no probe plan for language `{other}`")).into());
@@ -783,6 +792,7 @@ fn record_cold_index(
     builder.measure("shell_files", cold.metrics.shell_files);
     builder.measure("cpp_files", cold.metrics.cpp_files);
     builder.measure("hcl_files", cold.metrics.hcl_files);
+    builder.measure("go_files", cold.metrics.go_files);
     builder.measure("source_bytes", cold.metrics.indexing.coverage.source_bytes);
     builder.measure("degraded", cold.metrics.indexing.is_degraded());
     builder.measure(
@@ -1600,14 +1610,22 @@ mod tests {
 
     #[test]
     fn unsupported_language_skips_every_repository() -> Check<()> {
-        let manifest = CorpusManifest::load(&super::super::default_manifest_path())?;
+        let mut manifest = CorpusManifest::load(&super::super::default_manifest_path())?;
+        let repositories = manifest
+            .languages
+            .get("go")
+            .ok_or("manifest is missing go")?
+            .clone();
+        manifest
+            .languages
+            .insert("unsupported".to_owned(), repositories);
         let budgets = CorpusBudgets {
             schema_version: 1,
             note: String::new(),
             languages: BTreeMap::new(),
         };
         let cache = TempDir::new()?;
-        let reports = evaluate_language("go", &manifest, &budgets, cache.path())?;
+        let reports = evaluate_language("unsupported", &manifest, &budgets, cache.path())?;
         assert!(!reports.is_empty());
         assert!(
             reports

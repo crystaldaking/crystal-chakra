@@ -454,6 +454,7 @@ fn language_from_path(path: &str) -> Option<Language> {
         Some("java") => Some(Language::Java),
         Some("cs") => Some(Language::CSharp),
         Some("sh" | "bash" | "zsh" | "ksh") => Some(Language::Shell),
+        Some("go") => Some(Language::Go),
         Some("c" | "h" | "cc" | "cpp" | "cxx" | "hh" | "hpp" | "hxx" | "ipp" | "tpp" | "inc") => {
             Some(Language::Cpp)
         }
@@ -471,7 +472,7 @@ mod tests {
     use crate::WorkspaceEngine;
 
     #[test]
-    fn snapshot_backed_workspaces_retain_csharp_shell_cpp_and_hcl_documents()
+    fn snapshot_backed_workspaces_retain_csharp_shell_cpp_hcl_and_go_documents()
     -> Result<(), Box<dyn Error>> {
         let root = std::env::current_dir()?;
         let engine = WorkspaceEngine::new(WorkspaceIdentity::for_primary_worktree(&root)?);
@@ -491,6 +492,9 @@ mod tests {
         update
             .graph_mut()
             .add_file(RepoRelativePath::new("infra/main.tf")?, "terraform {}\n")?;
+        update
+            .graph_mut()
+            .add_file(RepoRelativePath::new("service.go")?, "package service\n")?;
         engine.publish(update)?;
 
         let workspace = ProviderWorkspace::from_snapshot(&engine.snapshot());
@@ -498,6 +502,7 @@ mod tests {
         assert_eq!(workspace.document_count(Language::Shell), 1);
         assert_eq!(workspace.document_count(Language::Cpp), 1);
         assert_eq!(workspace.document_count(Language::Hcl), 1);
+        assert_eq!(workspace.document_count(Language::Go), 1);
         assert!(
             workspace
                 .document(&RepoRelativePath::new("src/Program.cs")?)
@@ -511,6 +516,11 @@ mod tests {
         assert!(
             workspace
                 .document(&RepoRelativePath::new("src/payment.cpp")?)
+                .is_some()
+        );
+        assert!(
+            workspace
+                .document(&RepoRelativePath::new("service.go")?)
                 .is_some()
         );
         assert!(

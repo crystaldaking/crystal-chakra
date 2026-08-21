@@ -51,11 +51,13 @@ pub enum Language {
     Cpp,
     #[serde(rename = "hcl")]
     Hcl,
+    #[serde(rename = "go")]
+    Go,
 }
 
 impl Language {
     /// Languages understood by the current Chakra build, in stable display order.
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 11] = [
         Self::Rust,
         Self::Php,
         Self::TypeScript,
@@ -66,6 +68,7 @@ impl Language {
         Self::Shell,
         Self::Cpp,
         Self::Hcl,
+        Self::Go,
     ];
 }
 

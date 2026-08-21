@@ -11,6 +11,7 @@ Target list reviewed: 2026-08 (GitHub Octoverse 2025 top languages plus pre-exis
 |----------|------|-----------|---------|------------------|
 | cpp | first-class | yes | tree-sitter-cpp 0.23.4 | clangd (integrated) |
 | csharp | first-class | yes | tree-sitter-c-sharp 0.23.5 | csharp-ls (integrated) |
+| go | first-class | yes | tree-sitter-go 0.25.0 | gopls (integrated) |
 | hcl | first-class | yes | tree-sitter-hcl 1.1.0 | terraform-ls (integrated) |
 | java | first-class | yes | tree-sitter-java 0.23.5 | jdtls (integrated) |
 | javascript | first-class | yes | tree-sitter-javascript 0.25.0 | vtsls (integrated) |
@@ -89,6 +90,40 @@ Target list reviewed: 2026-08 (GitHub Octoverse 2025 top languages plus pre-exis
 | SYNTAX-06 | pass | tree-sitter + xUnit/NUnit/MSTest attribute hints |
 | SYNTAX-07 | pass | tree-sitter diagnostics (ADR-0022) |
 | SYNTAX-08 | pass | bounded lazy syntax call candidates with using/alias, receiver hints, and scope-checked local extension methods (ADR-0010) |
+
+### go
+
+| Capability | Status | Mechanism |
+|------------|--------|-----------|
+| AMBIG-01 | pass | query-layer typed ambiguity for duplicate Go declaration names |
+| BUDGET-01 | pass | query/index work budgets and calibrated public-corpus limits |
+| CANCEL-01 | pass | cooperative syntax and provider cancellation |
+| CONFORM-01 | pass | chakra-conformance shared scenario harness |
+| CORPUS-01 | pass | pinned Prometheus and Kubernetes public-corpus evaluation |
+| DEGRADE-01 | pass | bounded degradation with syntax fallback |
+| DISC-01 | pass | chakra-git discovery for Git-visible .go files |
+| DISC-02 | pass | nearest go.mod module scope plus go.work workspace fallback |
+| DISC-03 | pass | _test.go, vendor, and generated path/name roles with module metadata provenance |
+| DOCS-01 | pass | per-language install requirements and measured limitations |
+| FRESH-01 | pass | atomic revision publication and targeted language partitions |
+| FRESH-02 | pass | Go live freshness barrier and one-file incremental reconciliation |
+| PRECISE-01 | pass | recorded gopls 0.23.x selection and call-hierarchy contract |
+| PRECISE-02 | pass | gopls call hierarchy over the shared chakra-lsp client |
+| PRECISE-03 | pass | owned lifecycle, revision-scoped Go document synchronization, restart, cancellation, and orphan-free shutdown |
+| PRECISE-04 | pass | call-hierarchy capability gate with prepareCallHierarchy request barrier |
+| PRECISE-05 | pass | graceful absence, missing-capability, crash, timeout, and cancellation degradation |
+| PROV-01 | pass | domain provenance model including TreeSitter, Git, and Gopls |
+| QUERY-01 | pass | chakra-engine QueryService over Go syntax and precise relations |
+| QUERY-02 | pass | chakra-mcp structured tools |
+| QUERY-03 | pass | chakra-git worktree/base-ref diff provider for .go files |
+| SYNTAX-01 | pass | tree-sitter-go 0.25.0 |
+| SYNTAX-02 | pass | tree-sitter packages, values, types, structs, interfaces, fields, functions, methods, receivers, aliases, and generics |
+| SYNTAX-03 | pass | tree-sitter package/file modules and type containers |
+| SYNTAX-04 | pass | tree-sitter import aliases and Go build-constraint facts |
+| SYNTAX-05 | pass | tree-sitter byte-accurate declarations and call ranges with Unicode scalar conversion |
+| SYNTAX-06 | pass | Test, Benchmark, Fuzz, and Example entry-point hints in _test.go files |
+| SYNTAX-07 | pass | tree-sitter diagnostics with retained valid declarations |
+| SYNTAX-08 | pass | bounded free-function and selector call candidates with unique local function resolution |
 
 ### hcl
 
