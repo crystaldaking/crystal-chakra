@@ -22,7 +22,53 @@ use chakra_domain::symbol::{
 use rpds::{HashTrieMapSync, RedBlackTreeMapSync};
 use thiserror::Error;
 
-const PHP_ENTITY_ID_BASE: u64 = 1_u64 << 63;
+/// Revision-local entity ids are partitioned per language through an
+/// explicit slot registry (ADR-0033): a 4-bit slot tag in bits 60..64
+/// (`slot << 60`) plus a 60-bit per-language counter. The v0.1 graph is
+/// in-memory only — no id is ever persisted — so the slot layout may change
+/// between releases as long as it is consistent within one process.
+/// Explicit slot assignment: Rust = 0, Php = 1, TypeScript = 2, Python = 3,
+/// JavaScript = 4, Java = 5, C# = 6, Shell = 7, C++ = 8, HCL = 9, Go = 10;
+/// 5 slots remain. Adding a language means assigning it the next free slot
+/// in `language_entity_slot` and appending it to `ENTITY_SLOT_LANGUAGES` —
+/// nothing else in the id machinery changes.
+const ENTITY_ID_SLOT_COUNT: usize = 16;
+const ENTITY_ID_SLOT_SHIFT: u64 = 60;
+const ENTITY_ID_COUNTER_LIMIT: u64 = 1 << ENTITY_ID_SLOT_SHIFT;
+
+/// Registered languages in entity-slot order, iterated wherever per-language
+/// graph state must be visited deterministically.
+const ENTITY_SLOT_LANGUAGES: &[Language] = &[
+    Language::Rust,
+    Language::Php,
+    Language::TypeScript,
+    Language::Python,
+    Language::JavaScript,
+    Language::Java,
+    Language::CSharp,
+    Language::Shell,
+    Language::Cpp,
+    Language::Hcl,
+    Language::Go,
+];
+
+/// The entity-id slot a language owns; see the slot registry above.
+fn language_entity_slot(language: Language) -> usize {
+    match language {
+        Language::Rust => 0,
+        Language::Php => 1,
+        Language::TypeScript => 2,
+        Language::Python => 3,
+        Language::JavaScript => 4,
+        Language::Java => 5,
+        Language::CSharp => 6,
+        Language::Shell => 7,
+        Language::Cpp => 8,
+        Language::Hcl => 9,
+        Language::Go => 10,
+    }
+}
+
 const CANCELLATION_POLL_ITEMS: usize = 256;
 
 /// Why a graph mutation was rejected.
@@ -394,11 +440,11 @@ pub struct SymbolGraph {
     /// retained compactly and bounded only when a query expands them, so
     /// current language indexes keep this at zero.
     truncated_call_sites: u64,
-    next_rust_entity_id: u64,
-    next_php_entity_id: u64,
+    /// Per-slot next entity id, indexed by `language_entity_slot`.
+    next_entity_ids: [u64; ENTITY_ID_SLOT_COUNT],
     next_call_site_id: u64,
-    rust_symbol_count: u64,
-    php_symbol_count: u64,
+    /// Per-slot live symbol counts, indexed by `language_entity_slot`.
+    symbol_counts: [u64; ENTITY_ID_SLOT_COUNT],
     adjacency_entries_copied: u64,
 }
 
@@ -453,12 +499,11 @@ impl SymbolGraph {
             }
             return languages;
         }
-        let mut languages = Vec::with_capacity(2);
-        if self.rust_symbol_count != 0 {
-            languages.push(Language::Rust);
-        }
-        if self.php_symbol_count != 0 {
-            languages.push(Language::Php);
+        let mut languages = Vec::with_capacity(ENTITY_SLOT_LANGUAGES.len());
+        for (slot, language) in ENTITY_SLOT_LANGUAGES.iter().enumerate() {
+            if self.symbol_counts[slot] != 0 {
+                languages.push(*language);
+            }
         }
         languages
     }
@@ -580,31 +625,15 @@ impl SymbolGraph {
                 location_path: location.file().as_str().to_owned(),
             });
         }
-        let id = match key.language {
-            Language::Rust => {
-                if self.next_rust_entity_id >= PHP_ENTITY_ID_BASE {
-                    return Err(GraphError::EntityIdSpaceExhausted(Language::Rust));
-                }
-                let id = EntityId(self.next_rust_entity_id);
-                self.next_rust_entity_id += 1;
-                id
-            }
-            Language::Php => {
-                let Some(raw) = PHP_ENTITY_ID_BASE.checked_add(self.next_php_entity_id) else {
-                    return Err(GraphError::EntityIdSpaceExhausted(Language::Php));
-                };
-                let id = EntityId(raw);
-                self.next_php_entity_id = self
-                    .next_php_entity_id
-                    .checked_add(1)
-                    .ok_or(GraphError::EntityIdSpaceExhausted(Language::Php))?;
-                id
-            }
-        };
-        match key.language {
-            Language::Rust => self.rust_symbol_count = self.rust_symbol_count.saturating_add(1),
-            Language::Php => self.php_symbol_count = self.php_symbol_count.saturating_add(1),
+        let slot = language_entity_slot(key.language);
+        let counter = self.next_entity_ids[slot];
+        if counter >= ENTITY_ID_COUNTER_LIMIT {
+            return Err(GraphError::EntityIdSpaceExhausted(key.language));
         }
+        // slot < 16 and counter < 2^60, so the tagged id always fits u64.
+        let id = EntityId(((slot as u64) << ENTITY_ID_SLOT_SHIFT) + counter);
+        self.next_entity_ids[slot] = counter + 1;
+        self.symbol_counts[slot] = self.symbol_counts[slot].saturating_add(1);
         let symbol = Symbol {
             id,
             key,
@@ -836,10 +865,8 @@ impl SymbolGraph {
                     break;
                 }
             }
-            match symbol.key.language {
-                Language::Rust => self.rust_symbol_count = self.rust_symbol_count.saturating_sub(1),
-                Language::Php => self.php_symbol_count = self.php_symbol_count.saturating_sub(1),
-            }
+            let slot = language_entity_slot(symbol.key.language);
+            self.symbol_counts[slot] = self.symbol_counts[slot].saturating_sub(1);
             self.symbols.remove_mut(id);
         }
         self.files.remove_mut(path);
@@ -1010,12 +1037,14 @@ impl SymbolGraph {
             input.qualifier.as_deref(),
         );
         if let CallResolution::Resolved { target } = resolution {
+            let (calls_provenance, calls_precision) =
+                call_relation_tier(input.provenance, input.precision);
             self.add_edge_raw(Edge {
                 kind: EdgeKind::Calls,
                 from: input.caller,
                 to: target,
-                provenance: input.provenance,
-                precision: Precision::Heuristic,
+                provenance: calls_provenance,
+                precision: calls_precision,
                 location: Some(input.location.clone()),
             })?;
             if self
@@ -1028,12 +1057,14 @@ impl SymbolGraph {
                     )
                 })
             {
+                let (tests_provenance, tests_precision) =
+                    test_relation_tier(input.provenance, input.precision);
                 self.add_edge_raw(Edge {
                     kind: EdgeKind::Tests,
                     from: input.caller,
                     to: target,
-                    provenance: Provenance::Heuristic,
-                    precision: Precision::Heuristic,
+                    provenance: tests_provenance,
+                    precision: tests_precision,
                     location: Some(input.location.clone()),
                 })?;
             }
@@ -1208,6 +1239,33 @@ impl SymbolGraph {
                     coverage.composer_metadata_files = coverage
                         .composer_metadata_files
                         .saturating_add(part.composer_metadata_files);
+                    coverage.package_json_metadata_files = coverage
+                        .package_json_metadata_files
+                        .saturating_add(part.package_json_metadata_files);
+                    coverage.pyproject_metadata_files = coverage
+                        .pyproject_metadata_files
+                        .saturating_add(part.pyproject_metadata_files);
+                    coverage.maven_metadata_files = coverage
+                        .maven_metadata_files
+                        .saturating_add(part.maven_metadata_files);
+                    coverage.gradle_metadata_files = coverage
+                        .gradle_metadata_files
+                        .saturating_add(part.gradle_metadata_files);
+                    coverage.dotnet_project_metadata_files = coverage
+                        .dotnet_project_metadata_files
+                        .saturating_add(part.dotnet_project_metadata_files);
+                    coverage.shell_project_metadata_files = coverage
+                        .shell_project_metadata_files
+                        .saturating_add(part.shell_project_metadata_files);
+                    coverage.cpp_project_metadata_files = coverage
+                        .cpp_project_metadata_files
+                        .saturating_add(part.cpp_project_metadata_files);
+                    coverage.terraform_module_metadata_files = coverage
+                        .terraform_module_metadata_files
+                        .saturating_add(part.terraform_module_metadata_files);
+                    coverage.go_module_metadata_files = coverage
+                        .go_module_metadata_files
+                        .saturating_add(part.go_module_metadata_files);
                     coverage.path_fallback_files = coverage
                         .path_fallback_files
                         .saturating_add(part.path_fallback_files);
@@ -1222,6 +1280,33 @@ impl SymbolGraph {
             match file.metadata.classification {
                 SourceClassification::CargoMetadata => coverage.cargo_metadata_files += 1,
                 SourceClassification::ComposerMetadata => coverage.composer_metadata_files += 1,
+                SourceClassification::PackageJsonMetadata => {
+                    coverage.package_json_metadata_files += 1;
+                }
+                SourceClassification::PyprojectMetadata => {
+                    coverage.pyproject_metadata_files += 1;
+                }
+                SourceClassification::MavenMetadata => {
+                    coverage.maven_metadata_files += 1;
+                }
+                SourceClassification::GradleMetadata => {
+                    coverage.gradle_metadata_files += 1;
+                }
+                SourceClassification::DotnetProjectMetadata => {
+                    coverage.dotnet_project_metadata_files += 1;
+                }
+                SourceClassification::ShellProjectMetadata => {
+                    coverage.shell_project_metadata_files += 1;
+                }
+                SourceClassification::CppProjectMetadata => {
+                    coverage.cpp_project_metadata_files += 1;
+                }
+                SourceClassification::TerraformModuleMetadata => {
+                    coverage.terraform_module_metadata_files += 1;
+                }
+                SourceClassification::GoModuleMetadata => {
+                    coverage.go_module_metadata_files += 1;
+                }
                 SourceClassification::PathFallback => coverage.path_fallback_files += 1,
             }
         }
@@ -1306,6 +1391,16 @@ impl SymbolGraph {
             capture_omitted,
             response_omitted,
         }
+    }
+
+    /// Exact number of syntax diagnostics attributed to one indexed file.
+    pub fn file_diagnostic_count(&self, path: &RepoRelativePath) -> Option<u64> {
+        if let Some(parts) = self.parts.as_ref() {
+            return parts
+                .iter()
+                .find_map(|part| part.file_diagnostic_count(path));
+        }
+        self.files.get(path).map(|file| file.diagnostic_count)
     }
 
     /// Captured source for one file in this graph revision.
@@ -1663,12 +1758,14 @@ impl SymbolGraph {
                     continue;
                 };
                 if let CallResolution::Resolved { target } = call_site.resolution {
+                    let (calls_provenance, calls_precision) =
+                        call_relation_tier(call_site.provenance, call_site.precision);
                     self.remove_edge_raw(&Edge {
                         kind: EdgeKind::Calls,
                         from: call_site.caller,
                         to: target,
-                        provenance: call_site.provenance,
-                        precision: Precision::Heuristic,
+                        provenance: calls_provenance,
+                        precision: calls_precision,
                         location: Some(call_site.location.clone()),
                     })?;
                     if self
@@ -1676,12 +1773,14 @@ impl SymbolGraph {
                         .is_some_and(|symbol| symbol.key.kind == SymbolKind::Test)
                         && removed_test_relations.insert((call_site.caller, target))
                     {
+                        let (tests_provenance, tests_precision) =
+                            test_relation_tier(call_site.provenance, call_site.precision);
                         self.remove_edge_raw(&Edge {
                             kind: EdgeKind::Tests,
                             from: call_site.caller,
                             to: target,
-                            provenance: Provenance::Heuristic,
-                            precision: Precision::Heuristic,
+                            provenance: tests_provenance,
+                            precision: tests_precision,
                             location: Some(call_site.location.clone()),
                         })?;
                     }
@@ -2127,12 +2226,14 @@ impl SymbolGraph {
                 CallResolution::Resolved { target } => {
                     self.symbol(target)
                         .ok_or(ConsistencyError::UnknownEntity(target))?;
+                    let (calls_provenance, calls_precision) =
+                        call_relation_tier(call_site.provenance, call_site.precision);
                     let expected_call = Edge {
                         kind: EdgeKind::Calls,
                         from: call_site.caller,
                         to: target,
-                        provenance: call_site.provenance,
-                        precision: Precision::Heuristic,
+                        provenance: calls_provenance,
+                        precision: calls_precision,
                         location: Some(call_site.location.clone()),
                     };
                     let Some((_, available_calls)) = edge_counts.get_mut(&expected_call) else {
@@ -2149,12 +2250,14 @@ impl SymbolGraph {
                     if caller.key.kind == SymbolKind::Test
                         && expected_test_relations.insert((call_site.caller, target))
                     {
+                        let (tests_provenance, tests_precision) =
+                            test_relation_tier(call_site.provenance, call_site.precision);
                         let expected_test = Edge {
                             kind: EdgeKind::Tests,
                             from: call_site.caller,
                             to: target,
-                            provenance: Provenance::Heuristic,
-                            precision: Precision::Heuristic,
+                            provenance: tests_provenance,
+                            precision: tests_precision,
                             location: Some(call_site.location.clone()),
                         };
                         let Some((_, available_tests)) = edge_counts.get_mut(&expected_test) else {
@@ -2293,6 +2396,9 @@ fn call_target_kind(kind: SymbolKind) -> Option<CallTargetKind> {
         SymbolKind::Function => Some(CallTargetKind::Function),
         SymbolKind::Method => Some(CallTargetKind::Method),
         SymbolKind::Test => Some(CallTargetKind::Test),
+        SymbolKind::Module | SymbolKind::Property | SymbolKind::Configuration => {
+            Some(CallTargetKind::Configuration)
+        }
         _ => None,
     }
 }
@@ -2444,10 +2550,48 @@ fn diagnostic_cmp(left: &SyntaxDiagnostic, right: &SyntaxDiagnostic) -> Ordering
 fn provenance_rank(provenance: Provenance) -> u8 {
     match provenance {
         Provenance::RustAnalyzer => 0,
+        Provenance::Vtsls => 0,
+        Provenance::Pyright => 0,
+        Provenance::Jdtls => 0,
+        Provenance::CsharpLs => 0,
+        Provenance::BashLanguageServer => 0,
+        Provenance::Clangd => 0,
+        Provenance::TerraformLs => 0,
+        Provenance::Gopls => 0,
+        Provenance::ChakraResolver => 0,
         Provenance::TreeSitter => 1,
         Provenance::Git => 2,
         Provenance::TextSearch => 3,
         Provenance::Heuristic => 4,
+    }
+}
+
+/// `(provenance, precision)` of the `CALLS` relation materialized from one
+/// resolved syntax call site.
+///
+/// Resolved syntax calls stay heuristic by default (ADR-010, ADR-015) while
+/// keeping the call site's provenance. A language indexer promotes a single
+/// call site to the precise tier only through an explicit strict-tier
+/// evidence rule (ADR-0030); the relation then carries the call site's own
+/// provenance so the promotion stays attributable. Precision is never
+/// upgraded silently (PROV-01).
+fn call_relation_tier(provenance: Provenance, precision: Precision) -> (Provenance, Precision) {
+    if precision == Precision::Precise {
+        (provenance, Precision::Precise)
+    } else {
+        (provenance, Precision::Heuristic)
+    }
+}
+
+/// `(provenance, precision)` of the deduplicated `TESTS` relation
+/// materialized from one resolved syntax call site. Unlike `CALLS`, the
+/// default tier records the relation itself as heuristic; a strict-tier
+/// call site (ADR-0030) promotes it exactly like [`call_relation_tier`].
+fn test_relation_tier(provenance: Provenance, precision: Precision) -> (Provenance, Precision) {
+    if precision == Precision::Precise {
+        (provenance, Precision::Precise)
+    } else {
+        (Provenance::Heuristic, Precision::Heuristic)
     }
 }
 
@@ -2532,6 +2676,18 @@ mod tests {
     use chakra_domain::diagnostic::{SyntaxDiagnosticCause, SyntaxDiagnosticKind};
     use chakra_domain::location::TextPosition;
     use chakra_domain::symbol::{Language, SymbolKind};
+
+    #[test]
+    fn entity_slot_registry_matches_the_domain_language_catalog() {
+        assert_eq!(ENTITY_SLOT_LANGUAGES, Language::ALL.as_slice());
+        let slots: HashSet<_> = ENTITY_SLOT_LANGUAGES
+            .iter()
+            .copied()
+            .map(language_entity_slot)
+            .collect();
+        assert_eq!(slots.len(), ENTITY_SLOT_LANGUAGES.len());
+        assert!(slots.iter().all(|slot| *slot < ENTITY_ID_SLOT_COUNT));
+    }
 
     fn file(path: &str) -> Result<RepoRelativePath, Box<dyn std::error::Error>> {
         Ok(RepoRelativePath::new(path)?)
@@ -3196,7 +3352,7 @@ mod tests {
             Provenance::TreeSitter,
             Precision::Syntax,
         )?;
-        assert!(php_id.0 >= PHP_ENTITY_ID_BASE);
+        assert_eq!(php_id.0 >> ENTITY_ID_SLOT_SHIFT, 1);
 
         let combined = SymbolGraph::merge([rust.clone(), php.clone()])?;
         assert_eq!(combined.symbol_count(), 2);
@@ -3279,6 +3435,8 @@ mod tests {
         assert_eq!(summaries[0].provenance, Provenance::Git);
         assert_eq!(summaries[0].precision, Precision::Precise);
         assert_eq!(graph.file_source(&path), Some("//! Documentation only.\n"));
+        assert_eq!(graph.file_diagnostic_count(&path), Some(0));
+        assert_eq!(graph.file_diagnostic_count(&file("src/missing.rs")?), None);
         assert!(matches!(
             graph.add_file(path.clone(), "changed"),
             Err(GraphError::DuplicateFile(duplicate)) if duplicate == path

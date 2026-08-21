@@ -1,0 +1,3 @@
+package dupb
+
+func collidingHelper() {}

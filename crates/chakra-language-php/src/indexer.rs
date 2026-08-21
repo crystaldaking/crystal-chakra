@@ -16,7 +16,8 @@ use chakra_domain::location::{RepoRelativePath, SourceRange};
 use chakra_domain::provenance::{Precision, Provenance};
 use chakra_domain::source::SourceMetadata;
 use chakra_domain::symbol::{
-    CallResolution, CallTargetKind, Edge, EdgeKind, Language, SymbolKey, SymbolKind,
+    CallResolution, CallTargetKind, Edge, EdgeKind, Language, ReceiverTypeSource, SymbolKey,
+    SymbolKind,
 };
 use chakra_engine::{
     BoundedGraphBuilder, CallSiteInput, ConsistencyError, GraphBuildLimits, GraphBuildReport,
@@ -305,15 +306,18 @@ impl SymbolCatalog {
         (matches.len() == 1).then(|| matches[0].clone())
     }
 
-    fn method_qualifier(
+    /// Resolves the declaration container used as the call-site lookup
+    /// qualifier, and whether the lookup found exactly one candidate with an
+    /// unambiguous inheritance traversal (the ADR-0030 strict tier).
+    fn method_resolution(
         &self,
         receiver_type: &str,
         target_kind: CallTargetKind,
         method_name: &str,
-    ) -> String {
+    ) -> (String, bool) {
         match self.lookup_method(receiver_type, target_kind, method_name, &mut HashSet::new()) {
-            MethodLookup::Unique(container) => container,
-            MethodLookup::Missing | MethodLookup::Ambiguous => receiver_type.to_owned(),
+            MethodLookup::Unique(container) => (container, true),
+            MethodLookup::Missing | MethodLookup::Ambiguous => (receiver_type.to_owned(), false),
         }
     }
 
@@ -380,6 +384,40 @@ impl SymbolCatalog {
         }
         visiting.remove(receiver_type);
         MethodLookup::Missing
+    }
+}
+
+/// ADR-0030 strict tier: a receiver-resolved call site is promoted to
+/// precise `chakra_resolver` facts only when its receiver type comes from
+/// syntactically explicit evidence — a typed parameter, a typed or
+/// constructor-promoted property, a local `new`, `app(Foo::class)` /
+/// `resolve(Foo::class)`, or an explicit scoped type, including a fluent
+/// reassignment that preserves such evidence — AND the type catalog
+/// resolved the method to exactly one candidate declaration with an
+/// unambiguous inheritance traversal.
+///
+/// `$this`, `self`/`static`/`parent`, dynamic receivers, missing or
+/// ambiguous candidates, and Laravel framework-magic relations (ADR-0017)
+/// stay heuristic; precision is never upgraded silently (PROV-01).
+fn strict_call_site_tier(
+    receiver_type_source: Option<ReceiverTypeSource>,
+    unique_candidate: bool,
+) -> (Provenance, Precision) {
+    let explicit_evidence = matches!(
+        receiver_type_source,
+        Some(
+            ReceiverTypeSource::Parameter
+                | ReceiverTypeSource::Property
+                | ReceiverTypeSource::PromotedProperty
+                | ReceiverTypeSource::LocalNew
+                | ReceiverTypeSource::ServiceLocator
+                | ReceiverTypeSource::ScopedType
+        )
+    );
+    if unique_candidate && explicit_evidence {
+        (Provenance::ChakraResolver, Precision::Precise)
+    } else {
+        (Provenance::TreeSitter, Precision::Syntax)
     }
 }
 
@@ -1277,28 +1315,29 @@ impl PhpSyntaxIndex {
                     graph.omit_call_sites_for_symbol_budget(1);
                     continue;
                 };
-                let qualifier = call_site.receiver_type.as_deref().map_or_else(
-                    || call_site.qualifier.clone(),
+                let (qualifier, unique_candidate) = call_site.receiver_type.as_deref().map_or_else(
+                    || (call_site.qualifier.clone(), false),
                     |receiver_type| {
                         let key = (
                             receiver_type.to_owned(),
                             call_site.target_kind,
                             call_site.name.clone(),
                         );
-                        Some(
-                            method_qualifiers
-                                .entry(key)
-                                .or_insert_with(|| {
-                                    catalog.method_qualifier(
-                                        receiver_type,
-                                        call_site.target_kind,
-                                        &call_site.name,
-                                    )
-                                })
-                                .clone(),
-                        )
+                        let (qualifier, unique_candidate) = method_qualifiers
+                            .entry(key)
+                            .or_insert_with(|| {
+                                catalog.method_resolution(
+                                    receiver_type,
+                                    call_site.target_kind,
+                                    &call_site.name,
+                                )
+                            })
+                            .clone();
+                        (Some(qualifier), unique_candidate)
                     },
                 );
+                let (provenance, precision) =
+                    strict_call_site_tier(call_site.receiver_type_source, unique_candidate);
                 graph.add_call_site(CallSiteInput {
                     caller: *caller,
                     form: call_site.form,
@@ -1309,8 +1348,8 @@ impl PhpSyntaxIndex {
                     receiver_type_source: call_site.receiver_type_source,
                     receiver_hint: call_site.receiver_hint.clone(),
                     location: call_site.location.clone(),
-                    provenance: Provenance::TreeSitter,
-                    precision: Precision::Syntax,
+                    provenance,
+                    precision,
                 })?;
             }
         }
@@ -1484,28 +1523,29 @@ impl PhpSyntaxIndex {
                 let Some(caller) = graph.symbols_in_file(path).nth(call_site.caller) else {
                     continue;
                 };
-                let qualifier = call_site.receiver_type.as_deref().map_or_else(
-                    || call_site.qualifier.clone(),
+                let (qualifier, unique_candidate) = call_site.receiver_type.as_deref().map_or_else(
+                    || (call_site.qualifier.clone(), false),
                     |receiver_type| {
                         let key = (
                             receiver_type.to_owned(),
                             call_site.target_kind,
                             call_site.name.clone(),
                         );
-                        Some(
-                            method_qualifiers
-                                .entry(key)
-                                .or_insert_with(|| {
-                                    catalog.method_qualifier(
-                                        receiver_type,
-                                        call_site.target_kind,
-                                        &call_site.name,
-                                    )
-                                })
-                                .clone(),
-                        )
+                        let (qualifier, unique_candidate) = method_qualifiers
+                            .entry(key)
+                            .or_insert_with(|| {
+                                catalog.method_resolution(
+                                    receiver_type,
+                                    call_site.target_kind,
+                                    &call_site.name,
+                                )
+                            })
+                            .clone();
+                        (Some(qualifier), unique_candidate)
                     },
                 );
+                let (provenance, precision) =
+                    strict_call_site_tier(call_site.receiver_type_source, unique_candidate);
                 graph.add_call_site(CallSiteInput {
                     caller: caller.id,
                     form: call_site.form,
@@ -1516,8 +1556,8 @@ impl PhpSyntaxIndex {
                     receiver_type_source: call_site.receiver_type_source,
                     receiver_hint: call_site.receiver_hint.clone(),
                     location: call_site.location.clone(),
-                    provenance: Provenance::TreeSitter,
-                    precision: Precision::Syntax,
+                    provenance,
+                    precision,
                 })?;
                 if graph.edge_count() > self.graph_limits.max_edges {
                     return Ok(None);
@@ -2217,6 +2257,7 @@ fn callable_dependency(kind: chakra_domain::symbol::CallTargetKind, name: &str) 
         CallTargetKind::Function => 0,
         CallTargetKind::Method => 1,
         CallTargetKind::Test => 2,
+        CallTargetKind::Configuration => 3,
     };
     (kind, name.to_owned())
 }
@@ -2783,6 +2824,186 @@ class StatusTest {
             dynamic_call.resolution,
             chakra_domain::symbol::CallResolution::Unresolved
         );
+        Ok(())
+    }
+
+    #[test]
+    fn strict_tier_receiver_calls_promote_to_chakra_resolver_precise() -> Result<(), Box<dyn Error>>
+    {
+        let sources = in_memory_sources(&[
+            (
+                "src/services.php",
+                r#"<?php
+namespace App;
+class Mailer {
+    public function send(): void {}
+    public static function sendBatch(): void {}
+}
+class Service {
+    public function __construct(private Mailer $mailer) {}
+    public function viaProperty(): void { $this->mailer->send(); }
+    public function viaParameter(Mailer $mailer): void { $mailer->send(); }
+    public function viaLocalNew(): void { (new Mailer())->send(); }
+    public function viaLocator(): void { app(Mailer::class)->send(); }
+    public function viaScoped(): void { Mailer::sendBatch(); }
+    public function local(): void {}
+    public function viaThis(): void { $this->local(); }
+    public static function helper(): void {}
+    public function viaSelf(): void { self::helper(); }
+    public function viaStatic(): void { static::helper(); }
+    public function viaDynamic($mailer): void { $mailer->send(); }
+}
+"#,
+            ),
+            (
+                "tests/MailerTest.php",
+                r#"<?php
+namespace Tests;
+use App\Mailer;
+class MailerTest {
+    public function testSends(Mailer $mailer): void { $mailer->send(); }
+    public function testSendsDynamic($mailer): void { $mailer->send(); }
+}
+"#,
+            ),
+        ])?;
+        let (_, graph) = PhpSyntaxIndex::from_sources(sources)?;
+
+        let send = graph.resolve_name("App::Mailer::send");
+        assert_eq!(send.len(), 1);
+        let send_calls: Vec<_> = graph
+            .incoming_edges(send[0])
+            .iter()
+            .filter(|edge| edge.kind == EdgeKind::Calls)
+            .collect();
+        assert_eq!(send_calls.len(), 5);
+        assert!(
+            send_calls
+                .iter()
+                .all(|edge| edge.provenance == Provenance::ChakraResolver
+                    && edge.precision == Precision::Precise),
+            "strict-tier CALLS edges must be chakra_resolver/precise: {send_calls:?}"
+        );
+        let send_tests: Vec<_> = graph
+            .incoming_edges(send[0])
+            .iter()
+            .filter(|edge| edge.kind == EdgeKind::Tests)
+            .collect();
+        assert_eq!(send_tests.len(), 1);
+        assert_eq!(send_tests[0].provenance, Provenance::ChakraResolver);
+        assert_eq!(send_tests[0].precision, Precision::Precise);
+        let promoted_site = graph
+            .call_site_for_edge(send_calls[0])
+            .ok_or("promoted call-site evidence missing")?;
+        assert_eq!(promoted_site.provenance, Provenance::ChakraResolver);
+        assert_eq!(promoted_site.precision, Precision::Precise);
+
+        let batch = graph.resolve_name("App::Mailer::sendBatch");
+        assert_eq!(batch.len(), 1);
+        let batch_calls: Vec<_> = graph
+            .incoming_edges(batch[0])
+            .iter()
+            .filter(|edge| edge.kind == EdgeKind::Calls)
+            .collect();
+        assert_eq!(batch_calls.len(), 1);
+        assert_eq!(batch_calls[0].provenance, Provenance::ChakraResolver);
+        assert_eq!(batch_calls[0].precision, Precision::Precise);
+        Ok(())
+    }
+
+    #[test]
+    fn non_strict_receiver_calls_stay_heuristic() -> Result<(), Box<dyn Error>> {
+        let sources = in_memory_sources(&[(
+            "src/services.php",
+            r#"<?php
+namespace App;
+class Service {
+    public function local(): void {}
+    public function viaThis(): void { $this->local(); }
+    public static function helper(): void {}
+    public function viaSelf(): void { self::helper(); }
+    public function viaStatic(): void { static::helper(); }
+    public function viaDynamic($service): void { $service->local(); }
+}
+"#,
+        )])?;
+        let (_, graph) = PhpSyntaxIndex::from_sources(sources)?;
+
+        for target in ["App::Service::local", "App::Service::helper"] {
+            let ids = graph.resolve_name(target);
+            assert_eq!(ids.len(), 1, "missing target {target}");
+            let calls: Vec<_> = graph
+                .incoming_edges(ids[0])
+                .iter()
+                .filter(|edge| edge.kind == EdgeKind::Calls)
+                .collect();
+            assert!(!calls.is_empty(), "expected resolved callers for {target}");
+            assert!(
+                calls
+                    .iter()
+                    .all(|edge| edge.provenance == Provenance::TreeSitter
+                        && edge.precision == Precision::Heuristic),
+                "non-strict CALLS edges for {target} must stay tree_sitter/heuristic: {calls:?}"
+            );
+        }
+
+        let via_dynamic = graph.resolve_name("App::Service::viaDynamic");
+        assert_eq!(via_dynamic.len(), 1);
+        let dynamic_call = graph
+            .call_sites_from(via_dynamic[0])
+            .find(|call| call.name == "local")
+            .ok_or("dynamic call site missing")?;
+        assert_eq!(
+            dynamic_call.resolution,
+            chakra_domain::symbol::CallResolution::Unresolved
+        );
+        assert_eq!(dynamic_call.provenance, Provenance::TreeSitter);
+        assert_eq!(dynamic_call.precision, Precision::Syntax);
+        Ok(())
+    }
+
+    #[test]
+    fn ambiguous_inherited_candidates_stay_heuristic() -> Result<(), Box<dyn Error>> {
+        let sources = in_memory_sources(&[(
+            "src/ambiguous.php",
+            r#"<?php
+namespace App;
+trait LeftTrait { public function shared(): void {} }
+trait RightTrait { public function shared(): void {} }
+class Both {
+    use LeftTrait;
+    use RightTrait;
+}
+class Caller {
+    public function call(Both $both): void { $both->shared(); }
+}
+"#,
+        )])?;
+        let (_, graph) = PhpSyntaxIndex::from_sources(sources)?;
+
+        for trait_method in ["App::LeftTrait::shared", "App::RightTrait::shared"] {
+            let ids = graph.resolve_name(trait_method);
+            assert_eq!(ids.len(), 1, "missing target {trait_method}");
+            assert!(
+                graph
+                    .incoming_edges(ids[0])
+                    .iter()
+                    .all(|edge| edge.kind != EdgeKind::Calls),
+                "ambiguous candidate {trait_method} must not gain a call edge"
+            );
+        }
+        let caller = graph.resolve_name("App::Caller::call");
+        assert_eq!(caller.len(), 1);
+        let call = graph
+            .call_sites_from(caller[0])
+            .find(|call| call.name == "shared")
+            .ok_or("ambiguous call site missing")?;
+        assert!(!matches!(
+            call.resolution,
+            chakra_domain::symbol::CallResolution::Resolved { .. }
+        ));
+        assert_eq!(call.provenance, Provenance::TreeSitter);
+        assert_eq!(call.precision, Precision::Syntax);
         Ok(())
     }
 

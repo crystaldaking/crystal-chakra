@@ -1,0 +1,27 @@
+[package]
+name = "chakra-provider-pyright"
+description = "Optional pyright precise-provider adapter for Python in Chakra"
+version = "0.1.2"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+chakra-domain = { path = "../chakra-domain", version = "0.1.2" }
+chakra-engine = { path = "../chakra-engine", version = "0.1.2" }
+chakra-lsp = { path = "../chakra-lsp", version = "0.1.2" }
+crossbeam-channel.workspace = true
+lsp-types.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+url.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

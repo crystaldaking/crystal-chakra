@@ -5,8 +5,8 @@ use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::Arc;
 use std::sync::mpsc;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use chakra_domain::location::{RepoRelativePath, SourceRange, TextPosition};
@@ -168,6 +168,34 @@ fn compile_fake_server(root: &Path, name: &str) -> Result<PathBuf, Box<dyn Error
     Ok(executable)
 }
 
+struct SharedFakeServer {
+    _scratch: tempfile::TempDir,
+    executable: PathBuf,
+}
+
+fn materialize_fake_server(root: &Path, name: &str) -> Result<PathBuf, Box<dyn Error>> {
+    static SERVER: OnceLock<Result<SharedFakeServer, String>> = OnceLock::new();
+    let shared = match SERVER.get_or_init(|| {
+        let scratch = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let executable = compile_fake_server(scratch.path(), "fake-ra-shared")
+            .map_err(|error| error.to_string())?;
+        Ok(SharedFakeServer {
+            _scratch: scratch,
+            executable,
+        })
+    }) {
+        Ok(server) => &server.executable,
+        Err(message) => return Err(std::io::Error::other(message.clone()).into()),
+    };
+    let executable = root.join(if cfg!(windows) {
+        format!("{name}.exe")
+    } else {
+        name.to_owned()
+    });
+    fs::copy(shared, &executable)?;
+    Ok(executable)
+}
+
 fn request(root: &Path, revision: Revision) -> Result<PreciseQueryRequest, Box<dyn Error>> {
     let path = RepoRelativePath::new("src/lib.rs")?;
     let source: Arc<str> = Arc::from("pub fn target() {}\n");
@@ -197,6 +225,7 @@ fn request(root: &Path, revision: Revision) -> Result<PreciseQueryRequest, Box<d
             outgoing: false,
         },
         limit: 20,
+        priority: chakra_engine::ProviderRequestPriority::Normal,
     })
 }
 
@@ -238,7 +267,7 @@ fn config(executable: &Path) -> RustAnalyzerConfig {
 #[test]
 fn transport_crash_restarts_once_then_degrades() -> Result<(), Box<dyn Error>> {
     let repository = tempfile::tempdir()?;
-    let executable = compile_fake_server(repository.path(), "fake-ra-crash")?;
+    let executable = materialize_fake_server(repository.path(), "fake-ra-crash")?;
     let mut request = request(repository.path(), Revision(1))?;
     request.workspace = ProviderWorkspace::from_documents(
         fs::canonicalize(repository.path())?,
@@ -265,7 +294,7 @@ fn transport_crash_restarts_once_then_degrades() -> Result<(), Box<dyn Error>> {
 #[test]
 fn timed_out_request_is_cancelled_before_shutdown() -> Result<(), Box<dyn Error>> {
     let repository = tempfile::tempdir()?;
-    let executable = compile_fake_server(repository.path(), "fake-ra-hang")?;
+    let executable = materialize_fake_server(repository.path(), "fake-ra-hang")?;
     let request = request(repository.path(), Revision(1))?;
     let provider = RustAnalyzerProvider::start(request.workspace.clone(), config(&executable))?;
 
@@ -282,7 +311,7 @@ fn timed_out_request_is_cancelled_before_shutdown() -> Result<(), Box<dyn Error>
 fn per_query_wait_budget_returns_catching_up_before_request_timeout() -> Result<(), Box<dyn Error>>
 {
     let repository = tempfile::tempdir()?;
-    let executable = compile_fake_server(repository.path(), "fake-ra-hang-wait-budget")?;
+    let executable = materialize_fake_server(repository.path(), "fake-ra-hang-wait-budget")?;
     let request = request(repository.path(), Revision(1))?;
     let mut bounded = config(&executable);
     bounded.request_timeout = Duration::from_secs(2);
@@ -305,7 +334,7 @@ fn per_query_wait_budget_returns_catching_up_before_request_timeout() -> Result<
 #[test]
 fn caller_cancellation_interrupts_an_in_flight_request() -> Result<(), Box<dyn Error>> {
     let repository = tempfile::tempdir()?;
-    let executable = compile_fake_server(repository.path(), "fake-ra-hang-cancel")?;
+    let executable = materialize_fake_server(repository.path(), "fake-ra-hang-cancel")?;
     let mut request = request(repository.path(), Revision(1))?;
     request.workspace = ProviderWorkspace::from_documents(
         fs::canonicalize(repository.path())?,
@@ -345,7 +374,7 @@ fn caller_cancellation_interrupts_an_in_flight_request() -> Result<(), Box<dyn E
 #[test]
 fn blocked_provider_stdin_is_bounded_and_shutdown_completes() -> Result<(), Box<dyn Error>> {
     let repository = tempfile::tempdir()?;
-    let executable = compile_fake_server(repository.path(), "fake-ra-no-read")?;
+    let executable = materialize_fake_server(repository.path(), "fake-ra-no-read")?;
     let mut request = request(repository.path(), Revision(1))?;
     let source: Arc<str> = Arc::from(format!(
         "pub fn target() {{}}\n// {}\n",
@@ -383,7 +412,7 @@ fn blocked_provider_stdin_is_bounded_and_shutdown_completes() -> Result<(), Box<
 #[test]
 fn shutdown_reaps_provider_process_group_descendants() -> Result<(), Box<dyn Error>> {
     let repository = tempfile::tempdir()?;
-    let executable = compile_fake_server(repository.path(), "fake-ra-record-open-spawn-child")?;
+    let executable = materialize_fake_server(repository.path(), "fake-ra-record-open-spawn-child")?;
     let request = request(repository.path(), Revision(1))?;
     let provider = RustAnalyzerProvider::start(request.workspace.clone(), config(&executable))?;
     let result = provider.enrich(request);
@@ -407,7 +436,7 @@ fn shutdown_reaps_provider_process_group_descendants() -> Result<(), Box<dyn Err
 fn zed_scale_inventory_opens_only_target_and_measures_revision_delta() -> Result<(), Box<dyn Error>>
 {
     let repository = tempfile::tempdir()?;
-    let executable = compile_fake_server(repository.path(), "fake-ra-record-open")?;
+    let executable = materialize_fake_server(repository.path(), "fake-ra-record-open")?;
     let mut request = request(repository.path(), Revision(1))?;
     let second_path = RepoRelativePath::new("src/caller.rs")?;
     let documents = zed_scale_documents()?;

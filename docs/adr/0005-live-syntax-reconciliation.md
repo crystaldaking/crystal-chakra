@@ -2,7 +2,7 @@
 
 Status: accepted
 Date: 2026-08-15
-Last reviewed: 2026-08-18
+Last reviewed: 2026-08-21
 
 ## Context
 
@@ -22,10 +22,14 @@ over native filesystem mechanisms:
 ## Decision
 
 - Use workspace-managed `notify` 8.2.0 and `recommended_watcher`, selecting
-  the current stable release rather than a release candidate. Watch only the
-  repository root and the existing ancestor directories of indexed Rust/PHP
-  files, non-recursively. This avoids recursive watches inside `.git`,
-  `target`, ignored, and generated trees. The directory set is capped at
+  the current stable release rather than a release candidate. On macOS,
+  compile the documented `macos_kqueue` backend instead of the default
+  FSEvents backend: repeated `FSEventStreamStart` calls can block indefinitely
+  during watcher registration, while kqueue avoids that API and reports
+  registration errors through the existing typed startup/degradation paths.
+  Watch only the repository root and the existing ancestor directories of
+  indexed source files, non-recursively. This avoids recursive watches inside
+  `.git`, `target`, ignored, and generated trees. The directory set is capped at
   4,096; exceeding the cap degrades watcher health but does not disable exact
   freshness reconciliation.
 - Treat mutation-capable watcher events as wake-up hints. Pure access/open/read
@@ -58,6 +62,12 @@ over native filesystem mechanisms:
   temporary-file and rename-over-target save sequences without unbounded
   delay or queue growth. Parsing, Git subprocesses, and filesystem reads do
   not block Tokio runtime workers.
+- Bound watcher construction and initial registration with a typed startup
+  timeout. `LiveIndexOptions` defaults to 30 seconds and the CLI exposes
+  `--live-index-startup-timeout-millis`; zero is rejected. Timeout, setup
+  failure, barrier-install failure, and shutdown all signal the single owner,
+  stop registration cooperatively, and join it before returning, so a failed
+  start cannot detach a watcher thread.
 - Make `FreshnessBarrier` a small language-neutral engine contract. The
   `chakra-language` workspace owner implements it with monotonic
   request/completion generations plus a
@@ -72,10 +82,10 @@ over native filesystem mechanisms:
   quiet window short, so write/metadata/rename sequences converge to one latest
   state without requiring a caller sleep.
 - Reconcile from one Git-aware tracked plus untracked non-ignored inventory.
-  It contains admitted Rust/PHP sources and the Git-visible Cargo/Composer
-  manifests, lockfiles, toolchain files, and Cargo configuration that can
+  It contains admitted registered-language sources and the Git-visible
+  ecosystem manifests, lockfiles, toolchain files, and configuration that can
   change query-visible classification. Partition its source set by language;
-  do not rediscover either language or its metadata separately. A stable
+  do not rediscover a language or its metadata separately. A stable
   reconciliation has two identical shared-inventory checkpoints around one
   content/classification snapshot, unchanged watcher epoch, and identical
   pre/post filesystem identities for every admitted source and metadata input.
@@ -91,16 +101,19 @@ over native filesystem mechanisms:
   reparsed. Platforms without that identity strength conservatively reread
   admitted bodies rather than weakening `RequireFresh`.
 - Force a full bounded body reread when the cache is uninitialized, a watcher
-  error/degradation or dropped event advanced, an uncovered watcher epoch is
+  error or dropped event advanced, an uncovered watcher epoch is
   non-contiguous/reordered, an event hint is uncertain, a Git inventory
   checkpoint is uncertain, or the configurable periodic
   checkpoint is due. `LiveIndexOptions` defaults the checkpoint interval to
   256 successful reconciliations and rejects zero. Ordinary known changes and
-  no-op barriers use non-full paths. Watch directories are recomputed only
-  when the indexed path set changes or watcher recovery requires
-  reinstallation.
+  no-op barriers use non-full paths. A stable partial watch set caused by the
+  4,096-directory cap keeps lifecycle status degraded but does not itself
+  force full body rereads or repeated watch reinstallation: every fresh
+  barrier still verifies the complete Git inventory and every retained source
+  identity. Watch directories are recomputed only when the indexed path set
+  changes or a newly observed watcher error requires reinstallation.
 - Reconciliation reuses the initial revision's validated indexing budgets and
-  one shared Rust/PHP/metadata Git inventory per scan (ADR-011). Budget
+  one shared source/metadata Git inventory per scan (ADR-011). Budget
   coverage and degradation are published atomically with changed graph
   contents. A reconciled budget-limited graph is truthfully `Degraded` and `Fresh`; adding
   an over-budget file may publish metadata without pretending it was indexed.
@@ -157,12 +170,12 @@ over native filesystem mechanisms:
 
 ## Consequences
 
-- Production dependency added: `notify` 8.2.0 (CC0-1.0). On macOS it adds the
-  native FSEvents adapter; the lockfile also carries target-specific native
-  adapters for supported platforms. The stable crate declares Rust 1.77 as
-  its minimum, below Chakra's pinned Rust 1.97.1. Compile and transitive cost
-  are accepted for a mature native watcher rather than reimplementing
-  platform APIs.
+- Production dependency added: `notify` 8.2.0 (CC0-1.0). On macOS Chakra
+  enables its documented kqueue feature (with the target-specific `kqueue`
+  and `mio` dependencies) instead of FSEvents; other supported platforms keep
+  their native adapters. The stable crate declares Rust 1.77 as its minimum,
+  below Chakra's pinned Rust 1.97.1. Compile and transitive cost are accepted
+  for a mature native watcher rather than reimplementing platform APIs.
 - A warmed no-op fresh barrier performs two shared Git inventory checkpoints
   and two filesystem identity passes but reads zero source bodies. Both
   identity passes cover sources and classification inputs and are required to
@@ -204,6 +217,18 @@ over native filesystem mechanisms:
   source bodies or bytes read.
 - A pure unit test checks both quiet and absolute debounce deadlines using
   synthetic instants.
+- A macOS-only unit test pins `RecommendedWatcher` to kqueue, and the parallel
+  conformance suite exercises repeated owned watcher startup and shutdown
+  without the former FSEvents registration stall (issue #65).
+- A deterministic unit regression holds startup behind a cooperative gate,
+  reaches the configured deadline, and proves the owned worker is cancelled
+  and joined before `StartupTimeout` is returned. macOS CI runs the watcher
+  and live-update suites on the native backend.
+- The pinned Java Spring Boot corpus exceeds the non-recursive watch-directory
+  cap. Its freshness scenarios prove that stable partial notification coverage
+  remains bounded and degraded while fresh barriers complete through
+  authoritative inventory/identity reconciliation instead of repeatedly
+  reinstalling 4,096 watches and forcing whole-workspace body rereads.
 - The hardening measurement records the fresh barrier and reparse counters for
   both one ordinary edit and a 32-replacement burst. The ordinary edit reparses
   one file and recomputes only the affected relationship owner set.

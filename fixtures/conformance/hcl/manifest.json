@@ -1,0 +1,120 @@
+{
+  "language": "hcl",
+  "scenarios": [
+    {
+      "id": "declarations-containers",
+      "description": "Nested HCL blocks retain deterministic containers and prefix filtering.",
+      "capability_ids": ["SYNTAX-02", "SYNTAX-03", "QUERY-01", "PROV-01"]
+    },
+    {
+      "id": "imports-aliases",
+      "description": "Terraform provider requirements are recorded as syntax import facts.",
+      "capability_ids": ["SYNTAX-04", "PROV-01"]
+    },
+    {
+      "id": "source-roles",
+      "description": "Production and Terraform test configurations use module-aware source roles.",
+      "capability_ids": ["DISC-03"]
+    },
+    {
+      "id": "ambiguity",
+      "description": "Duplicate resource names yield candidates and typed ambiguity.",
+      "capability_ids": ["AMBIG-01", "PROV-01"]
+    },
+    {
+      "id": "syntax-callers",
+      "description": "Terraform traversals provide bounded configuration callers without a precise provider.",
+      "capability_ids": ["SYNTAX-08", "QUERY-01", "PROV-01"]
+    },
+    {
+      "id": "test-hints",
+      "description": "Terraform test run blocks are identified as tests.",
+      "capability_ids": ["SYNTAX-06", "DISC-03"]
+    },
+    {
+      "id": "text-search",
+      "description": "Text search remains textual.",
+      "capability_ids": ["QUERY-01", "PROV-01"]
+    },
+    {
+      "id": "bounded-responses",
+      "description": "Limited responses report truncation.",
+      "capability_ids": ["BUDGET-01"]
+    },
+    {
+      "id": "syntax-error-recovery",
+      "description": "Malformed HCL publishes diagnostics while valid declarations remain.",
+      "capability_ids": ["SYNTAX-07", "FRESH-01", "FRESH-02"]
+    },
+    {
+      "id": "file-lifecycle",
+      "description": "Create, modify, atomic save, rename, and delete are fresh.",
+      "capability_ids": ["FRESH-01", "FRESH-02", "DISC-01"]
+    },
+    {
+      "id": "diff-context-scopes",
+      "description": "diff_context attributes HCL worktree and base-ref changes.",
+      "capability_ids": ["QUERY-03"]
+    },
+    {
+      "id": "provider-absent-degradation",
+      "description": "HCL callers remain available through the Chakra-owned syntax equivalent.",
+      "capability_ids": ["PRECISE-05", "DEGRADE-01"]
+    },
+    {
+      "id": "provider-crash-recovery",
+      "description": "Provider failure degrades to syntax and recovery restores precise references.",
+      "capability_ids": ["PRECISE-05", "DEGRADE-01", "PROV-01"]
+    },
+    {
+      "id": "high-degree-callers",
+      "description": "A resource with 56 configuration callers is complete at explicit limits and bounded by default.",
+      "capability_ids": ["SYNTAX-08", "BUDGET-01"]
+    }
+  ],
+  "expectations": {
+    "production_file": "src/service.tf",
+    "test_file": "tests/conformance_flow.tftest.hcl",
+    "breakable_file": "src/service.tf",
+    "ambiguous_name": "colliding_helper",
+    "ambiguous_qualified": [
+      "resource::null_resource_a::colliding_helper",
+      "resource::null_resource_b::colliding_helper"
+    ],
+    "nested_prefix": "nested::outer::nested::inner",
+    "nested_containers": [
+      {
+        "qualified_name": "nested::outer",
+        "kind": "configuration"
+      },
+      {
+        "qualified_name": "nested::outer::nested::inner",
+        "kind": "configuration"
+      }
+    ],
+    "nested_symbol": {
+      "qualified_name": "nested::outer::nested::inner::marker::deeply_nested_marker",
+      "kind": "configuration"
+    },
+    "import_alias": "null",
+    "caller": "resource::null_resource::dispatch_conformance_request",
+    "caller_simple": "dispatch_conformance_request",
+    "callee": "resource::null_resource::shared_unique_target",
+    "test_symbol": "run::test_conformance_end_to_end_marker",
+    "text_needle": "CONFORMANCE_TEXT_NEEDLE",
+    "text_needle_file": "src/service.tf",
+    "fan_in_target": "resource::null_resource::record_conformance_event",
+    "fan_in_callers": 56,
+    "diff_second_commit_file": "src/shared.tf",
+    "diff_worktree_file": "src/service.tf",
+    "lifecycle_file": "src/lifecycle_created.tf",
+    "lifecycle_renamed_file": "src/lifecycle_renamed.tf",
+    "lifecycle_symbol_prefix": "lifecycle_marker",
+    "lifecycle_decl_prefix": "resource \"null_resource\" \"",
+    "lifecycle_decl_suffix": "\" {}\n",
+    "snippet_prefix": "resource \"null_resource\" \"",
+    "snippet_suffix": "\" {}\n",
+    "broken_content": "resource \"null_resource\" \"conformance_retained_marker\" {}\nresource \"broken\" \"conformance_broken\" {\n",
+    "retained_symbol": "conformance_retained_marker"
+  }
+}

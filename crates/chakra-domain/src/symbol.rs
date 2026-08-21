@@ -35,6 +35,41 @@ pub const MAX_RECEIVER_HINT_CHARS: usize = 128;
 pub enum Language {
     Rust,
     Php,
+    #[serde(rename = "typescript")]
+    TypeScript,
+    #[serde(rename = "python")]
+    Python,
+    #[serde(rename = "javascript")]
+    JavaScript,
+    #[serde(rename = "java")]
+    Java,
+    #[serde(rename = "csharp")]
+    CSharp,
+    #[serde(rename = "shell")]
+    Shell,
+    #[serde(rename = "cpp")]
+    Cpp,
+    #[serde(rename = "hcl")]
+    Hcl,
+    #[serde(rename = "go")]
+    Go,
+}
+
+impl Language {
+    /// Languages understood by the current Chakra build, in stable display order.
+    pub const ALL: [Self; 11] = [
+        Self::Rust,
+        Self::Php,
+        Self::TypeScript,
+        Self::Python,
+        Self::JavaScript,
+        Self::Java,
+        Self::CSharp,
+        Self::Shell,
+        Self::Cpp,
+        Self::Hcl,
+        Self::Go,
+    ];
 }
 
 /// Kind of a code entity (SPEC §8 plus the impl-block/import facts v0.1 §7
@@ -53,6 +88,8 @@ pub enum SymbolKind {
     Constant,
     Field,
     Property,
+    /// A type-level alias declaration (e.g. TypeScript `type X = ...`).
+    TypeAlias,
     /// An `impl` block entity (container for methods).
     ImplBlock,
     /// A `use` declaration.
@@ -201,6 +238,9 @@ pub enum CallTargetKind {
     Function,
     Method,
     Test,
+    /// A declarative configuration entity referenced from another entity,
+    /// such as a Terraform resource, module, variable, or output.
+    Configuration,
 }
 
 /// Syntax fact that justified an inferred receiver type for a call site.

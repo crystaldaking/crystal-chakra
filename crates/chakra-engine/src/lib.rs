@@ -17,7 +17,7 @@ pub use diff::{
 };
 pub use engine::{
     BarrierAlreadyInstalled, DiffProviderAlreadyInstalled, FreshnessBarrier, FreshnessBarrierError,
-    ProviderAlreadyInstalled, PublishError, UpdateBuilder, WorkspaceEngine, WorkspaceSnapshot,
+    ProviderInstallError, PublishError, UpdateBuilder, WorkspaceEngine, WorkspaceSnapshot,
 };
 pub use graph::{
     BoundedGraphBuilder, CallSiteInput, ConsistencyAudit, ConsistencyError, GraphBuildLimits,
@@ -25,5 +25,6 @@ pub use graph::{
 };
 pub use precise::{
     CallHierarchyDirections, PreciseProvider, PreciseQueryRequest, PreciseQueryResult,
-    PreciseRelation, ProviderDocument, ProviderSymbol, ProviderWorkspace, ProviderWorkspaceDelta,
+    PreciseRelation, ProviderDocument, ProviderInput, ProviderRequestPriority,
+    ProviderShutdownError, ProviderSymbol, ProviderWorkspace, ProviderWorkspaceDelta,
 };

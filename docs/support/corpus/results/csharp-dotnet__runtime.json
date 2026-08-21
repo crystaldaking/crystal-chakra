@@ -1,0 +1,494 @@
+{
+  "schema_version": 2,
+  "language": "csharp",
+  "repository": "dotnet/runtime",
+  "sha": "663c457b86ccd35743374676a69de5ed97bc3b14",
+  "status": "evaluated",
+  "skip_reason": "",
+  "provider_phase": "hermetic-startup-failure-restart",
+  "scenario_count": 12,
+  "passed": 12,
+  "failed": 0,
+  "skipped": 0,
+  "scenarios": [
+    {
+      "id": "cold-index",
+      "status": "pass",
+      "details": "full index from scratch; coverage counts recorded",
+      "phases": [
+        {
+          "name": "GitInventory",
+          "wall_micros": 333312
+        },
+        {
+          "name": "SourceRead",
+          "wall_micros": 1075298
+        },
+        {
+          "name": "ParseExtraction/Rust",
+          "wall_micros": 2
+        },
+        {
+          "name": "SymbolCatalog/Rust",
+          "wall_micros": 1
+        },
+        {
+          "name": "Relationships/Rust",
+          "wall_micros": 0
+        },
+        {
+          "name": "GraphMaterialization/Rust",
+          "wall_micros": 5
+        },
+        {
+          "name": "ParseExtraction/Php",
+          "wall_micros": 0
+        },
+        {
+          "name": "SymbolCatalog/Php",
+          "wall_micros": 0
+        },
+        {
+          "name": "Relationships/Php",
+          "wall_micros": 0
+        },
+        {
+          "name": "GraphMaterialization/Php",
+          "wall_micros": 3
+        },
+        {
+          "name": "ParseExtraction/TypeScript",
+          "wall_micros": 1
+        },
+        {
+          "name": "SymbolCatalog/TypeScript",
+          "wall_micros": 1
+        },
+        {
+          "name": "Relationships/TypeScript",
+          "wall_micros": 0
+        },
+        {
+          "name": "GraphMaterialization/TypeScript",
+          "wall_micros": 2
+        },
+        {
+          "name": "ParseExtraction/Python",
+          "wall_micros": 33722
+        },
+        {
+          "name": "SymbolCatalog/Python",
+          "wall_micros": 553
+        },
+        {
+          "name": "Relationships/Python",
+          "wall_micros": 178
+        },
+        {
+          "name": "GraphMaterialization/Python",
+          "wall_micros": 6089
+        },
+        {
+          "name": "ParseExtraction/JavaScript",
+          "wall_micros": 872
+        },
+        {
+          "name": "SymbolCatalog/JavaScript",
+          "wall_micros": 3
+        },
+        {
+          "name": "Relationships/JavaScript",
+          "wall_micros": 3
+        },
+        {
+          "name": "GraphMaterialization/JavaScript",
+          "wall_micros": 56
+        },
+        {
+          "name": "ParseExtraction/Java",
+          "wall_micros": 1
+        },
+        {
+          "name": "SymbolCatalog/Java",
+          "wall_micros": 1
+        },
+        {
+          "name": "Relationships/Java",
+          "wall_micros": 0
+        },
+        {
+          "name": "GraphMaterialization/Java",
+          "wall_micros": 3
+        },
+        {
+          "name": "ParseExtraction/CSharp",
+          "wall_micros": 1691883
+        },
+        {
+          "name": "SymbolCatalog/CSharp",
+          "wall_micros": 38187
+        },
+        {
+          "name": "Relationships/CSharp",
+          "wall_micros": 15493
+        },
+        {
+          "name": "GraphMaterialization/CSharp",
+          "wall_micros": 9188390
+        },
+        {
+          "name": "ParseExtraction/Shell",
+          "wall_micros": 4095
+        },
+        {
+          "name": "SymbolCatalog/Shell",
+          "wall_micros": 53
+        },
+        {
+          "name": "Relationships/Shell",
+          "wall_micros": 67
+        },
+        {
+          "name": "GraphMaterialization/Shell",
+          "wall_micros": 1032
+        },
+        {
+          "name": "ParseExtraction/Cpp",
+          "wall_micros": 2305157
+        },
+        {
+          "name": "SymbolCatalog/Cpp",
+          "wall_micros": 51744
+        },
+        {
+          "name": "Relationships/Cpp",
+          "wall_micros": 20753
+        },
+        {
+          "name": "GraphMaterialization/Cpp",
+          "wall_micros": 1765531
+        },
+        {
+          "name": "ParseExtraction/Hcl",
+          "wall_micros": 2
+        },
+        {
+          "name": "SymbolCatalog/Hcl",
+          "wall_micros": 1
+        },
+        {
+          "name": "Relationships/Hcl",
+          "wall_micros": 0
+        },
+        {
+          "name": "GraphMaterialization/Hcl",
+          "wall_micros": 4
+        },
+        {
+          "name": "ParseExtraction/Go",
+          "wall_micros": 1
+        },
+        {
+          "name": "SymbolCatalog/Go",
+          "wall_micros": 2
+        },
+        {
+          "name": "Relationships/Go",
+          "wall_micros": 0
+        },
+        {
+          "name": "GraphMaterialization/Go",
+          "wall_micros": 2
+        },
+        {
+          "name": "LanguageComposition",
+          "wall_micros": 7
+        },
+        {
+          "name": "GraphValidation",
+          "wall_micros": 1576946
+        },
+        {
+          "name": "total",
+          "wall_micros": 18206816
+        }
+      ],
+      "measurements": {
+        "ambiguous_call_sites": 103899,
+        "call_sites": 530290,
+        "cpp_files": 2604,
+        "csharp_files": 6547,
+        "degradations": 7,
+        "degraded": true,
+        "discovered_files": 38746,
+        "edges": 364710,
+        "go_files": 0,
+        "hcl_files": 0,
+        "java_files": 0,
+        "javascript_files": 2,
+        "parsed_files": 9280,
+        "peak_rss_bytes": 1451638784,
+        "php_files": 0,
+        "python_files": 45,
+        "rust_files": 0,
+        "shell_files": 82,
+        "source_bytes": 134217709,
+        "symbols": 283524,
+        "syntax_error_files": 2091,
+        "typescript_files": 0,
+        "unresolved_call_sites": 327549,
+        "wall_micros": 18206816
+      },
+      "budget_verdicts": [
+        {
+          "budget": "cold_index_peak_rss_bytes",
+          "observed": 1451638784,
+          "limit": 8589934592,
+          "status": "pass"
+        },
+        {
+          "budget": "cold_index_wall_micros",
+          "observed": 18206816,
+          "limit": 250000000,
+          "status": "pass"
+        }
+      ]
+    },
+    {
+      "id": "warm-noop",
+      "status": "pass",
+      "details": "unchanged checkout: no reindex work behind the freshness barrier",
+      "phases": [
+        {
+          "name": "fresh_barrier",
+          "wall_micros": 936972
+        }
+      ],
+      "measurements": {
+        "files_inspected": 77491,
+        "git_subprocesses": 2,
+        "no_op_reconciliations": 1,
+        "wall_micros": 936972
+      },
+      "budget_verdicts": [
+        {
+          "budget": "warm_noop_wall_micros",
+          "observed": 936973,
+          "limit": 30000000,
+          "status": "pass"
+        }
+      ]
+    },
+    {
+      "id": "fingerprint",
+      "status": "pass",
+      "details": "two cold indexes produce identical fingerprints and counts",
+      "phases": [
+        {
+          "name": "reindex",
+          "wall_micros": 19010789
+        }
+      ],
+      "measurements": {
+        "fingerprint": "6262c67130b071ed",
+        "rerun_edges": 364710,
+        "rerun_symbols": 283524
+      },
+      "budget_verdicts": []
+    },
+    {
+      "id": "one-file-edit",
+      "status": "pass",
+      "details": "source-byte budget degraded: 2 extra reparsed file(s) are budget-boundary churn; one-file edit: targeted reconcile, fresh query sees the change",
+      "phases": [
+        {
+          "name": "edit_and_barrier",
+          "wall_micros": 2780993
+        }
+      ],
+      "measurements": {
+        "files_reparsed": 3,
+        "full_reconciliations": 0,
+        "wall_micros": 2780994
+      },
+      "budget_verdicts": []
+    },
+    {
+      "id": "atomic-replace",
+      "status": "pass",
+      "details": "source-byte budget degraded: 1 extra reparsed file(s) are budget-boundary churn; write-temp-then-rename: targeted reconcile, fresh query sees the change",
+      "phases": [
+        {
+          "name": "replace_and_barrier",
+          "wall_micros": 3729975
+        }
+      ],
+      "measurements": {
+        "files_reparsed": 2,
+        "full_reconciliations": 0,
+        "wall_micros": 3729975
+      },
+      "budget_verdicts": []
+    },
+    {
+      "id": "rename-delete",
+      "status": "pass",
+      "details": "rename + delete: inventory correct after the freshness barrier",
+      "phases": [
+        {
+          "name": "rename_delete_and_barrier",
+          "wall_micros": 4563773
+        }
+      ],
+      "measurements": {
+        "created_files": 5,
+        "deleted_files": 5,
+        "wall_micros": 4563774
+      },
+      "budget_verdicts": []
+    },
+    {
+      "id": "syntax-error",
+      "status": "pass",
+      "details": "last-good revision: `XPathNodesetTest` stays queryable; temporary syntax error: attributed diagnostics; restore returns to baseline on a newer revision",
+      "phases": [
+        {
+          "name": "break_and_barrier",
+          "wall_micros": 1195523
+        }
+      ],
+      "measurements": {
+        "baseline_total_diagnostics": 77987
+      },
+      "budget_verdicts": []
+    },
+    {
+      "id": "diff-context",
+      "status": "pass",
+      "details": "clean tree: empty diff; after edits: correct changed-file attribution",
+      "phases": [
+        {
+          "name": "clean_diff",
+          "wall_micros": 13684619
+        },
+        {
+          "name": "dirty_diff",
+          "wall_micros": 2706651
+        }
+      ],
+      "measurements": {
+        "changed_files": [
+          {
+            "change": "Deleted",
+            "path": "docs/design/datacontracts/contract_csharp_api_design.cs",
+            "previous_path": null
+          },
+          {
+            "change": "Deleted",
+            "path": "eng/analyzers/PlatformDocAnalyzer.Tests/PlatformDocAnalyzerTests.cs",
+            "previous_path": null
+          },
+          {
+            "change": "Added",
+            "path": "eng/analyzers/PlatformDocAnalyzer.Tests/PlatformDocAnalyzerTests__chakra_moved.cs",
+            "previous_path": null
+          }
+        ],
+        "clean_diff_wall_micros": 2593412
+      },
+      "budget_verdicts": []
+    },
+    {
+      "id": "queries",
+      "status": "pass",
+      "details": "high-degree targets chosen from the index; bounded responses with explicit truncation",
+      "phases": [
+        {
+          "name": "symbol_search",
+          "wall_micros": 149
+        },
+        {
+          "name": "callers",
+          "wall_micros": 4489
+        },
+        {
+          "name": "context",
+          "wall_micros": 2860
+        }
+      ],
+      "measurements": {
+        "callers_returned": 5,
+        "target": "XPathTests::Common::Utils::XPathNodesetTest",
+        "target_incoming_calls": 821,
+        "target_precision": "TreeSitter/Syntax",
+        "targets": [
+          {
+            "incoming_calls": 821,
+            "qualified_name": "XPathTests::Common::Utils::XPathNodesetTest"
+          },
+          {
+            "incoming_calls": 232,
+            "qualified_name": "CacheLine::memset"
+          },
+          {
+            "incoming_calls": 178,
+            "qualified_name": "XPathTests::Common::Utils::XPathMatchTest"
+          }
+        ]
+      },
+      "budget_verdicts": []
+    },
+    {
+      "id": "cancellation",
+      "status": "pass",
+      "details": "cancelled index and query stop promptly; no partial publication",
+      "phases": [
+        {
+          "name": "cancelled_cold_index",
+          "wall_micros": 4
+        },
+        {
+          "name": "cancelled_query",
+          "wall_micros": 0
+        }
+      ],
+      "measurements": {
+        "cancelled_index_wall_micros": 4
+      },
+      "budget_verdicts": []
+    },
+    {
+      "id": "cache-restore",
+      "status": "pass",
+      "details": "checkout restored to the pinned SHA with a clean worktree",
+      "phases": [],
+      "measurements": {},
+      "budget_verdicts": []
+    },
+    {
+      "id": "provider-lifecycle",
+      "status": "pass",
+      "details": "real corpus graph: provider absent, failed start with explicit fallback, then provenance-tagged precise restart",
+      "phases": [
+        {
+          "name": "provider_absent",
+          "wall_micros": 5161
+        },
+        {
+          "name": "provider_failure",
+          "wall_micros": 938074
+        },
+        {
+          "name": "provider_restart",
+          "wall_micros": 1853513
+        }
+      ],
+      "measurements": {
+        "fallback_callers": 20,
+        "precise_callers": 1,
+        "target": "XPathTests::Common::Utils::XPathNodesetTest"
+      },
+      "budget_verdicts": []
+    }
+  ]
+}

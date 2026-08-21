@@ -48,6 +48,8 @@ impl FreshnessRequirement {
 pub enum ProviderState {
     /// No provider is configured for this workspace.
     NotConfigured,
+    /// Provider is configured but intentionally stopped until a query needs it.
+    Dormant,
     /// Provider is starting up.
     Initializing,
     /// Provider has processed the current revision.

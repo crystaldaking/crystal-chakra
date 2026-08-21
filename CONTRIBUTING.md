@@ -59,6 +59,21 @@ cargo test -p chakra-provider-rust-analyzer --test real_provider -- --ignored --
 The repository's `AGENTS.md` defines additional mandatory self-review,
 architecture-review, validation, staging, and commit gates for coding agents.
 
+## Release review
+
+Before freezing an Unreleased changelog section on `release/<version>`:
+
+1. Compare platform, runtime, provider, schema-version, and support claims
+   with the final implementation, feature flags, accepted ADRs, and
+   platform-specific tests.
+2. Re-read entries affected by every late `fix:` commit; update historical
+   implementation wording rather than publishing an earlier design.
+3. Run the full required checks on the final release branch, verify the
+   release range with `git diff --check <previous-tag>..HEAD`, and inspect the
+   generated support/corpus artifacts.
+4. Confirm the release commit, annotated tag, and GitHub release all identify
+   the same version and commit.
+
 ## Licensing
 
 Unless explicitly stated otherwise, contributions are submitted under the

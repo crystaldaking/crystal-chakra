@@ -22,9 +22,9 @@ const MAX_REPOSITORY_ROOTS: usize = 64;
 /// Git-visible inputs that can affect one syntax revision.
 ///
 /// Source files are parsed into the graph. Metadata inputs are not indexed as
-/// source, but Cargo/Composer classification can change query-visible package
-/// and source-role facts, so freshness reconciliation must pin them in the
-/// same pre/post inventory proof.
+/// source, but ecosystem metadata can change query-visible package and
+/// source-role facts, so freshness reconciliation must pin it in the same
+/// pre/post inventory proof.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct WorkspaceInventory {
     pub sources: Vec<RepoRelativePath>,
@@ -473,6 +473,55 @@ fn is_excluded(path: &Path) -> bool {
     )
 }
 
+/// Single extension-to-language catalog shared by source discovery and the
+/// raw Git diff prefilter. Keep special filename exclusions in
+/// [`source_language`], after the path has been decoded and validated.
+const SOURCE_EXTENSIONS: &[(&str, Language)] = &[
+    ("rs", Language::Rust),
+    ("php", Language::Php),
+    ("ts", Language::TypeScript),
+    ("tsx", Language::TypeScript),
+    ("mts", Language::TypeScript),
+    ("cts", Language::TypeScript),
+    ("py", Language::Python),
+    ("pyi", Language::Python),
+    ("js", Language::JavaScript),
+    ("jsx", Language::JavaScript),
+    ("mjs", Language::JavaScript),
+    ("cjs", Language::JavaScript),
+    ("java", Language::Java),
+    ("cs", Language::CSharp),
+    ("sh", Language::Shell),
+    ("bash", Language::Shell),
+    ("zsh", Language::Shell),
+    ("ksh", Language::Shell),
+    ("c", Language::Cpp),
+    ("h", Language::Cpp),
+    ("cc", Language::Cpp),
+    ("cpp", Language::Cpp),
+    ("cxx", Language::Cpp),
+    ("hh", Language::Cpp),
+    ("hpp", Language::Cpp),
+    ("hxx", Language::Cpp),
+    ("ipp", Language::Cpp),
+    ("tpp", Language::Cpp),
+    ("inc", Language::Cpp),
+    ("tf", Language::Hcl),
+    ("tfvars", Language::Hcl),
+    ("hcl", Language::Hcl),
+    ("go", Language::Go),
+];
+
+pub(crate) fn raw_may_be_source(raw: &[u8]) -> bool {
+    let Some(dot) = raw.iter().rposition(|byte| *byte == b'.') else {
+        return false;
+    };
+    let extension = &raw[dot.saturating_add(1)..];
+    SOURCE_EXTENSIONS
+        .iter()
+        .any(|(candidate, _)| extension == candidate.as_bytes())
+}
+
 /// Recognizes a v0.1 source language without interpreting `target` build
 /// output as source. Git administration is resolved separately through Git
 /// and is never inferred from a literal worktree path.
@@ -481,11 +530,14 @@ pub fn source_language(path: &str) -> Option<Language> {
     if is_excluded(path) {
         return None;
     }
-    match path.extension() {
-        Some(extension) if extension == OsStr::new("rs") => Some(Language::Rust),
-        Some(extension) if extension == OsStr::new("php") => Some(Language::Php),
-        _ => None,
+    let file_name = path.file_name().and_then(OsStr::to_str).unwrap_or_default();
+    if matches!(file_name, ".terraform.lock.hcl" | ".opentofu.lock.hcl") {
+        return None;
     }
+    let extension = path.extension().and_then(OsStr::to_str)?;
+    SOURCE_EXTENSIONS
+        .iter()
+        .find_map(|(candidate, language)| (*candidate == extension).then_some(*language))
 }
 
 /// Returns tracked plus untracked, non-ignored files for one supported
@@ -578,7 +630,7 @@ fn workspace_inventory_from_git_output(
         if raw.is_empty() {
             continue;
         }
-        let source = raw.ends_with(b".rs") || raw.ends_with(b".php");
+        let source = raw_may_be_source(raw);
         let metadata_input = raw_is_metadata_input(raw);
         if !source && !metadata_input {
             continue;
@@ -594,9 +646,19 @@ fn workspace_inventory_from_git_output(
             continue;
         }
         let path = RepoRelativePath::new(raw)?;
-        if source_language(raw).is_some() {
-            inventory.sources.push(path);
-        } else if metadata_input {
+        let is_source = source_language(raw).is_some();
+        if is_source {
+            inventory.sources.push(path.clone());
+        }
+        // A `setup.py` is both a Python source and a project-scope manifest:
+        // it joins the source inventory and is still a metadata input.
+        if metadata_input
+            && (!is_source
+                || raw == "setup.py"
+                || raw
+                    .strip_suffix("setup.py")
+                    .is_some_and(|p| p.ends_with('/')))
+        {
             inventory.metadata_inputs.push(path);
         }
     }
@@ -607,23 +669,139 @@ fn workspace_inventory_from_git_output(
     Ok(inventory)
 }
 
+const RUST_METADATA_LANGUAGES: &[Language] = &[Language::Rust];
+const PHP_METADATA_LANGUAGES: &[Language] = &[Language::Php];
+const TYPESCRIPT_METADATA_LANGUAGES: &[Language] = &[Language::TypeScript];
+const JAVASCRIPT_METADATA_LANGUAGES: &[Language] = &[Language::JavaScript];
+const WEB_METADATA_LANGUAGES: &[Language] = &[Language::TypeScript, Language::JavaScript];
+const PYTHON_METADATA_LANGUAGES: &[Language] = &[Language::Python];
+const JAVA_METADATA_LANGUAGES: &[Language] = &[Language::Java];
+const CSHARP_METADATA_LANGUAGES: &[Language] = &[Language::CSharp];
+const SHELL_METADATA_LANGUAGES: &[Language] = &[Language::Shell];
+const CPP_METADATA_LANGUAGES: &[Language] = &[Language::Cpp];
+const HCL_METADATA_LANGUAGES: &[Language] = &[Language::Hcl];
+const GO_METADATA_LANGUAGES: &[Language] = &[Language::Go];
+
+/// Languages whose provider workspace semantics may change when `path`
+/// changes. The mapping is shared by discovery and the atomically published
+/// provider-input catalog so adapters receive only relevant metadata events.
+pub fn metadata_languages(path: &str) -> &'static [Language] {
+    raw_metadata_languages(path.as_bytes())
+}
+
 fn raw_is_metadata_input(raw: &[u8]) -> bool {
-    [
-        b"Cargo.toml".as_slice(),
-        b"Cargo.lock".as_slice(),
-        b"composer.json".as_slice(),
-        b".cargo/config".as_slice(),
-        b".cargo/config.toml".as_slice(),
-        b"rust-toolchain".as_slice(),
-        b"rust-toolchain.toml".as_slice(),
+    !raw_metadata_languages(raw).is_empty()
+}
+
+fn raw_metadata_languages(raw: &[u8]) -> &'static [Language] {
+    if [
+        b".csproj".as_slice(),
+        b".sln".as_slice(),
+        b".slnx".as_slice(),
     ]
     .into_iter()
-    .any(|name| {
+    .any(|suffix| raw.ends_with(suffix))
+    {
+        return CSHARP_METADATA_LANGUAGES;
+    }
+    let matches_name = |name: &[u8]| {
         raw == name
             || raw
                 .strip_suffix(name)
                 .is_some_and(|prefix| prefix.ends_with(b"/"))
-    })
+    };
+    for (names, languages) in [
+        (
+            &[
+                b"Cargo.toml".as_slice(),
+                b"Cargo.lock".as_slice(),
+                b".cargo/config".as_slice(),
+                b".cargo/config.toml".as_slice(),
+                b"rust-toolchain".as_slice(),
+                b"rust-toolchain.toml".as_slice(),
+            ][..],
+            RUST_METADATA_LANGUAGES,
+        ),
+        (&[b"composer.json".as_slice()][..], PHP_METADATA_LANGUAGES),
+        (&[b"package.json".as_slice()][..], WEB_METADATA_LANGUAGES),
+        (
+            &[b"tsconfig.json".as_slice()][..],
+            TYPESCRIPT_METADATA_LANGUAGES,
+        ),
+        (
+            &[b"jsconfig.json".as_slice()][..],
+            JAVASCRIPT_METADATA_LANGUAGES,
+        ),
+        (
+            &[
+                b"pyproject.toml".as_slice(),
+                b"setup.py".as_slice(),
+                b"setup.cfg".as_slice(),
+            ][..],
+            PYTHON_METADATA_LANGUAGES,
+        ),
+        (
+            &[
+                b"pom.xml".as_slice(),
+                b"build.gradle".as_slice(),
+                b"build.gradle.kts".as_slice(),
+                b"settings.gradle".as_slice(),
+                b"settings.gradle.kts".as_slice(),
+            ][..],
+            JAVA_METADATA_LANGUAGES,
+        ),
+        (
+            &[
+                b"Directory.Build.props".as_slice(),
+                b"Directory.Build.targets".as_slice(),
+                b"Directory.Packages.props".as_slice(),
+                b"global.json".as_slice(),
+            ][..],
+            CSHARP_METADATA_LANGUAGES,
+        ),
+        (
+            &[b".shellcheckrc".as_slice(), b"shellcheckrc".as_slice()][..],
+            SHELL_METADATA_LANGUAGES,
+        ),
+        (
+            &[
+                b"compile_commands.json".as_slice(),
+                b"compile_flags.txt".as_slice(),
+                b"CMakeLists.txt".as_slice(),
+                b"meson.build".as_slice(),
+                b"BUILD".as_slice(),
+                b"BUILD.bazel".as_slice(),
+                b".clangd".as_slice(),
+            ][..],
+            CPP_METADATA_LANGUAGES,
+        ),
+        (
+            &[
+                b".terraform.lock.hcl".as_slice(),
+                b".opentofu.lock.hcl".as_slice(),
+                b".terraform-version".as_slice(),
+                b".opentofu-version".as_slice(),
+                b".terraformrc".as_slice(),
+                b"terraform.rc".as_slice(),
+                b"tofu.rc".as_slice(),
+            ][..],
+            HCL_METADATA_LANGUAGES,
+        ),
+        (
+            &[
+                b"go.mod".as_slice(),
+                b"go.sum".as_slice(),
+                b"go.work".as_slice(),
+                b"go.work.sum".as_slice(),
+            ][..],
+            GO_METADATA_LANGUAGES,
+        ),
+    ] {
+        if names.iter().copied().any(matches_name) {
+            return languages;
+        }
+    }
+    &[]
 }
 
 #[cfg(test)]
@@ -663,6 +841,21 @@ mod tests {
         git(repository.path(), &["add", "src/lib.rs", ".gitignore"])?;
         git(repository.path(), &["commit", "--quiet", "-m", "fixture"])?;
         Ok(repository)
+    }
+
+    #[test]
+    fn raw_git_prefilter_and_typed_source_catalog_share_every_extension() {
+        for (extension, language) in SOURCE_EXTENSIONS {
+            let path = format!("src/example.{extension}");
+            assert!(
+                raw_may_be_source(path.as_bytes()),
+                "missing raw {extension}"
+            );
+            assert_eq!(source_language(&path), Some(*language), "wrong {extension}");
+        }
+        assert!(!raw_may_be_source(b"src/example.unsupported"));
+        assert_eq!(source_language("target/example.rs"), None);
+        assert_eq!(source_language(".terraform.lock.hcl"), None);
     }
 
     #[test]
@@ -828,6 +1021,335 @@ mod tests {
         assert_eq!(php[0].as_str(), "src/service.php");
         let all = discover_source_files(repository.path())?;
         assert_eq!(all.len(), 2);
+        Ok(())
+    }
+
+    #[test]
+    fn discovers_typescript_extensions_without_mixing_languages() -> Result<(), Box<dyn Error>> {
+        let repository = repository()?;
+        for (path, source) in [
+            ("src/service.ts", "export function pay(): void {}\n"),
+            ("src/view.tsx", "export function View() { return null; }\n"),
+            ("src/entry.mts", "export function entry(): void {}\n"),
+            ("src/legacy.cts", "export function legacy(): void {}\n"),
+        ] {
+            fs::write(repository.path().join(path), source)?;
+        }
+
+        let typescript = discover_language_files(repository.path(), Language::TypeScript)?;
+        let paths: Vec<&str> = typescript.iter().map(RepoRelativePath::as_str).collect();
+        assert_eq!(
+            paths,
+            [
+                "src/entry.mts",
+                "src/legacy.cts",
+                "src/service.ts",
+                "src/view.tsx"
+            ]
+        );
+        let rust = discover_language_files(repository.path(), Language::Rust)?;
+        assert_eq!(rust.len(), 1);
+        let all = discover_source_files(repository.path())?;
+        assert_eq!(all.len(), 5);
+        Ok(())
+    }
+
+    #[test]
+    fn discovers_javascript_extensions_without_mixing_metadata() -> Result<(), Box<dyn Error>> {
+        let repository = repository()?;
+        for (path, source) in [
+            ("src/service.js", "export function pay() {}\n"),
+            (
+                "src/view.jsx",
+                "export function Panel() { return <section/>; }\n",
+            ),
+            ("src/modern.mjs", "export function modern() {}\n"),
+            ("src/legacy.cjs", "module.exports = {};\n"),
+        ] {
+            fs::write(repository.path().join(path), source)?;
+        }
+        fs::write(repository.path().join("jsconfig.json"), "{}\n")?;
+
+        let javascript = discover_language_files(repository.path(), Language::JavaScript)?;
+        let paths: Vec<&str> = javascript.iter().map(RepoRelativePath::as_str).collect();
+        assert_eq!(
+            paths,
+            [
+                "src/legacy.cjs",
+                "src/modern.mjs",
+                "src/service.js",
+                "src/view.jsx"
+            ],
+            "jsconfig.json is a metadata input, never a JavaScript source"
+        );
+        let rust = discover_language_files(repository.path(), Language::Rust)?;
+        assert_eq!(rust.len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn discovers_java_extension_without_mixing_metadata() -> Result<(), Box<dyn Error>> {
+        let repository = repository()?;
+        let root = repository.path();
+        fs::create_dir_all(root.join("src/main/java/chakra"))?;
+        fs::write(
+            root.join("src/main/java/chakra/Service.java"),
+            "package chakra;\nclass Service {}\n",
+        )?;
+        fs::write(
+            root.join("pom.xml"),
+            "<project><artifactId>app</artifactId></project>\n",
+        )?;
+        fs::write(root.join("build.gradle"), "plugins { id 'java' }\n")?;
+
+        let java = discover_language_files(root, Language::Java)?;
+        let paths: Vec<&str> = java.iter().map(RepoRelativePath::as_str).collect();
+        assert_eq!(
+            paths,
+            ["src/main/java/chakra/Service.java"],
+            "pom.xml and build.gradle are metadata inputs, never Java sources"
+        );
+        let rust = discover_language_files(root, Language::Rust)?;
+        assert_eq!(rust.len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn discovers_python_extensions_and_setup_py_metadata_without_mixing()
+    -> Result<(), Box<dyn Error>> {
+        let repository = repository()?;
+        for (path, source) in [
+            ("src/service.py", "def pay():\n    pass\n"),
+            ("src/service.pyi", "def pay() -> None: ...\n"),
+            ("setup.py", "from setuptools import setup\nsetup()\n"),
+        ] {
+            fs::write(repository.path().join(path), source)?;
+        }
+
+        let python = discover_language_files(repository.path(), Language::Python)?;
+        let paths: Vec<&str> = python.iter().map(RepoRelativePath::as_str).collect();
+        assert_eq!(paths, ["setup.py", "src/service.py", "src/service.pyi"]);
+        let rust = discover_language_files(repository.path(), Language::Rust)?;
+        assert_eq!(rust.len(), 1);
+        let classified = crate::discover_classified_sources(repository.path(), Language::Python)?;
+        let setup = classified
+            .iter()
+            .find(|source| source.path.as_str() == "setup.py")
+            .ok_or("setup.py missing from classified sources")?;
+        assert_eq!(
+            setup.metadata.classification,
+            chakra_domain::source::SourceClassification::PyprojectMetadata
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn discovers_csharp_without_mixing_dotnet_metadata() -> Result<(), Box<dyn Error>> {
+        let repository = repository()?;
+        let root = repository.path();
+        fs::create_dir_all(root.join("src/Payments"))?;
+        fs::write(
+            root.join("src/Payments/Service.cs"),
+            "namespace Payments; class Service {}\n",
+        )?;
+        fs::write(
+            root.join("src/Payments/Payments.csproj"),
+            "<Project Sdk=\"Microsoft.NET.Sdk\" />\n",
+        )?;
+        fs::write(
+            root.join("Payments.sln"),
+            "Microsoft Visual Studio Solution File\n",
+        )?;
+        fs::write(root.join("Directory.Build.props"), "<Project />\n")?;
+
+        let csharp = discover_language_files(root, Language::CSharp)?;
+        let paths: Vec<&str> = csharp.iter().map(RepoRelativePath::as_str).collect();
+        assert_eq!(paths, ["src/Payments/Service.cs"]);
+        let inventory = discover_workspace_inventory_in_worktree_with_context(
+            root,
+            &OperationContext::unbounded(),
+        )?;
+        let metadata: Vec<&str> = inventory
+            .metadata_inputs
+            .iter()
+            .map(RepoRelativePath::as_str)
+            .filter(|path| path.contains("Payments") || *path == "Directory.Build.props")
+            .collect();
+        assert_eq!(
+            metadata,
+            [
+                "Directory.Build.props",
+                "Payments.sln",
+                "src/Payments/Payments.csproj"
+            ]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn discovers_shell_dialects_without_mixing_shellcheck_metadata() -> Result<(), Box<dyn Error>> {
+        let repository = repository()?;
+        let root = repository.path();
+        for (path, source) in [
+            ("src/run.sh", "run() { true; }\n"),
+            ("src/login.bash", "login() { true; }\n"),
+            ("src/prompt.zsh", "prompt() { true; }\n"),
+            ("src/task.ksh", "task() { true; }\n"),
+            ("ignored.sh", "ignored() { true; }\n"),
+        ] {
+            fs::write(root.join(path), source)?;
+        }
+        fs::write(root.join(".shellcheckrc"), "enable=all\n")?;
+        fs::write(root.join("shellcheckrc"), "disable=SC1090\n")?;
+        fs::write(root.join(".gitignore"), "ignored.rs\nignored.sh\ntarget/\n")?;
+
+        let shell = discover_language_files(root, Language::Shell)?;
+        let paths: Vec<&str> = shell.iter().map(RepoRelativePath::as_str).collect();
+        assert_eq!(
+            paths,
+            [
+                "src/login.bash",
+                "src/prompt.zsh",
+                "src/run.sh",
+                "src/task.ksh"
+            ]
+        );
+        let inventory = discover_workspace_inventory_in_worktree_with_context(
+            root,
+            &OperationContext::unbounded(),
+        )?;
+        let metadata: Vec<&str> = inventory
+            .metadata_inputs
+            .iter()
+            .map(RepoRelativePath::as_str)
+            .filter(|path| path.contains("shellcheck"))
+            .collect();
+        assert_eq!(metadata, [".shellcheckrc", "shellcheckrc"]);
+        Ok(())
+    }
+
+    #[test]
+    fn discovers_cpp_translation_units_headers_and_build_metadata() -> Result<(), Box<dyn Error>> {
+        let repository = repository()?;
+        let root = repository.path();
+        fs::create_dir_all(root.join("include"))?;
+        fs::create_dir_all(root.join("src"))?;
+        for (path, source) in [
+            ("include/service.hpp", "void pay();\n"),
+            ("src/service.cpp", "void pay() {}\n"),
+            ("src/compat.c", "void compat(void) {}\n"),
+            ("src/detail.ipp", "template<class T> void detail(T) {}\n"),
+            ("ignored.cc", "void ignored() {}\n"),
+        ] {
+            fs::write(root.join(path), source)?;
+        }
+        fs::write(root.join("compile_commands.json"), "[]\n")?;
+        fs::write(root.join("CMakeLists.txt"), "project(chakra)\n")?;
+        fs::write(root.join(".gitignore"), "ignored.cc\ntarget/\n")?;
+
+        let cpp = discover_language_files(root, Language::Cpp)?;
+        let paths: Vec<&str> = cpp.iter().map(RepoRelativePath::as_str).collect();
+        assert_eq!(
+            paths,
+            [
+                "include/service.hpp",
+                "src/compat.c",
+                "src/detail.ipp",
+                "src/service.cpp"
+            ]
+        );
+        let inventory = discover_workspace_inventory_in_worktree_with_context(
+            root,
+            &OperationContext::unbounded(),
+        )?;
+        let metadata: Vec<&str> = inventory
+            .metadata_inputs
+            .iter()
+            .map(RepoRelativePath::as_str)
+            .filter(|path| *path == "CMakeLists.txt" || *path == "compile_commands.json")
+            .collect();
+        assert_eq!(metadata, ["CMakeLists.txt", "compile_commands.json"]);
+        Ok(())
+    }
+
+    #[test]
+    fn discovers_hcl_and_terraform_sources_without_lock_files() -> Result<(), Box<dyn Error>> {
+        let repository = repository()?;
+        let root = repository.path();
+        fs::create_dir_all(root.join("tests"))?;
+        for (path, source) in [
+            ("main.tf", "terraform {}\n"),
+            ("production.tfvars", "region = \"eu-west-1\"\n"),
+            ("terragrunt.hcl", "inputs = {}\n"),
+            ("tests/flow.tftest.hcl", "run \"flow\" {}\n"),
+            // Terraform JSON needs a JSON-capable syntax adapter and is not
+            // accepted by the native-HCL grammar.
+            ("variables.tf.json", "{}\n"),
+            ("production.tfvars.json", "{}\n"),
+            ("tests/flow.tftest.json", "{}\n"),
+        ] {
+            fs::write(root.join(path), source)?;
+        }
+        fs::write(root.join(".terraform.lock.hcl"), "provider lock\n")?;
+        fs::write(root.join(".opentofu.lock.hcl"), "provider lock\n")?;
+
+        let hcl = discover_language_files(root, Language::Hcl)?;
+        let paths: Vec<&str> = hcl.iter().map(RepoRelativePath::as_str).collect();
+        assert_eq!(
+            paths,
+            [
+                "main.tf",
+                "production.tfvars",
+                "terragrunt.hcl",
+                "tests/flow.tftest.hcl",
+            ]
+        );
+        let inventory = discover_workspace_inventory_in_worktree_with_context(
+            root,
+            &OperationContext::unbounded(),
+        )?;
+        let metadata: Vec<&str> = inventory
+            .metadata_inputs
+            .iter()
+            .map(RepoRelativePath::as_str)
+            .filter(|path| path.contains("lock.hcl"))
+            .collect();
+        assert_eq!(metadata, [".opentofu.lock.hcl", ".terraform.lock.hcl"]);
+        Ok(())
+    }
+
+    #[test]
+    fn discovers_go_sources_and_module_workspace_metadata() -> Result<(), Box<dyn Error>> {
+        let repository = repository()?;
+        let root = repository.path();
+        fs::create_dir_all(root.join("cmd/tool"))?;
+        fs::write(root.join("main.go"), "package main\n")?;
+        fs::write(root.join("cmd/tool/main.go"), "package main\n")?;
+        fs::write(root.join("ignored.go"), "package ignored\n")?;
+        fs::write(root.join("go.mod"), "module example.com/root\n")?;
+        fs::write(root.join("go.sum"), "example.com/dependency v1.0.0 h1:x\n")?;
+        fs::write(root.join("go.work"), "go 1.25\nuse ./cmd/tool\n")?;
+        fs::write(
+            root.join("go.work.sum"),
+            "example.com/dependency v1.0.0 h1:x\n",
+        )?;
+        fs::write(root.join(".gitignore"), "ignored.go\n")?;
+
+        let go = discover_language_files(root, Language::Go)?;
+        let paths: Vec<&str> = go.iter().map(RepoRelativePath::as_str).collect();
+        assert_eq!(paths, ["cmd/tool/main.go", "main.go"]);
+
+        let inventory = discover_workspace_inventory_in_worktree_with_context(
+            root,
+            &OperationContext::unbounded(),
+        )?;
+        let metadata: Vec<&str> = inventory
+            .metadata_inputs
+            .iter()
+            .map(RepoRelativePath::as_str)
+            .filter(|path| path.starts_with("go."))
+            .collect();
+        assert_eq!(metadata, ["go.mod", "go.sum", "go.work", "go.work.sum"]);
         Ok(())
     }
 }

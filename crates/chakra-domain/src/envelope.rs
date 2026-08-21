@@ -11,7 +11,7 @@ use crate::revision::Revision;
 use crate::state::{Freshness, ProviderState, WorkspaceStatus};
 
 /// Current envelope schema version.
-pub const SCHEMA_VERSION: u32 = 7;
+pub const SCHEMA_VERSION: u32 = 13;
 
 /// Response section whose contents were cut by a bounded query operation.
 #[derive(
@@ -186,6 +186,16 @@ mod tests {
         assert!(workspace_id.contains(":worktree:"));
         assert!(json["data"].is_object());
         Ok(())
+    }
+
+    #[test]
+    fn spec_envelope_example_tracks_the_current_schema_version() {
+        let spec = include_str!("../../../docs/SPEC.md");
+        let expected = format!("\"schema_version\": {SCHEMA_VERSION}");
+        assert!(
+            spec.contains(&expected),
+            "SPEC query-envelope example must contain {expected}"
+        );
     }
 
     #[test]

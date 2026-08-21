@@ -1,0 +1,494 @@
+{
+  "schema_version": 2,
+  "language": "rust",
+  "repository": "tokio-rs/tokio",
+  "sha": "625954f365727668cb02d04172b34f1149637728",
+  "status": "evaluated",
+  "skip_reason": "",
+  "provider_phase": "hermetic-startup-failure-restart",
+  "scenario_count": 12,
+  "passed": 12,
+  "failed": 0,
+  "skipped": 0,
+  "scenarios": [
+    {
+      "id": "cold-index",
+      "status": "pass",
+      "details": "full index from scratch; coverage counts recorded",
+      "phases": [
+        {
+          "name": "GitInventory",
+          "wall_micros": 23404
+        },
+        {
+          "name": "SourceRead",
+          "wall_micros": 189607
+        },
+        {
+          "name": "ParseExtraction/Rust",
+          "wall_micros": 97367
+        },
+        {
+          "name": "SymbolCatalog/Rust",
+          "wall_micros": 3283
+        },
+        {
+          "name": "Relationships/Rust",
+          "wall_micros": 2525
+        },
+        {
+          "name": "GraphMaterialization/Rust",
+          "wall_micros": 101471
+        },
+        {
+          "name": "ParseExtraction/Php",
+          "wall_micros": 0
+        },
+        {
+          "name": "SymbolCatalog/Php",
+          "wall_micros": 0
+        },
+        {
+          "name": "Relationships/Php",
+          "wall_micros": 0
+        },
+        {
+          "name": "GraphMaterialization/Php",
+          "wall_micros": 3
+        },
+        {
+          "name": "ParseExtraction/TypeScript",
+          "wall_micros": 1
+        },
+        {
+          "name": "SymbolCatalog/TypeScript",
+          "wall_micros": 1
+        },
+        {
+          "name": "Relationships/TypeScript",
+          "wall_micros": 0
+        },
+        {
+          "name": "GraphMaterialization/TypeScript",
+          "wall_micros": 2
+        },
+        {
+          "name": "ParseExtraction/Python",
+          "wall_micros": 1
+        },
+        {
+          "name": "SymbolCatalog/Python",
+          "wall_micros": 1
+        },
+        {
+          "name": "Relationships/Python",
+          "wall_micros": 0
+        },
+        {
+          "name": "GraphMaterialization/Python",
+          "wall_micros": 1
+        },
+        {
+          "name": "ParseExtraction/JavaScript",
+          "wall_micros": 2
+        },
+        {
+          "name": "SymbolCatalog/JavaScript",
+          "wall_micros": 1
+        },
+        {
+          "name": "Relationships/JavaScript",
+          "wall_micros": 0
+        },
+        {
+          "name": "GraphMaterialization/JavaScript",
+          "wall_micros": 1
+        },
+        {
+          "name": "ParseExtraction/Java",
+          "wall_micros": 1
+        },
+        {
+          "name": "SymbolCatalog/Java",
+          "wall_micros": 1
+        },
+        {
+          "name": "Relationships/Java",
+          "wall_micros": 0
+        },
+        {
+          "name": "GraphMaterialization/Java",
+          "wall_micros": 2
+        },
+        {
+          "name": "ParseExtraction/CSharp",
+          "wall_micros": 1
+        },
+        {
+          "name": "SymbolCatalog/CSharp",
+          "wall_micros": 1
+        },
+        {
+          "name": "Relationships/CSharp",
+          "wall_micros": 0
+        },
+        {
+          "name": "GraphMaterialization/CSharp",
+          "wall_micros": 1
+        },
+        {
+          "name": "ParseExtraction/Shell",
+          "wall_micros": 0
+        },
+        {
+          "name": "SymbolCatalog/Shell",
+          "wall_micros": 1
+        },
+        {
+          "name": "Relationships/Shell",
+          "wall_micros": 0
+        },
+        {
+          "name": "GraphMaterialization/Shell",
+          "wall_micros": 2
+        },
+        {
+          "name": "ParseExtraction/Cpp",
+          "wall_micros": 1
+        },
+        {
+          "name": "SymbolCatalog/Cpp",
+          "wall_micros": 1
+        },
+        {
+          "name": "Relationships/Cpp",
+          "wall_micros": 0
+        },
+        {
+          "name": "GraphMaterialization/Cpp",
+          "wall_micros": 2
+        },
+        {
+          "name": "ParseExtraction/Hcl",
+          "wall_micros": 1
+        },
+        {
+          "name": "SymbolCatalog/Hcl",
+          "wall_micros": 1
+        },
+        {
+          "name": "Relationships/Hcl",
+          "wall_micros": 0
+        },
+        {
+          "name": "GraphMaterialization/Hcl",
+          "wall_micros": 2
+        },
+        {
+          "name": "ParseExtraction/Go",
+          "wall_micros": 0
+        },
+        {
+          "name": "SymbolCatalog/Go",
+          "wall_micros": 2
+        },
+        {
+          "name": "Relationships/Go",
+          "wall_micros": 0
+        },
+        {
+          "name": "GraphMaterialization/Go",
+          "wall_micros": 1
+        },
+        {
+          "name": "LanguageComposition",
+          "wall_micros": 7
+        },
+        {
+          "name": "GraphValidation",
+          "wall_micros": 61319
+        },
+        {
+          "name": "total",
+          "wall_micros": 514234
+        }
+      ],
+      "measurements": {
+        "ambiguous_call_sites": 1881,
+        "call_sites": 33500,
+        "cpp_files": 0,
+        "csharp_files": 0,
+        "degradations": 0,
+        "degraded": false,
+        "discovered_files": 793,
+        "edges": 19117,
+        "go_files": 0,
+        "hcl_files": 0,
+        "java_files": 0,
+        "javascript_files": 0,
+        "parsed_files": 793,
+        "peak_rss_bytes": 123584512,
+        "php_files": 0,
+        "python_files": 0,
+        "rust_files": 793,
+        "shell_files": 0,
+        "source_bytes": 5685721,
+        "symbols": 16888,
+        "syntax_error_files": 0,
+        "typescript_files": 0,
+        "unresolved_call_sites": 26656,
+        "wall_micros": 514234
+      },
+      "budget_verdicts": [
+        {
+          "budget": "cold_index_peak_rss_bytes",
+          "observed": 123584512,
+          "limit": 2147483648,
+          "status": "pass"
+        },
+        {
+          "budget": "cold_index_wall_micros",
+          "observed": 514234,
+          "limit": 60000000,
+          "status": "pass"
+        }
+      ]
+    },
+    {
+      "id": "warm-noop",
+      "status": "pass",
+      "details": "unchanged checkout: no reindex work behind the freshness barrier",
+      "phases": [
+        {
+          "name": "fresh_barrier",
+          "wall_micros": 105056
+        }
+      ],
+      "measurements": {
+        "files_inspected": 1586,
+        "git_subprocesses": 2,
+        "no_op_reconciliations": 1,
+        "wall_micros": 105056
+      },
+      "budget_verdicts": [
+        {
+          "budget": "warm_noop_wall_micros",
+          "observed": 105057,
+          "limit": 10000000,
+          "status": "pass"
+        }
+      ]
+    },
+    {
+      "id": "fingerprint",
+      "status": "pass",
+      "details": "two cold indexes produce identical fingerprints and counts",
+      "phases": [
+        {
+          "name": "reindex",
+          "wall_micros": 412428
+        }
+      ],
+      "measurements": {
+        "fingerprint": "1c7b6f738e280e2a",
+        "rerun_edges": 19117,
+        "rerun_symbols": 16888
+      },
+      "budget_verdicts": []
+    },
+    {
+      "id": "one-file-edit",
+      "status": "pass",
+      "details": "one-file edit: targeted reconcile, fresh query sees the change",
+      "phases": [
+        {
+          "name": "edit_and_barrier",
+          "wall_micros": 176763
+        }
+      ],
+      "measurements": {
+        "files_reparsed": 1,
+        "full_reconciliations": 0,
+        "wall_micros": 176763
+      },
+      "budget_verdicts": []
+    },
+    {
+      "id": "atomic-replace",
+      "status": "pass",
+      "details": "write-temp-then-rename: targeted reconcile, fresh query sees the change",
+      "phases": [
+        {
+          "name": "replace_and_barrier",
+          "wall_micros": 324280
+        }
+      ],
+      "measurements": {
+        "files_reparsed": 1,
+        "full_reconciliations": 0,
+        "wall_micros": 324280
+      },
+      "budget_verdicts": []
+    },
+    {
+      "id": "rename-delete",
+      "status": "pass",
+      "details": "rename + delete: inventory correct after the freshness barrier",
+      "phases": [
+        {
+          "name": "rename_delete_and_barrier",
+          "wall_micros": 314807
+        }
+      ],
+      "measurements": {
+        "created_files": 1,
+        "deleted_files": 2,
+        "wall_micros": 314807
+      },
+      "budget_verdicts": []
+    },
+    {
+      "id": "syntax-error",
+      "status": "pass",
+      "details": "last-good revision: `run_one` stays queryable; temporary syntax error: attributed diagnostics; restore returns to baseline on a newer revision",
+      "phases": [
+        {
+          "name": "break_and_barrier",
+          "wall_micros": 104023
+        }
+      ],
+      "measurements": {
+        "baseline_total_diagnostics": 0
+      },
+      "budget_verdicts": []
+    },
+    {
+      "id": "diff-context",
+      "status": "pass",
+      "details": "clean tree: empty diff; after edits: correct changed-file attribution",
+      "phases": [
+        {
+          "name": "clean_diff",
+          "wall_micros": 1053996
+        },
+        {
+          "name": "dirty_diff",
+          "wall_micros": 244244
+        }
+      ],
+      "measurements": {
+        "changed_files": [
+          {
+            "change": "Deleted",
+            "path": "benches/copy.rs",
+            "previous_path": null
+          },
+          {
+            "change": "Deleted",
+            "path": "benches/fs.rs",
+            "previous_path": null
+          },
+          {
+            "change": "Added",
+            "path": "benches/fs__chakra_moved.rs",
+            "previous_path": null
+          }
+        ],
+        "clean_diff_wall_micros": 237132
+      },
+      "budget_verdicts": []
+    },
+    {
+      "id": "queries",
+      "status": "pass",
+      "details": "high-degree targets chosen from the index; bounded responses with explicit truncation",
+      "phases": [
+        {
+          "name": "symbol_search",
+          "wall_micros": 157
+        },
+        {
+          "name": "callers",
+          "wall_micros": 100
+        },
+        {
+          "name": "context",
+          "wall_micros": 133
+        }
+      ],
+      "measurements": {
+        "callers_returned": 5,
+        "target": "tokio::src::fs::mocks::pool::run_one",
+        "target_incoming_calls": 27,
+        "target_precision": "TreeSitter/Syntax",
+        "targets": [
+          {
+            "incoming_calls": 27,
+            "qualified_name": "tokio::src::fs::mocks::pool::run_one"
+          },
+          {
+            "incoming_calls": 19,
+            "qualified_name": "tokio::tests::fs_uring_file_read::create_temp_file"
+          },
+          {
+            "incoming_calls": 19,
+            "qualified_name": "tokio::tests::io_async_fd::socketpair"
+          }
+        ]
+      },
+      "budget_verdicts": []
+    },
+    {
+      "id": "cancellation",
+      "status": "pass",
+      "details": "cancelled index and query stop promptly; no partial publication",
+      "phases": [
+        {
+          "name": "cancelled_cold_index",
+          "wall_micros": 2
+        },
+        {
+          "name": "cancelled_query",
+          "wall_micros": 0
+        }
+      ],
+      "measurements": {
+        "cancelled_index_wall_micros": 2
+      },
+      "budget_verdicts": []
+    },
+    {
+      "id": "cache-restore",
+      "status": "pass",
+      "details": "checkout restored to the pinned SHA with a clean worktree",
+      "phases": [],
+      "measurements": {},
+      "budget_verdicts": []
+    },
+    {
+      "id": "provider-lifecycle",
+      "status": "pass",
+      "details": "real corpus graph: provider absent, failed start with explicit fallback, then provenance-tagged precise restart",
+      "phases": [
+        {
+          "name": "provider_absent",
+          "wall_micros": 36
+        },
+        {
+          "name": "provider_failure",
+          "wall_micros": 90921
+        },
+        {
+          "name": "provider_restart",
+          "wall_micros": 183284
+        }
+      ],
+      "measurements": {
+        "fallback_callers": 20,
+        "precise_callers": 1,
+        "target": "tokio::src::fs::mocks::pool::run_one"
+      },
+      "budget_verdicts": []
+    }
+  ]
+}

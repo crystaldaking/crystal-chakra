@@ -65,6 +65,15 @@ impl QueryService for StubService {
                     total_files: 1,
                     cargo_metadata_files: 0,
                     composer_metadata_files: 0,
+                    package_json_metadata_files: 0,
+                    pyproject_metadata_files: 0,
+                    maven_metadata_files: 0,
+                    gradle_metadata_files: 0,
+                    dotnet_project_metadata_files: 0,
+                    shell_project_metadata_files: 0,
+                    cpp_project_metadata_files: 0,
+                    terraform_module_metadata_files: 0,
+                    go_module_metadata_files: 0,
                     path_fallback_files: 1,
                 },
                 syntax_diagnostics: Default::default(),
@@ -142,7 +151,8 @@ async fn status_tool_is_listed_and_callable() -> Result<(), Box<dyn Error + Send
         .instructions
         .as_deref()
         .ok_or("server instructions missing")?;
-    assert!(instructions.contains("Rust and PHP code intelligence"));
+    assert!(instructions.contains("multi-language code intelligence"));
+    assert!(!instructions.contains("Rust and PHP"));
 
     let tools = client.list_all_tools().await?;
     let mut tool_names: Vec<&str> = tools.iter().map(|tool| tool.name.as_ref()).collect();
@@ -186,9 +196,10 @@ async fn status_tool_is_listed_and_callable() -> Result<(), Box<dyn Error + Send
             .and_then(|tool| tool.description.as_deref())
             .ok_or("tool description missing")?;
         assert!(
-            description.contains("PHP"),
+            description.contains("supported-language"),
             "{name} description: {description}"
         );
+        assert!(!description.contains("Rust and PHP"));
     }
     assert!(tools.iter().all(|tool| {
         tool.annotations.as_ref().is_some_and(|annotations| {
@@ -257,6 +268,60 @@ fn laravel_fixture_root() -> PathBuf {
         .join("fixtures")
         .join("php")
         .join("laravel-relationships")
+}
+
+fn java_fixture_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
+        .join("fixtures")
+        .join("java")
+        .join("controller-service-provider")
+}
+
+fn csharp_fixture_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
+        .join("fixtures")
+        .join("csharp")
+        .join("controller-service-provider")
+}
+
+fn shell_fixture_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
+        .join("fixtures")
+        .join("shell")
+        .join("controller-service-provider")
+}
+
+fn cpp_fixture_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
+        .join("fixtures")
+        .join("cpp")
+        .join("controller-service-provider")
+}
+
+fn hcl_fixture_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
+        .join("fixtures")
+        .join("hcl")
+        .join("controller-service-provider")
+}
+
+fn go_fixture_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
+        .join("fixtures")
+        .join("go")
+        .join("controller-service-provider")
 }
 
 fn copy_fixture_tree(source: &Path, target: &Path) -> Result<(), Box<dyn Error + Send + Sync>> {
@@ -337,6 +402,631 @@ fn indexed_fixture_engine() -> Result<(TempDir, WorkspaceEngine), Box<dyn Error 
     Ok((repository, engine))
 }
 
+fn indexed_java_fixture_engine() -> Result<(TempDir, WorkspaceEngine), Box<dyn Error + Send + Sync>>
+{
+    let repository = TempDir::new()?;
+    git(repository.path(), &["init", "--quiet"])?;
+    git(
+        repository.path(),
+        &["config", "user.email", "tests@example.invalid"],
+    )?;
+    git(repository.path(), &["config", "user.name", "Chakra Tests"])?;
+    copy_fixture_tree(&java_fixture_root(), repository.path())?;
+    git(repository.path(), &["add", "pom.xml", "src"])?;
+    git(repository.path(), &["commit", "--quiet", "-m", "base"])?;
+    let report = index_repository(repository.path())?;
+    let identity = WorkspaceIdentity::for_primary_worktree(&report.repository_root)?;
+    let engine = WorkspaceEngine::new(identity);
+    let mut update = engine.begin_update();
+    update.replace_graph(report.graph);
+    update.set_indexing(report.metrics.indexing);
+    update.set_status(WorkspaceStatus::Ready);
+    update.set_freshness(Freshness::Fresh);
+    engine.publish(update)?;
+    engine.install_diff_provider(Arc::new(chakra_git::GitWorkspaceDiff))?;
+    Ok((repository, engine))
+}
+
+fn indexed_csharp_fixture_engine()
+-> Result<(TempDir, WorkspaceEngine), Box<dyn Error + Send + Sync>> {
+    let repository = TempDir::new()?;
+    git(repository.path(), &["init", "--quiet"])?;
+    git(
+        repository.path(),
+        &["config", "user.email", "tests@example.invalid"],
+    )?;
+    git(repository.path(), &["config", "user.name", "Chakra Tests"])?;
+    copy_fixture_tree(&csharp_fixture_root(), repository.path())?;
+    git(repository.path(), &["add", "Payments.sln", "src", "tests"])?;
+    git(repository.path(), &["commit", "--quiet", "-m", "base"])?;
+    let report = index_repository(repository.path())?;
+    let identity = WorkspaceIdentity::for_primary_worktree(&report.repository_root)?;
+    let engine = WorkspaceEngine::new(identity);
+    let mut update = engine.begin_update();
+    update.replace_graph(report.graph);
+    update.set_indexing(report.metrics.indexing);
+    update.set_status(WorkspaceStatus::Ready);
+    update.set_freshness(Freshness::Fresh);
+    engine.publish(update)?;
+    engine.install_diff_provider(Arc::new(chakra_git::GitWorkspaceDiff))?;
+    Ok((repository, engine))
+}
+
+fn indexed_shell_fixture_engine() -> Result<(TempDir, WorkspaceEngine), Box<dyn Error + Send + Sync>>
+{
+    let repository = TempDir::new()?;
+    git(repository.path(), &["init", "--quiet"])?;
+    git(
+        repository.path(),
+        &["config", "user.email", "tests@example.invalid"],
+    )?;
+    git(repository.path(), &["config", "user.name", "Chakra Tests"])?;
+    copy_fixture_tree(&shell_fixture_root(), repository.path())?;
+    git(
+        repository.path(),
+        &[
+            "add",
+            ".shellcheckrc",
+            "src",
+            "tests",
+            "vendor",
+            "generated",
+        ],
+    )?;
+    git(repository.path(), &["commit", "--quiet", "-m", "base"])?;
+    let report = index_repository(repository.path())?;
+    let identity = WorkspaceIdentity::for_primary_worktree(&report.repository_root)?;
+    let engine = WorkspaceEngine::new(identity);
+    let mut update = engine.begin_update();
+    update.replace_graph(report.graph);
+    update.set_indexing(report.metrics.indexing);
+    update.set_status(WorkspaceStatus::Ready);
+    update.set_freshness(Freshness::Fresh);
+    engine.publish(update)?;
+    Ok((repository, engine))
+}
+
+fn indexed_cpp_fixture_engine() -> Result<(TempDir, WorkspaceEngine), Box<dyn Error + Send + Sync>>
+{
+    let repository = TempDir::new()?;
+    git(repository.path(), &["init", "--quiet"])?;
+    git(
+        repository.path(),
+        &["config", "user.email", "tests@example.invalid"],
+    )?;
+    git(repository.path(), &["config", "user.name", "Chakra Tests"])?;
+    copy_fixture_tree(&cpp_fixture_root(), repository.path())?;
+    git(
+        repository.path(),
+        &[
+            "add",
+            "CMakeLists.txt",
+            "include",
+            "src",
+            "tests",
+            "vendor",
+            "generated",
+        ],
+    )?;
+    git(repository.path(), &["commit", "--quiet", "-m", "base"])?;
+    let report = index_repository(repository.path())?;
+    let identity = WorkspaceIdentity::for_primary_worktree(&report.repository_root)?;
+    let engine = WorkspaceEngine::new(identity);
+    let mut update = engine.begin_update();
+    update.replace_graph(report.graph);
+    update.set_indexing(report.metrics.indexing);
+    update.set_status(WorkspaceStatus::Ready);
+    update.set_freshness(Freshness::Fresh);
+    engine.publish(update)?;
+    Ok((repository, engine))
+}
+
+fn indexed_hcl_fixture_engine() -> Result<(TempDir, WorkspaceEngine), Box<dyn Error + Send + Sync>>
+{
+    let repository = TempDir::new()?;
+    git(repository.path(), &["init", "--quiet"])?;
+    git(
+        repository.path(),
+        &["config", "user.email", "tests@example.invalid"],
+    )?;
+    git(repository.path(), &["config", "user.name", "Chakra Tests"])?;
+    copy_fixture_tree(&hcl_fixture_root(), repository.path())?;
+    git(
+        repository.path(),
+        &[
+            "add",
+            "generated",
+            "outputs.tf",
+            "resources.tf",
+            "service.tf",
+            "tests",
+            "variables.tf",
+            "vendor",
+            "versions.tf",
+        ],
+    )?;
+    git(repository.path(), &["commit", "--quiet", "-m", "base"])?;
+    let report = index_repository(repository.path())?;
+    let identity = WorkspaceIdentity::for_primary_worktree(&report.repository_root)?;
+    let engine = WorkspaceEngine::new(identity);
+    let mut update = engine.begin_update();
+    update.replace_graph(report.graph);
+    update.set_indexing(report.metrics.indexing);
+    update.set_status(WorkspaceStatus::Ready);
+    update.set_freshness(Freshness::Fresh);
+    engine.publish(update)?;
+    Ok((repository, engine))
+}
+
+fn indexed_go_fixture_engine() -> Result<(TempDir, WorkspaceEngine), Box<dyn Error + Send + Sync>> {
+    let repository = TempDir::new()?;
+    git(repository.path(), &["init", "--quiet"])?;
+    git(
+        repository.path(),
+        &["config", "user.email", "tests@example.invalid"],
+    )?;
+    git(repository.path(), &["config", "user.name", "Chakra Tests"])?;
+    copy_fixture_tree(&go_fixture_root(), repository.path())?;
+    git(
+        repository.path(),
+        &[
+            "add",
+            "go.mod",
+            "generated",
+            "src",
+            "tests",
+            "tools_linux.go",
+            "vendor",
+        ],
+    )?;
+    git(repository.path(), &["commit", "--quiet", "-m", "base"])?;
+    let report = index_repository(repository.path())?;
+    let identity = WorkspaceIdentity::for_primary_worktree(&report.repository_root)?;
+    let engine = WorkspaceEngine::new(identity);
+    let mut update = engine.begin_update();
+    update.replace_graph(report.graph);
+    update.set_indexing(report.metrics.indexing);
+    update.set_status(WorkspaceStatus::Ready);
+    update.set_freshness(Freshness::Fresh);
+    engine.publish(update)?;
+    Ok((repository, engine))
+}
+
+#[tokio::test]
+async fn java_fixture_is_queryable_through_structured_mcp_tools()
+-> Result<(), Box<dyn Error + Send + Sync>> {
+    let (_repository, engine) = indexed_java_fixture_engine()?;
+    let server = ChakraMcpServer::new(Arc::new(engine));
+    let (server_transport, client_transport) = tokio::io::duplex(64 * 1024);
+    let server_task = tokio::spawn(async move { server.serve(server_transport).await });
+    let client = ().serve(client_transport).await?;
+
+    let repo_map = client
+        .call_tool(
+            CallToolRequestParams::new("repo_map").with_arguments(serde_json::from_value(
+                serde_json::json!({ "include_languages": ["java"], "limit": 20 }),
+            )?),
+        )
+        .await?
+        .structured_content
+        .ok_or("Java repo_map response missing")?;
+    let files = repo_map["data"]["files"]
+        .as_array()
+        .ok_or("Java repo_map files missing")?;
+    assert_eq!(files.len(), 8);
+    assert!(files.iter().all(|file| file["language"] == "java"));
+    assert!(files.iter().any(|file| {
+        file["source_classification"] == "maven_metadata" && file["source_role"] == "test"
+    }));
+
+    let symbols = client
+        .call_tool(CallToolRequestParams::new("symbol_search").with_arguments(
+            serde_json::from_value(
+                serde_json::json!({ "query": "sharedUniqueTarget", "limit": 5 }),
+            )?,
+        ))
+        .await?
+        .structured_content
+        .ok_or("Java symbol_search response missing")?;
+    let target = symbols["data"]["candidates"]
+        .as_array()
+        .and_then(|candidates| candidates.first())
+        .ok_or("Java sharedUniqueTarget symbol missing")?;
+    assert_eq!(target["language"], "java");
+    assert_eq!(target["precision"], "syntax");
+    assert_eq!(target["provenance"], "tree_sitter");
+
+    let symbol_ref = serde_json::json!({
+        "by_id": { "id": target["id"], "revision": symbols["revision"] }
+    });
+    let callers = client
+        .call_tool(
+            CallToolRequestParams::new("callers").with_arguments(serde_json::from_value(
+                serde_json::json!({ "symbol": symbol_ref.clone(), "limit": 10 }),
+            )?),
+        )
+        .await?
+        .structured_content
+        .ok_or("Java callers response missing")?;
+    assert!(
+        callers["data"]["callers"]
+            .as_array()
+            .is_some_and(|items| !items.is_empty())
+    );
+    assert_ne!(callers["data"]["callers"][0]["precision"], "precise");
+
+    let context =
+        client
+            .call_tool(CallToolRequestParams::new("context").with_arguments(
+                serde_json::from_value(serde_json::json!({ "symbol": symbol_ref, "limit": 10 }))?,
+            ))
+            .await?
+            .structured_content
+            .ok_or("Java context response missing")?;
+    assert_eq!(context["data"]["symbol"]["id"], target["id"]);
+
+    client.cancel().await?;
+    let running = server_task
+        .await
+        .map_err(|error| std::io::Error::other(format!("server task join: {error}")))?
+        .map_err(|error| std::io::Error::other(format!("server serve: {error}")))?;
+    running.cancel().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn csharp_fixture_is_queryable_through_structured_mcp_tools()
+-> Result<(), Box<dyn Error + Send + Sync>> {
+    let (_repository, engine) = indexed_csharp_fixture_engine()?;
+    let server = ChakraMcpServer::new(Arc::new(engine));
+    let (server_transport, client_transport) = tokio::io::duplex(64 * 1024);
+    let server_task = tokio::spawn(async move { server.serve(server_transport).await });
+    let client = ().serve(client_transport).await?;
+
+    let repo_map = client
+        .call_tool(
+            CallToolRequestParams::new("repo_map").with_arguments(serde_json::from_value(
+                serde_json::json!({ "include_languages": ["csharp"], "limit": 20 }),
+            )?),
+        )
+        .await?
+        .structured_content
+        .ok_or("C# repo_map response missing")?;
+    let files = repo_map["data"]["files"]
+        .as_array()
+        .ok_or("C# repo_map files missing")?;
+    assert_eq!(files.len(), 6);
+    assert!(files.iter().all(|file| file["language"] == "csharp"));
+    assert!(files.iter().any(|file| {
+        file["source_classification"] == "dotnet_project_metadata" && file["source_role"] == "test"
+    }));
+
+    let symbols = client
+        .call_tool(CallToolRequestParams::new("symbol_search").with_arguments(
+            serde_json::from_value(
+                serde_json::json!({ "query": "SharedUniqueTarget", "limit": 5 }),
+            )?,
+        ))
+        .await?
+        .structured_content
+        .ok_or("C# symbol_search response missing")?;
+    let target = symbols["data"]["candidates"]
+        .as_array()
+        .and_then(|candidates| candidates.first())
+        .ok_or("C# SharedUniqueTarget symbol missing")?;
+    assert_eq!(target["language"], "csharp");
+    assert_eq!(target["precision"], "syntax");
+    assert_eq!(target["provenance"], "tree_sitter");
+
+    let symbol_ref = serde_json::json!({
+        "by_id": { "id": target["id"], "revision": symbols["revision"] }
+    });
+    let callers = client
+        .call_tool(
+            CallToolRequestParams::new("callers").with_arguments(serde_json::from_value(
+                serde_json::json!({ "symbol": symbol_ref.clone(), "limit": 10 }),
+            )?),
+        )
+        .await?
+        .structured_content
+        .ok_or("C# callers response missing")?;
+    assert!(
+        callers["data"]["callers"]
+            .as_array()
+            .is_some_and(|items| !items.is_empty())
+    );
+    assert_ne!(callers["data"]["callers"][0]["precision"], "precise");
+
+    let context =
+        client
+            .call_tool(CallToolRequestParams::new("context").with_arguments(
+                serde_json::from_value(serde_json::json!({ "symbol": symbol_ref, "limit": 10 }))?,
+            ))
+            .await?
+            .structured_content
+            .ok_or("C# context response missing")?;
+    assert_eq!(context["data"]["symbol"]["id"], target["id"]);
+
+    client.cancel().await?;
+    let running = server_task
+        .await
+        .map_err(|error| std::io::Error::other(format!("server task join: {error}")))?
+        .map_err(|error| std::io::Error::other(format!("server serve: {error}")))?;
+    running.cancel().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn shell_fixture_is_queryable_through_structured_mcp_tools()
+-> Result<(), Box<dyn Error + Send + Sync>> {
+    let (_repository, engine) = indexed_shell_fixture_engine()?;
+    let server = ChakraMcpServer::new(Arc::new(engine));
+    let (server_transport, client_transport) = tokio::io::duplex(64 * 1024);
+    let server_task = tokio::spawn(async move { server.serve(server_transport).await });
+    let client = ().serve(client_transport).await?;
+
+    let repo_map = client
+        .call_tool(
+            CallToolRequestParams::new("repo_map").with_arguments(serde_json::from_value(
+                serde_json::json!({ "include_languages": ["shell"], "limit": 20 }),
+            )?),
+        )
+        .await?
+        .structured_content
+        .ok_or("Shell repo_map response missing")?;
+    let files = repo_map["data"]["files"]
+        .as_array()
+        .ok_or("Shell repo_map files missing")?;
+    assert_eq!(files.len(), 7);
+    assert!(files.iter().all(|file| file["language"] == "shell"));
+    assert!(files.iter().any(|file| {
+        file["source_classification"] == "shell_project_metadata" && file["source_role"] == "test"
+    }));
+
+    let symbols = client
+        .call_tool(CallToolRequestParams::new("symbol_search").with_arguments(
+            serde_json::from_value(serde_json::json!({ "query": "refund_provider", "limit": 5 }))?,
+        ))
+        .await?
+        .structured_content
+        .ok_or("Shell symbol_search response missing")?;
+    let target = symbols["data"]["candidates"]
+        .as_array()
+        .and_then(|candidates| candidates.first())
+        .ok_or("Shell refund_provider symbol missing")?;
+    assert_eq!(target["language"], "shell");
+    assert_eq!(target["precision"], "syntax");
+    assert_eq!(target["provenance"], "tree_sitter");
+
+    let symbol_ref = serde_json::json!({
+        "by_id": { "id": target["id"], "revision": symbols["revision"] }
+    });
+    let callers =
+        client
+            .call_tool(CallToolRequestParams::new("callers").with_arguments(
+                serde_json::from_value(serde_json::json!({ "symbol": symbol_ref, "limit": 10 }))?,
+            ))
+            .await?
+            .structured_content
+            .ok_or("Shell callers response missing")?;
+    assert_eq!(callers["data"]["callers"].as_array().map(Vec::len), Some(1));
+
+    client.cancel().await?;
+    let running = server_task
+        .await
+        .map_err(|error| std::io::Error::other(format!("server task join: {error}")))?
+        .map_err(|error| std::io::Error::other(format!("server serve: {error}")))?;
+    running.cancel().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn cpp_fixture_is_queryable_through_structured_mcp_tools()
+-> Result<(), Box<dyn Error + Send + Sync>> {
+    let (_repository, engine) = indexed_cpp_fixture_engine()?;
+    let server = ChakraMcpServer::new(Arc::new(engine));
+    let (server_transport, client_transport) = tokio::io::duplex(64 * 1024);
+    let server_task = tokio::spawn(async move { server.serve(server_transport).await });
+    let client = ().serve(client_transport).await?;
+
+    let repo_map = client
+        .call_tool(
+            CallToolRequestParams::new("repo_map").with_arguments(serde_json::from_value(
+                serde_json::json!({ "include_languages": ["cpp"], "limit": 20 }),
+            )?),
+        )
+        .await?
+        .structured_content
+        .ok_or("C++ repo_map response missing")?;
+    let files = repo_map["data"]["files"]
+        .as_array()
+        .ok_or("C++ repo_map files missing")?;
+    assert_eq!(files.len(), 7);
+    assert!(files.iter().all(|file| file["language"] == "cpp"));
+    assert!(files.iter().any(|file| {
+        file["source_classification"] == "cpp_project_metadata" && file["source_role"] == "test"
+    }));
+
+    let symbols = client
+        .call_tool(CallToolRequestParams::new("symbol_search").with_arguments(
+            serde_json::from_value(serde_json::json!({ "query": "provider_refund", "limit": 5 }))?,
+        ))
+        .await?
+        .structured_content
+        .ok_or("C++ symbol_search response missing")?;
+    let target = symbols["data"]["candidates"]
+        .as_array()
+        .and_then(|candidates| candidates.first())
+        .ok_or("C++ provider_refund symbol missing")?;
+    assert_eq!(target["language"], "cpp");
+    assert_eq!(target["precision"], "syntax");
+    assert_eq!(target["provenance"], "tree_sitter");
+
+    let symbol_ref = serde_json::json!({
+        "by_id": { "id": target["id"], "revision": symbols["revision"] }
+    });
+    let callers =
+        client
+            .call_tool(CallToolRequestParams::new("callers").with_arguments(
+                serde_json::from_value(serde_json::json!({ "symbol": symbol_ref, "limit": 10 }))?,
+            ))
+            .await?
+            .structured_content
+            .ok_or("C++ callers response missing")?;
+    assert_eq!(callers["data"]["callers"].as_array().map(Vec::len), Some(1));
+
+    client.cancel().await?;
+    let running = server_task
+        .await
+        .map_err(|error| std::io::Error::other(format!("server task join: {error}")))?
+        .map_err(|error| std::io::Error::other(format!("server serve: {error}")))?;
+    running.cancel().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn hcl_fixture_is_queryable_through_structured_mcp_tools()
+-> Result<(), Box<dyn Error + Send + Sync>> {
+    let (_repository, engine) = indexed_hcl_fixture_engine()?;
+    let server = ChakraMcpServer::new(Arc::new(engine));
+    let (server_transport, client_transport) = tokio::io::duplex(64 * 1024);
+    let server_task = tokio::spawn(async move { server.serve(server_transport).await });
+    let client = ().serve(client_transport).await?;
+
+    let repo_map = client
+        .call_tool(
+            CallToolRequestParams::new("repo_map").with_arguments(serde_json::from_value(
+                serde_json::json!({ "include_languages": ["hcl"], "limit": 20 }),
+            )?),
+        )
+        .await?
+        .structured_content
+        .ok_or("HCL repo_map response missing")?;
+    let files = repo_map["data"]["files"]
+        .as_array()
+        .ok_or("HCL repo_map files missing")?;
+    assert_eq!(files.len(), 8);
+    assert!(files.iter().all(|file| file["language"] == "hcl"));
+    assert!(files.iter().any(|file| {
+        file["source_classification"] == "terraform_module_metadata"
+            && file["source_role"] == "test"
+    }));
+
+    let symbols = client
+        .call_tool(CallToolRequestParams::new("symbol_search").with_arguments(
+            serde_json::from_value(
+                serde_json::json!({ "query": "null_resource::provider", "limit": 10 }),
+            )?,
+        ))
+        .await?
+        .structured_content
+        .ok_or("HCL symbol_search response missing")?;
+    let target = symbols["data"]["candidates"]
+        .as_array()
+        .and_then(|candidates| {
+            candidates.iter().find(|candidate| {
+                candidate["qualified_name"] == "resource::null_resource::provider"
+            })
+        })
+        .ok_or("HCL provider resource symbol missing")?;
+    assert_eq!(target["language"], "hcl");
+    assert_eq!(target["precision"], "syntax");
+    assert_eq!(target["provenance"], "tree_sitter");
+
+    let symbol_ref = serde_json::json!({
+        "by_id": { "id": target["id"], "revision": symbols["revision"] }
+    });
+    let callers =
+        client
+            .call_tool(CallToolRequestParams::new("callers").with_arguments(
+                serde_json::from_value(serde_json::json!({ "symbol": symbol_ref, "limit": 10 }))?,
+            ))
+            .await?
+            .structured_content
+            .ok_or("HCL callers response missing")?;
+    assert_eq!(callers["data"]["callers"].as_array().map(Vec::len), Some(1));
+    assert_eq!(
+        callers["data"]["callers"][0]["symbol"]["qualified_name"],
+        "resource::null_resource::service"
+    );
+
+    client.cancel().await?;
+    let running = server_task
+        .await
+        .map_err(|error| std::io::Error::other(format!("server task join: {error}")))?
+        .map_err(|error| std::io::Error::other(format!("server serve: {error}")))?;
+    running.cancel().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn go_fixture_is_queryable_through_structured_mcp_tools()
+-> Result<(), Box<dyn Error + Send + Sync>> {
+    let (_repository, engine) = indexed_go_fixture_engine()?;
+    let server = ChakraMcpServer::new(Arc::new(engine));
+    let (server_transport, client_transport) = tokio::io::duplex(64 * 1024);
+    let server_task = tokio::spawn(async move { server.serve(server_transport).await });
+    let client = ().serve(client_transport).await?;
+
+    let repo_map = client
+        .call_tool(
+            CallToolRequestParams::new("repo_map").with_arguments(serde_json::from_value(
+                serde_json::json!({ "include_languages": ["go"], "limit": 20 }),
+            )?),
+        )
+        .await?
+        .structured_content
+        .ok_or("Go repo_map response missing")?;
+    let files = repo_map["data"]["files"]
+        .as_array()
+        .ok_or("Go repo_map files missing")?;
+    assert_eq!(files.len(), 7);
+    assert!(files.iter().all(|file| file["language"] == "go"));
+    assert!(files.iter().any(|file| {
+        file["source_classification"] == "go_module_metadata" && file["source_role"] == "test"
+    }));
+
+    let symbols = client
+        .call_tool(CallToolRequestParams::new("symbol_search").with_arguments(
+            serde_json::from_value(serde_json::json!({ "query": "providerRefund", "limit": 10 }))?,
+        ))
+        .await?
+        .structured_content
+        .ok_or("Go symbol_search response missing")?;
+    let target = symbols["data"]["candidates"]
+        .as_array()
+        .and_then(|candidates| {
+            candidates
+                .iter()
+                .find(|candidate| candidate["qualified_name"] == "payments::providerRefund")
+        })
+        .ok_or("Go providerRefund symbol missing")?;
+    assert_eq!(target["language"], "go");
+    assert_eq!(target["precision"], "syntax");
+    assert_eq!(target["provenance"], "tree_sitter");
+
+    let symbol_ref = serde_json::json!({
+        "by_id": { "id": target["id"], "revision": symbols["revision"] }
+    });
+    let callers =
+        client
+            .call_tool(CallToolRequestParams::new("callers").with_arguments(
+                serde_json::from_value(serde_json::json!({ "symbol": symbol_ref, "limit": 10 }))?,
+            ))
+            .await?
+            .structured_content
+            .ok_or("Go callers response missing")?;
+    assert_eq!(callers["data"]["callers"].as_array().map(Vec::len), Some(2));
+
+    client.cancel().await?;
+    let running = server_task
+        .await
+        .map_err(|error| std::io::Error::other(format!("server task join: {error}")))?
+        .map_err(|error| std::io::Error::other(format!("server serve: {error}")))?;
+    running.cancel().await?;
+    Ok(())
+}
+
 #[tokio::test]
 async fn indexed_fixture_is_queryable_through_structured_mcp_tools()
 -> Result<(), Box<dyn Error + Send + Sync>> {
@@ -351,12 +1041,11 @@ async fn indexed_fixture_is_queryable_through_structured_mcp_tools()
         .await?
         .structured_content
         .ok_or("indexed status must return structured content")?;
-    assert_eq!(status["data"]["providers"][0]["name"], "rust-analyzer");
-    assert_eq!(status["data"]["providers"][0]["languages"][0], "rust");
-    assert!(
-        status["data"]["providers"][0]["capabilities"]
-            .as_array()
-            .is_some_and(|items| items.iter().any(|item| item == "incoming_calls"))
+    // No precise provider is installed on this engine, so status must report
+    // an empty provider list rather than a fabricated entry.
+    assert_eq!(
+        status["data"]["providers"].as_array().map(Vec::len),
+        Some(0)
     );
 
     let repo_map_args = serde_json::from_value(serde_json::json!({ "limit": 20 }))?;
@@ -904,7 +1593,10 @@ final class PaymentServiceTest {
         .iter()
         .find(|caller| caller["symbol"]["qualified_name"] == "App::Api::PaymentController::refund")
         .ok_or("PHP controller caller missing")?;
-    assert_eq!(controller_caller["precision"], "heuristic");
+    // Strict-tier receiver evidence (typed promoted property) is promoted to
+    // the precise tier under Chakra's own resolver provenance (ADR-0030).
+    assert_eq!(controller_caller["provenance"], "chakra_resolver");
+    assert_eq!(controller_caller["precision"], "precise");
     assert_eq!(
         controller_caller["representative_call_sites"][0]["receiver_type"],
         "App::Service::PaymentService"
@@ -913,8 +1605,6 @@ final class PaymentServiceTest {
         controller_caller["representative_call_sites"][0]["receiver_type_source"],
         "promoted_property"
     );
-    assert_eq!(controller_caller["provenance"], "tree_sitter");
-    assert_eq!(controller_caller["precision"], "heuristic");
     let php_tests = context["data"]["tests"]
         .as_array()
         .ok_or("PHP tests missing")?;
@@ -923,7 +1613,8 @@ final class PaymentServiceTest {
         php_tests[0]["symbol"]["qualified_name"],
         "App::Tests::PaymentServiceTest::testRefundTwice"
     );
-    assert_eq!(php_tests[0]["precision"], "heuristic");
+    assert_eq!(php_tests[0]["provenance"], "chakra_resolver");
+    assert_eq!(php_tests[0]["precision"], "precise");
     assert_eq!(
         php_tests[0]["representative_call_sites"][0]["receiver_type"],
         "App::Service::PaymentService"

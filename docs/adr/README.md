@@ -48,5 +48,22 @@ Accepted decisions:
 - ADR-023: query truncation contract
 - ADR-024: caller aggregation and byte-first response budgets
 - ADR-025: query execution work budgets
+- ADR-026: first-class language parity contract and generated support matrix
+- ADR-027: syntax grammar and precise provider selection for target languages
+- ADR-028: cross-language conformance harness and scenario manifest
+- ADR-029: pinned public evaluation corpus and budgeted runner
+- ADR-030: PHP precise-equivalent resolver through strict-tier promotion
+- ADR-031: object-safe syntax language adapter trait and registry
+- ADR-032: shared LSP client crate and vtsls precise provider
+- ADR-033: slot-keyed revision-local entity-id partitions
+- ADR-034: CommonJS facts in the JavaScript syntax model
+- ADR-035: bounded multi-provider orchestration
+- ADR-036: jdtls workspace data directory and readiness bound
+- ADR-037: csharp-ls workspace-only enrichment
+- ADR-038: bash-language-server reference enrichment
+- ADR-039: clangd workspace enrichment
+- ADR-040: terraform-ls reference enrichment
+- ADR-041: gopls workspace enrichment
+- ADR-042: revision-bound provider input deltas
 
 Do not pre-create empty ADRs merely to satisfy a list.
