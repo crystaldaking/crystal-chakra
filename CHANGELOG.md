@@ -5,8 +5,42 @@ version tags prefixed with `v`.
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-08-21
+
 ### Added
 
+- A first-class language parity contract and generated support matrix for all
+  11 advertised languages (issues #22–#25): independent fixtures, a shared
+  14-scenario conformance suite, and 12 release scenarios exercised across 19
+  pinned public repositories. Machine-readable evidence prevents a language
+  from being advertised before every mandatory gate passes.
+- First-class Go support (issue #36): `tree-sitter-go` 0.25.0 syntax facts,
+  `go.mod`/`go.work` project scopes, test/generated/vendor roles, bounded call
+  candidates, live-update and MCP coverage, and optional on-demand gopls
+  0.23.x call-hierarchy enrichment with revision synchronization, failure
+  isolation, and owned shutdown (ADR-0041). The Prometheus and Kubernetes
+  corpora pass all release scenarios.
+- First-class HCL/Terraform support (issue #35): `tree-sitter-hcl` 1.1.0,
+  Terraform module scopes and resource/module/data/output relationships,
+  plus optional terraform-ls reference enrichment through the shared LSP
+  lifecycle. The pinned terraform-aws-vpc and terraform-aws-eks corpora pass
+  all release scenarios.
+- First-class C++ support (issue #34): `tree-sitter-cpp` 0.23.4 across common
+  translation-unit/header extensions, CMake/compile database scopes, bounded
+  syntax relationships, and optional clangd call hierarchy. The nlohmann/json
+  and protocolbuffers/protobuf corpora pass all release scenarios.
+- First-class Shell support (issue #33): `tree-sitter-bash` 0.25.1 across
+  sh/bash/zsh/ksh paths, ShellCheck project boundaries, syntax-derived
+  function calls, and optional bash-language-server navigation enrichment.
+  The ohmyzsh/ohmyzsh and nvm-sh/nvm corpora pass all release scenarios.
+- First-class C# support (issue #31): `tree-sitter-c-sharp` 0.23.5, `.csproj`
+  project scopes, C# declarations/tests/call candidates, and optional
+  csharp-ls call-hierarchy enrichment. The pinned dotnet/runtime corpus passes
+  all release scenarios within calibrated degraded-workspace budgets.
+- Existing Rust and PHP support now pass the same full parity contract as the
+  newly added languages (issues #32 and #37), including independent
+  conformance, public-corpus, freshness, provenance, cancellation,
+  degradation, MCP, and provider/equivalent-precision evidence.
 - First-class Java support (issue #30): a `chakra-language-java` adapter
   crate (tree-sitter-java 0.23.5, `.java`) registered in the ADR-0031
   adapter registry after JavaScript; class/interface/enum/record/annotation
@@ -25,11 +59,7 @@ version tags prefixed with `v`.
   reject relative/repository-contained cache paths) and a configurable
   readiness bound for the slow first project import (ADR-0036). Conformance
   fixture (14/14 scenarios) and the pinned spring-projects/spring-boot plus
-  apache/kafka corpus evaluations. Java is advertised first-class. On macOS,
-  live indexing now coalesces nested source directories into recursive
-  FSEvents watches at their indexed top-level roots instead of redundantly
-  registering every ancestor; live conformance suites serialize watcher
-  ownership to avoid backend registration storms.
+  apache/kafka corpus evaluations. Java is advertised first-class.
 - Bounded multi-provider orchestration (issue #26, ADR-0035):
   rust-analyzer, vtsls (shared by TypeScript/JavaScript), pyright, and jdtls
   now coexist through strict language routing and start only on the first
@@ -39,8 +69,7 @@ version tags prefixed with `v`.
   backoff, cancellation, and owned pool/provider shutdown prevent unbounded
   work or orphan processes; failed eviction cleanup retains its reservation
   and is retried observably. Provider status distinguishes `dormant` from
-  `not_configured` and reports pool lifecycle/capacity metrics; the response
-  envelope schema advances to version 8.
+  `not_configured` and reports pool lifecycle/capacity metrics.
 - First-class JavaScript/JSX support (issue #29): a
   `chakra-language-javascript` adapter crate (tree-sitter-javascript
   0.25.0, `.js`/`.jsx`/`.mjs`/`.cjs`; the single grammar parses JSX
@@ -55,7 +84,7 @@ version tags prefixed with `v`.
   serves JavaScript documents (`javascript`/`javascriptreact` language
   ids, shared `Provenance::Vtsls`, no new provider crate). Conformance
   fixture (14/14 scenarios) and the pinned react/react corpus evaluation
-  (11/11, no degradations). JavaScript is advertised first-class.
+  (12/12, no degradations). JavaScript is advertised first-class.
 - First-class Python support (issue #28): a `chakra-language-python`
   adapter crate (tree-sitter-python 0.25.0, `.py`/`.pyi`) registered in the
   ADR-0031 adapter registry after TypeScript; `import`/`from ... import`
@@ -68,7 +97,7 @@ version tags prefixed with `v`.
   `chakra-provider-pyright` precise provider over the shared chakra-lsp
   client (additive `Provenance::Pyright`); conformance fixture (14/14
   scenarios) and the pinned django/django + apache/airflow corpus
-  evaluations (11/11 each, no degradations). Revision-local entity ids now
+  evaluations (12/12 each, no degradations). Revision-local entity ids now
   use the ADR-0033 slot registry (4-bit language slot + 60-bit counter)
   instead of hardcoded per-language bases; ids remain in-memory only.
 - First-class TypeScript/TSX syntax support (issue #27, Part A): a
@@ -80,13 +109,37 @@ version tags prefixed with `v`.
   relative-import resolution, and actionable syntax diagnostics.
   package.json/tsconfig.json project scopes plus `*.test.*`/`*.spec.*`/
   `__tests__/` source roles; conformance fixture (14/14 scenarios) and the
-  pinned microsoft/vscode corpus evaluation (11/11, degraded as designed by
+  pinned microsoft/vscode corpus evaluation (12/12, degraded as designed by
   the workspace source-byte and symbol budgets).
 - Shared `chakra-lsp` stdio client crate and the `chakra-provider-vtsls`
   precise provider for TypeScript (issue #27, Part B, ADR-0032): precise
   definitions/references/callers with bounded readiness, revision-scoped
   synchronization, cancellation, restart, and orphan-free shutdown; additive
   `Provenance::Vtsls`. TypeScript is advertised first-class.
+
+### Changed
+
+- The structured query/MCP response envelope schema is version 13 after the
+  additive provider-pool, source-classification, provenance, repository-map,
+  and per-language coverage extensions in this release.
+- The project README now provides a complete source installation path, current
+  Codex MCP configuration, tool guide, trust/freshness semantics, architecture,
+  validation evidence, limitations, and contributor entry points.
+
+### Performance and reliability
+
+- Provider inputs are revision-bound and provider metadata deltas publish
+  atomically with the syntax graph. All LSP adapters receive watched-file
+  changes, while metadata-only updates and true no-delta revisions avoid
+  rebuilding unchanged document contributions (ADR-0042).
+- On macOS, live indexing uses notify's kqueue backend with bounded,
+  non-recursive Git-visible source-directory watches, avoiding the observed
+  FSEvents registration stall while preserving targeted fresh reconciliation
+  (ADR-0005). Watcher startup, cancellation, joining, and test ownership are
+  bounded and observable.
+- Public-corpus release gates require an optimized binary, isolate scenarios
+  by process, and count distinct callers so cross-scenario state and repeated
+  call sites cannot create false-positive readiness evidence.
 
 ## [0.1.1] - 2026-08-18
 
@@ -196,6 +249,7 @@ version tags prefixed with `v`.
 - All development after this release follows the Gitflow policy in
   `CONTRIBUTING.md` and `AGENTS.md`.
 
-[Unreleased]: https://github.com/crystaldaking/crystal-chakra/compare/v0.1.1...develop
+[Unreleased]: https://github.com/crystaldaking/crystal-chakra/compare/v0.1.2...develop
+[0.1.2]: https://github.com/crystaldaking/crystal-chakra/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/crystaldaking/crystal-chakra/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/crystaldaking/crystal-chakra/releases/tag/v0.1.0

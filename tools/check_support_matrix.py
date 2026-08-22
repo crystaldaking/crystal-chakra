@@ -52,6 +52,7 @@ PROVIDER_CONDITIONAL = ["PRECISE-02", "PRECISE-03", "PRECISE-04", "PRECISE-05"]
 
 VALID_STATUSES = {"pass", "fail", "equivalent", "missing", "not-applicable"}
 VALID_TIERS = {"first-class", "in-progress", "syntax", "none"}
+VALID_PROVIDER_STATUSES = {"adapter-ready", "runtime-integrated", "deferred", "equivalent"}
 KNOWN_CAPABILITY_IDS = set(MANDATORY_CAPABILITIES) | set(PROVIDER_CONDITIONAL)
 
 
@@ -105,7 +106,29 @@ def validate_manifest(path: Path, manifest: dict, errors: list[str]) -> None:
             fail(errors, where, f"unknown capability id {cap_id!r} (sync with the parity contract)")
 
     provider = manifest.get("precise_provider")
-    provider_integrated = isinstance(provider, dict) and provider.get("status") == "integrated"
+    if provider is not None and not isinstance(provider, dict):
+        fail(errors, where, "'precise_provider' must be an object or null")
+    elif isinstance(provider, dict):
+        provider_status = provider.get("status")
+        if provider_status not in VALID_PROVIDER_STATUSES:
+            fail(
+                errors,
+                where,
+                f"precise_provider.status must be one of {sorted(VALID_PROVIDER_STATUSES)}",
+            )
+        runtime_evidence = provider.get("runtime_evidence")
+        if provider_status == "runtime-integrated" and (
+            not isinstance(runtime_evidence, list) or not runtime_evidence
+        ):
+            fail(errors, where, "runtime-integrated provider requires runtime_evidence")
+        if isinstance(runtime_evidence, list):
+            for pointer in runtime_evidence:
+                if not isinstance(pointer, str) or not (REPO_ROOT / pointer).exists():
+                    fail(errors, where, f"provider runtime evidence does not exist: {pointer!r}")
+    provider_integrated = (
+        isinstance(provider, dict)
+        and provider.get("status") in {"adapter-ready", "runtime-integrated"}
+    )
 
     required = list(MANDATORY_CAPABILITIES)
     if provider_integrated:

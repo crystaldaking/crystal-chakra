@@ -71,9 +71,9 @@ type-directed relationships.
   selection, and cross-package type resolution remain gopls responsibilities.
 - Files excluded by the current Go build configuration can still appear in
   the syntax graph, with their build constraints visible as import facts.
-- Provider workspaces currently synchronize captured source documents only;
-  extending precise-provider deltas to non-source inputs remains tracked in
-  issue #71.
+- `go.mod`, `go.sum`, `go.work`, and `go.work.sum` are revision-bound provider
+  inputs and produce watched-file events independently of source-document
+  deltas (ADR-0042).
 
 ## Validation / follow-up
 
@@ -86,5 +86,5 @@ type-directed relationships.
   initial incoming-call enrichment completed in about 114 ms and a revision
   edit exposed the second caller in under 1 ms.
 - Go conformance passes 14/14 scenarios. The pinned Prometheus and Kubernetes
-  corpora each pass 11/11; observed release cold indexes were about
+  corpora each pass 12/12; observed release cold indexes were about
   0.8–7.6 seconds with 248–1591 MiB peak RSS.

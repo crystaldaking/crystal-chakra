@@ -9,17 +9,17 @@ Target list reviewed: 2026-08 (GitHub Octoverse 2025 top languages plus pre-exis
 
 | Language | Tier | Advertised | Grammar | Precise provider |
 |----------|------|-----------|---------|------------------|
-| cpp | first-class | yes | tree-sitter-cpp 0.23.4 | clangd (integrated) |
-| csharp | first-class | yes | tree-sitter-c-sharp 0.23.5 | csharp-ls (integrated) |
-| go | first-class | yes | tree-sitter-go 0.25.0 | gopls (integrated) |
-| hcl | first-class | yes | tree-sitter-hcl 1.1.0 | terraform-ls (integrated) |
-| java | first-class | yes | tree-sitter-java 0.23.5 | jdtls (integrated) |
-| javascript | first-class | yes | tree-sitter-javascript 0.25.0 | vtsls (integrated) |
+| cpp | first-class | yes | tree-sitter-cpp 0.23.4 | clangd (runtime-integrated) |
+| csharp | first-class | yes | tree-sitter-c-sharp 0.23.5 | csharp-ls (runtime-integrated) |
+| go | first-class | yes | tree-sitter-go 0.25.0 | gopls (runtime-integrated) |
+| hcl | first-class | yes | tree-sitter-hcl 1.1.0 | terraform-ls (runtime-integrated) |
+| java | first-class | yes | tree-sitter-java 0.23.5 | jdtls (runtime-integrated) |
+| javascript | first-class | yes | tree-sitter-javascript 0.25.0 | vtsls (runtime-integrated) |
 | php | first-class | yes | tree-sitter-php 0.24.2 | none (deferred) |
-| python | first-class | yes | tree-sitter-python 0.25.0 | pyright (integrated) |
-| rust | first-class | yes | tree-sitter-rust 0.24 | rust-analyzer (integrated) |
-| shell | first-class | yes | tree-sitter-bash 0.25.1 | bash-language-server (integrated) |
-| typescript | first-class | yes | tree-sitter-typescript 0.23.2 | vtsls (integrated) |
+| python | first-class | yes | tree-sitter-python 0.25.0 | pyright (runtime-integrated) |
+| rust | first-class | yes | tree-sitter-rust 0.24 | rust-analyzer (runtime-integrated) |
+| shell | first-class | yes | tree-sitter-bash 0.25.1 | bash-language-server (runtime-integrated) |
+| typescript | first-class | yes | tree-sitter-typescript 0.23.2 | vtsls (runtime-integrated) |
 
 ## Capability detail
 
@@ -75,7 +75,7 @@ Target list reviewed: 2026-08 (GitHub Octoverse 2025 top languages plus pre-exis
 | FRESH-02 | pass | live freshness barrier (ADR-0005) |
 | PRECISE-01 | pass | recorded provider selection: csharp-ls 0.26.x with .NET 10 SDK |
 | PRECISE-02 | pass | csharp-ls over shared chakra-lsp client (csharp language id) |
-| PRECISE-03 | pass | owned lifecycle, source-document synchronization, restart, orphan-free shutdown, and workspace-only result boundary (ADR-0037; non-source delta limitation #71) |
+| PRECISE-03 | pass | owned lifecycle, revision-bound source and project-input synchronization, restart, orphan-free shutdown, and workspace-only result boundary (ADR-0037; ADR-0042) |
 | PRECISE-04 | pass | capability-gated enrichment through PreciseProvider |
 | PRECISE-05 | pass | graceful absence/crash degradation to syntax tier |
 | PROV-01 | pass | domain provenance model |

@@ -37,6 +37,7 @@ const MAX_WATCHED_DIRECTORIES: usize = 4_096;
 const MAX_PUBLISH_ATTEMPTS: usize = 3;
 const MAX_EVENT_HINT_PATHS: usize = 32;
 const DEFAULT_FULL_RECONCILE_INTERVAL: u64 = 256;
+const DEFAULT_STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum ReconciliationKind {
@@ -52,12 +53,15 @@ pub struct LiveIndexOptions {
     /// Successful reconciliations between forced content rereads. Metadata
     /// identities and Git inventory are still verified on every barrier.
     pub full_reconcile_interval: u64,
+    /// Upper bound for watcher construction and initial watch registration.
+    pub startup_timeout: Duration,
 }
 
 impl Default for LiveIndexOptions {
     fn default() -> Self {
         Self {
             full_reconcile_interval: DEFAULT_FULL_RECONCILE_INTERVAL,
+            startup_timeout: DEFAULT_STARTUP_TIMEOUT,
         }
     }
 }
@@ -314,10 +318,14 @@ pub enum LiveIndexError {
     Startup(String),
     #[error("live index worker stopped during startup")]
     StartupDisconnected,
+    #[error("live index worker did not become ready within {timeout:?}")]
+    StartupTimeout { timeout: Duration },
     #[error("workspace freshness owner is already installed")]
     BarrierAlreadyInstalled,
     #[error("full reconciliation interval must be greater than zero")]
     InvalidFullReconcileInterval,
+    #[error("live index startup timeout must be greater than zero")]
+    InvalidStartupTimeout,
     #[error(transparent)]
     Freshness(#[from] FreshnessBarrierError),
     #[error("live index worker panicked")]
@@ -352,6 +360,10 @@ struct BarrierShared {
 }
 
 impl BarrierShared {
+    fn is_stopped(&self) -> bool {
+        self.state.lock().map_or(true, |state| state.shutdown)
+    }
+
     fn pending_generation(&self) -> Result<(u64, u64), String> {
         let state = self
             .state
@@ -821,6 +833,9 @@ pub fn start_live_index_with_options(
     if options.full_reconcile_interval == 0 {
         return Err(LiveIndexError::InvalidFullReconcileInterval);
     }
+    if options.startup_timeout.is_zero() {
+        return Err(LiveIndexError::InvalidStartupTimeout);
+    }
     let (sender, receiver) = mpsc::sync_channel(EVENT_QUEUE_CAPACITY);
     let (ready_sender, ready_receiver) = mpsc::sync_channel(1);
     let shared = Arc::new(BarrierShared {
@@ -851,19 +866,13 @@ pub fn start_live_index_with_options(
             );
         })?;
 
-    match ready_receiver.recv() {
-        Ok(Ok(())) => {}
-        Ok(Err(message)) => {
-            shared.stop();
-            let _ = worker.join();
-            return Err(LiveIndexError::Startup(message));
-        }
-        Err(_) => {
-            shared.stop();
-            let _ = worker.join();
-            return Err(LiveIndexError::StartupDisconnected);
-        }
-    }
+    let worker = await_worker_startup(
+        ready_receiver,
+        &sender,
+        &shared,
+        worker,
+        options.startup_timeout,
+    )?;
 
     let barrier = Arc::new(LiveFreshnessBarrier {
         shared: shared.clone(),
@@ -897,6 +906,25 @@ pub fn start_live_index_with_options(
         metrics,
         worker: Some(worker),
     })
+}
+
+fn await_worker_startup(
+    ready: Receiver<Result<(), String>>,
+    sender: &SyncSender<WorkerSignal>,
+    shared: &Arc<BarrierShared>,
+    worker: JoinHandle<()>,
+    timeout: Duration,
+) -> Result<JoinHandle<()>, LiveIndexError> {
+    let failure = match ready.recv_timeout(timeout) {
+        Ok(Ok(())) => return Ok(worker),
+        Ok(Err(message)) => LiveIndexError::Startup(message),
+        Err(mpsc::RecvTimeoutError::Timeout) => LiveIndexError::StartupTimeout { timeout },
+        Err(mpsc::RecvTimeoutError::Disconnected) => LiveIndexError::StartupDisconnected,
+    };
+    let _ = sender.try_send(WorkerSignal::Shutdown);
+    shared.stop();
+    worker.join().map_err(|_| LiveIndexError::WorkerPanicked)?;
+    Err(failure)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -986,6 +1014,7 @@ fn run_worker(
         &initial_paths,
         &mut watched,
         &metrics,
+        &shared,
         false,
     ) {
         Ok(degraded) => degraded,
@@ -1317,6 +1346,7 @@ fn reconcile(
                     &next_paths,
                     watched,
                     metrics,
+                    shared,
                     force_reinstall_watches,
                 )?;
             }
@@ -1336,8 +1366,13 @@ fn reconcile(
             operation
                 .check()
                 .map_err(|_| WorkspaceIndexError::Cancelled)?;
-            let published = publish_fresh(engine, graph.as_ref(), status, &indexing)
-                .map_err(WorkspaceIndexError::Update)?;
+            let provider_inputs = next_index.as_ref().map_or_else(
+                || syntax_index.provider_inputs(),
+                |next| next.provider_inputs(),
+            );
+            let published =
+                publish_fresh(engine, graph.as_ref(), status, &indexing, provider_inputs)
+                    .map_err(WorkspaceIndexError::Update)?;
             if let Some(next_index) = next_index {
                 *syntax_index = next_index;
             }
@@ -1640,6 +1675,7 @@ fn refresh_watches(
     indexed_paths: &[RepoRelativePath],
     watched: &mut BTreeSet<PathBuf>,
     metrics: &MetricsState,
+    shared: &BarrierShared,
     force_reinstall: bool,
 ) -> Result<bool, WorkspaceIndexError> {
     let (desired, mut degraded) = desired_watch_directories(repository_root, indexed_paths);
@@ -1655,6 +1691,9 @@ fn refresh_watches(
         watched.difference(&desired).cloned().collect::<Vec<_>>()
     };
     for directory in removed {
+        if shared.is_stopped() {
+            return Err(WorkspaceIndexError::Cancelled);
+        }
         if let Err(error) = watcher.unwatch(&directory) {
             metrics.watcher_errors.fetch_add(1, Ordering::Relaxed);
             warn!(path = %directory.display(), %error, "failed to remove filesystem watch");
@@ -1663,6 +1702,9 @@ fn refresh_watches(
         watched.remove(&directory);
     }
     for directory in desired.difference(watched).cloned().collect::<Vec<_>>() {
+        if shared.is_stopped() {
+            return Err(WorkspaceIndexError::Cancelled);
+        }
         match watcher.watch(&directory, RecursiveMode::NonRecursive) {
             Ok(()) => {
                 watched.insert(directory);
@@ -1691,6 +1733,7 @@ fn publish_fresh(
     graph: Option<&SymbolGraph>,
     status: WorkspaceStatus,
     indexing: &chakra_domain::indexing::IndexingStatus,
+    provider_inputs: &[chakra_engine::ProviderInput],
 ) -> Result<bool, String> {
     let started = Instant::now();
     let current = engine.snapshot();
@@ -1698,6 +1741,7 @@ fn publish_fresh(
         && current.freshness() == Freshness::Fresh
         && current.status() == status
         && current.indexing() == indexing
+        && current.provider_inputs_match(provider_inputs)
     {
         return Ok(false);
     }
@@ -1707,6 +1751,7 @@ fn publish_fresh(
             update.replace_graph(graph.clone());
         }
         update.set_indexing(indexing.clone());
+        update.set_provider_inputs(provider_inputs.iter().cloned());
         update.set_status(status);
         update.set_freshness(Freshness::Fresh);
         match engine.publish(update) {
@@ -1776,6 +1821,39 @@ mod tests {
         assert_eq!(window.deadline(), start + Duration::from_millis(90));
         window.observe(start + DEBOUNCE_MAX);
         assert_eq!(window.deadline(), start + DEBOUNCE_MAX);
+    }
+
+    #[test]
+    fn startup_timeout_cancels_and_joins_the_owned_worker() {
+        let (sender, _receiver) = mpsc::sync_channel(EVENT_QUEUE_CAPACITY);
+        let (ready_sender, ready_receiver) = mpsc::sync_channel(1);
+        let shared = Arc::new(BarrierShared {
+            state: Mutex::new(BarrierState::default()),
+            completed: Condvar::new(),
+        });
+        let worker_shared = shared.clone();
+        let active = Arc::new(AtomicU64::new(0));
+        let worker_active = active.clone();
+        let worker = thread::spawn(move || {
+            let _ready_sender = ready_sender;
+            worker_active.fetch_add(1, Ordering::SeqCst);
+            while !worker_shared.is_stopped() {
+                thread::yield_now();
+            }
+            worker_active.fetch_sub(1, Ordering::SeqCst);
+        });
+
+        let result = await_worker_startup(
+            ready_receiver,
+            &sender,
+            &shared,
+            worker,
+            Duration::from_millis(10),
+        );
+
+        assert!(matches!(result, Err(LiveIndexError::StartupTimeout { .. })));
+        assert_eq!(active.load(Ordering::SeqCst), 0);
+        assert!(shared.is_stopped());
     }
 
     #[test]

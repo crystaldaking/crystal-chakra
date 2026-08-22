@@ -189,6 +189,16 @@ mod tests {
     }
 
     #[test]
+    fn spec_envelope_example_tracks_the_current_schema_version() {
+        let spec = include_str!("../../../docs/SPEC.md");
+        let expected = format!("\"schema_version\": {SCHEMA_VERSION}");
+        assert!(
+            spec.contains(&expected),
+            "SPEC query-envelope example must contain {expected}"
+        );
+    }
+
+    #[test]
     fn envelope_roundtrips_through_json() -> Result<(), Box<dyn std::error::Error>> {
         let envelope = sample_envelope()?;
         let encoded = serde_json::to_string(&envelope)?;

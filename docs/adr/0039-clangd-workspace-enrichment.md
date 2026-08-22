@@ -65,9 +65,9 @@ Tree-sitter graph.
 - Templates, macros, overloads, ADL, virtual dispatch, and generated include
   paths may exceed the syntax tier; Chakra reports unresolved or ambiguous
   candidates rather than guessing.
-- Build metadata is a freshness input, but the shared provider workspace
-  currently synchronizes captured source documents only. Extending provider
-  deltas to non-source inputs remains tracked in issue #71.
+- Build metadata is a revision-bound provider input. Compilation databases,
+  CMake/Meson/Bazel files, `compile_flags.txt`, and `.clangd` changes produce
+  watched-file events without pretending to be text documents (ADR-0042).
 
 ## Validation / follow-up
 
@@ -78,4 +78,4 @@ Tree-sitter graph.
   after a revision edit; hermetic lifecycle tests cover synchronization,
   restart, timeout/cancellation, degradation, and shutdown.
 - C++ conformance passes 14/14 scenarios. The pinned `nlohmann/json` and
-  `protocolbuffers/protobuf` corpora each pass 11/11 within committed budgets.
+  `protocolbuffers/protobuf` corpora each pass 12/12 within committed budgets.

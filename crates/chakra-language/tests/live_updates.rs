@@ -10,6 +10,7 @@ use std::time::Instant;
 use chakra_domain::identity::WorkspaceIdentity;
 use chakra_domain::indexing::{IndexBudgetKind, IndexBudgets, IndexCancellation, IndexPhase};
 use chakra_domain::location::RepoRelativePath;
+use chakra_domain::operation::OperationContext;
 use chakra_domain::query::{
     ContextRequest, DiffContextRequest, QueryError, QueryService, RepoMapRequest, StatusRequest,
     SymbolRef, SymbolSearchRequest,
@@ -65,6 +66,7 @@ fn start_with_options(
     let identity = WorkspaceIdentity::for_primary_worktree(&report.repository_root)?;
     let engine = Arc::new(WorkspaceEngine::new(identity));
     let mut update = engine.begin_update();
+    update.set_provider_inputs(report.provider_inputs.clone());
     update.replace_graph(report.graph);
     update.set_indexing(report.metrics.indexing);
     update.set_status(WorkspaceStatus::Indexing);
@@ -84,6 +86,41 @@ fn start_with_options(
 }
 
 #[test]
+fn metadata_only_change_publishes_a_provider_input_delta() -> Result<(), Box<dyn Error>> {
+    let repository = repository()?;
+    write(
+        repository.path(),
+        "Cargo.toml",
+        "[package]\nname = \"chakra-live-metadata\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+    )?;
+    let (engine, live) = start(&repository)?;
+    let before = engine.provider_workspace();
+    let metrics_before = live.metrics();
+
+    write(
+        repository.path(),
+        "Cargo.toml",
+        "[package]\nname = \"chakra-live-metadata\"\nversion = \"0.1.0\"\nedition = \"2024\"\n# provider reload\n",
+    )?;
+    engine.require_fresh()?;
+
+    let after = engine.provider_workspace();
+    let delta = after.delta_since(&before, Language::Rust, &OperationContext::unbounded())?;
+    assert!(delta.created.is_empty());
+    assert!(delta.changed.is_empty());
+    assert!(delta.deleted.is_empty());
+    assert_eq!(delta.inputs_changed, [RepoRelativePath::new("Cargo.toml")?]);
+    assert!(after.revision > before.revision);
+    assert_eq!(
+        live.metrics().files_reparsed,
+        metrics_before.files_reparsed,
+        "metadata-only change must not reparse an unchanged source"
+    );
+    live.shutdown()?;
+    Ok(())
+}
+
+#[test]
 fn zero_full_reconciliation_interval_is_rejected() -> Result<(), Box<dyn Error>> {
     let repository = repository()?;
     let report = index_repository(repository.path())?;
@@ -96,6 +133,7 @@ fn zero_full_reconciliation_interval_is_rejected() -> Result<(), Box<dyn Error>>
         engine,
         LiveIndexOptions {
             full_reconcile_interval: 0,
+            ..LiveIndexOptions::default()
         },
     );
 
@@ -103,6 +141,27 @@ fn zero_full_reconciliation_interval_is_rejected() -> Result<(), Box<dyn Error>>
         result,
         Err(LiveIndexError::InvalidFullReconcileInterval)
     ));
+    Ok(())
+}
+
+#[test]
+fn zero_startup_timeout_is_rejected() -> Result<(), Box<dyn Error>> {
+    let repository = repository()?;
+    let report = index_repository(repository.path())?;
+    let identity = WorkspaceIdentity::for_primary_worktree(&report.repository_root)?;
+    let engine = Arc::new(WorkspaceEngine::new(identity));
+
+    let result = start_live_index_with_options(
+        report.repository_root,
+        report.syntax_index,
+        engine,
+        LiveIndexOptions {
+            startup_timeout: std::time::Duration::ZERO,
+            ..LiveIndexOptions::default()
+        },
+    );
+
+    assert!(matches!(result, Err(LiveIndexError::InvalidStartupTimeout)));
     Ok(())
 }
 
@@ -120,6 +179,7 @@ fn degraded_budget_metadata_survives_incremental_live_updates() -> Result<(), Bo
     let identity = WorkspaceIdentity::for_primary_worktree(&report.repository_root)?;
     let engine = Arc::new(WorkspaceEngine::new(identity));
     let mut update = engine.begin_update();
+    update.set_provider_inputs(report.provider_inputs.clone());
     update.replace_graph(report.graph);
     update.set_indexing(report.metrics.indexing);
     update.set_status(WorkspaceStatus::Indexing);
@@ -1313,6 +1373,7 @@ fn configured_checkpoint_forces_a_bounded_full_reread() -> Result<(), Box<dyn Er
         &repository,
         Some(LiveIndexOptions {
             full_reconcile_interval: 1,
+            ..LiveIndexOptions::default()
         }),
     )?;
     assert_eq!(symbols(&engine, "one::alpha")?, ["one::alpha"]);

@@ -43,6 +43,10 @@ struct ServeArgs {
     #[arg(long, value_name = "PATH", default_value = ".")]
     repo: PathBuf,
 
+    /// Maximum watcher construction and initial registration time, in milliseconds.
+    #[arg(long, default_value_t = 30_000)]
+    live_index_startup_timeout_millis: u64,
+
     /// Run syntax-only and do not start the optional rust-analyzer provider.
     #[arg(long)]
     no_rust_analyzer: bool,
@@ -215,6 +219,7 @@ async fn serve(args: ServeArgs) -> ExitCode {
     // on Tokio's owned blocking pool instead of a runtime worker.
     let ServeArgs {
         repo,
+        live_index_startup_timeout_millis,
         no_rust_analyzer,
         rust_analyzer_path,
         no_vtsls,
@@ -298,6 +303,7 @@ async fn serve(args: ServeArgs) -> ExitCode {
         return ExitCode::FAILURE;
     }
     let mut update = engine.begin_update();
+    update.set_provider_inputs(report.provider_inputs.clone());
     update.replace_graph(report.graph);
     update.set_indexing(report.metrics.indexing.clone());
     update.set_status(WorkspaceStatus::Indexing);
@@ -343,7 +349,15 @@ async fn serve(args: ServeArgs) -> ExitCode {
     let syntax_index = report.syntax_index;
     let live_engine = engine.clone();
     let live = match tokio::task::spawn_blocking(move || {
-        chakra_language::start_live_index(repository_root, syntax_index, live_engine)
+        chakra_language::start_live_index_with_options(
+            repository_root,
+            syntax_index,
+            live_engine,
+            chakra_language::LiveIndexOptions {
+                startup_timeout: Duration::from_millis(live_index_startup_timeout_millis),
+                ..chakra_language::LiveIndexOptions::default()
+            },
+        )
     })
     .await
     {
@@ -782,6 +796,7 @@ mod tests {
             Ok(Cli {
                 command: Some(Commands::Serve(ref args)),
             }) if args.repo == Path::new("/tmp/example")
+                && args.live_index_startup_timeout_millis == 30_000
                 && !args.no_rust_analyzer
                 && args.rust_analyzer_path == "rust-analyzer"
                 && !args.no_vtsls

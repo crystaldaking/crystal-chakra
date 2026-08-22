@@ -495,6 +495,10 @@ impl Worker {
             deleted,
             documents_examined,
             source_body_comparisons,
+            inputs_created,
+            inputs_changed,
+            inputs_deleted,
+            inputs_examined: _,
         } = workspace
             .delta_since_matching(
                 &self.known_workspace,
@@ -512,7 +516,14 @@ impl Worker {
             .filter(|document| terraform_ls_language(document.language))
             .ok_or(ProviderError::InvalidPosition)?;
         let target_needs_open = !self.opened_versions.contains_key(target.file());
-        if !deleted.is_empty() || !created.is_empty() || !changed.is_empty() || target_needs_open {
+        if !deleted.is_empty()
+            || !created.is_empty()
+            || !changed.is_empty()
+            || !inputs_created.is_empty()
+            || !inputs_changed.is_empty()
+            || !inputs_deleted.is_empty()
+            || target_needs_open
+        {
             self.sync_generation = self.sync_generation.saturating_add(1);
             self.barrier_generation = None;
             self.set_progress(ProviderProgress {
@@ -588,6 +599,27 @@ impl Worker {
                 )? as u64);
                 text_documents_sent = text_documents_sent.saturating_add(1);
             }
+        }
+        for path in inputs_deleted {
+            self.check_operation()?;
+            events.push(FileEvent {
+                uri: path_to_uri(&workspace.repository_root, &path)?,
+                typ: FileChangeType::DELETED,
+            });
+        }
+        for path in inputs_created {
+            self.check_operation()?;
+            events.push(FileEvent {
+                uri: path_to_uri(&workspace.repository_root, &path)?,
+                typ: FileChangeType::CREATED,
+            });
+        }
+        for path in inputs_changed {
+            self.check_operation()?;
+            events.push(FileEvent {
+                uri: path_to_uri(&workspace.repository_root, &path)?,
+                typ: FileChangeType::CHANGED,
+            });
         }
         if !self.opened_versions.contains_key(&target_document.path) {
             text_bytes_sent = text_bytes_sent.saturating_add(self.open_or_change(

@@ -10,7 +10,8 @@
   "precise_provider": {
     "name": "clangd",
     "adr": "docs/adr/0039-clangd-workspace-enrichment.md",
-    "status": "integrated"
+    "status": "runtime-integrated",
+    "runtime_evidence": ["crates/chakra-cli/src/main.rs", "crates/chakra-provider-clangd/tests/lifecycle.rs"]
   },
   "capabilities": {
     "DISC-01": {

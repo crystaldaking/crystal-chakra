@@ -100,7 +100,7 @@ than being guessed:
 
 - Conformance: `docs/support/conformance/python.json` (14/14 scenarios).
 - Corpus: `docs/support/corpus/results/python-django__django.json` and
-  `docs/support/corpus/results/python-apache__airflow.json` (11/11 each).
+  `docs/support/corpus/results/python-apache__airflow.json` (12/12 each).
 - Adapter tests: `crates/chakra-language-python/tests/fixture_index.rs`
   (declarations, containers, imports/aliases, ranges, test hints,
   diagnostics, call candidates, ambiguity, reconcile) and

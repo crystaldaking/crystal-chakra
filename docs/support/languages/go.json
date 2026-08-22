@@ -10,7 +10,8 @@
   "precise_provider": {
     "name": "gopls",
     "adr": "docs/adr/0041-gopls-workspace-enrichment.md",
-    "status": "integrated"
+    "status": "runtime-integrated",
+    "runtime_evidence": ["crates/chakra-cli/src/main.rs", "crates/chakra-provider-gopls/tests/lifecycle.rs"]
   },
   "capabilities": {
     "DISC-01": {

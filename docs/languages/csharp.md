@@ -71,12 +71,10 @@ method, because they have no stable syntax-tier callable identity. External
 SDK/dependency definitions exposed only as `csharp:/` metadata URIs are
 intentionally absent from Chakra results.
 
-Metadata-only revisions are current in Chakra's syntax graph, but the shared
-precise-provider envelope does not yet carry non-source inputs such as changed
-`.csproj`/`.sln` files to an already active language server (issue #71).
-Restart Chakra after changing project/solution structure before relying on new
-`csharp-ls` facts; ordinary syntax, source-role, and project-scope results do
-not require that restart.
+Project metadata changes (`.csproj`, `.sln`, `.slnx`, `Directory.Build.*`,
+and `global.json`) are captured in the workspace revision and sent to an
+active `csharp-ls` instance as watched-file events. They never masquerade as
+text-document changes.
 
 ## Evidence
 

@@ -108,7 +108,7 @@ than being guessed:
 - Conformance: `docs/support/conformance/javascript.json` (14/14
   scenarios), including a CommonJS `require()` alias hard case.
 - Corpus: `docs/support/corpus/results/javascript-react__react.json`
-  (11/11).
+  (12/12).
 - Adapter tests: `crates/chakra-language-javascript/tests/fixture_index.rs`
   (declarations, containers, ES/CommonJS imports and aliases, ranges, test
   hints, JSX, diagnostics, call candidates, ambiguity, reconcile) and

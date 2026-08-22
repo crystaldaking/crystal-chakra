@@ -28,8 +28,8 @@ use thiserror::Error;
 /// in-memory only — no id is ever persisted — so the slot layout may change
 /// between releases as long as it is consistent within one process.
 /// Explicit slot assignment: Rust = 0, Php = 1, TypeScript = 2, Python = 3,
-/// JavaScript = 4, Java = 5, C# = 6, Shell = 7, C++ = 8; 7 slots remain. Adding a language means
-/// assigning it the next free slot
+/// JavaScript = 4, Java = 5, C# = 6, Shell = 7, C++ = 8, HCL = 9, Go = 10;
+/// 5 slots remain. Adding a language means assigning it the next free slot
 /// in `language_entity_slot` and appending it to `ENTITY_SLOT_LANGUAGES` —
 /// nothing else in the id machinery changes.
 const ENTITY_ID_SLOT_COUNT: usize = 16;
@@ -2676,6 +2676,18 @@ mod tests {
     use chakra_domain::diagnostic::{SyntaxDiagnosticCause, SyntaxDiagnosticKind};
     use chakra_domain::location::TextPosition;
     use chakra_domain::symbol::{Language, SymbolKind};
+
+    #[test]
+    fn entity_slot_registry_matches_the_domain_language_catalog() {
+        assert_eq!(ENTITY_SLOT_LANGUAGES, Language::ALL.as_slice());
+        let slots: HashSet<_> = ENTITY_SLOT_LANGUAGES
+            .iter()
+            .copied()
+            .map(language_entity_slot)
+            .collect();
+        assert_eq!(slots.len(), ENTITY_SLOT_LANGUAGES.len());
+        assert!(slots.iter().all(|slot| *slot < ENTITY_ID_SLOT_COUNT));
+    }
 
     fn file(path: &str) -> Result<RepoRelativePath, Box<dyn std::error::Error>> {
         Ok(RepoRelativePath::new(path)?)

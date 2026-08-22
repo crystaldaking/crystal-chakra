@@ -10,7 +10,8 @@
   "precise_provider": {
     "name": "pyright",
     "adr": "docs/adr/0027-grammar-and-provider-selection.md",
-    "status": "integrated"
+    "status": "runtime-integrated",
+    "runtime_evidence": ["crates/chakra-cli/src/main.rs", "crates/chakra-provider-pyright/tests/lifecycle.rs"]
   },
   "capabilities": {
     "DISC-01": {"status": "pass", "mechanism": "chakra-git discovery (.py/.pyi)", "evidence": ["crates/chakra-language-python/tests/fixture_index.rs", "crates/chakra-git/src/discovery.rs"]},

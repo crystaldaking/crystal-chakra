@@ -16,7 +16,7 @@ use chakra_domain::location::RepoRelativePath;
 use chakra_domain::operation::OperationContext;
 use chakra_domain::symbol::Language;
 use chakra_engine::{
-    ConsistencyError, GraphBuildLimits, GraphBuildReport, GraphError, SymbolGraph,
+    ConsistencyError, GraphBuildLimits, GraphBuildReport, GraphError, ProviderInput, SymbolGraph,
 };
 use thiserror::Error;
 use tracing::{info, warn};
@@ -83,6 +83,9 @@ impl WorkspaceSources {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkspaceSourceScan {
     pub sources: WorkspaceSources,
+    /// Non-source manifests/configuration captured with this exact scan for
+    /// revision-scoped provider watched-file synchronization.
+    pub provider_inputs: Vec<ProviderInput>,
     pub discovered_files: u64,
     pub indexed_files: u64,
     pub source_bytes: u64,
@@ -284,6 +287,7 @@ pub struct IndexReport {
     pub graph: SymbolGraph,
     pub metrics: IndexMetrics,
     pub syntax_index: WorkspaceSyntaxIndex,
+    pub provider_inputs: Vec<ProviderInput>,
 }
 
 #[derive(Debug, Error)]
@@ -295,6 +299,12 @@ pub enum WorkspaceIndexError {
         path: RepoRelativePath,
         #[source]
         source: io::Error,
+    },
+    #[error("{language:?} syntax adapter failed: {source}")]
+    Adapter {
+        language: Language,
+        #[source]
+        source: Box<WorkspaceIndexError>,
     },
     #[error(transparent)]
     Rust(#[from] chakra_language_rust::RustIndexError),
@@ -341,6 +351,7 @@ pub struct WorkspaceSyntaxIndex {
     adapters: Vec<WorkspaceAdapterState>,
     budgets: IndexBudgets,
     indexing: IndexingStatus,
+    provider_inputs: Vec<ProviderInput>,
 }
 
 impl WorkspaceSyntaxIndex {
@@ -360,6 +371,10 @@ impl WorkspaceSyntaxIndex {
 
     pub fn indexing(&self) -> &IndexingStatus {
         &self.indexing
+    }
+
+    pub fn provider_inputs(&self) -> &[ProviderInput] {
+        &self.provider_inputs
     }
 
     pub fn scan_repository(
@@ -389,8 +404,17 @@ impl WorkspaceSyntaxIndex {
         let limits = self.live_graph_limits(&scan.sources);
         let mut reconciled = Vec::with_capacity(self.adapters.len());
         for (state, limits) in self.adapters.iter().zip(limits.iter().copied()) {
-            let sources = scan.sources.take(state.adapter.language());
-            reconciled.push(state.adapter.reconcile(sources, limits, cancellation)?);
+            let language = state.adapter.language();
+            let sources = scan.sources.take(language);
+            reconciled.push(
+                state
+                    .adapter
+                    .reconcile(sources, limits, cancellation)
+                    .map_err(|source| WorkspaceIndexError::Adapter {
+                        language,
+                        source: Box::new(source),
+                    })?,
+            );
             check_cancelled(cancellation)?;
         }
         let mut metrics = ReconcileMetrics::default();
@@ -501,8 +525,9 @@ impl WorkspaceSyntaxIndex {
             },
         );
 
-        let metadata_changed = !indexing_semantically_equal(&self.indexing, &indexing);
-        if !graph_changed && !metadata_changed {
+        let indexing_changed = !indexing_semantically_equal(&self.indexing, &indexing);
+        let provider_inputs_changed = self.provider_inputs != scan.provider_inputs;
+        if !graph_changed && !indexing_changed && !provider_inputs_changed {
             return Ok(ReconcileReport {
                 graph: None,
                 metrics,
@@ -519,6 +544,7 @@ impl WorkspaceSyntaxIndex {
                 .collect(),
             budgets: self.budgets,
             indexing: indexing.clone(),
+            provider_inputs: scan.provider_inputs,
         };
         Ok(ReconcileReport {
             graph,
@@ -632,15 +658,23 @@ pub fn index_repository_with_options(
     let limits = split_graph_limits(budgets, &scan.sources.counts());
     let mut builds = Vec::with_capacity(prototypes.len());
     for (adapter, limits) in prototypes.iter().zip(limits.iter().copied()) {
-        let sources = scan.sources.take(adapter.language());
-        builds.push(adapter.cold_build(
-            sources,
-            limits,
-            worker_policy.effective_worker_limit as usize,
-            PARALLEL_PARSE_FILE_THRESHOLD as usize,
-            &repository_root,
-            &options.cancellation,
-        )?);
+        let language = adapter.language();
+        let sources = scan.sources.take(language);
+        builds.push(
+            adapter
+                .cold_build(
+                    sources,
+                    limits,
+                    worker_policy.effective_worker_limit as usize,
+                    PARALLEL_PARSE_FILE_THRESHOLD as usize,
+                    &repository_root,
+                    &options.cancellation,
+                )
+                .map_err(|source| WorkspaceIndexError::Adapter {
+                    language,
+                    source: Box::new(source),
+                })?,
+        );
         rss_peak = max_option(rss_peak, process_rss_bytes());
     }
     check_cancelled(&options.cancellation)?;
@@ -778,6 +812,7 @@ pub fn index_repository_with_options(
             .collect(),
         budgets,
         indexing: indexing.clone(),
+        provider_inputs: scan.provider_inputs.clone(),
     };
     let metrics = IndexMetrics {
         discovered_files: scan.discovered_files,
@@ -824,6 +859,7 @@ pub fn index_repository_with_options(
         repository_root,
         graph,
         metrics,
+        provider_inputs: syntax_index.provider_inputs.clone(),
         syntax_index,
     })
 }
@@ -1019,6 +1055,7 @@ fn scan_discovered_sources_with_inventory_phase(
         }
     }
 
+    let mut provider_inputs = Vec::new();
     for path in &inventory.metadata_inputs {
         operation
             .check()
@@ -1037,6 +1074,15 @@ fn scan_discovered_sources_with_inventory_phase(
                 continue;
             }
         };
+        if let Some(input) = ProviderInput::from_metadata(
+            path.clone(),
+            chakra_git::metadata_languages(path.as_str())
+                .iter()
+                .copied(),
+            &metadata,
+        ) {
+            provider_inputs.push(input);
+        }
         loader.observe_metadata(path, &metadata);
     }
 
@@ -1108,6 +1154,7 @@ fn scan_discovered_sources_with_inventory_phase(
     ];
     Ok(WorkspaceSourceScan {
         sources: WorkspaceSources { languages },
+        provider_inputs,
         discovered_files,
         indexed_files,
         source_bytes,

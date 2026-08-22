@@ -14,7 +14,7 @@ Internal Rust crates use the `chakra-*` prefix.
 Before substantial work, read the minimum relevant documentation:
 
 1. `docs/SPEC.md` — architectural source of truth and long-term direction.
-2. `docs/roadmap/v0.1.md` — scope authority for v0.1. If SPEC and v0.1 differ on whether something must be implemented now, v0.1 wins on scope while SPEC wins on architecture.
+2. `docs/roadmap/v0.1.md` — baseline scope authority for the v0.1 release line. For post-v0.1.0 releases, the accepted GitHub milestone, issue acceptance criteria, and relevant ADRs define the incremental release scope. SPEC still wins on architecture.
 3. Relevant ADRs in `docs/adr/` when touching an architectural decision.
 4. The closest nested `AGENTS.md` if one exists.
 
@@ -53,7 +53,7 @@ Precise provider data is not an intrinsic property of an arbitrary Git commit.
 
 ## v0.1 scope discipline
 
-For v0.1, prefer the smallest useful implementation that proves agent value:
+For the v0.1 baseline, prefer the smallest useful implementation that proves agent value. Later v0.1.x milestone work may extend supported languages and provider adapters when explicitly accepted in that milestone:
 
 - Rust and PHP syntax intelligence.
 - One repository and one active materialized worktree.
@@ -75,6 +75,19 @@ Explicitly deferred unless the task is specifically about a later milestone:
 - Full eager precise call graph.
 - Distributed indexing.
 - Web UI.
+
+## Dogfooding
+
+Use Chakra to develop Chakra. When working in this repository, prefer Chakra's
+own query surface (`repo_map`, `search`, `symbol_search`, `context`, `callers`,
+`diff_context`) over ad-hoc text search for code navigation and investigation.
+
+File every problem found while dogfooding as a GitHub issue in this repository,
+with reproduction steps and observed evidence. Incorrect or surprising results,
+provenance/precision gaps, truncation noise, performance regressions, and UX
+friction all count. Do not silently work around a discovered defect — the issue
+is the record. Milestone assignment for dogfooding issues remains subject to
+milestone scope discipline.
 
 ## Rust engineering rules
 

@@ -10,7 +10,8 @@
   "precise_provider": {
     "name": "vtsls",
     "adr": "docs/adr/0032-shared-lsp-client-and-vtsls-provider.md",
-    "status": "integrated"
+    "status": "runtime-integrated",
+    "runtime_evidence": ["crates/chakra-cli/src/main.rs", "crates/chakra-provider-vtsls/tests/lifecycle.rs"]
   },
   "capabilities": {
     "DISC-01": {"status": "pass", "mechanism": "chakra-git discovery (.js/.jsx/.mjs/.cjs)", "evidence": ["crates/chakra-language-javascript/tests/fixture_index.rs", "crates/chakra-git/src/discovery.rs"]},

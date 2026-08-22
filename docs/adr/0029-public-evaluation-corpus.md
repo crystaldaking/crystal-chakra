@@ -34,7 +34,11 @@ time, peak RSS, coverage counts), warm no-op, deterministic fingerprint,
 one-file edit, editor-style atomic replace, rename/delete, temporary syntax
 error, clean and changed `diff_context`, high-degree bounded queries,
 cooperative cancellation, and cache restoration. Edit scenarios mutate the
-cached checkout and always restore the pinned SHA afterwards.
+cached checkout and always restore the pinned SHA afterwards. After restore,
+a hermetic provider double uses a real high-degree symbol from that repository
+to verify provider absence, explicit failed-start fallback, and precise restart.
+This exercises the provider/query lifecycle without making a globally
+installed language server part of the corpus prerequisite.
 
 **Budgets.** `docs/support/corpus/budgets.json` holds per-language starting
 budgets sized at roughly 25–100× observed values — tripwires for
@@ -47,6 +51,10 @@ the producing machine and date. Because measured values vary by machine, CI
 does not diff results; it runs `chakra-conformance corpus --verify`, a
 non-networked structural check of artifacts against the manifest. Budgets are
 enforced at evaluation time by the runner (exit code = failed scenarios).
+Multi-repository runs isolate each repository in a fresh owned process so
+allocator retention and absolute RSS sampling from one large graph cannot be
+misattributed to another repository. Child failure stops emission with the
+language, repository, and process status visible.
 
 ## Alternatives considered
 
@@ -61,14 +69,11 @@ enforced at evaluation time by the runner (exit code = failed scenarios).
 
 ## Consequences
 
-- First real-corpus finding already recorded: `symfony/symfony@add4ddb9`
-  contains a Latin-1-encoded file, and the workspace source scan aborts the
-  entire cold index on a non-UTF-8 read instead of degrading past the file.
-  The artifact records `cold-index: fail`; the fix (skip-with-diagnostic) is
-  tracked under #32 PHP parity.
-- New language issues (#27–#36) inherit corpus evaluation: once a language
-  has an adapter, its manifest entries are evaluated and `CORPUS-01` can flip
-  to pass.
+- The first run exposed a Latin-1 Symfony source. The completed PHP parity
+  work now skips unreadable files with explicit coverage degradation instead
+  of aborting the repository; both PHP corpus entries pass.
+- Every registered language inherits the same corpus and provider-lifecycle
+  catalog. A language cannot claim `CORPUS-01` from parser fixtures alone.
 - Cancellation is asserted with pre-cancelled tokens (deterministic, no
   sleeps); mid-flight cancellation coverage remains a follow-up.
 - RSS is sampled at index phase boundaries (via `/proc` on Linux, `ps` on
@@ -76,8 +81,8 @@ enforced at evaluation time by the runner (exit code = failed scenarios).
 
 ## Validation / follow-up
 
-- Real evaluation executed 2026-08-18 on macOS/aarch64 against tokio,
-  ripgrep, laravel/framework, and symfony/symfony; artifacts committed.
+- Real evaluation covers 19 pinned repositories across all 11 registered
+  languages; artifacts record the producing machine and date.
 - `chakra-conformance corpus --verify` passes and runs in CI.
-- Follow-ups: non-UTF-8 source degradation (#32), mid-flight cancellation
-  coverage, corpus refresh cadence per the contract §7 review policy.
+- Follow-ups: mid-flight cancellation coverage and corpus refresh cadence per
+  the contract §7 review policy.

@@ -28,9 +28,9 @@ mod source_metadata;
 pub use discovery::{
     DiscoveryError, WorkspaceInventory, discover_language_files, discover_source_files,
     discover_source_files_in_worktree, discover_source_files_in_worktree_with_context,
-    discover_workspace_inventory_in_worktree_with_context, resolve_git_administrative_paths,
-    resolve_repository_identity, resolve_repository_root, resolve_repository_root_with_context,
-    resolve_workspace_identity, source_language,
+    discover_workspace_inventory_in_worktree_with_context, metadata_languages,
+    resolve_git_administrative_paths, resolve_repository_identity, resolve_repository_root,
+    resolve_repository_root_with_context, resolve_workspace_identity, source_language,
 };
 pub use source_metadata::{
     ClassifiedSource, classify_discovered_sources_with_context, discover_classified_sources,
@@ -540,40 +540,7 @@ fn is_supported_source(path: &str) -> bool {
 }
 
 fn raw_is_supported_source(raw: &[u8]) -> Result<bool, WorkspaceDiffError> {
-    let looks_supported = raw.ends_with(b".rs")
-        || raw.ends_with(b".php")
-        || raw.ends_with(b".ts")
-        || raw.ends_with(b".tsx")
-        || raw.ends_with(b".mts")
-        || raw.ends_with(b".cts")
-        || raw.ends_with(b".py")
-        || raw.ends_with(b".pyi")
-        || raw.ends_with(b".js")
-        || raw.ends_with(b".jsx")
-        || raw.ends_with(b".mjs")
-        || raw.ends_with(b".cjs")
-        || raw.ends_with(b".java")
-        || raw.ends_with(b".cs")
-        || raw.ends_with(b".sh")
-        || raw.ends_with(b".bash")
-        || raw.ends_with(b".zsh")
-        || raw.ends_with(b".ksh")
-        || raw.ends_with(b".c")
-        || raw.ends_with(b".h")
-        || raw.ends_with(b".cc")
-        || raw.ends_with(b".cpp")
-        || raw.ends_with(b".cxx")
-        || raw.ends_with(b".hh")
-        || raw.ends_with(b".hpp")
-        || raw.ends_with(b".hxx")
-        || raw.ends_with(b".ipp")
-        || raw.ends_with(b".tpp")
-        || raw.ends_with(b".inc")
-        || raw.ends_with(b".tf")
-        || raw.ends_with(b".tfvars")
-        || raw.ends_with(b".hcl")
-        || raw.ends_with(b".go");
-    if !looks_supported {
+    if !discovery::raw_may_be_source(raw) {
         return Ok(false);
     }
     let path = std::str::from_utf8(raw)

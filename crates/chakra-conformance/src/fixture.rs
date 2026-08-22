@@ -38,6 +38,7 @@ impl LiveFixture {
         let identity = WorkspaceIdentity::for_primary_worktree(&report.repository_root)?;
         let engine = Arc::new(WorkspaceEngine::new(identity));
         let mut update = engine.begin_update();
+        update.set_provider_inputs(report.provider_inputs.clone());
         update.replace_graph(report.graph);
         update.set_indexing(report.metrics.indexing);
         update.set_status(WorkspaceStatus::Indexing);

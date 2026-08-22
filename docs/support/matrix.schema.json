@@ -38,7 +38,17 @@
         "name": {"type": "string"},
         "version": {"type": "string"},
         "adr": {"type": "string"},
-        "status": {"type": "string", "enum": ["integrated", "deferred", "equivalent"]}
+        "status": {
+          "type": "string",
+          "enum": ["adapter-ready", "runtime-integrated", "deferred", "equivalent"],
+          "description": "adapter-ready has contract evidence but no shipped activation path; runtime-integrated is discoverable and lifecycle-owned by chakra serve."
+        },
+        "runtime_evidence": {
+          "type": "array",
+          "items": {"type": "string"},
+          "minItems": 1,
+          "description": "Required for runtime-integrated: shipped composition and lifecycle evidence paths."
+        }
       }
     },
     "capabilities": {

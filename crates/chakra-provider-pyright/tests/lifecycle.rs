@@ -65,6 +65,7 @@ fn main() -> io::Result<()> {
     let opened_path = executable.with_extension("opened");
     let changed_path = executable.with_extension("changed");
     let watched_path = executable.with_extension("watched");
+    let prepared_path = executable.with_extension("prepared");
     let child_path = executable.with_extension("child");
     bump(&count_path)?;
     let hang = stem_contains("hang");
@@ -124,6 +125,7 @@ fn main() -> io::Result<()> {
             bump(&watched_path)?;
         } else if body.contains("\"method\":\"textDocument/prepareCallHierarchy\"") {
             if crash {
+                bump(&prepared_path)?;
                 std::process::exit(17);
             }
             if hang {
@@ -426,13 +428,17 @@ fn transport_crash_restarts_once_then_degrades() -> Result<(), Box<dyn Error>> {
 
     let result = provider.enrich(request);
     let process_count = fs::read_to_string(executable.with_extension("count"))?;
+    let prepare_count = fs::read_to_string(executable.with_extension("prepared"))?;
     assert_eq!(
         result.state,
         ProviderState::Degraded,
-        "last_error={:?}, process_count={process_count}",
+        "last_error={:?}, process_count={process_count}, prepare_count={prepare_count}",
         provider.last_error()
     );
-    assert_eq!(process_count, "2", "one restart attempt after the crash");
+    assert_eq!(
+        prepare_count, "2",
+        "one retry of the crash-inducing request"
+    );
     assert_eq!(provider.state_for(Revision(1)), ProviderState::Degraded);
     assert!(provider.last_error().is_some());
     provider.shutdown()?;

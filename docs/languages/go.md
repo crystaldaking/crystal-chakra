@@ -57,9 +57,9 @@ package loader.
 
 Provider locations outside captured Go documents are omitted. Provider
 absence, missing call-hierarchy capability, crash, timeout, or cancellation
-leaves the syntax graph available and reports degradation. Changes to
-non-source module/workspace inputs are freshness inputs, but the current LSP
-document delta contains source documents only (issue #71).
+leaves the syntax graph available and reports degradation. `go.mod`, `go.sum`,
+`go.work`, and `go.work.sum` changes are synchronized as revision-bound
+watched-file events alongside source-document deltas.
 
 ## Evidence
 

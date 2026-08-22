@@ -45,12 +45,10 @@ adapter still needs an explicit runtime and result-boundary contract:
 - Hermetic fake-server tests cover lifecycle, delta synchronization,
   cancellation, restart, capability gating, and orphan-free shutdown. A real
   server remains an opt-in operator smoke test.
-- Source-document changes produce watched-file events. The atomically
-  published provider envelope does not yet retain non-source input deltas, so
-  an active server cannot be notified safely about a metadata-only
-  `.csproj`/`.sln` revision; issue #71 tracks the cross-provider contract.
-  Restarting Chakra after project-structure changes is the current honest
-  operational boundary.
+- Source-document and C# project-input changes produce revision-bound
+  watched-file events. `.csproj`, `.sln`, `.slnx`, `Directory.Build.*`, and
+  `global.json` identities are published atomically with the syntax graph and
+  synchronized without fabricating text-document changes (ADR-0042).
 
 ## Alternatives considered
 

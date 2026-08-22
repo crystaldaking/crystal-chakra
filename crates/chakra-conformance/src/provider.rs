@@ -1,12 +1,13 @@
-//! Controllable `PreciseProvider` double for degradation/recovery scenarios.
+//! Controllable `PreciseProvider` double for degradation/restart scenarios.
 //!
 //! The double never spawns a process and never talks to a real language
-//! server. It starts in a crashed (degraded) state; `recover` flips it to
-//! ready with caller-supplied precise relations.
+//! server. It records one failed start in its crashed (degraded) state;
+//! `restart` records a second attempt and flips it to ready with
+//! caller-supplied precise relations.
 //!
 //! Note on provenance: the double labels its precise facts
 //! `Provenance::ChakraResolver` because the scenarios assert
-//! degradation/recovery *behavior* (precision upgrade and explicit
+//! degradation/restart *behavior* (precision upgrade and explicit
 //! fallback), not the identity of a real language server.
 
 use std::sync::{Mutex, MutexGuard, PoisonError};
@@ -21,9 +22,10 @@ use chakra_engine::{PreciseProvider, PreciseQueryRequest, PreciseQueryResult, Pr
 struct FlakyState {
     healthy: bool,
     incoming: Vec<PreciseRelation>,
+    start_attempts: u64,
 }
 
-/// A `PreciseProvider` that first fails, then recovers on demand.
+/// A `PreciseProvider` that first fails, then restarts on demand.
 #[derive(Debug, Default)]
 pub struct FlakyProvider {
     state: Mutex<FlakyState>,
@@ -32,15 +34,25 @@ pub struct FlakyProvider {
 impl FlakyProvider {
     /// A provider in the crashed state.
     pub fn crashed() -> Self {
-        Self::default()
+        Self {
+            state: Mutex::new(FlakyState {
+                start_attempts: 1,
+                ..FlakyState::default()
+            }),
+        }
     }
 
-    /// Marks the provider healthy; subsequent `enrich` calls return
-    /// `incoming` as precise caller relations for the queried revision.
-    pub fn recover(&self, incoming: Vec<PreciseRelation>) {
+    /// Simulates a bounded restart and marks the provider healthy; subsequent
+    /// `enrich` calls return `incoming` for the queried revision.
+    pub fn restart(&self, incoming: Vec<PreciseRelation>) {
         let mut state = self.state();
+        state.start_attempts = state.start_attempts.saturating_add(1);
         state.healthy = true;
         state.incoming = incoming;
+    }
+
+    pub fn start_attempts(&self) -> u64 {
+        self.state().start_attempts
     }
 
     fn state(&self) -> MutexGuard<'_, FlakyState> {

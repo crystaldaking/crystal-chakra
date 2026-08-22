@@ -112,7 +112,7 @@ pub(super) fn provider_crash_recovery(manifest: &Manifest) -> Check<Vec<String>>
 
         // The double labels its precise facts with the Chakra-owned precise
         // provenance; see crates/chakra-conformance/src/provider.rs.
-        provider.recover(vec![PreciseRelation {
+        provider.restart(vec![PreciseRelation {
             name: expectations.caller_simple.clone(),
             declaration: caller_location.clone(),
             occurrence_count: 1,
@@ -142,6 +142,10 @@ pub(super) fn provider_crash_recovery(manifest: &Manifest) -> Check<Vec<String>>
                     && caller.provenance == Provenance::ChakraResolver
             }),
             "recovered provider did not contribute precise caller facts",
+        )?;
+        ensure(
+            provider.start_attempts() == 2,
+            "provider double did not record failed start plus restart",
         )?;
         Ok(vec![
             "provider crash: explicit fallback, syntax facts retained, precision never upgraded silently"

@@ -76,9 +76,9 @@ language server prerequisites for the syntax tier.
 - Provider document-symbol attribution omits top-level references that have no
   enclosing configuration symbol. Locations outside the captured worktree are
   omitted.
-- Provider workspaces currently synchronize captured source documents only;
-  extending precise-provider deltas to non-source inputs remains tracked in
-  issue #71.
+- Terraform locks, version files, and CLI configuration are revision-bound
+  provider inputs and produce watched-file events independently of source
+  document deltas (ADR-0042).
 - Terraform JSON configuration and variable/test forms are not indexed by the
   native-HCL grammar; a dedicated JSON adapter path remains tracked in issue
   #86.
@@ -93,5 +93,5 @@ language server prerequisites for the syntax tier.
   gates, synchronization, cancellation, restart, degradation, and orphan-free
   shutdown.
 - HCL conformance passes 14/14 scenarios. The pinned terraform-aws-vpc and
-  terraform-aws-eks corpora each pass 11/11; observed release cold indexes were
+  terraform-aws-eks corpora each pass 12/12; observed release cold indexes were
   about 0.12–0.13 seconds with 49–77 MiB peak RSS.
