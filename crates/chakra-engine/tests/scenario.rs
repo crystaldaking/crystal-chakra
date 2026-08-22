@@ -699,6 +699,112 @@ fn exact_symbol_search_reaches_later_partition_before_bounded_scan() -> Result<(
 }
 
 #[test]
+fn symbol_search_exact_mode_reads_only_the_exact_name_index() -> Result<(), Box<dyn Error>> {
+    let identity = chakra_domain::identity::WorkspaceIdentity::for_primary_worktree(
+        std::path::Path::new("."),
+    )?;
+    let engine = chakra_engine::WorkspaceEngine::new(identity);
+    let mut rust = SymbolGraph::new();
+    for index in 0..1_025 {
+        let path = format!("src/noise_{index:04}.rs");
+        add_search_symbol(
+            &mut rust,
+            &path,
+            Language::Rust,
+            &format!("noise::item_{index:04}"),
+            SymbolKind::Function,
+            SourceMetadata::path_fallback(&RepoRelativePath::new(path.clone())?),
+        )?;
+    }
+    let mut php = SymbolGraph::new();
+    for (name, symbol) in [
+        ("app/Service.php", "App::Service::run"),
+        ("app/Runner.php", "App::Runner::run"),
+        ("app/ServiceRunAll.php", "App::Service::run_all"),
+    ] {
+        add_search_symbol(
+            &mut php,
+            name,
+            Language::Php,
+            symbol,
+            SymbolKind::Method,
+            SourceMetadata::path_fallback(&RepoRelativePath::new(name)?),
+        )?;
+    }
+    let graph = SymbolGraph::merge([rust, php])?;
+    let mut update = engine.begin_update();
+    update.replace_graph(graph);
+    update.set_status(WorkspaceStatus::Ready);
+    update.set_freshness(Freshness::Fresh);
+    engine.publish(update)?;
+
+    // Exact mode returns every exact-name candidate across partitions, skips
+    // the substring scan over unrelated noise symbols, and therefore reports
+    // no truncation at all (issue #82).
+    let exact = engine.symbol_search(SymbolSearchRequest {
+        query: "RUN".to_owned(),
+        match_mode: chakra_domain::query::SymbolMatchMode::Exact,
+        limit: Some(20),
+        ..SymbolSearchRequest::default()
+    })?;
+    assert_eq!(exact.data.candidates.len(), 2);
+    assert!(
+        exact
+            .data
+            .candidates
+            .iter()
+            .all(|candidate| candidate.name == "run")
+    );
+    assert!(!exact.truncated);
+    assert!(exact.truncation.is_empty());
+
+    // Qualified exact names match through the same folded index.
+    let qualified = engine.symbol_search(SymbolSearchRequest {
+        query: "app::service::run".to_owned(),
+        match_mode: chakra_domain::query::SymbolMatchMode::Exact,
+        limit: Some(20),
+        ..SymbolSearchRequest::default()
+    })?;
+    assert_eq!(qualified.data.candidates.len(), 1);
+    assert_eq!(qualified.data.candidates[0].name, "run");
+    assert!(qualified.truncation.is_empty());
+
+    // Prefix/substring spellings are not exact-name matches.
+    let prefix = engine.symbol_search(SymbolSearchRequest {
+        query: "run_a".to_owned(),
+        match_mode: chakra_domain::query::SymbolMatchMode::Exact,
+        limit: Some(20),
+        ..SymbolSearchRequest::default()
+    })?;
+    assert!(prefix.data.candidates.is_empty());
+    assert!(prefix.truncation.is_empty());
+
+    // Filters still apply to the exact candidate set.
+    let filtered = engine.symbol_search(SymbolSearchRequest {
+        query: "run".to_owned(),
+        match_mode: chakra_domain::query::SymbolMatchMode::Exact,
+        include_languages: vec![Language::Rust],
+        limit: Some(20),
+        ..SymbolSearchRequest::default()
+    })?;
+    assert!(filtered.data.candidates.is_empty());
+
+    // Default substring mode is unchanged by the new field: it still runs the
+    // bounded broad scan and honestly reports the examined-work limit.
+    let substring = engine.symbol_search(SymbolSearchRequest {
+        query: "RUN".to_owned(),
+        limit: Some(20),
+        ..SymbolSearchRequest::default()
+    })?;
+    assert_eq!(substring.data.candidates.len(), 2);
+    assert!(substring.truncation.iter().any(|detail| {
+        detail.section == TruncationSection::SymbolSearchCandidates
+            && detail.cause == TruncationCause::ExaminedWorkLimit
+    }));
+    Ok(())
+}
+
+#[test]
 fn source_filters_scope_rust_and_php_without_hiding_default_results() -> Result<(), Box<dyn Error>>
 {
     let identity = chakra_domain::identity::WorkspaceIdentity::for_primary_worktree(

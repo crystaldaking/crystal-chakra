@@ -519,9 +519,27 @@ pub struct SearchData {
 
 // --- symbol_search ---
 
+/// Matching strategy for [`SymbolSearchRequest`] (issue #82).
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum SymbolMatchMode {
+    /// Case-insensitive substring/prefix ranking across the symbol graph.
+    #[default]
+    Substring,
+    /// Only symbols whose case-folded simple or qualified name equals the
+    /// query. Reads the exact-name index without scanning unrelated substring
+    /// candidates; truncation is reported only when the exact-name candidate
+    /// set itself exceeds the response limit.
+    Exact,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct SymbolSearchRequest {
     pub query: String,
+    #[serde(default)]
+    pub match_mode: SymbolMatchMode,
     /// Empty means every indexed language.
     #[serde(default)]
     pub include_languages: Vec<Language>,

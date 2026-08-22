@@ -5,6 +5,14 @@ version tags prefixed with `v`.
 
 ## [Unreleased]
 
+### Added
+
+- `symbol_search` accepts `match_mode: "exact"` (issue #82): matching is
+  limited to the exact case-folded simple/qualified name index, existing
+  language/kind/source filters and budgets still apply, and truncation is
+  reported only when the exact candidate set itself exceeds a bound. The
+  default substring ranking is unchanged.
+
 ### Breaking
 
 - `status` now reports workspace-global provider-pool lifecycle/admission
