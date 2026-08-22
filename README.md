@@ -107,7 +107,7 @@ workspace before narrowing through symbols and relationships.
 | `status` | Revision, freshness, coverage, diagnostics, budgets, provider state, and operational metrics |
 | `repo_map` | A bounded structural overview and paginated file inventory |
 | `search` | Bounded textual matches in captured source |
-| `symbol_search` | Ranked, filterable declarations with stable revision-local identities |
+| `symbol_search` | Ranked, filterable declarations with stable revision-local identities; `match_mode: "exact"` reads only the exact-name index |
 | `context` | One symbol, source excerpt, callers, callees, implementations, tests, and typed related facts |
 | `callers` | Aggregated incoming relations plus unresolved syntax evidence |
 | `diff_context` | Git/worktree changes joined with current symbols, callers, tests, and call candidates |

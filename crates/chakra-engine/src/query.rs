@@ -28,8 +28,8 @@ use chakra_domain::query::{
     ProviderCapability, ProviderFallbackCause, ProviderInfo, ProviderQueryInfo, QueryError,
     QueryService, RelatedSymbol, RelationDirection, RepoMapCursor, RepoMapData, RepoMapGroup,
     RepoMapGroupKind, RepoMapRequest, RepoMapScope, SearchData, SearchRequest, SourceFilter,
-    SourceSnippet, StatusData, StatusRequest, SymbolRef, SymbolSearchData, SymbolSearchRequest,
-    SymbolView, SyntaxDiagnosticSummary, TextMatch,
+    SourceSnippet, StatusData, StatusRequest, SymbolMatchMode, SymbolRef, SymbolSearchData,
+    SymbolSearchRequest, SymbolView, SyntaxDiagnosticSummary, TextMatch,
 };
 use chakra_domain::revision::Revision;
 use chakra_domain::source::{SourceClassification, SourceMetadata, SourceRole};
@@ -1194,6 +1194,7 @@ fn ranked_symbol_matches(
     limit: usize,
     operation: &OperationContext,
     work: &mut SectionWorkBudget,
+    exact_only: bool,
 ) -> Result<(Vec<EntityId>, bool), QueryError> {
     let query_lower = query.to_lowercase();
     let mut best = BinaryHeap::with_capacity(limit.min(graph.symbol_count() as usize));
@@ -1227,8 +1228,10 @@ fn ranked_symbol_matches(
     // Once more exact filtered matches exist than the response can retain,
     // every prefix/substring match is strictly worse and cannot change the
     // top-k result. Otherwise continue the bounded broad scan so ranking and
-    // truncation semantics remain unchanged.
-    if !work_exhausted && !truncated {
+    // truncation semantics remain unchanged. Exact-match mode (issue #82)
+    // never runs the broad scan: the folded-name candidate set is complete,
+    // so truncation can only come from the limit or the work budget.
+    if !exact_only && !work_exhausted && !truncated {
         for symbol in graph.symbols() {
             let match_rank = match_rank(symbol, &query_lower);
             if match_rank == Some(0) {
@@ -2653,6 +2656,7 @@ impl QueryService for WorkspaceEngine {
             limit,
             operation,
             &mut work,
+            request.match_mode == SymbolMatchMode::Exact,
         )?;
         work.add_to_stats(&mut work_stats);
         let candidates: Vec<SymbolView> = matches
