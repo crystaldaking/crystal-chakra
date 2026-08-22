@@ -13,6 +13,14 @@ version tags prefixed with `v`.
   reported only when the exact candidate set itself exceeds a bound. The
   default substring ranking is unchanged.
 
+### Fixed
+
+- C++ namespace-qualified free-function definitions such as `void ns::free()`
+  are no longer misclassified as methods (issue #84): qualified callable
+  definitions are reclassified against workspace type/namespace evidence
+  during graph build and reconcile, an unproven qualifier keeps the
+  conservative parse-time kind, and no file is reparsed for the pass.
+
 ### Breaking
 
 - `status` now reports workspace-global provider-pool lifecycle/admission
