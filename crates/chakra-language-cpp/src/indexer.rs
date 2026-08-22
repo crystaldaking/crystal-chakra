@@ -367,6 +367,8 @@ impl CppSyntaxIndex {
             parse_schedule.peak_queue_depth,
         );
         check_cancelled(cancellation)?;
+        let mut files = files;
+        reclassify_qualified_callables(&mut files);
         let catalog_started = PhaseTimer::start();
         let catalog = SymbolCatalog::new(&files);
         let catalog_phase = measured_phase(
@@ -562,6 +564,7 @@ impl CppSyntaxIndex {
         }
         let parse_elapsed = parse_started.elapsed();
         check_cancelled(cancellation)?;
+        reclassify_qualified_callables(&mut next_files);
 
         let mut stable_symbol_paths = BTreeSet::new();
         let mut unchanged_fact_paths = BTreeSet::new();
@@ -1545,6 +1548,67 @@ fn symbol_keys_equal(left: &ParsedFile, right: &ParsedFile) -> bool {
             .all(|(left, right)| left.key == right.key)
 }
 
+/// Reclassifies qualified callable definitions using workspace symbol
+/// evidence (issue #84). The parser cannot distinguish `void ns::free()`
+/// (namespace-qualified free function) from `void ns::Type::method()`
+/// (out-of-line method): Tree-sitter C++ spells both qualifier scopes as
+/// `namespace_identifier`. Once every file is parsed, the owner qualifier of
+/// each `Method` draft is compared against known type and namespace names: a
+/// qualifier that names a type keeps `Method`, one that only names a
+/// namespace becomes `Function`, and an unproven qualifier keeps the
+/// conservative parse-time kind. Runs over retained drafts in memory; no file
+/// is reparsed and no eager workspace rescan is introduced.
+fn reclassify_qualified_callables(files: &mut BTreeMap<RepoRelativePath, Arc<ParsedFile>>) {
+    let mut namespaces: HashSet<String> = HashSet::new();
+    let mut types: HashSet<String> = HashSet::new();
+    for file in files.values() {
+        for symbol in &file.symbols {
+            match symbol.key.kind {
+                SymbolKind::Module => {
+                    namespaces.insert(symbol.key.qualified_name.clone());
+                }
+                SymbolKind::Class
+                | SymbolKind::Struct
+                | SymbolKind::Enum
+                | SymbolKind::TypeAlias => {
+                    types.insert(symbol.key.qualified_name.clone());
+                }
+                _ => {}
+            }
+        }
+    }
+    if namespaces.is_empty() {
+        return;
+    }
+    for file in files.values_mut() {
+        let reclassifiable = file.symbols.iter().any(|symbol| {
+            symbol.key.kind == SymbolKind::Method
+                && owner_is_namespace_only(&symbol.key.qualified_name, &namespaces, &types)
+        });
+        if !reclassifiable {
+            continue;
+        }
+        for symbol in &mut Arc::make_mut(file).symbols {
+            if symbol.key.kind == SymbolKind::Method
+                && owner_is_namespace_only(&symbol.key.qualified_name, &namespaces, &types)
+            {
+                symbol.key.kind = SymbolKind::Function;
+            }
+        }
+    }
+}
+
+fn owner_is_namespace_only(
+    qualified_name: &str,
+    namespaces: &HashSet<String>,
+    types: &HashSet<String>,
+) -> bool {
+    let Some((owner, _)) = qualified_name.rsplit_once("::") else {
+        return false;
+    };
+    namespaces.contains(owner) && !types.contains(owner)
+}
+
 fn syntax_facts_equal(left: &ParsedFile, right: &ParsedFile) -> bool {
     left.module_path == right.module_path
         && left.symbols == right.symbols
@@ -1878,6 +1942,82 @@ mod tests {
         release.wait();
         let result = indexing.join().map_err(|_| "index owner panicked")?;
         assert!(matches!(result, Err(CppIndexError::Cancelled)));
+        Ok(())
+    }
+
+    #[test]
+    fn qualified_free_functions_are_distinguished_from_out_of_line_methods()
+    -> Result<(), Box<dyn Error>> {
+        let mut sources = BTreeMap::new();
+        sources.insert(
+            RepoRelativePath::new("include/api.h")?,
+            Arc::<str>::from(
+                "namespace ns {\n\
+                 struct Type { void method(); };\n\
+                 void free();\n\
+                 namespace inner { void deep(); }\n\
+                 }\n",
+            ),
+        );
+        sources.insert(
+            RepoRelativePath::new("src/api.cpp")?,
+            Arc::<str>::from(
+                "namespace other { void untouched(); }\n\
+                 void ns::free() {}\n\
+                 void ns::Type::method() {}\n\
+                 void ns::inner::deep() {}\n\
+                 void unproven::ambiguous() {}\n",
+            ),
+        );
+        let (_, graph) = CppSyntaxIndex::from_sources(sources)?;
+        let kind_of = |qualified_name: &str| {
+            graph
+                .symbols()
+                .iter()
+                .find(|symbol| {
+                    symbol.key.qualified_name == qualified_name
+                        && symbol.key.path.as_str() == "src/api.cpp"
+                })
+                .map(|symbol| symbol.key.kind)
+        };
+        assert_eq!(kind_of("ns::free"), Some(SymbolKind::Function));
+        assert_eq!(kind_of("ns::Type::method"), Some(SymbolKind::Method));
+        assert_eq!(kind_of("ns::inner::deep"), Some(SymbolKind::Function));
+        // No workspace evidence names `unproven`: the qualifier cannot be
+        // proven to be a type or a namespace, so the conservative parse-time
+        // classification is preserved.
+        assert_eq!(kind_of("unproven::ambiguous"), Some(SymbolKind::Method));
+        Ok(())
+    }
+
+    #[test]
+    fn reconcile_reclassifies_qualified_callables_without_reparse() -> Result<(), Box<dyn Error>> {
+        let mut sources = BTreeMap::new();
+        sources.insert(
+            RepoRelativePath::new("src/lib.cpp")?,
+            Arc::<str>::from("void ns::free() {}\n"),
+        );
+        let (index, graph) = CppSyntaxIndex::from_sources(sources.clone())?;
+        let kind_of = |graph: &SymbolGraph| {
+            graph
+                .symbols()
+                .iter()
+                .find(|symbol| symbol.key.qualified_name == "ns::free")
+                .map(|symbol| symbol.key.kind)
+        };
+        // Without namespace evidence the conservative kind is kept.
+        assert_eq!(kind_of(&graph), Some(SymbolKind::Method));
+
+        // Introducing the namespace declaration in another file reclassifies
+        // the retained definition without reparsing it.
+        sources.insert(
+            RepoRelativePath::new("include/ns.h")?,
+            Arc::<str>::from("namespace ns { void free(); }\n"),
+        );
+        let report = index.reconcile_sources(sources)?;
+        let next = report.next_index.ok_or("reconcile must publish a graph")?;
+        assert_eq!(kind_of(next.graph()), Some(SymbolKind::Function));
+        assert_eq!(report.metrics.reparsed_files, 1);
         Ok(())
     }
 
