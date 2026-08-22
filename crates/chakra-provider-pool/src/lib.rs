@@ -302,13 +302,16 @@ impl PreciseProvider for PooledProvider {
     }
 
     fn metrics(&self) -> Option<ProviderMetrics> {
-        let mut metrics = lock(&self.slot().runtime)
+        let metrics = lock(&self.slot().runtime)
             .provider
             .as_ref()
             .and_then(|provider| provider.metrics())
             .unwrap_or_default();
-        metrics.orchestration = Some(self.inner.metrics());
         Some(metrics)
+    }
+
+    fn orchestration_metrics(&self) -> Option<ProviderOrchestrationMetrics> {
+        Some(self.inner.metrics())
     }
 
     fn query_wait_budget(&self) -> Option<Duration> {

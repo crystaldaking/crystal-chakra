@@ -60,6 +60,7 @@ impl QueryService for StubService {
                     call_sites_with_truncated_candidates: 0,
                 },
                 providers: vec![],
+                provider_pool: None,
                 query_execution: None,
                 source_metadata: SourceMetadataCoverage {
                     total_files: 1,

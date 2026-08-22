@@ -1426,7 +1426,6 @@ impl Worker {
             shared.metrics = ProviderMetrics {
                 cache: self.cache.metrics(),
                 document_sync: self.sync_metrics.clone(),
-                ..ProviderMetrics::default()
             };
         }
     }
@@ -1447,7 +1446,6 @@ impl Worker {
             shared.metrics = ProviderMetrics {
                 cache: self.cache.metrics(),
                 document_sync: self.sync_metrics.clone(),
-                ..ProviderMetrics::default()
             };
         }
     }

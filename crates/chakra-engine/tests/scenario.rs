@@ -51,6 +51,44 @@ struct RevisionAdvancingProvider {
 }
 
 #[derive(Debug)]
+struct PoolAwareProvider;
+
+impl PreciseProvider for PoolAwareProvider {
+    fn name(&self) -> &'static str {
+        "pool-aware-provider"
+    }
+
+    fn supports(&self, language: Language) -> bool {
+        language == Language::Rust
+    }
+
+    fn state_for(&self, _revision: Revision) -> ProviderState {
+        ProviderState::Ready
+    }
+
+    fn metrics(&self) -> Option<chakra_domain::query::ProviderMetrics> {
+        Some(chakra_domain::query::ProviderMetrics::default())
+    }
+
+    fn orchestration_metrics(&self) -> Option<chakra_domain::query::ProviderOrchestrationMetrics> {
+        Some(chakra_domain::query::ProviderOrchestrationMetrics {
+            configured_providers: 1,
+            active_providers: 1,
+            max_active_providers: 3,
+            ..Default::default()
+        })
+    }
+
+    fn enrich_with_context(
+        &self,
+        request: PreciseQueryRequest,
+        _operation: &OperationContext,
+    ) -> PreciseQueryResult {
+        PreciseQueryResult::unavailable(request.workspace.revision, ProviderState::Ready)
+    }
+}
+
+#[derive(Debug)]
 struct AdvanceAfterProviderBarrier {
     engine: Weak<WorkspaceEngine>,
     calls: AtomicUsize,
@@ -244,6 +282,33 @@ fn status_reports_an_installed_provider_with_its_name_and_languages() -> Result<
             .capabilities
             .contains(&chakra_domain::query::ProviderCapability::IncomingCalls)
     );
+    Ok(())
+}
+
+#[test]
+fn status_reports_pool_metrics_once_and_keeps_provider_metrics_local() -> Result<(), Box<dyn Error>>
+{
+    let (engine, _) = scenario_engine()?;
+    engine.install_precise_provider(Arc::new(PoolAwareProvider))?;
+    let envelope = engine.status(StatusRequest)?;
+    let pool = envelope
+        .data
+        .provider_pool
+        .as_ref()
+        .ok_or("workspace-global pool metrics must be reported once")?;
+    assert_eq!(pool.configured_providers, 1);
+    assert_eq!(pool.active_providers, 1);
+    assert_eq!(pool.max_active_providers, 3);
+    // Per-provider metrics stay provider-local: no orchestration section may
+    // leak into the serialized provider entry (issue #61).
+    let provider = &envelope.data.providers[0];
+    let serialized = serde_json::to_value(provider)?;
+    let metrics = serialized
+        .get("metrics")
+        .ok_or("provider-local metrics must be present")?;
+    assert!(metrics.get("orchestration").is_none());
+    assert!(metrics.get("cache").is_some());
+    assert!(metrics.get("document_sync").is_some());
     Ok(())
 }
 

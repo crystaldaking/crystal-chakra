@@ -2310,10 +2310,16 @@ impl QueryService for WorkspaceEngine {
             TruncationSection::StatusProviders,
         )?;
         truncation.extend(providers.truncation.iter().cloned());
+        // Pooled adapters share one workspace-global pool; report its
+        // lifecycle/admission counters once rather than per provider.
+        let provider_pool = precise_providers
+            .iter()
+            .find_map(|provider| provider.orchestration_metrics());
         let data = StatusData {
             workspace: snapshot.identity().clone(),
             counts,
             providers: providers.items,
+            provider_pool,
             query_execution: None,
             source_metadata: snapshot.graph().source_metadata_coverage(),
             syntax_diagnostics: SyntaxDiagnosticSummary {

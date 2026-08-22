@@ -5,6 +5,16 @@ version tags prefixed with `v`.
 
 ## [Unreleased]
 
+### Breaking
+
+- `status` now reports workspace-global provider-pool lifecycle/admission
+  counters once under `data.provider_pool` instead of repeating them inside
+  every `data.providers[].metrics.orchestration` entry (issue #61, policy
+  ADR-0043). Per-provider `metrics` keeps only provider-local `cache` and
+  `document_sync` sections. Query-local fallback metadata continues to explain
+  pool saturation or queue timeouts through the typed `fallback_cause`/
+  `fallback_reason` fields.
+
 ## [0.1.2] - 2026-08-21
 
 ### Added
