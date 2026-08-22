@@ -262,8 +262,6 @@ pub struct ProviderDocumentSyncMetrics {
 pub struct ProviderMetrics {
     pub cache: ProviderCacheMetrics,
     pub document_sync: ProviderDocumentSyncMetrics,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub orchestration: Option<ProviderOrchestrationMetrics>,
 }
 
 /// Provider-pool lifecycle and admission counters. Reservations are
@@ -356,6 +354,10 @@ pub struct StatusData {
     pub workspace: WorkspaceIdentity,
     pub counts: IndexCounts,
     pub providers: Vec<ProviderInfo>,
+    /// Workspace-global provider-pool lifecycle/admission counters, reported
+    /// once for the whole pool instead of repeated per provider (issue #61).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_pool: Option<ProviderOrchestrationMetrics>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub query_execution: Option<QueryExecutionMetrics>,
     pub source_metadata: SourceMetadataCoverage,

@@ -17,7 +17,9 @@ use std::os::unix::fs::MetadataExt;
 use chakra_domain::location::{RepoRelativePath, SourceRange};
 use chakra_domain::operation::{OperationAbort, OperationContext};
 use chakra_domain::provenance::Provenance;
-use chakra_domain::query::{ProviderFallbackCause, ProviderMetrics, ProviderProgress};
+use chakra_domain::query::{
+    ProviderFallbackCause, ProviderMetrics, ProviderOrchestrationMetrics, ProviderProgress,
+};
 use chakra_domain::revision::Revision;
 use chakra_domain::state::ProviderState;
 use chakra_domain::symbol::Language;
@@ -582,7 +584,16 @@ pub trait PreciseProvider: std::fmt::Debug + Send + Sync {
     }
 
     /// Bounded provider-owned cache and synchronization instrumentation.
+    /// These counters are strictly provider-local; workspace-global pool
+    /// lifecycle/admission counters are reported via `orchestration_metrics`.
     fn metrics(&self) -> Option<ProviderMetrics> {
+        None
+    }
+
+    /// Workspace-global provider-pool lifecycle and admission counters, when
+    /// this adapter belongs to a shared pool. Pooled adapters return the same
+    /// shared snapshot; the query layer reports it once (issue #61).
+    fn orchestration_metrics(&self) -> Option<ProviderOrchestrationMetrics> {
         None
     }
 
