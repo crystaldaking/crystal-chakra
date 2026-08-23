@@ -5,6 +5,22 @@ version tags prefixed with `v`.
 
 ## [Unreleased]
 
+### Changed
+
+- The eight `chakra-lsp`-based provider adapters (vtsls, pyright, clangd,
+  gopls, csharp-ls, jdtls, bash-language-server, terraform-ls) now share one
+  worker scaffolding crate, `chakra-provider-worker` (issue #94): the
+  owner-thread event loop, session lifecycle with bounded restart/backoff,
+  revision-scoped document synchronization, the post-synchronization request
+  barrier, observability, cancellation, shutdown, and LSP-to-domain
+  conversion. Language-specific seams are typed hooks (name/provenance,
+  language ids, capability gates, readiness budgets, cold-start semantics,
+  query strategies, mid-query document open) instead of ~1,000 copied lines
+  per provider. rust-analyzer keeps its own worker: its custom transport,
+  result cache, and `experimental/serverStatus` readiness are deliberately
+  provider-specific. Public adapter APIs and hermetic lifecycle contract
+  tests are unchanged.
+
 ### Added
 
 - `symbol_search` accepts `match_mode: "exact"` (issue #82): matching is

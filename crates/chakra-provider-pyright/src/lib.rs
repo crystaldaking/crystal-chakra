@@ -1,37 +1,38 @@
 //! Live, optional pyright adapter for Python precise enrichment (ADR-0032).
 //!
+//! The language-neutral worker mechanics (session lifecycle, revision-scoped
+//! document synchronization, the post-synchronization request barrier,
+//! observability, restart, and shutdown) live in `chakra-provider-worker`
+//! (issue #94); this crate keeps only pyright-specific seams: command
+//! discovery, defaults, the `python` language id, and the call-hierarchy
+//! capability gate.
+//!
 //! Only the v0.1 call-hierarchy operations cross this adapter internally.
 //! Public contracts are Chakra-native, so LSP URIs, UTF-16 positions, and
-//! protocol lifecycle details remain confined to this crate and chakra-lsp.
+//! protocol lifecycle details remain confined to the adapter crates and
+//! chakra-lsp.
 //!
 //! An absent or failing pyright never fails Chakra startup: the provider
 //! transitions to `Degraded` and queries keep their syntax results
 //! (ADR-0006/0013).
 
-mod convert;
-mod worker;
-
 use std::ffi::{OsStr, OsString};
-use std::fmt;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
-use std::thread::{self, JoinHandle};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use chakra_domain::location::RepoRelativePath;
 use chakra_domain::operation::{OperationAbort, OperationContext};
-use chakra_domain::query::{ProviderMetrics, ProviderProgress};
-use chakra_domain::revision::Revision;
-use chakra_domain::state::ProviderState;
+use chakra_domain::provenance::Provenance;
 use chakra_domain::symbol::Language;
-use chakra_engine::{
-    PreciseProvider, PreciseQueryRequest, PreciseQueryResult, ProviderShutdownError,
-    ProviderWorkspace,
+use chakra_engine::{PreciseQueryRequest, PreciseQueryResult};
+use chakra_provider_worker::{
+    CallHierarchyDriver, ProviderCommandSpec, ProviderHandle, ProviderHooks, QueryChannel,
+    QueryDeadlines, QueryOutcome, WorkerConfig, WorkerError,
 };
-use crossbeam_channel::{SendTimeoutError, Sender, bounded};
-use thiserror::Error;
+use lsp_types::InitializeResult;
 
-use crate::worker::Worker;
+pub use chakra_provider_worker::{StartError, WorkerShutdownError as ShutdownError};
 
 const DEFAULT_COMMAND_CAPACITY: usize = 8;
 const DEFAULT_MAX_MESSAGE_BYTES: usize = 32 * 1024 * 1024;
@@ -105,6 +106,15 @@ impl PyrightCommand {
             )));
         }
         Ok(None)
+    }
+}
+
+impl From<PyrightCommand> for ProviderCommandSpec {
+    fn from(command: PyrightCommand) -> Self {
+        Self {
+            program: command.program,
+            args: command.args,
+        }
     }
 }
 
@@ -217,72 +227,67 @@ impl Default for PyrightConfig {
     }
 }
 
-#[derive(Debug, Error)]
-pub enum StartError {
-    #[error("provider command capacity and message size bound must be non-zero")]
-    InvalidCapacity,
-    #[error("provider startup, request, and barrier timeouts must be non-zero")]
-    InvalidTimeout,
-    #[error("failed to spawn the pyright owner thread: {0}")]
-    ThreadSpawn(#[source] std::io::Error),
-}
-
-#[derive(Debug, Error)]
-pub enum ShutdownError {
-    #[error("pyright owner thread panicked")]
-    WorkerPanicked,
-    #[error("pyright owner lock is poisoned")]
-    LockPoisoned,
-}
-
-#[derive(Debug)]
-pub(crate) struct SharedState {
-    pub(crate) state: ProviderState,
-    pub(crate) synced_revision: Option<Revision>,
-    pub(crate) provider_epoch: u64,
-    pub(crate) last_error: Option<String>,
-    pub(crate) progress: Option<ProviderProgress>,
-    pub(crate) metrics: ProviderMetrics,
-}
-
-impl Default for SharedState {
-    fn default() -> Self {
+impl From<PyrightConfig> for WorkerConfig {
+    fn from(config: PyrightConfig) -> Self {
         Self {
-            state: ProviderState::Initializing,
-            synced_revision: None,
-            provider_epoch: 0,
-            last_error: None,
-            progress: None,
-            metrics: ProviderMetrics::default(),
+            command: config.command.into(),
+            startup_timeout: config.startup_timeout,
+            request_timeout: config.request_timeout,
+            barrier_timeout: config.barrier_timeout,
+            query_wait_timeout: config.query_wait_timeout,
+            restart_base_delay: config.restart_base_delay,
+            restart_max_delay: config.restart_max_delay,
+            command_capacity: config.command_capacity,
+            max_message_bytes: config.max_message_bytes,
         }
     }
 }
 
-pub(crate) enum Command {
-    Enrich {
-        request: Box<PreciseQueryRequest>,
-        operation: OperationContext,
-        response: Sender<PreciseQueryResult>,
-    },
+/// pyright language hooks: Python documents synchronize through the session
+/// and the precise surface is the LSP call-hierarchy trio verified at
+/// initialization.
+#[derive(Debug, Clone, Copy, Default)]
+struct PyrightHooks;
+
+impl ProviderHooks for PyrightHooks {
+    fn name(&self) -> &'static str {
+        "pyright"
+    }
+
+    fn provenance(&self) -> Provenance {
+        Provenance::Pyright
+    }
+
+    fn synchronizes(&self, language: Language) -> bool {
+        language == Language::Python
+    }
+
+    fn language_id(&self, _path: &RepoRelativePath) -> &'static str {
+        "python"
+    }
+
+    fn verify_capabilities(&self, result: &InitializeResult) -> Result<(), WorkerError> {
+        CallHierarchyDriver::verify_call_hierarchy(result)
+    }
+
+    fn query(
+        &self,
+        channel: &mut dyn QueryChannel,
+        request: &PreciseQueryRequest,
+        deadlines: QueryDeadlines,
+    ) -> Result<QueryOutcome, WorkerError> {
+        CallHierarchyDriver.query(channel, request, deadlines, Provenance::Pyright)
+    }
 }
 
 /// Owned pyright process and worker lifecycle.
 pub struct PyrightProvider {
-    commands: Sender<Command>,
-    shared: Arc<Mutex<SharedState>>,
-    worker: Mutex<Option<JoinHandle<()>>>,
-    stopped: AtomicBool,
-    force_stop: Arc<AtomicBool>,
-    config: PyrightConfig,
+    inner: Arc<ProviderHandle<PyrightHooks>>,
 }
 
-impl fmt::Debug for PyrightProvider {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("PyrightProvider")
-            .field("state", &self.state_snapshot())
-            .field("stopped", &self.stopped.load(Ordering::Acquire))
-            .finish_non_exhaustive()
+impl std::fmt::Debug for PyrightProvider {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Debug::fmt(&self.inner, formatter)
     }
 }
 
@@ -291,135 +296,62 @@ impl PyrightProvider {
     /// Chakra startup: the handle transitions to `Degraded` and later queries
     /// retain syntax results.
     pub fn start(
-        initial_workspace: ProviderWorkspace,
+        initial_workspace: chakra_engine::ProviderWorkspace,
         config: PyrightConfig,
     ) -> Result<Arc<Self>, StartError> {
-        if config.command_capacity == 0 || config.max_message_bytes == 0 {
-            return Err(StartError::InvalidCapacity);
-        }
-        if config.startup_timeout.is_zero()
-            || config.request_timeout.is_zero()
-            || config.barrier_timeout.is_zero()
-            || config.query_wait_timeout.is_zero()
-        {
-            return Err(StartError::InvalidTimeout);
-        }
-        let (commands, receiver) = bounded(config.command_capacity);
-        let shared = Arc::new(Mutex::new(SharedState::default()));
-        let force_stop = Arc::new(AtomicBool::new(false));
-        let worker_shared = shared.clone();
-        let worker_stop = force_stop.clone();
-        let worker_config = config.clone();
-        let worker = thread::Builder::new()
-            .name("chakra-pyright".to_owned())
-            .spawn(move || {
-                Worker::new(
-                    receiver,
-                    worker_shared,
-                    worker_stop,
-                    worker_config,
-                    initial_workspace,
-                )
-                .run();
-            })
-            .map_err(StartError::ThreadSpawn)?;
-        Ok(Arc::new(Self {
-            commands,
-            shared,
-            worker: Mutex::new(Some(worker)),
-            stopped: AtomicBool::new(false),
-            force_stop,
-            config,
-        }))
-    }
-
-    pub fn last_error(&self) -> Option<String> {
-        self.shared
-            .lock()
-            .ok()
-            .and_then(|state| state.last_error.clone())
-    }
-
-    pub fn progress(&self) -> Option<ProviderProgress> {
-        self.shared
-            .lock()
-            .ok()
-            .and_then(|state| state.progress.clone())
-    }
-
-    pub fn metrics(&self) -> Option<ProviderMetrics> {
-        self.shared.lock().ok().map(|state| state.metrics.clone())
+        let inner = ProviderHandle::start(initial_workspace, config.into(), PyrightHooks)?;
+        Ok(Arc::new(Self { inner }))
     }
 
     /// Idempotent cooperative shutdown followed by joining the owned worker.
     /// The owned process group is terminated, so no `node` child remains.
     pub fn shutdown(&self) -> Result<(), ShutdownError> {
-        self.stopped.store(true, Ordering::Release);
-        self.force_stop.store(true, Ordering::Release);
-        let worker = self
-            .worker
-            .lock()
-            .map_err(|_| ShutdownError::LockPoisoned)?
-            .take();
-        if let Some(worker) = worker {
-            worker.join().map_err(|_| ShutdownError::WorkerPanicked)?;
-        }
-        Ok(())
-    }
-
-    fn state_snapshot(&self) -> (ProviderState, Option<Revision>, u64) {
-        self.shared
-            .lock()
-            .map_or((ProviderState::Degraded, None, 0), |state| {
-                (state.state, state.synced_revision, state.provider_epoch)
-            })
+        self.inner.shutdown()
     }
 }
 
-impl PreciseProvider for PyrightProvider {
+impl chakra_engine::PreciseProvider for PyrightProvider {
     fn name(&self) -> &'static str {
-        "pyright"
+        self.inner.name()
     }
 
     fn supports(&self, language: Language) -> bool {
-        language == Language::Python
+        self.inner.supports(language)
     }
 
-    fn state_for(&self, revision: Revision) -> ProviderState {
-        if self.stopped.load(Ordering::Acquire) {
-            return ProviderState::Degraded;
-        }
-        let (state, synced_revision, _) = self.state_snapshot();
-        match state {
-            ProviderState::Ready if synced_revision == Some(revision) => ProviderState::Ready,
-            ProviderState::Ready | ProviderState::CatchingUp => ProviderState::CatchingUp,
-            other => other,
-        }
+    fn state_for(
+        &self,
+        revision: chakra_domain::revision::Revision,
+    ) -> chakra_domain::state::ProviderState {
+        self.inner.state_for(revision)
     }
 
     fn last_error(&self) -> Option<String> {
-        PyrightProvider::last_error(self)
+        self.inner.last_error()
     }
 
-    fn progress(&self) -> Option<ProviderProgress> {
-        PyrightProvider::progress(self)
+    fn progress(&self) -> Option<chakra_domain::query::ProviderProgress> {
+        self.inner.progress()
     }
 
-    fn metrics(&self) -> Option<ProviderMetrics> {
-        PyrightProvider::metrics(self)
+    fn metrics(&self) -> Option<chakra_domain::query::ProviderMetrics> {
+        self.inner.metrics()
+    }
+
+    fn orchestration_metrics(&self) -> Option<chakra_domain::query::ProviderOrchestrationMetrics> {
+        self.inner.orchestration_metrics()
     }
 
     fn query_wait_budget(&self) -> Option<Duration> {
-        Some(self.config.query_wait_timeout)
+        self.inner.query_wait_budget()
     }
 
-    fn shutdown(&self) -> Result<(), ProviderShutdownError> {
-        PyrightProvider::shutdown(self)
-            .map_err(|error| ProviderShutdownError::new(error.to_string()))
+    fn shutdown(&self) -> Result<(), chakra_engine::ProviderShutdownError> {
+        chakra_engine::PreciseProvider::shutdown(self.inner.as_ref())
     }
 
     fn enrich(&self, request: PreciseQueryRequest) -> PreciseQueryResult {
-        self.enrich_with_context(request, &OperationContext::unbounded())
+        self.inner.enrich(request)
     }
 
     fn enrich_with_context(
@@ -427,45 +359,7 @@ impl PreciseProvider for PyrightProvider {
         request: PreciseQueryRequest,
         operation: &OperationContext,
     ) -> PreciseQueryResult {
-        let revision = request.workspace.revision;
-        if self.stopped.load(Ordering::Acquire) {
-            return PreciseQueryResult::unavailable(revision, ProviderState::Degraded);
-        }
-        let provider_operation = operation.bounded_by(self.config.query_wait_timeout);
-        if provider_operation.check().is_err() {
-            return PreciseQueryResult::unavailable(revision, ProviderState::CatchingUp);
-        }
-        let (sender, receiver) = bounded(1);
-        let queue_operation = provider_operation.bounded_by(self.config.barrier_timeout);
-        let mut command = Command::Enrich {
-            request: Box::new(request),
-            operation: provider_operation.clone(),
-            response: sender,
-        };
-        loop {
-            let Ok(wait) = queue_operation.poll_timeout(Duration::from_millis(10)) else {
-                return PreciseQueryResult::unavailable(revision, ProviderState::CatchingUp);
-            };
-            match self.commands.send_timeout(command, wait) {
-                Ok(()) => break,
-                Err(SendTimeoutError::Timeout(returned)) => command = returned,
-                Err(SendTimeoutError::Disconnected(_)) => {
-                    return PreciseQueryResult::unavailable(revision, ProviderState::Degraded);
-                }
-            }
-        }
-        loop {
-            let Ok(poll) = provider_operation.poll_timeout(Duration::from_millis(10)) else {
-                return PreciseQueryResult::unavailable(revision, ProviderState::CatchingUp);
-            };
-            match receiver.recv_timeout(poll) {
-                Ok(result) => return result,
-                Err(crossbeam_channel::RecvTimeoutError::Timeout) => {}
-                Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
-                    return PreciseQueryResult::unavailable(revision, ProviderState::Degraded);
-                }
-            }
-        }
+        self.inner.enrich_with_context(request, operation)
     }
 }
 
@@ -499,7 +393,11 @@ pub fn resolve_command_with_context(
 mod tests {
     use super::*;
     use chakra_domain::location::{RepoRelativePath, SourceRange, TextPosition};
-    use chakra_engine::{CallHierarchyDirections, ProviderDocument};
+    use chakra_domain::revision::Revision;
+    use chakra_domain::state::ProviderState;
+    use chakra_engine::{
+        CallHierarchyDirections, PreciseProvider, ProviderDocument, ProviderSymbol,
+    };
 
     #[test]
     fn default_config_uses_a_side_effect_free_command_fallback() {
@@ -523,7 +421,7 @@ mod tests {
     fn missing_executable_degrades_without_failing_queries()
     -> Result<(), Box<dyn std::error::Error>> {
         let root = tempfile::tempdir()?;
-        let workspace = ProviderWorkspace::from_documents(
+        let workspace = chakra_engine::ProviderWorkspace::from_documents(
             root.path().to_path_buf(),
             Revision(1),
             vec![ProviderDocument {
@@ -543,12 +441,12 @@ mod tests {
         )?;
         let result = provider.enrich(PreciseQueryRequest {
             workspace,
-            symbol: chakra_engine::ProviderSymbol {
+            symbol: ProviderSymbol {
                 name: "target".to_owned(),
                 declaration: SourceRange::new(
                     RepoRelativePath::new("src/index.py")?,
                     TextPosition::new(1, 1)?,
-                    TextPosition::new(1, 14)?,
+                    TextPosition::new(1, 12)?,
                 )?,
                 language: Language::Python,
             },
