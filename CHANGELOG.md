@@ -20,6 +20,17 @@ version tags prefixed with `v`.
   result cache, and `experimental/serverStatus` readiness are deliberately
   provider-specific. Public adapter APIs and hermetic lifecycle contract
   tests are unchanged.
+- The eight syntax adapters with the common per-file fact shape (Go, Java,
+  HCL, TypeScript, JavaScript, Python, Shell, C++) now share one indexing
+  driver crate, `chakra-language-index` (issue #94): cold-build and
+  reconcile scheduling, bounded parser workers, metrics and limits,
+  relationship materialization, and graph publication. Language seams are
+  typed `LanguageHooks` (parser, Git-aware discovery, worker naming, optional
+  post-parse evidence pass — the C++ reclassification/promoted-call passes
+  from this release). Rust (impl-block drafts), PHP (receiver-aware call
+  resolution), and C# (extension-method delta machinery) keep their own
+  indexers because their index semantics are genuinely language-specific.
+  Public adapter APIs and adapter tests are unchanged.
 
 ### Added
 
