@@ -20,13 +20,25 @@ use chakra_domain::provenance::{Precision, Provenance};
 use chakra_domain::symbol::{
     CallForm, CallTargetKind, EdgeKind, Language, MAX_RECEIVER_HINT_CHARS, SymbolKey, SymbolKind,
 };
+pub(crate) use chakra_language_index::facts::{
+    CallDraft, NamedRelationDraft, ParsedFile, SymbolDraft,
+};
 use thiserror::Error;
+
+struct CallTarget<'tree> {
+    form: CallForm,
+    target_kind: CallTargetKind,
+    name: String,
+    qualifier: Option<String>,
+    receiver_hint: Option<String>,
+    location: Node<'tree>,
+}
 use tree_sitter::{Node, Parser, Point};
 
 const MAX_SIGNATURE_CHARS: usize = 512;
 
 #[derive(Debug, Error)]
-pub(crate) enum ParseError {
+pub enum ParseError {
     #[error("failed to load the Tree-sitter Java grammar: {0}")]
     Language(String),
     #[error("Tree-sitter returned no syntax tree for {0}")]
@@ -48,56 +60,6 @@ pub(crate) enum ParseError {
         path: RepoRelativePath,
         message: String,
     },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ParsedFile {
-    pub source: Arc<str>,
-    pub module_path: Vec<String>,
-    pub symbols: Vec<SymbolDraft>,
-    pub calls: Vec<CallDraft>,
-    pub named_relations: Vec<NamedRelationDraft>,
-    pub has_errors: bool,
-    pub diagnostics: Vec<SyntaxDiagnostic>,
-    pub diagnostic_count: u64,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct SymbolDraft {
-    pub key: SymbolKey,
-    pub location: SourceRange,
-    pub signature: Option<String>,
-    pub parent: Option<usize>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct CallDraft {
-    pub caller: usize,
-    pub form: CallForm,
-    pub target_kind: CallTargetKind,
-    pub name: String,
-    pub qualifier: Option<String>,
-    pub receiver_hint: Option<String>,
-    pub location: SourceRange,
-}
-
-struct CallTarget<'tree> {
-    form: CallForm,
-    target_kind: CallTargetKind,
-    name: String,
-    qualifier: Option<String>,
-    receiver_hint: Option<String>,
-    location: Node<'tree>,
-}
-
-/// An `extends`/`implements` relation with ordered syntactic resolution
-/// candidates (nested class, same package, then import targets).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct NamedRelationDraft {
-    pub from: usize,
-    pub candidates: Vec<String>,
-    pub target_kinds: Vec<SymbolKind>,
-    pub kind: EdgeKind,
 }
 
 /// Import bindings resolvable from the source text: `import a.b.C` binds the
@@ -721,6 +683,7 @@ impl Extraction<'_> {
             && let Some(target) = self.call_target(node, current_container)
         {
             self.calls.push(CallDraft {
+                promoted: false,
                 caller,
                 form: target.form,
                 target_kind: target.target_kind,
@@ -736,6 +699,7 @@ impl Extraction<'_> {
         {
             let qualifier = name.rsplit("::").next().map(str::to_owned);
             self.calls.push(CallDraft {
+                promoted: false,
                 caller,
                 form: CallForm::Scoped,
                 target_kind: CallTargetKind::Method,
@@ -895,12 +859,12 @@ pub(crate) fn module_path(path: &RepoRelativePath, package: Option<&str>) -> Vec
     module
 }
 
-pub(crate) struct JavaParser {
+pub struct JavaParser {
     parser: Parser,
 }
 
 impl JavaParser {
-    pub(crate) fn new() -> Result<Self, ParseError> {
+    pub fn new() -> Result<Self, ParseError> {
         let mut parser = Parser::new();
         parser
             .set_language(&tree_sitter_java::LANGUAGE.into())
@@ -908,7 +872,7 @@ impl JavaParser {
         Ok(Self { parser })
     }
 
-    pub(crate) fn parse(
+    pub fn parse(
         &mut self,
         path: RepoRelativePath,
         source: impl Into<Arc<str>>,

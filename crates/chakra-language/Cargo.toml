@@ -17,6 +17,7 @@ chakra-language-csharp = { path = "../chakra-language-csharp", version = "0.1.2"
 chakra-language-shell = { path = "../chakra-language-shell", version = "0.1.2" }
 chakra-language-cpp = { path = "../chakra-language-cpp", version = "0.1.2" }
 chakra-language-hcl = { path = "../chakra-language-hcl", version = "0.1.2" }
+chakra-language-index = { path = "../chakra-language-index", version = "0.1.2" }
 chakra-language-go = { path = "../chakra-language-go", version = "0.1.2" }
 chakra-language-javascript = { path = "../chakra-language-javascript", version = "0.1.2" }
 chakra-language-php = { path = "../chakra-language-php", version = "0.1.2" }
