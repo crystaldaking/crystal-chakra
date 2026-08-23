@@ -225,6 +225,7 @@ dependencies = [
  "chakra-language-csharp",
  "chakra-language-go",
  "chakra-language-hcl",
+ "chakra-language-index",
  "chakra-language-java",
  "chakra-language-javascript",
  "chakra-language-php",
@@ -246,6 +247,7 @@ dependencies = [
  "chakra-domain",
  "chakra-engine",
  "chakra-git",
+ "chakra-language-index",
  "nix",
  "tempfile",
  "thiserror",
@@ -276,6 +278,7 @@ dependencies = [
  "chakra-domain",
  "chakra-engine",
  "chakra-git",
+ "chakra-language-index",
  "nix",
  "tempfile",
  "thiserror",
@@ -291,6 +294,7 @@ dependencies = [
  "chakra-domain",
  "chakra-engine",
  "chakra-git",
+ "chakra-language-index",
  "nix",
  "tempfile",
  "thiserror",
@@ -300,12 +304,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "chakra-language-index"
+version = "0.1.2"
+dependencies = [
+ "chakra-domain",
+ "chakra-engine",
+ "chakra-git",
+ "nix",
+ "tempfile",
+ "thiserror",
+ "tracing",
+]
+
+[[package]]
 name = "chakra-language-java"
 version = "0.1.2"
 dependencies = [
  "chakra-domain",
  "chakra-engine",
  "chakra-git",
+ "chakra-language-index",
  "nix",
  "tempfile",
  "thiserror",
@@ -321,6 +339,7 @@ dependencies = [
  "chakra-domain",
  "chakra-engine",
  "chakra-git",
+ "chakra-language-index",
  "nix",
  "tempfile",
  "thiserror",
@@ -352,6 +371,7 @@ dependencies = [
  "chakra-domain",
  "chakra-engine",
  "chakra-git",
+ "chakra-language-index",
  "nix",
  "tempfile",
  "thiserror",
@@ -382,6 +402,7 @@ dependencies = [
  "chakra-domain",
  "chakra-engine",
  "chakra-git",
+ "chakra-language-index",
  "nix",
  "tempfile",
  "thiserror",
@@ -397,6 +418,7 @@ dependencies = [
  "chakra-domain",
  "chakra-engine",
  "chakra-git",
+ "chakra-language-index",
  "nix",
  "tempfile",
  "thiserror",

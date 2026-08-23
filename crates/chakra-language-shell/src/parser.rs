@@ -14,14 +14,15 @@ use chakra_domain::diagnostic::{
 };
 use chakra_domain::location::{RepoRelativePath, SourceRange, TextPosition};
 use chakra_domain::provenance::{Precision, Provenance};
-use chakra_domain::symbol::{CallForm, CallTargetKind, EdgeKind, Language, SymbolKey, SymbolKind};
+use chakra_domain::symbol::{CallForm, CallTargetKind, Language, SymbolKey, SymbolKind};
+pub(crate) use chakra_language_index::facts::{CallDraft, ParsedFile, SymbolDraft};
 use thiserror::Error;
 use tree_sitter::{Node, Parser, Point};
 
 const MAX_SIGNATURE_CHARS: usize = 512;
 
 #[derive(Debug, Error)]
-pub(crate) enum ParseError {
+pub enum ParseError {
     #[error("failed to load the Tree-sitter Bash grammar: {0}")]
     Language(String),
     #[error("Tree-sitter returned no syntax tree for {0}")]
@@ -43,48 +44,6 @@ pub(crate) enum ParseError {
         path: RepoRelativePath,
         message: String,
     },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ParsedFile {
-    pub source: Arc<str>,
-    pub module_path: Vec<String>,
-    pub symbols: Vec<SymbolDraft>,
-    pub calls: Vec<CallDraft>,
-    pub named_relations: Vec<NamedRelationDraft>,
-    pub has_errors: bool,
-    pub diagnostics: Vec<SyntaxDiagnostic>,
-    pub diagnostic_count: u64,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct SymbolDraft {
-    pub key: SymbolKey,
-    pub location: SourceRange,
-    pub signature: Option<String>,
-    pub parent: Option<usize>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct CallDraft {
-    pub caller: usize,
-    pub form: CallForm,
-    pub target_kind: CallTargetKind,
-    pub name: String,
-    pub qualifier: Option<String>,
-    pub receiver_hint: Option<String>,
-    pub location: SourceRange,
-}
-
-/// Shell currently has no syntax-only inheritance relation. Keeping the
-/// shared draft shape lets the generic incremental indexer remain identical
-/// to the other language adapters.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct NamedRelationDraft {
-    pub from: usize,
-    pub candidates: Vec<String>,
-    pub target_kinds: Vec<SymbolKind>,
-    pub kind: EdgeKind,
 }
 
 #[derive(Debug, Clone)]
@@ -366,6 +325,7 @@ impl Extraction<'_> {
             return Ok(());
         }
         self.calls.push(CallDraft {
+            promoted: false,
             caller,
             form: CallForm::Function,
             target_kind: CallTargetKind::Function,
@@ -531,12 +491,12 @@ fn module_path(path: &RepoRelativePath) -> Vec<String> {
 }
 
 /// Stateful parser; each bounded worker owns one instance.
-pub(crate) struct ShellParser {
+pub struct ShellParser {
     parser: Parser,
 }
 
 impl ShellParser {
-    pub(crate) fn new() -> Result<Self, ParseError> {
+    pub fn new() -> Result<Self, ParseError> {
         let mut parser = Parser::new();
         parser
             .set_language(&tree_sitter_bash::LANGUAGE.into())
@@ -544,7 +504,7 @@ impl ShellParser {
         Ok(Self { parser })
     }
 
-    pub(crate) fn parse(
+    pub fn parse(
         &mut self,
         path: RepoRelativePath,
         source: Arc<str>,

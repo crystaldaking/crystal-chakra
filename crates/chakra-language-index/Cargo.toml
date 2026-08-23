@@ -1,6 +1,6 @@
 [package]
-name = "chakra-language-cpp"
-description = "Git-aware Tree-sitter Cpp syntax index adapter for Chakra"
+name = "chakra-language-index"
+description = "Shared language-neutral syntax indexing scaffolding for Chakra language adapters"
 version = "0.1.2"
 edition.workspace = true
 rust-version.workspace = true
@@ -12,14 +12,11 @@ publish = false
 chakra-domain = { path = "../chakra-domain", version = "0.1.2" }
 chakra-engine = { path = "../chakra-engine", version = "0.1.2" }
 chakra-git = { path = "../chakra-git", version = "0.1.2" }
-chakra-language-index = { path = "../chakra-language-index", version = "0.1.2" }
 thiserror.workspace = true
 tracing.workspace = true
-tree-sitter.workspace = true
-tree-sitter-cpp.workspace = true
 
 [target.'cfg(unix)'.dependencies]
-nix = { workspace = true, features = ["resource"] }
+nix = { version = "0.31", default-features = false, features = ["resource"] }
 
 [dev-dependencies]
 tempfile.workspace = true

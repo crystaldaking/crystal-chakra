@@ -12,6 +12,7 @@ publish = false
 chakra-domain = { path = "../chakra-domain", version = "0.1.2" }
 chakra-engine = { path = "../chakra-engine", version = "0.1.2" }
 chakra-git = { path = "../chakra-git", version = "0.1.2" }
+chakra-language-index = { path = "../chakra-language-index", version = "0.1.2" }
 thiserror.workspace = true
 tracing.workspace = true
 tree-sitter.workspace = true
