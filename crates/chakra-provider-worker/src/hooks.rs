@@ -53,6 +53,15 @@ impl QueryOutcome {
     }
 }
 
+/// Per-query deadlines. `readiness` bounds the barrier-proving round-trips
+/// and equals `request` unless the hooks declare a separate readiness budget
+/// (jdtls cold project import, ADR-0036).
+#[derive(Debug, Clone, Copy)]
+pub struct QueryDeadlines {
+    pub request: Instant,
+    pub readiness: Instant,
+}
+
 /// Language-specific behavior of one worker-backed provider adapter.
 pub trait ProviderHooks: Send + Sync + 'static {
     /// Stable operator-facing provider name, e.g. `vtsls`.
@@ -67,6 +76,27 @@ pub trait ProviderHooks: Send + Sync + 'static {
     /// LSP language id for a synchronized document path.
     fn language_id(&self, path: &RepoRelativePath) -> &'static str;
 
+    /// Optional separate readiness budget for barrier-proving round-trips.
+    fn readiness_timeout(&self) -> Option<std::time::Duration> {
+        None
+    }
+
+    /// True when the owner may keep a cold import/readiness barrier running
+    /// after the caller's wait budget expires (jdtls, ADR-0036). The command
+    /// then carries the caller's original operation — preserving caller
+    /// cancellation and any outer deadline — instead of the caller-wait
+    /// bounded one.
+    fn cold_start_outlives_caller_wait(&self) -> bool {
+        false
+    }
+
+    /// Bounded pre-spawn validation (for example a prepared per-workspace
+    /// data directory), so a missing prerequisite never surfaces as an
+    /// opaque server failure.
+    fn before_session_start(&self) -> Result<(), WorkerError> {
+        Ok(())
+    }
+
     /// Verifies the initialized server actually serves this provider's
     /// precise operations.
     fn verify_capabilities(&self, result: &InitializeResult) -> Result<(), WorkerError>;
@@ -78,7 +108,7 @@ pub trait ProviderHooks: Send + Sync + 'static {
         &self,
         channel: &mut dyn QueryChannel,
         request: &PreciseQueryRequest,
-        deadline: Instant,
+        deadlines: QueryDeadlines,
     ) -> Result<QueryOutcome, WorkerError>;
 }
 
@@ -93,10 +123,10 @@ impl CallHierarchyDriver {
         &self,
         channel: &mut dyn QueryChannel,
         request: &PreciseQueryRequest,
-        deadline: Instant,
+        deadlines: QueryDeadlines,
         provenance: Provenance,
     ) -> Result<QueryOutcome, WorkerError> {
-        let items = prepare_call_hierarchy(channel, request, deadline)?;
+        let items = prepare_call_hierarchy(channel, request, deadlines.readiness)?;
         let Some(item) = select_hierarchy_item(items, request)? else {
             // No hierarchy item: the answer may improve while the provider is
             // still loading; after readiness it is an honest empty result.
@@ -124,7 +154,7 @@ impl CallHierarchyDriver {
             let value = channel.request(
                 "callHierarchy/incomingCalls",
                 &serde_json::to_value(params)?,
-                deadline,
+                deadlines.request,
             )?;
             last_incoming =
                 serde_json::from_value::<Option<Vec<CallHierarchyIncomingCall>>>(value)?
@@ -139,7 +169,7 @@ impl CallHierarchyDriver {
             let value = channel.request(
                 "callHierarchy/outgoingCalls",
                 &serde_json::to_value(params)?,
-                deadline,
+                deadlines.request,
             )?;
             last_outgoing =
                 serde_json::from_value::<Option<Vec<CallHierarchyOutgoingCall>>>(value)?

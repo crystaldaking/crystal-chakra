@@ -27,7 +27,8 @@ pub enum WorkerError {
 }
 
 impl WorkerError {
-    pub(crate) fn transport(provider: &str, error: impl std::fmt::Display) -> Self {
+    /// Transport failure with the provider name attached at the raise site.
+    pub fn transport(provider: &str, error: impl std::fmt::Display) -> Self {
         Self::Transport(format!("{provider} transport failed: {error}"))
     }
 

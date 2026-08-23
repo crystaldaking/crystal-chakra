@@ -24,7 +24,7 @@ mod state;
 mod worker;
 
 pub use error::WorkerError;
-pub use hooks::{CallHierarchyDriver, ProviderHooks, QueryChannel, QueryOutcome};
+pub use hooks::{CallHierarchyDriver, ProviderHooks, QueryChannel, QueryDeadlines, QueryOutcome};
 pub use provider::{
     ProviderCommandSpec, ProviderHandle, StartError, WorkerConfig, WorkerShutdownError,
 };

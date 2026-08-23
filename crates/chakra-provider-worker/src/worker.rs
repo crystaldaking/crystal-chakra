@@ -251,12 +251,21 @@ impl<H: ProviderHooks> WorkerCore<H> {
     ) -> Result<PreciseQueryResult, WorkerError> {
         self.check_operation()?;
         self.set_state(ProviderState::CatchingUp, None, None);
-        let deadline = self.operation_deadline(self.config.request_timeout);
+        let request_deadline = self.operation_deadline(self.config.request_timeout);
+        let readiness_deadline = self
+            .hooks
+            .readiness_timeout()
+            .map(|timeout| self.operation_deadline(timeout))
+            .unwrap_or(request_deadline);
+        let deadlines = crate::hooks::QueryDeadlines {
+            request: request_deadline,
+            readiness: readiness_deadline,
+        };
         self.synchronize_documents(
             session,
             &request.workspace,
             &request.symbol.declaration,
-            deadline,
+            request_deadline,
         )?;
 
         let mut last_result = None;
@@ -269,7 +278,7 @@ impl<H: ProviderHooks> WorkerCore<H> {
                     session: &mut *session,
                     roundtrip_completed: false,
                 };
-                let outcome = hooks.query(&mut channel, request, deadline)?;
+                let outcome = hooks.query(&mut channel, request, deadlines)?;
                 (outcome, channel.roundtrip_completed)
             };
             // The first completed round-trip after synchronization is the
@@ -561,6 +570,7 @@ impl<H: ProviderHooks> WorkerCore<H> {
     }
 
     fn start_session(&mut self) -> Result<(), WorkerError> {
+        self.hooks.before_session_start()?;
         self.set_progress(ProviderProgress {
             stage: ProviderProgressStage::ProcessStartup,
             source: ProviderProgressSource::Chakra,

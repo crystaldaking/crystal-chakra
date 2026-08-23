@@ -243,9 +243,14 @@ impl<H: ProviderHooks> PreciseProvider for ProviderHandle<H> {
         }
         let (sender, receiver) = bounded(1);
         let queue_operation = provider_operation.bounded_by(self.config.barrier_timeout);
+        let command_operation = if self.hooks.cold_start_outlives_caller_wait() {
+            operation.clone()
+        } else {
+            provider_operation.clone()
+        };
         let mut command = ProviderCommand::Enrich {
             request: Box::new(request),
-            operation: provider_operation.clone(),
+            operation: command_operation,
             response: sender,
         };
         loop {
