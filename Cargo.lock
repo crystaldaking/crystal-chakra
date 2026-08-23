@@ -592,6 +592,24 @@ dependencies = [
  "chakra-domain",
  "chakra-engine",
  "chakra-lsp",
+ "chakra-provider-worker",
+ "crossbeam-channel",
+ "lsp-types",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tracing",
+ "url",
+]
+
+[[package]]
+name = "chakra-provider-worker"
+version = "0.1.2"
+dependencies = [
+ "chakra-domain",
+ "chakra-engine",
+ "chakra-lsp",
  "crossbeam-channel",
  "lsp-types",
  "serde",

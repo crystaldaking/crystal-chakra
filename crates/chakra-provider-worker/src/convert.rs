@@ -1,6 +1,7 @@
-//! LSP-to-domain conversion. No LSP type leaves this crate (invariants 5, 6,
-//! 10); UTF-16 positions and file URIs are translated against the pinned
-//! syntax snapshot, and every converted fact carries `Provenance::Vtsls`.
+//! LSP-to-domain conversion shared by worker-backed providers. No LSP type
+//! leaves this crate (invariants 5, 6, 10); UTF-16 positions and file URIs
+//! are translated against the pinned syntax snapshot, and every converted
+//! fact carries the provenance supplied by the provider's hooks.
 
 use std::path::Path;
 use std::str::FromStr;
@@ -13,28 +14,27 @@ use lsp_types::{
 };
 use url::Url;
 
-use crate::worker::ProviderError;
+use crate::WorkerError;
 
 const MAX_REPRESENTATIVE_CALL_SITES: usize = 3;
 
-pub(crate) fn directory_uri(path: &Path) -> Result<Uri, ProviderError> {
+pub fn directory_uri(path: &Path) -> Result<Uri, WorkerError> {
     let url = Url::from_directory_path(path)
-        .map_err(|()| ProviderError::InvalidUri(path.display().to_string()))?;
-    Uri::from_str(url.as_str()).map_err(|_| ProviderError::InvalidUri(path.display().to_string()))
+        .map_err(|()| WorkerError::InvalidUri(path.display().to_string()))?;
+    Uri::from_str(url.as_str()).map_err(|_| WorkerError::InvalidUri(path.display().to_string()))
 }
 
-pub(crate) fn path_to_uri(root: &Path, path: &RepoRelativePath) -> Result<Uri, ProviderError> {
+pub fn path_to_uri(root: &Path, path: &RepoRelativePath) -> Result<Uri, WorkerError> {
     let absolute = path
         .as_str()
         .split('/')
         .fold(root.to_path_buf(), |base, component| base.join(component));
     let url = Url::from_file_path(&absolute)
-        .map_err(|()| ProviderError::InvalidUri(absolute.display().to_string()))?;
-    Uri::from_str(url.as_str())
-        .map_err(|_| ProviderError::InvalidUri(absolute.display().to_string()))
+        .map_err(|()| WorkerError::InvalidUri(absolute.display().to_string()))?;
+    Uri::from_str(url.as_str()).map_err(|_| WorkerError::InvalidUri(absolute.display().to_string()))
 }
 
-pub(crate) fn uri_to_path(root: &Path, uri: &Uri) -> Option<RepoRelativePath> {
+pub fn uri_to_path(root: &Path, uri: &Uri) -> Option<RepoRelativePath> {
     let absolute = Url::parse(uri.as_str()).ok()?.to_file_path().ok()?;
     let relative = absolute.strip_prefix(root).ok()?;
     let raw = relative
@@ -49,7 +49,7 @@ fn source_line(source: &str, zero_based_line: u32) -> Option<&str> {
     source.lines().nth(usize::try_from(zero_based_line).ok()?)
 }
 
-pub(crate) fn chakra_to_lsp_position(source: &str, position: TextPosition) -> Option<Position> {
+pub fn chakra_to_lsp_position(source: &str, position: TextPosition) -> Option<Position> {
     let line = position.line().checked_sub(1)?;
     let scalar_column = usize::try_from(position.column().checked_sub(1)?).ok()?;
     let text = source_line(source, line)?;
@@ -63,7 +63,7 @@ pub(crate) fn chakra_to_lsp_position(source: &str, position: TextPosition) -> Op
     ))
 }
 
-pub(crate) fn lsp_to_chakra_position(source: &str, position: Position) -> Option<TextPosition> {
+pub fn lsp_to_chakra_position(source: &str, position: Position) -> Option<TextPosition> {
     let text = source_line(source, position.line)?;
     let target = usize::try_from(position.character).ok()?;
     let mut utf16 = 0_usize;
@@ -98,17 +98,16 @@ fn convert_range(path: RepoRelativePath, source: &str, range: Range) -> Option<S
     .ok()
 }
 
-pub(crate) fn find_symbol_position(
+pub fn find_symbol_position(
     source: &str,
     name: &str,
     declaration: &SourceRange,
-) -> Result<Position, ProviderError> {
+) -> Result<Position, WorkerError> {
     let start_line = declaration.start().line();
     let end_line = declaration.end().line();
-    let start_index =
-        usize::try_from(start_line - 1).map_err(|_| ProviderError::InvalidPosition)?;
+    let start_index = usize::try_from(start_line - 1).map_err(|_| WorkerError::InvalidPosition)?;
     let line_count =
-        usize::try_from(end_line - start_line + 1).map_err(|_| ProviderError::InvalidPosition)?;
+        usize::try_from(end_line - start_line + 1).map_err(|_| WorkerError::InvalidPosition)?;
     for (offset, line) in source
         .lines()
         .skip(start_index)
@@ -116,11 +115,11 @@ pub(crate) fn find_symbol_position(
         .enumerate()
     {
         let line_number = start_line
-            .checked_add(u32::try_from(offset).map_err(|_| ProviderError::InvalidPosition)?)
-            .ok_or(ProviderError::InvalidPosition)?;
+            .checked_add(u32::try_from(offset).map_err(|_| WorkerError::InvalidPosition)?)
+            .ok_or(WorkerError::InvalidPosition)?;
         let minimum = if line_number == start_line {
             usize::try_from(declaration.start().column() - 1)
-                .map_err(|_| ProviderError::InvalidPosition)?
+                .map_err(|_| WorkerError::InvalidPosition)?
         } else {
             0
         };
@@ -131,13 +130,13 @@ pub(crate) fn find_symbol_position(
             }
             let chakra = TextPosition::new(
                 line_number,
-                u32::try_from(scalar + 1).map_err(|_| ProviderError::InvalidPosition)?,
+                u32::try_from(scalar + 1).map_err(|_| WorkerError::InvalidPosition)?,
             )
-            .map_err(|_| ProviderError::InvalidPosition)?;
-            return chakra_to_lsp_position(source, chakra).ok_or(ProviderError::InvalidPosition);
+            .map_err(|_| WorkerError::InvalidPosition)?;
+            return chakra_to_lsp_position(source, chakra).ok_or(WorkerError::InvalidPosition);
         }
     }
-    chakra_to_lsp_position(source, declaration.start()).ok_or(ProviderError::InvalidPosition)
+    chakra_to_lsp_position(source, declaration.start()).ok_or(WorkerError::InvalidPosition)
 }
 
 fn identifier_boundary(line: &str, byte: usize, length: usize) -> bool {
@@ -147,7 +146,7 @@ fn identifier_boundary(line: &str, byte: usize, length: usize) -> bool {
         && !after.is_some_and(|character| character == '_' || character.is_alphanumeric())
 }
 
-pub(crate) fn item_declaration(
+pub fn item_declaration(
     item: &CallHierarchyItem,
     workspace: &ProviderWorkspace,
 ) -> Option<(RepoRelativePath, SourceRange)> {
@@ -157,10 +156,11 @@ pub(crate) fn item_declaration(
     Some((path, range))
 }
 
-pub(crate) fn convert_incoming(
+pub fn convert_incoming(
     calls: Vec<CallHierarchyIncomingCall>,
     workspace: &ProviderWorkspace,
     limit: usize,
+    provenance: Provenance,
     truncated: &mut bool,
 ) -> Vec<PreciseRelation> {
     let mut result = Vec::new();
@@ -186,17 +186,18 @@ pub(crate) fn convert_incoming(
             declaration,
             occurrence_count,
             call_sites,
-            provenance: Provenance::Vtsls,
+            provenance,
         });
     }
     result
 }
 
-pub(crate) fn convert_outgoing(
+pub fn convert_outgoing(
     calls: Vec<CallHierarchyOutgoingCall>,
     workspace: &ProviderWorkspace,
     caller_path: &RepoRelativePath,
     limit: usize,
+    provenance: Provenance,
     truncated: &mut bool,
 ) -> Vec<PreciseRelation> {
     let caller_source = workspace.document(caller_path);
@@ -222,7 +223,7 @@ pub(crate) fn convert_outgoing(
             declaration,
             occurrence_count,
             call_sites,
-            provenance: Provenance::Vtsls,
+            provenance,
         });
     }
     result
@@ -240,7 +241,7 @@ mod tests {
 
     use super::*;
 
-    fn typescript_document(path: &RepoRelativePath, source: &str) -> ProviderDocument {
+    fn sample_document(path: &RepoRelativePath, source: &str) -> ProviderDocument {
         ProviderDocument {
             path: path.clone(),
             source: Arc::from(source),
@@ -263,14 +264,14 @@ mod tests {
     }
 
     #[test]
-    fn incoming_relations_carry_vtsls_provenance_and_bounded_call_sites()
+    fn incoming_relations_carry_the_hook_provenance_and_bounded_call_sites()
     -> Result<(), Box<dyn Error>> {
         let repository = TempDir::new()?;
         let path = RepoRelativePath::new("src/index.ts")?;
         let workspace = ProviderWorkspace::from_documents(
             repository.path().to_path_buf(),
             Revision(4),
-            vec![typescript_document(&path, "export function target() {}\n")],
+            vec![sample_document(&path, "export function target() {}\n")],
         );
         let inside = path_to_uri(repository.path(), &path)?;
         let range = Range::new(Position::new(0, 17), Position::new(0, 23));
@@ -280,7 +281,7 @@ mod tests {
         }];
         let mut truncated = false;
 
-        let converted = convert_incoming(calls, &workspace, 10, &mut truncated);
+        let converted = convert_incoming(calls, &workspace, 10, Provenance::Vtsls, &mut truncated);
         assert_eq!(converted.len(), 1);
         assert_eq!(converted[0].occurrence_count, 5);
         assert_eq!(converted[0].call_sites.len(), 3);
@@ -297,7 +298,7 @@ mod tests {
         let workspace = ProviderWorkspace::from_documents(
             repository.path().to_path_buf(),
             Revision(4),
-            vec![typescript_document(&path, "export function inside() {}\n")],
+            vec![sample_document(&path, "export function inside() {}\n")],
         );
         let outside_root = TempDir::new()?;
         let outside = path_to_uri(outside_root.path(), &path)?;
@@ -314,7 +315,7 @@ mod tests {
         ];
         let mut truncated = false;
 
-        let converted = convert_incoming(calls, &workspace, 1, &mut truncated);
+        let converted = convert_incoming(calls, &workspace, 1, Provenance::Vtsls, &mut truncated);
         assert_eq!(converted.len(), 1);
         assert_eq!(converted[0].name, "inside");
         assert!(!truncated);

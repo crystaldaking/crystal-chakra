@@ -1,18 +1,13 @@
-//! Owner-thread worker: session lifecycle, revision-scoped document
-//! synchronization, and bounded call-hierarchy queries on top of chakra-lsp.
-//!
-//! vtsls has no rust-analyzer-style `experimental/serverStatus` quiescence
-//! signal. Readiness is instead proven by a post-synchronization request
-//! barrier (ADR-0032): after the current document generation is sent, the
-//! first `textDocument/prepareCallHierarchy` round-trip confirms the server
-//! consumed it. An empty prepare after the barrier is a genuine "no item",
-//! not a reason to wait forever.
+//! Language-neutral owner-thread worker core: session lifecycle,
+//! revision-scoped document synchronization, the post-synchronization request
+//! barrier, bounded restart/backoff, observability, cancellation, and
+//! cooperative shutdown. Provider-specific behavior enters only through
+//! [`ProviderHooks`].
 
 use std::collections::HashMap;
-use std::path::Path;
-use std::sync::Arc;
-use std::sync::Mutex;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use chakra_domain::location::{RepoRelativePath, SourceRange};
@@ -23,89 +18,40 @@ use chakra_domain::query::{
 };
 use chakra_domain::revision::Revision;
 use chakra_domain::state::ProviderState;
-use chakra_domain::symbol::Language;
-use chakra_engine::{
-    PreciseQueryRequest, PreciseQueryResult, ProviderWorkspace, ProviderWorkspaceDelta,
-};
-use chakra_lsp::{Client, ClientConfig, ClientError, RestartBackoff, ServerEvent, TransportConfig};
+use chakra_engine::{PreciseQueryRequest, PreciseQueryResult, ProviderWorkspaceDelta};
+use chakra_lsp::{Client, ClientConfig, RestartBackoff, ServerEvent, TransportConfig};
 use crossbeam_channel::Receiver;
 use lsp_types::{
-    CallHierarchyIncomingCall, CallHierarchyIncomingCallsParams, CallHierarchyItem,
-    CallHierarchyOutgoingCall, CallHierarchyOutgoingCallsParams, CallHierarchyPrepareParams,
-    CallHierarchyServerCapability, ClientCapabilities, ClientInfo, DidChangeTextDocumentParams,
-    DidChangeWatchedFilesParams, DidCloseTextDocumentParams, DidOpenTextDocumentParams,
-    FileChangeType, FileEvent, InitializeParams, InitializeResult, PartialResultParams,
-    TextDocumentContentChangeEvent, TextDocumentIdentifier, TextDocumentItem,
-    TextDocumentPositionParams, VersionedTextDocumentIdentifier, WindowClientCapabilities,
+    ClientCapabilities, ClientInfo, DidChangeTextDocumentParams, DidChangeWatchedFilesParams,
+    DidCloseTextDocumentParams, DidOpenTextDocumentParams, FileChangeType, FileEvent,
+    InitializeParams, InitializeResult, TextDocumentContentChangeEvent, TextDocumentIdentifier,
+    TextDocumentItem, VersionedTextDocumentIdentifier, WindowClientCapabilities,
     WorkDoneProgressParams, WorkspaceFolder,
 };
 use serde::Serialize;
-use serde::de::DeserializeOwned;
 use serde_json::Value;
-use thiserror::Error;
 
-use crate::convert::{
-    convert_incoming, convert_outgoing, directory_uri, find_symbol_position, item_declaration,
-    path_to_uri,
-};
-use crate::{Command, SharedState, VtslsConfig};
+use crate::convert::{directory_uri, path_to_uri};
+use crate::hooks::QueryChannel;
+use crate::provider::WorkerConfig;
+use crate::state::{ProviderCommand, SharedState};
+use crate::{ProviderHooks, WorkerError};
 
-const MAX_PROVIDER_ERROR_CHARS: usize = 1_024;
+pub(crate) const MAX_PROVIDER_ERROR_CHARS: usize = 1_024;
 const MAX_PROVIDER_RESULTS: usize = 500;
 const EVENT_POLL: Duration = Duration::from_millis(25);
 
-#[derive(Debug, Error)]
-pub(crate) enum ProviderError {
-    #[error("vtsls transport failed: {0}")]
-    Transport(String),
-    #[error("timed out waiting for the vtsls response")]
-    Timeout,
-    #[error("the vtsls request was cancelled by its caller")]
-    Cancelled,
-    #[error("vtsls request failed ({code}): {message}")]
-    Server { code: i32, message: String },
-    #[error("invalid vtsls response: {0}")]
-    InvalidResponse(#[from] serde_json::Error),
-    #[error("vtsls does not advertise call hierarchy")]
-    Unsupported,
-    #[error("invalid file URI for {0}")]
-    InvalidUri(String),
-    #[error("provider position is outside captured source")]
-    InvalidPosition,
-}
-
-impl ProviderError {
-    fn from_client(error: ClientError) -> Self {
-        match error {
-            ClientError::Timeout { .. } => Self::Timeout,
-            ClientError::Cancelled { .. } => Self::Cancelled,
-            ClientError::Server { code, message, .. } => Self::Server { code, message },
-            other => Self::Transport(other.to_string()),
-        }
-    }
-
-    fn is_transport_failure(&self) -> bool {
-        matches!(self, Self::Transport(_))
-    }
-
-    fn fallback_state(&self) -> ProviderState {
-        match self {
-            Self::Timeout | Self::Cancelled => ProviderState::CatchingUp,
-            _ => ProviderState::Degraded,
-        }
-    }
-}
-
-pub(crate) struct Worker {
-    commands: Receiver<Command>,
+pub(crate) struct WorkerCore<H: ProviderHooks> {
+    commands: Receiver<ProviderCommand>,
     shared: Arc<Mutex<SharedState>>,
     force_stop: Arc<AtomicBool>,
-    config: VtslsConfig,
-    root: std::path::PathBuf,
+    config: WorkerConfig,
+    hooks: Arc<H>,
+    root: PathBuf,
     known_revision: Revision,
     session: Option<Client>,
     provider_epoch: u64,
-    known_workspace: ProviderWorkspace,
+    known_workspace: chakra_engine::ProviderWorkspace,
     opened_versions: HashMap<RepoRelativePath, i32>,
     sync_generation: u64,
     barrier_generation: Option<u64>,
@@ -115,17 +61,18 @@ pub(crate) struct Worker {
     backoff: RestartBackoff,
 }
 
-impl Worker {
+impl<H: ProviderHooks> WorkerCore<H> {
     pub(crate) fn new(
-        commands: Receiver<Command>,
+        commands: Receiver<ProviderCommand>,
         shared: Arc<Mutex<SharedState>>,
         force_stop: Arc<AtomicBool>,
-        config: VtslsConfig,
-        initial_workspace: ProviderWorkspace,
+        config: WorkerConfig,
+        hooks: Arc<H>,
+        initial_workspace: chakra_engine::ProviderWorkspace,
     ) -> Self {
         let known_revision = initial_workspace.revision;
         let (workspace_documents, workspace_source_bytes) =
-            initial_workspace.document_stats_matching(vtsls_language);
+            initial_workspace.document_stats_matching(|language| hooks.synchronizes(language));
         let root = initial_workspace.repository_root.clone();
         Self {
             commands,
@@ -133,6 +80,7 @@ impl Worker {
             force_stop,
             backoff: RestartBackoff::new(config.restart_base_delay, config.restart_max_delay),
             config,
+            hooks,
             root,
             known_revision,
             session: None,
@@ -158,7 +106,7 @@ impl Worker {
         }
         while !self.force_stop.load(Ordering::Acquire) {
             match self.commands.recv_timeout(Duration::from_millis(50)) {
-                Ok(Command::Enrich {
+                Ok(ProviderCommand::Enrich {
                     request,
                     operation,
                     response,
@@ -238,7 +186,7 @@ impl Worker {
         result
     }
 
-    fn fallback(&mut self, revision: Revision, error: ProviderError) -> PreciseQueryResult {
+    fn fallback(&mut self, revision: Revision, error: WorkerError) -> PreciseQueryResult {
         let state = error.fallback_state();
         if state == ProviderState::Degraded {
             self.set_progress(ProviderProgress {
@@ -252,15 +200,15 @@ impl Worker {
         PreciseQueryResult::unavailable(revision, state)
     }
 
-    fn check_operation(&self) -> Result<(), ProviderError> {
+    fn check_operation(&self) -> Result<(), WorkerError> {
         match self
             .active_operation
             .as_ref()
             .map_or(Ok(()), OperationContext::check)
         {
             Ok(()) => Ok(()),
-            Err(OperationAbort::Cancelled) => Err(ProviderError::Cancelled),
-            Err(OperationAbort::DeadlineExceeded) => Err(ProviderError::Timeout),
+            Err(OperationAbort::Cancelled) => Err(WorkerError::Cancelled),
+            Err(OperationAbort::DeadlineExceeded) => Err(WorkerError::Timeout),
         }
     }
 
@@ -286,11 +234,11 @@ impl Worker {
     fn query_with_owned_session(
         &mut self,
         request: &PreciseQueryRequest,
-    ) -> Result<PreciseQueryResult, ProviderError> {
+    ) -> Result<PreciseQueryResult, WorkerError> {
         let mut session = self
             .session
             .take()
-            .ok_or_else(|| ProviderError::Transport("no active vtsls process".to_owned()))?;
+            .ok_or_else(|| WorkerError::transport(self.hooks.name(), "no active process"))?;
         let result = self.query_session(&mut session, request);
         self.session = Some(session);
         result
@@ -300,7 +248,7 @@ impl Worker {
         &mut self,
         session: &mut Client,
         request: &PreciseQueryRequest,
-    ) -> Result<PreciseQueryResult, ProviderError> {
+    ) -> Result<PreciseQueryResult, WorkerError> {
         self.check_operation()?;
         self.set_state(ProviderState::CatchingUp, None, None);
         let deadline = self.operation_deadline(self.config.request_timeout);
@@ -310,163 +258,34 @@ impl Worker {
             &request.symbol.declaration,
             deadline,
         )?;
-        let mut last_incoming = Vec::new();
-        let mut last_outgoing = Vec::new();
 
+        let mut last_result = None;
         for attempt in 0..2 {
             self.check_operation()?;
-            let items = self.prepare_call_hierarchy(session, request, deadline)?;
-            // The prepare round-trip is the post-synchronization barrier: the
-            // server consumed the current document generation before answering.
-            self.confirm_sync_barrier();
-            let Some(item) = self.select_hierarchy_item(items, request)? else {
-                if self.provider_is_ready() {
-                    return Ok(PreciseQueryResult {
-                        revision: request.workspace.revision,
-                        state: ProviderState::Ready,
-                        fallback_cause: None,
-                        incoming: Vec::new(),
-                        outgoing: Vec::new(),
-                        incoming_truncated: false,
-                        outgoing_truncated: false,
-                    });
-                }
-                self.wait_for_events();
-                if attempt == 1 {
-                    // The barrier completed and the server still reports no
-                    // item: an honest empty precise result.
-                    return Ok(PreciseQueryResult {
-                        revision: request.workspace.revision,
-                        state: ProviderState::Ready,
-                        fallback_cause: None,
-                        incoming: Vec::new(),
-                        outgoing: Vec::new(),
-                        incoming_truncated: false,
-                        outgoing_truncated: false,
-                    });
-                }
-                continue;
+            let (outcome, roundtrip_completed) = {
+                let hooks = self.hooks.clone();
+                let mut channel = CoreChannel {
+                    core: &mut *self,
+                    session: &mut *session,
+                    roundtrip_completed: false,
+                };
+                let outcome = hooks.query(&mut channel, request, deadline)?;
+                (outcome, channel.roundtrip_completed)
             };
-            if request.directions.incoming {
-                let params = CallHierarchyIncomingCallsParams {
-                    item: item.clone(),
-                    work_done_progress_params: WorkDoneProgressParams::default(),
-                    partial_result_params: PartialResultParams::default(),
-                };
-                last_incoming = self
-                    .send_request::<_, Option<Vec<CallHierarchyIncomingCall>>>(
-                        session,
-                        "callHierarchy/incomingCalls",
-                        &params,
-                        deadline,
-                    )?
-                    .unwrap_or_default();
+            // The first completed round-trip after synchronization is the
+            // barrier: the server consumed the current document generation
+            // before answering.
+            if roundtrip_completed {
+                self.confirm_sync_barrier();
             }
-            if request.directions.outgoing {
-                let params = CallHierarchyOutgoingCallsParams {
-                    item,
-                    work_done_progress_params: WorkDoneProgressParams::default(),
-                    partial_result_params: PartialResultParams::default(),
-                };
-                last_outgoing = self
-                    .send_request::<_, Option<Vec<CallHierarchyOutgoingCall>>>(
-                        session,
-                        "callHierarchy/outgoingCalls",
-                        &params,
-                        deadline,
-                    )?
-                    .unwrap_or_default();
+            let may_improve = outcome.may_improve_when_ready && !self.provider_is_ready();
+            last_result = Some(outcome.result);
+            if !may_improve || attempt == 1 {
+                break;
             }
-            break;
+            self.wait_for_events();
         }
-
-        let mut incoming_truncated = false;
-        let incoming = convert_incoming(
-            last_incoming,
-            &request.workspace,
-            request.limit,
-            &mut incoming_truncated,
-        );
-        let mut outgoing_truncated = false;
-        let outgoing = convert_outgoing(
-            last_outgoing,
-            &request.workspace,
-            request.symbol.declaration.file(),
-            request.limit,
-            &mut outgoing_truncated,
-        );
-        Ok(PreciseQueryResult {
-            revision: request.workspace.revision,
-            state: ProviderState::Ready,
-            fallback_cause: None,
-            incoming,
-            outgoing,
-            incoming_truncated,
-            outgoing_truncated,
-        })
-    }
-
-    fn prepare_call_hierarchy(
-        &mut self,
-        session: &mut Client,
-        request: &PreciseQueryRequest,
-        deadline: Instant,
-    ) -> Result<Vec<CallHierarchyItem>, ProviderError> {
-        let document = request
-            .workspace
-            .document(request.symbol.declaration.file())
-            .ok_or(ProviderError::InvalidPosition)?;
-        let position = find_symbol_position(
-            &document.source,
-            &request.symbol.name,
-            &request.symbol.declaration,
-        )?;
-        let uri = path_to_uri(
-            &request.workspace.repository_root,
-            request.symbol.declaration.file(),
-        )?;
-        let params = CallHierarchyPrepareParams {
-            text_document_position_params: TextDocumentPositionParams {
-                text_document: TextDocumentIdentifier { uri },
-                position,
-            },
-            work_done_progress_params: WorkDoneProgressParams::default(),
-        };
-        Ok(self
-            .send_request::<_, Option<Vec<CallHierarchyItem>>>(
-                session,
-                "textDocument/prepareCallHierarchy",
-                &params,
-                deadline,
-            )?
-            .unwrap_or_default())
-    }
-
-    fn select_hierarchy_item(
-        &self,
-        items: Vec<CallHierarchyItem>,
-        request: &PreciseQueryRequest,
-    ) -> Result<Option<CallHierarchyItem>, ProviderError> {
-        if items.is_empty() {
-            return Ok(None);
-        }
-        let mut matching = items.into_iter().filter(|item| {
-            if item.name != request.symbol.name {
-                return false;
-            }
-            item_declaration(item, &request.workspace).is_some_and(|(path, selection)| {
-                path == *request.symbol.declaration.file()
-                    && selection.start() >= request.symbol.declaration.start()
-                    && selection.end() <= request.symbol.declaration.end()
-            })
-        });
-        let Some(item) = matching.next() else {
-            return Err(ProviderError::InvalidPosition);
-        };
-        if matching.next().is_some() {
-            return Err(ProviderError::InvalidPosition);
-        }
-        Ok(Some(item))
+        last_result.ok_or(WorkerError::Cancelled)
     }
 
     fn confirm_sync_barrier(&mut self) {
@@ -493,11 +312,12 @@ impl Worker {
     fn synchronize_documents(
         &mut self,
         session: &mut Client,
-        workspace: &ProviderWorkspace,
+        workspace: &chakra_engine::ProviderWorkspace,
         target: &SourceRange,
         deadline: Instant,
-    ) -> Result<(), ProviderError> {
+    ) -> Result<(), WorkerError> {
         self.check_operation()?;
+        let hooks = self.hooks.clone();
         let ProviderWorkspaceDelta {
             created,
             changed,
@@ -511,19 +331,19 @@ impl Worker {
         } = workspace
             .delta_since_matching(
                 &self.known_workspace,
-                vtsls_language,
+                |language| hooks.synchronizes(language),
                 self.active_operation
                     .as_ref()
-                    .ok_or(ProviderError::Cancelled)?,
+                    .ok_or(WorkerError::Cancelled)?,
             )
             .map_err(|abort| match abort {
-                OperationAbort::Cancelled => ProviderError::Cancelled,
-                OperationAbort::DeadlineExceeded => ProviderError::Timeout,
+                OperationAbort::Cancelled => WorkerError::Cancelled,
+                OperationAbort::DeadlineExceeded => WorkerError::Timeout,
             })?;
         let target_document = workspace
             .document(target.file())
-            .filter(|document| vtsls_language(document.language))
-            .ok_or(ProviderError::InvalidPosition)?;
+            .filter(|document| hooks.synchronizes(document.language))
+            .ok_or(WorkerError::InvalidPosition)?;
         let target_needs_open = !self.opened_versions.contains_key(target.file());
         if !deleted.is_empty()
             || !created.is_empty()
@@ -653,14 +473,14 @@ impl Worker {
         self.known_revision = workspace.revision;
         let (workspace_documents, workspace_source_bytes) = workspace
             .document_stats_with_context_matching(
-                vtsls_language,
+                |language| hooks.synchronizes(language),
                 self.active_operation
                     .as_ref()
-                    .ok_or(ProviderError::Cancelled)?,
+                    .ok_or(WorkerError::Cancelled)?,
             )
             .map_err(|abort| match abort {
-                OperationAbort::Cancelled => ProviderError::Cancelled,
-                OperationAbort::DeadlineExceeded => ProviderError::Timeout,
+                OperationAbort::Cancelled => WorkerError::Cancelled,
+                OperationAbort::DeadlineExceeded => WorkerError::Timeout,
             })?;
         self.sync_metrics = ProviderDocumentSyncMetrics {
             revision: Some(workspace.revision),
@@ -699,11 +519,11 @@ impl Worker {
     fn open_or_change(
         &mut self,
         session: &mut Client,
-        root: &Path,
+        root: &std::path::Path,
         path: &RepoRelativePath,
         source: &Arc<str>,
         deadline: Instant,
-    ) -> Result<usize, ProviderError> {
+    ) -> Result<usize, WorkerError> {
         let uri = path_to_uri(root, path)?;
         if let Some(version) = self.opened_versions.get_mut(path) {
             *version = version.saturating_add(1);
@@ -729,7 +549,7 @@ impl Worker {
                 &DidOpenTextDocumentParams {
                     text_document: TextDocumentItem {
                         uri,
-                        language_id: language_id(path).to_owned(),
+                        language_id: self.hooks.language_id(path).to_owned(),
                         version: 1,
                         text: source.to_string(),
                     },
@@ -740,11 +560,11 @@ impl Worker {
         Ok(source.len())
     }
 
-    fn start_session(&mut self) -> Result<(), ProviderError> {
+    fn start_session(&mut self) -> Result<(), WorkerError> {
         self.set_progress(ProviderProgress {
             stage: ProviderProgressStage::ProcessStartup,
             source: ProviderProgressSource::Chakra,
-            message: Some("starting the vtsls process".to_owned()),
+            message: Some(format!("starting the {} process", self.hooks.name())),
             percentage: None,
         });
         self.set_state(ProviderState::Initializing, None, None);
@@ -768,9 +588,9 @@ impl Worker {
             &args,
             &self.root,
             client_config,
-            "vtsls",
+            self.hooks.name(),
         )
-        .map_err(|error| ProviderError::Transport(error.to_string()))?;
+        .map_err(|error| WorkerError::transport(self.hooks.name(), error))?;
         self.set_progress(ProviderProgress {
             stage: ProviderProgressStage::Initialization,
             source: ProviderProgressSource::Chakra,
@@ -813,20 +633,12 @@ impl Worker {
         let mut pending = Vec::new();
         let result = session
             .initialize(&params, &mut |event| pending.push(event))
-            .map_err(ProviderError::from_client);
+            .map_err(|error| WorkerError::from_client(self.hooks.name(), error));
         for event in pending {
             self.handle_event(event);
         }
-        let result: InitializeResult =
-            serde_json::from_value(result?).map_err(ProviderError::InvalidResponse)?;
-        let supports_call_hierarchy = matches!(
-            result.capabilities.call_hierarchy_provider,
-            Some(CallHierarchyServerCapability::Simple(true))
-                | Some(CallHierarchyServerCapability::Options(_))
-        );
-        if !supports_call_hierarchy {
-            return Err(ProviderError::Unsupported);
-        }
+        let result: InitializeResult = serde_json::from_value(result?)?;
+        self.hooks.verify_capabilities(&result)?;
         self.provider_epoch = self.provider_epoch.saturating_add(1);
         self.opened_versions.clear();
         self.session = Some(session);
@@ -843,7 +655,10 @@ impl Worker {
         Ok(())
     }
 
-    fn restart_for(&mut self, workspace: &ProviderWorkspace) -> Result<(), ProviderError> {
+    fn restart_for(
+        &mut self,
+        workspace: &chakra_engine::ProviderWorkspace,
+    ) -> Result<(), WorkerError> {
         self.root = workspace.repository_root.clone();
         self.known_workspace = workspace.clone();
         self.known_revision = workspace.revision;
@@ -865,13 +680,13 @@ impl Worker {
         self.publish_observability();
     }
 
-    fn send_request<P: Serialize, R: DeserializeOwned>(
+    fn send_request_value(
         &mut self,
         session: &mut Client,
         method: &str,
-        params: &P,
+        params: &Value,
         deadline: Instant,
-    ) -> Result<R, ProviderError> {
+    ) -> Result<Value, WorkerError> {
         let operation = self.active_operation.clone();
         let force_stop = self.force_stop.clone();
         let cancel = move || {
@@ -887,8 +702,7 @@ impl Worker {
         for event in pending {
             self.handle_event(event);
         }
-        let value = result.map_err(ProviderError::from_client)?;
-        serde_json::from_value(value).map_err(ProviderError::InvalidResponse)
+        result.map_err(|error| WorkerError::from_client(self.hooks.name(), error))
     }
 
     fn send_notification<P: Serialize>(
@@ -897,10 +711,10 @@ impl Worker {
         method: &str,
         params: &P,
         deadline: Instant,
-    ) -> Result<(), ProviderError> {
+    ) -> Result<(), WorkerError> {
         session
             .notify(method, params, deadline)
-            .map_err(ProviderError::from_client)
+            .map_err(|error| WorkerError::from_client(self.hooks.name(), error))
     }
 
     /// Bounded event pump used while waiting for the server to catch up with
@@ -930,11 +744,8 @@ impl Worker {
         }
         if closed {
             session.shutdown();
-            self.set_state(
-                ProviderState::Degraded,
-                None,
-                Some("vtsls process closed its output".to_owned()),
-            );
+            let message = format!("{} process closed its output", self.hooks.name());
+            self.set_state(ProviderState::Degraded, None, Some(message));
         } else {
             self.session = Some(session);
         }
@@ -1011,55 +822,26 @@ impl Worker {
     }
 }
 
-/// Languages synchronized through the shared vtsls session: the underlying
-/// server handles TypeScript and JavaScript natively.
-fn vtsls_language(language: Language) -> bool {
-    matches!(language, Language::TypeScript | Language::JavaScript)
+/// Query channel handed to hook query drivers: routes requests through the
+/// worker-owned session, draining pending server events and tracking
+/// round-trip completion for the synchronization barrier.
+struct CoreChannel<'a, H: ProviderHooks> {
+    core: &'a mut WorkerCore<H>,
+    session: &'a mut Client,
+    roundtrip_completed: bool,
 }
 
-fn language_id(path: &RepoRelativePath) -> &'static str {
-    match path.as_str().rsplit('.').next() {
-        Some("tsx") => "typescriptreact",
-        Some("jsx") => "javascriptreact",
-        Some("js" | "mjs" | "cjs") => "javascript",
-        _ => "typescript",
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn language_ids_follow_the_file_extension() -> Result<(), Box<dyn std::error::Error>> {
-        assert_eq!(
-            language_id(&RepoRelativePath::new("src/a.ts")?),
-            "typescript"
-        );
-        assert_eq!(
-            language_id(&RepoRelativePath::new("src/a.tsx")?),
-            "typescriptreact"
-        );
-        assert_eq!(
-            language_id(&RepoRelativePath::new("src/a.mts")?),
-            "typescript"
-        );
-        assert_eq!(
-            language_id(&RepoRelativePath::new("src/a.js")?),
-            "javascript"
-        );
-        assert_eq!(
-            language_id(&RepoRelativePath::new("src/a.jsx")?),
-            "javascriptreact"
-        );
-        assert_eq!(
-            language_id(&RepoRelativePath::new("src/a.mjs")?),
-            "javascript"
-        );
-        assert_eq!(
-            language_id(&RepoRelativePath::new("src/a.cjs")?),
-            "javascript"
-        );
-        Ok(())
+impl<H: ProviderHooks> QueryChannel for CoreChannel<'_, H> {
+    fn request(
+        &mut self,
+        method: &str,
+        params: &Value,
+        deadline: Instant,
+    ) -> Result<Value, WorkerError> {
+        let value = self
+            .core
+            .send_request_value(self.session, method, params, deadline)?;
+        self.roundtrip_completed = true;
+        Ok(value)
     }
 }
