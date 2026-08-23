@@ -74,6 +74,11 @@ pub(crate) struct CallDraft {
     pub name: String,
     pub qualifier: Option<String>,
     pub receiver_hint: Option<String>,
+    /// The parser promoted this function-form call to the method tier only
+    /// because its caller looked like a method (issue #83). The indexer
+    /// re-evaluates promoted calls against workspace symbol evidence; the
+    /// flag makes that pass reversible across reconciles.
+    pub promoted: bool,
     pub location: SourceRange,
 }
 
@@ -603,6 +608,7 @@ impl Extraction<'_> {
         if target.name.trim().is_empty() {
             return Ok(());
         }
+        let mut promoted = false;
         if target.form == CallForm::Function
             && target.target_kind == CallTargetKind::Function
             && self
@@ -611,6 +617,7 @@ impl Extraction<'_> {
                 .is_some_and(|symbol| symbol.key.kind == SymbolKind::Method)
         {
             target.target_kind = CallTargetKind::Method;
+            promoted = true;
         }
         self.calls.push(CallDraft {
             caller,
@@ -619,6 +626,7 @@ impl Extraction<'_> {
             name: target.name,
             qualifier: target.qualifier,
             receiver_hint: target.receiver_hint,
+            promoted,
             location: self.range(target.location)?,
         });
         Ok(())

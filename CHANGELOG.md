@@ -20,6 +20,12 @@ version tags prefixed with `v`.
   definitions are reclassified against workspace type/namespace evidence
   during graph build and reconcile, an unproven qualifier keeps the
   conservative parse-time kind, and no file is reparsed for the pass.
+- Unqualified calls inside C++ methods no longer commit to the member
+  interpretation too early (issue #83): with workspace evidence a call
+  resolves to a unique free function, reports honest ambiguity when several
+  free functions match, stays a member call when only a same-type member
+  exists, and becomes unresolved member-form evidence on a genuine
+  member/free collision. clangd remains the precise path.
 
 ### Breaking
 
