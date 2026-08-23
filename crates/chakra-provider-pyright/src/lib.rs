@@ -28,7 +28,7 @@ use chakra_domain::symbol::Language;
 use chakra_engine::{PreciseQueryRequest, PreciseQueryResult};
 use chakra_provider_worker::{
     CallHierarchyDriver, ProviderCommandSpec, ProviderHandle, ProviderHooks, QueryChannel,
-    QueryOutcome, WorkerConfig, WorkerError,
+    QueryDeadlines, QueryOutcome, WorkerConfig, WorkerError,
 };
 use lsp_types::InitializeResult;
 
@@ -274,9 +274,9 @@ impl ProviderHooks for PyrightHooks {
         &self,
         channel: &mut dyn QueryChannel,
         request: &PreciseQueryRequest,
-        deadline: Instant,
+        deadlines: QueryDeadlines,
     ) -> Result<QueryOutcome, WorkerError> {
-        CallHierarchyDriver.query(channel, request, deadline, Provenance::Pyright)
+        CallHierarchyDriver.query(channel, request, deadlines, Provenance::Pyright)
     }
 }
 
