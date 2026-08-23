@@ -15,7 +15,9 @@ use chakra_domain::indexing::{
 use chakra_domain::location::{RepoRelativePath, SourceRange};
 use chakra_domain::provenance::{Precision, Provenance};
 use chakra_domain::source::SourceMetadata;
-use chakra_domain::symbol::{CallResolution, Edge, EdgeKind, Language, SymbolKind};
+use chakra_domain::symbol::{
+    CallForm, CallResolution, CallTargetKind, Edge, EdgeKind, Language, SymbolKind,
+};
 use chakra_engine::{
     BoundedGraphBuilder, CallSiteInput, ConsistencyError, GraphBuildLimits, GraphBuildReport,
     GraphError, SymbolGraph,
@@ -369,6 +371,7 @@ impl CppSyntaxIndex {
         check_cancelled(cancellation)?;
         let mut files = files;
         reclassify_qualified_callables(&mut files);
+        resolve_unqualified_method_calls(&mut files);
         let catalog_started = PhaseTimer::start();
         let catalog = SymbolCatalog::new(&files);
         let catalog_phase = measured_phase(
@@ -565,11 +568,12 @@ impl CppSyntaxIndex {
         let parse_elapsed = parse_started.elapsed();
         check_cancelled(cancellation)?;
         reclassify_qualified_callables(&mut next_files);
+        resolve_unqualified_method_calls(&mut next_files);
 
         let mut stable_symbol_paths = BTreeSet::new();
         let mut unchanged_fact_paths = BTreeSet::new();
         let mut changed_dependencies = HashSet::new();
-        let mut changed_callables = HashSet::new();
+        let mut changed_callable_names = HashSet::new();
         for path in &changed_paths {
             match (self.files.get(path), next_files.get(path)) {
                 (Some(previous), Some(next)) if symbol_keys_equal(previous, next) => {
@@ -581,11 +585,11 @@ impl CppSyntaxIndex {
                 (previous, next) => {
                     if let Some(previous) = previous {
                         changed_dependencies.extend(exported_dependencies(previous));
-                        changed_callables.extend(exported_callables(previous));
+                        changed_callable_names.extend(exported_callable_names(previous));
                     }
                     if let Some(next) = next {
                         changed_dependencies.extend(exported_dependencies(next));
-                        changed_callables.extend(exported_callables(next));
+                        changed_callable_names.extend(exported_callable_names(next));
                     }
                 }
             }
@@ -610,14 +614,17 @@ impl CppSyntaxIndex {
             .difference(&unchanged_fact_paths)
             .cloned()
             .collect();
+        // Match by simple name, not by (kind, name): workspace evidence can
+        // change a call's stored domain (issues #83, #84) without any edit to
+        // the file that contains the call, and the next drafts — not the
+        // previously stored ones — decide which call sites are rebuilt.
         affected_call_owners.extend(
-            self.files
+            next_files
                 .iter()
                 .filter(|(_, file)| {
-                    file.calls.iter().any(|call| {
-                        changed_callables
-                            .contains(&callable_dependency(call.target_kind, &call.name))
-                    })
+                    file.calls
+                        .iter()
+                        .any(|call| changed_callable_names.contains(&call.name))
                 })
                 .map(|(path, _)| path.clone()),
         );
@@ -1609,6 +1616,87 @@ fn owner_is_namespace_only(
     namespaces.contains(owner) && !types.contains(owner)
 }
 
+/// Resolves unqualified function-form calls that the parser promoted to the
+/// method tier because their caller looked like a method (issue #83). A bare
+/// `helper()` inside a C++ method can denote an implicit member, a namespace
+/// function found by ordinary lookup, or an ADL candidate; Tree-sitter cannot
+/// tell them apart. With workspace symbol evidence the index now:
+///
+/// - keeps the call at the method tier when a same-type member exists and no
+///   free function collides;
+/// - retargets it to the function domain when no same-type member exists but
+///   a free function does — a unique free function then resolves, and several
+///   report ambiguity through the usual lazy candidate contract;
+/// - converts a genuine member/free collision to unresolved member-form
+///   evidence instead of silently committing to the member (clangd remains
+///   the precise path);
+/// - returns calls inside callables reclassified as free functions (issue
+///   #84) to the function domain.
+///
+/// The pass runs over retained in-memory drafts; no file is reparsed and no
+/// domain/MCP contract changes.
+fn resolve_unqualified_method_calls(files: &mut BTreeMap<RepoRelativePath, Arc<ParsedFile>>) {
+    let mut methods: HashSet<String> = HashSet::new();
+    let mut free_functions: HashMap<String, usize> = HashMap::new();
+    for file in files.values() {
+        for symbol in &file.symbols {
+            match symbol.key.kind {
+                SymbolKind::Method => {
+                    methods.insert(symbol.key.qualified_name.clone());
+                }
+                SymbolKind::Function => {
+                    *free_functions
+                        .entry(symbol_name(symbol).to_owned())
+                        .or_default() += 1;
+                }
+                _ => {}
+            }
+        }
+    }
+    for file in files.values_mut() {
+        let adjustable = file.calls.iter().any(|call| call.promoted);
+        if !adjustable {
+            continue;
+        }
+        let file = Arc::make_mut(file);
+        let symbols = &file.symbols;
+        let calls = &mut file.calls;
+        for call in calls.iter_mut() {
+            if !call.promoted {
+                continue;
+            }
+            // Restore the parser's original function form so the pass is a
+            // pure, reversible function of the current workspace evidence.
+            call.form = CallForm::Function;
+            call.target_kind = CallTargetKind::Method;
+            let Some(caller) = symbols.get(call.caller) else {
+                continue;
+            };
+            if caller.key.kind != SymbolKind::Method {
+                // The caller was reclassified as a namespace-qualified free
+                // function after parsing; its calls were never member calls.
+                call.target_kind = CallTargetKind::Function;
+                continue;
+            }
+            let member_exists = caller
+                .key
+                .qualified_name
+                .rsplit_once("::")
+                .is_some_and(|(owner, _)| methods.contains(&format!("{owner}::{}", call.name)));
+            let free_candidates = free_functions.get(call.name.as_str()).copied().unwrap_or(0);
+            match (member_exists, free_candidates) {
+                (true, 0) | (false, 0) => {}
+                (false, _) => call.target_kind = CallTargetKind::Function,
+                // Member and free-function candidates both survive: the
+                // syntax tier must not commit to either. Member form without
+                // a qualifier is unresolved by construction, so the call
+                // remains visible as bounded syntax evidence.
+                (true, _) => call.form = CallForm::Member,
+            }
+        }
+    }
+}
+
 fn syntax_facts_equal(left: &ParsedFile, right: &ParsedFile) -> bool {
     left.module_path == right.module_path
         && left.symbols == right.symbols
@@ -1617,13 +1705,11 @@ fn syntax_facts_equal(left: &ParsedFile, right: &ParsedFile) -> bool {
         && left.has_errors == right.has_errors
 }
 
-fn exported_callables(file: &ParsedFile) -> HashSet<(u8, String)> {
+fn exported_callable_names(file: &ParsedFile) -> HashSet<String> {
     file.symbols
         .iter()
-        .filter_map(|symbol| {
-            callable_target_kind(symbol.key.kind)
-                .map(|kind| callable_dependency(kind, symbol_name(symbol)))
-        })
+        .filter(|symbol| callable_target_kind(symbol.key.kind).is_some())
+        .map(|symbol| symbol_name(symbol).to_owned())
         .collect()
 }
 
@@ -1635,17 +1721,6 @@ fn callable_target_kind(kind: SymbolKind) -> Option<chakra_domain::symbol::CallT
         SymbolKind::Test => Some(CallTargetKind::Test),
         _ => None,
     }
-}
-
-fn callable_dependency(kind: chakra_domain::symbol::CallTargetKind, name: &str) -> (u8, String) {
-    use chakra_domain::symbol::CallTargetKind;
-    let kind = match kind {
-        CallTargetKind::Function => 0,
-        CallTargetKind::Method => 1,
-        CallTargetKind::Test => 2,
-        CallTargetKind::Configuration => 3,
-    };
-    (kind, name.to_owned())
 }
 
 fn entity_for_address(
@@ -2018,6 +2093,192 @@ mod tests {
         let next = report.next_index.ok_or("reconcile must publish a graph")?;
         assert_eq!(kind_of(next.graph()), Some(SymbolKind::Function));
         assert_eq!(report.metrics.reparsed_files, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn unqualified_calls_from_methods_keep_honest_candidates() -> Result<(), Box<dyn Error>> {
+        let mut sources = BTreeMap::new();
+        sources.insert(
+            RepoRelativePath::new("include/api.h")?,
+            Arc::<str>::from(
+                "namespace ns {\n\
+                 struct Type { void member_only(); void colliding(); void helper(); };\n\
+                 }\n\
+                 void unique_free();\n\
+                 void shared_name();\n\
+                 namespace other { void shared_name(); }\n\
+                 void colliding();\n",
+            ),
+        );
+        sources.insert(
+            RepoRelativePath::new("src/impl.cpp")?,
+            Arc::<str>::from(
+                "void ns::Type::member_only() { unique_free(); }\n\
+                 void ns::Type::colliding() { colliding(); }\n\
+                 void ns::Type::helper() { shared_name(); }\n",
+            ),
+        );
+        let (_, graph) = CppSyntaxIndex::from_sources(sources)?;
+        graph.validate_consistency()?;
+
+        fn single_call(
+            graph: &SymbolGraph,
+            caller_name: &str,
+            path: &str,
+        ) -> Result<chakra_domain::symbol::CallSite, Box<dyn Error>> {
+            let caller = graph
+                .symbols()
+                .iter()
+                .find(|symbol| {
+                    symbol.key.qualified_name == caller_name && symbol.key.path.as_str() == path
+                })
+                .ok_or_else(|| format!("missing caller {caller_name}"))?;
+            let calls: Vec<_> = graph.call_sites_from(caller.id).collect();
+            if calls.len() != 1 {
+                return Err(format!("{caller_name} must own exactly one call").into());
+            }
+            Ok(calls[0].clone())
+        }
+
+        // Unique free function, no same-type member: resolves (issue #83).
+        let resolved = single_call(&graph, "ns::Type::member_only", "src/impl.cpp")?;
+        assert_eq!(resolved.target_kind, CallTargetKind::Function);
+        let CallResolution::Resolved { target } = resolved.resolution else {
+            return Err(format!(
+                "unique free-function call must resolve, got {:?}",
+                resolved.resolution
+            )
+            .into());
+        };
+        let target = graph.symbol(target).ok_or("resolved target missing")?;
+        assert_eq!(target.key.qualified_name, "unique_free");
+        assert_eq!(target.key.kind, SymbolKind::Function);
+
+        // Member/free collision: neither side may win silently.
+        let colliding = single_call(&graph, "ns::Type::colliding", "src/impl.cpp")?;
+        assert_eq!(colliding.resolution, CallResolution::Unresolved);
+        assert_eq!(colliding.name, "colliding");
+        assert_eq!(colliding.provenance, Provenance::TreeSitter);
+        assert_eq!(colliding.precision, Precision::Syntax);
+
+        // Two free functions, no member: honest ambiguity with both
+        // candidates enumerable.
+        let ambiguous = single_call(&graph, "ns::Type::helper", "src/impl.cpp")?;
+        assert_eq!(ambiguous.target_kind, CallTargetKind::Function);
+        assert_eq!(
+            ambiguous.resolution,
+            CallResolution::Ambiguous { candidates: 2 }
+        );
+        let (candidates, truncated) = graph.call_candidates(&ambiguous, 8);
+        assert!(!truncated);
+        let mut names: Vec<_> = candidates
+            .iter()
+            .map(|symbol| symbol.key.qualified_name.as_str())
+            .collect();
+        names.sort_unstable();
+        assert_eq!(names, ["other::shared_name", "shared_name"]);
+        Ok(())
+    }
+
+    #[test]
+    fn member_only_unqualified_calls_keep_member_resolution() -> Result<(), Box<dyn Error>> {
+        let mut sources = BTreeMap::new();
+        sources.insert(
+            RepoRelativePath::new("src/lib.cpp")?,
+            Arc::<str>::from(
+                "namespace ns {\n\
+                 struct Type {\n\
+                 void run() { helper(); }\n\
+                 void helper() {}\n\
+                 };\n\
+                 }\n",
+            ),
+        );
+        let (_, graph) = CppSyntaxIndex::from_sources(sources)?;
+        let caller = graph
+            .symbols()
+            .iter()
+            .find(|symbol| symbol.key.qualified_name == "ns::Type::run")
+            .ok_or("missing ns::Type::run")?;
+        let calls: Vec<_> = graph.call_sites_from(caller.id).collect();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].target_kind, CallTargetKind::Method);
+        let CallResolution::Resolved { target } = calls[0].resolution else {
+            return Err(format!(
+                "member-only call must resolve, got {:?}",
+                calls[0].resolution
+            )
+            .into());
+        };
+        assert_eq!(
+            graph
+                .symbol(target)
+                .ok_or("resolved target missing")?
+                .key
+                .qualified_name,
+            "ns::Type::helper"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn reconcile_reevaluates_promoted_calls_when_callable_evidence_changes()
+    -> Result<(), Box<dyn Error>> {
+        let mut sources = BTreeMap::new();
+        sources.insert(
+            RepoRelativePath::new("src/lib.cpp")?,
+            Arc::<str>::from(
+                "namespace ns {\n\
+                 struct Type {\n\
+                 void run() { helper(); }\n\
+                 void helper() {}\n\
+                 };\n\
+                 }\n",
+            ),
+        );
+        let (index, graph) = CppSyntaxIndex::from_sources(sources.clone())?;
+        let resolution_of = |graph: &SymbolGraph| -> Result<CallResolution, Box<dyn Error>> {
+            let caller = graph
+                .symbols()
+                .iter()
+                .find(|symbol| symbol.key.qualified_name == "ns::Type::run")
+                .map(|symbol| symbol.id)
+                .ok_or("caller missing")?;
+            let calls: Vec<_> = graph.call_sites_from(caller).collect();
+            if calls.len() != 1 {
+                return Err("caller must own exactly one call".into());
+            }
+            Ok(calls[0].resolution.clone())
+        };
+        assert!(matches!(
+            resolution_of(&graph)?,
+            CallResolution::Resolved { .. }
+        ));
+
+        // A new colliding free function in another file must flip the call to
+        // unresolved without reparsing the call's own file.
+        sources.insert(
+            RepoRelativePath::new("src/free.cpp")?,
+            Arc::<str>::from("void helper() {}\n"),
+        );
+        let report = index.reconcile_sources(sources.clone())?;
+        let next = report.next_index.ok_or("reconcile must publish a graph")?;
+        assert_eq!(report.metrics.reparsed_files, 1);
+        assert_eq!(resolution_of(next.graph())?, CallResolution::Unresolved);
+        next.graph().validate_consistency()?;
+
+        // Removing it restores the member resolution; a deletion reparses
+        // nothing at all.
+        sources.remove(&RepoRelativePath::new("src/free.cpp")?);
+        let report = next.reconcile_sources(sources)?;
+        let next = report.next_index.ok_or("reconcile must publish a graph")?;
+        assert_eq!(report.metrics.reparsed_files, 0);
+        assert!(matches!(
+            resolution_of(next.graph())?,
+            CallResolution::Resolved { .. }
+        ));
+        next.graph().validate_consistency()?;
         Ok(())
     }
 
