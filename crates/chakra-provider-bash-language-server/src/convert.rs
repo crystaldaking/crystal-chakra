@@ -1,15 +1,17 @@
-//! LSP-to-domain conversion for bash-language-server reference facts.
-
-use std::path::Path;
-use std::str::FromStr;
+//! Reference-flavor LSP-to-domain conversion for bash-language-server.
+//! Position/URI primitives come from `chakra-provider-worker` (issue #94);
+//! this module keeps the shell-specific parts: hyphen-aware identifier
+//! boundaries, caller-symbol flattening, and reference aggregation.
 
 use chakra_domain::location::{RepoRelativePath, SourceRange, TextPosition};
 use chakra_domain::provenance::Provenance;
 use chakra_engine::{PreciseRelation, ProviderWorkspace};
-use lsp_types::{Location, Position, Range, SymbolKind, Uri};
-use url::Url;
+use chakra_provider_worker::convert::{
+    chakra_to_lsp_position, lsp_to_chakra_position, uri_to_path,
+};
+use lsp_types::{DocumentSymbol, Location, Position, Range, SymbolInformation, SymbolKind};
 
-use crate::worker::ProviderError;
+use chakra_provider_worker::WorkerError;
 
 const MAX_REPRESENTATIVE_CALL_SITES: usize = 3;
 
@@ -21,102 +23,50 @@ pub(crate) struct CallerSymbol {
     pub kind: SymbolKind,
 }
 
-pub(crate) fn directory_uri(path: &Path) -> Result<Uri, ProviderError> {
-    let url = Url::from_directory_path(path)
-        .map_err(|()| ProviderError::InvalidUri(path.display().to_string()))?;
-    Uri::from_str(url.as_str()).map_err(|_| ProviderError::InvalidUri(path.display().to_string()))
-}
-
-pub(crate) fn path_to_uri(root: &Path, path: &RepoRelativePath) -> Result<Uri, ProviderError> {
-    let absolute = path
-        .as_str()
-        .split('/')
-        .fold(root.to_path_buf(), |base, component| base.join(component));
-    let url = Url::from_file_path(&absolute)
-        .map_err(|()| ProviderError::InvalidUri(absolute.display().to_string()))?;
-    Uri::from_str(url.as_str())
-        .map_err(|_| ProviderError::InvalidUri(absolute.display().to_string()))
-}
-
-pub(crate) fn uri_to_path(root: &Path, uri: &Uri) -> Option<RepoRelativePath> {
-    let absolute = Url::parse(uri.as_str()).ok()?.to_file_path().ok()?;
-    let relative = absolute.strip_prefix(root).ok()?;
-    let raw = relative
-        .components()
-        .map(|component| component.as_os_str().to_str())
-        .collect::<Option<Vec<_>>>()?
-        .join("/");
-    RepoRelativePath::new(raw).ok()
-}
-
-fn source_line(source: &str, zero_based_line: u32) -> Option<&str> {
-    source.lines().nth(usize::try_from(zero_based_line).ok()?)
-}
-
-pub(crate) fn chakra_to_lsp_position(source: &str, position: TextPosition) -> Option<Position> {
-    let line = position.line().checked_sub(1)?;
-    let scalar_column = usize::try_from(position.column().checked_sub(1)?).ok()?;
-    let text = source_line(source, line)?;
-    let prefix: String = text.chars().take(scalar_column).collect();
-    if prefix.chars().count() != scalar_column {
-        return None;
-    }
-    Some(Position::new(
-        line,
-        u32::try_from(prefix.encode_utf16().count()).ok()?,
-    ))
-}
-
-pub(crate) fn lsp_to_chakra_position(source: &str, position: Position) -> Option<TextPosition> {
-    let text = source_line(source, position.line)?;
-    let target = usize::try_from(position.character).ok()?;
-    let mut utf16 = 0_usize;
-    let mut scalars = 0_usize;
-    for character in text.chars() {
-        if utf16 == target {
-            break;
-        }
-        let next = utf16.checked_add(character.len_utf16())?;
-        if next > target {
-            return None;
-        }
-        utf16 = next;
-        scalars += 1;
-    }
-    if utf16 != target {
-        return None;
-    }
-    TextPosition::new(
-        position.line.checked_add(1)?,
-        u32::try_from(scalars).ok()?.checked_add(1)?,
-    )
-    .ok()
-}
-
-pub(crate) fn convert_range(
-    path: RepoRelativePath,
-    source: &str,
-    range: Range,
-) -> Option<SourceRange> {
-    SourceRange::new(
+pub(crate) fn flat_caller_symbol(
+    symbol: SymbolInformation,
+    expected_path: &RepoRelativePath,
+    workspace: &ProviderWorkspace,
+) -> Option<CallerSymbol> {
+    let path = uri_to_path(&workspace.repository_root, &symbol.location.uri)?;
+    (path == *expected_path).then_some(CallerSymbol {
+        name: symbol.name,
         path,
-        lsp_to_chakra_position(source, range.start)?,
-        lsp_to_chakra_position(source, range.end)?,
-    )
-    .ok()
+        range: symbol.location.range,
+        kind: symbol.kind,
+    })
 }
 
+pub(crate) fn flatten_document_symbols(
+    path: &RepoRelativePath,
+    symbols: Vec<DocumentSymbol>,
+    output: &mut Vec<CallerSymbol>,
+) {
+    for symbol in symbols {
+        output.push(CallerSymbol {
+            name: symbol.name,
+            path: path.clone(),
+            range: symbol.range,
+            kind: symbol.kind,
+        });
+        if let Some(children) = symbol.children {
+            flatten_document_symbols(path, children, output);
+        }
+    }
+}
+
+/// Shell identifiers allow hyphens, so the generic identifier-boundary rule
+/// in the shared conversion cannot be reused for symbol lookup.
 pub(crate) fn find_symbol_position(
     source: &str,
     name: &str,
     declaration: &SourceRange,
-) -> Result<Position, ProviderError> {
+) -> Result<Position, WorkerError> {
     let start_line = declaration.start().line();
     let end_line = declaration.end().line();
-    let start_index =
-        usize::try_from(start_line - 1).map_err(|_| ProviderError::InvalidPosition)?;
+    let start_index = usize::try_from(start_line - 1).map_err(|_| WorkerError::InvalidPosition)?;
     let line_count =
-        usize::try_from(end_line - start_line + 1).map_err(|_| ProviderError::InvalidPosition)?;
+        usize::try_from(end_line - start_line + 1).map_err(|_| WorkerError::InvalidPosition)?;
     for (offset, line) in source
         .lines()
         .skip(start_index)
@@ -124,11 +74,11 @@ pub(crate) fn find_symbol_position(
         .enumerate()
     {
         let line_number = start_line
-            .checked_add(u32::try_from(offset).map_err(|_| ProviderError::InvalidPosition)?)
-            .ok_or(ProviderError::InvalidPosition)?;
+            .checked_add(u32::try_from(offset).map_err(|_| WorkerError::InvalidPosition)?)
+            .ok_or(WorkerError::InvalidPosition)?;
         let minimum = if line_number == start_line {
             usize::try_from(declaration.start().column() - 1)
-                .map_err(|_| ProviderError::InvalidPosition)?
+                .map_err(|_| WorkerError::InvalidPosition)?
         } else {
             0
         };
@@ -139,13 +89,13 @@ pub(crate) fn find_symbol_position(
             }
             let chakra = TextPosition::new(
                 line_number,
-                u32::try_from(scalar + 1).map_err(|_| ProviderError::InvalidPosition)?,
+                u32::try_from(scalar + 1).map_err(|_| WorkerError::InvalidPosition)?,
             )
-            .map_err(|_| ProviderError::InvalidPosition)?;
-            return chakra_to_lsp_position(source, chakra).ok_or(ProviderError::InvalidPosition);
+            .map_err(|_| WorkerError::InvalidPosition)?;
+            return chakra_to_lsp_position(source, chakra).ok_or(WorkerError::InvalidPosition);
         }
     }
-    chakra_to_lsp_position(source, declaration.start()).ok_or(ProviderError::InvalidPosition)
+    chakra_to_lsp_position(source, declaration.start()).ok_or(WorkerError::InvalidPosition)
 }
 
 fn identifier_boundary(line: &str, byte: usize, length: usize) -> bool {
@@ -156,6 +106,15 @@ fn identifier_boundary(line: &str, byte: usize, length: usize) -> bool {
     }) && !after.is_some_and(|character| {
         character == '_' || character == '-' || character.is_alphanumeric()
     })
+}
+
+fn convert_range(path: RepoRelativePath, source: &str, range: Range) -> Option<SourceRange> {
+    SourceRange::new(
+        path,
+        lsp_to_chakra_position(source, range.start)?,
+        lsp_to_chakra_position(source, range.end)?,
+    )
+    .ok()
 }
 
 fn contains(range: Range, position: Position) -> bool {
@@ -234,6 +193,7 @@ mod tests {
     use chakra_domain::revision::Revision;
     use chakra_domain::symbol::Language;
     use chakra_engine::ProviderDocument;
+    use chakra_provider_worker::convert::path_to_uri;
     use tempfile::TempDir;
 
     use super::*;
