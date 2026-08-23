@@ -581,6 +581,7 @@ dependencies = [
  "chakra-domain",
  "chakra-engine",
  "chakra-lsp",
+ "chakra-provider-worker",
  "crossbeam-channel",
  "lsp-types",
  "serde",

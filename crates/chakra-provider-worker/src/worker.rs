@@ -276,6 +276,7 @@ impl<H: ProviderHooks> WorkerCore<H> {
                 let mut channel = CoreChannel {
                     core: &mut *self,
                     session: &mut *session,
+                    workspace: &request.workspace,
                     roundtrip_completed: false,
                 };
                 let outcome = hooks.query(&mut channel, request, deadlines)?;
@@ -838,6 +839,7 @@ impl<H: ProviderHooks> WorkerCore<H> {
 struct CoreChannel<'a, H: ProviderHooks> {
     core: &'a mut WorkerCore<H>,
     session: &'a mut Client,
+    workspace: &'a chakra_engine::ProviderWorkspace,
     roundtrip_completed: bool,
 }
 
@@ -853,5 +855,45 @@ impl<H: ProviderHooks> QueryChannel for CoreChannel<'_, H> {
             .send_request_value(self.session, method, params, deadline)?;
         self.roundtrip_completed = true;
         Ok(value)
+    }
+
+    fn open_document(
+        &mut self,
+        path: &RepoRelativePath,
+        deadline: Instant,
+    ) -> Result<(), WorkerError> {
+        let document = self
+            .workspace
+            .document(path)
+            .ok_or(WorkerError::InvalidPosition)?;
+        if self.core.opened_versions.contains_key(path) {
+            return Ok(());
+        }
+        self.core.sync_generation = self.core.sync_generation.saturating_add(1);
+        self.core.barrier_generation = None;
+        let bytes = self.core.open_or_change(
+            self.session,
+            &self.workspace.repository_root,
+            path,
+            &document.source,
+            deadline,
+        )? as u64;
+        self.core.sync_metrics.opened_documents = self.core.open_versions_len();
+        self.core.sync_metrics.text_documents_sent =
+            self.core.sync_metrics.text_documents_sent.saturating_add(1);
+        self.core.sync_metrics.text_bytes_sent =
+            self.core.sync_metrics.text_bytes_sent.saturating_add(bytes);
+        self.core.sync_metrics.total_text_documents_sent = self
+            .core
+            .sync_metrics
+            .total_text_documents_sent
+            .saturating_add(1);
+        self.core.sync_metrics.total_text_bytes_sent = self
+            .core
+            .sync_metrics
+            .total_text_bytes_sent
+            .saturating_add(bytes);
+        self.core.publish_observability();
+        Ok(())
     }
 }

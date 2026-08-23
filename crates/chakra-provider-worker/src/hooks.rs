@@ -32,6 +32,20 @@ pub trait QueryChannel {
         params: &Value,
         deadline: Instant,
     ) -> Result<Value, WorkerError>;
+
+    /// Opens a synchronized workspace document discovered mid-query (for
+    /// example a caller found through references before its documentSymbol
+    /// request, terraform-ls ADR-0040). Bumps the synchronization generation
+    /// and records the metrics; the default errors to keep drivers honest.
+    fn open_document(
+        &mut self,
+        _path: &RepoRelativePath,
+        _deadline: Instant,
+    ) -> Result<(), WorkerError> {
+        Err(WorkerError::Unsupported(
+            "mid-query document open".to_owned(),
+        ))
+    }
 }
 
 /// Outcome of one provider query attempt.
