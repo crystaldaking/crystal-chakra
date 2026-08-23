@@ -15,6 +15,12 @@
 //! implement the hook directly. No hook erases language-specific readiness or
 //! result semantics, and no LSP type crosses the crate's public boundary into
 //! domain or query layers (invariants 5, 6, 10).
+//!
+//! rust-analyzer deliberately does **not** use this crate: its adapter owns a
+//! custom transport with a revision/epoch-keyed result cache and the
+//! `experimental/serverStatus` quiescence readiness signal (ADR-0013).
+//! Forcing those provider-specific semantics behind the shared hooks would
+//! erase exactly the behavior they are meant to preserve.
 
 pub mod convert;
 mod error;
