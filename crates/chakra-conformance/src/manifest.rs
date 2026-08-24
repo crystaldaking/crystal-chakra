@@ -23,6 +23,19 @@ pub struct ExpectedSymbol {
     pub kind: SymbolKind,
 }
 
+/// Optional mixed-syntax variant expectations (issue #86, HCL only): a
+/// resource declared in the Terraform JSON encoding and referenced from a
+/// native-syntax file.
+#[derive(Debug, Clone, Deserialize)]
+pub struct JsonVariantExpectation {
+    /// Fixture file with the JSON-encoded declaration.
+    pub file: String,
+    /// Qualified name of the JSON-declared resource.
+    pub target: String,
+    /// Qualified name of the native-syntax caller of `target`.
+    pub caller: String,
+}
+
 /// Per-language values the shared scenarios assert against.
 #[derive(Debug, Clone, Deserialize)]
 pub struct Expectations {
@@ -79,6 +92,9 @@ pub struct Expectations {
     pub broken_content: String,
     /// Symbol that must survive in `breakable_file` while it is broken.
     pub retained_symbol: String,
+    /// Optional mixed-syntax JSON variant (HCL only, issue #86).
+    #[serde(default)]
+    pub json_variant: Option<JsonVariantExpectation>,
 }
 
 impl Expectations {

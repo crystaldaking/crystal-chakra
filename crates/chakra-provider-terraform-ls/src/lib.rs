@@ -177,6 +177,12 @@ fn terraform_ls_language(language: Language) -> bool {
     language == Language::Hcl
 }
 
+/// Terraform JSON variants are Chakra-side syntax facts only (issue #86).
+fn is_terraform_json(path: &RepoRelativePath) -> bool {
+    let path = path.as_str();
+    path.ends_with(".tf.json") || path.ends_with(".tfvars.json") || path.ends_with(".tftest.json")
+}
+
 /// terraform-ls language hooks: HCL documents synchronize through the
 /// session and the precise surface is references + document symbols.
 #[derive(Debug, Clone, Copy, Default)]
@@ -252,6 +258,13 @@ impl ProviderHooks for TerraformLsHooks {
 
     fn synchronizes(&self, language: Language) -> bool {
         terraform_ls_language(language)
+    }
+
+    /// terraform-ls is not equipped to parse Terraform JSON variants
+    /// (.tf.json/.tfvars.json/.tftest.json); they stay Chakra-side syntax
+    /// facts and are never sent to the server (issue #86).
+    fn synchronizes_path(&self, language: Language, path: &RepoRelativePath) -> bool {
+        terraform_ls_language(language) && !is_terraform_json(path)
     }
 
     fn language_id(&self, path: &RepoRelativePath) -> &'static str {
@@ -507,6 +520,21 @@ mod tests {
             "terraform-vars"
         );
         assert_eq!(hooks.language_id(&RepoRelativePath::new("mod.hcl")?), "hcl");
+        Ok(())
+    }
+
+    #[test]
+    fn terraform_json_documents_are_never_synchronized() -> Result<(), Box<dyn std::error::Error>> {
+        let hooks = TerraformLsHooks;
+        assert!(hooks.synchronizes_path(Language::Hcl, &RepoRelativePath::new("main.tf")?));
+        assert!(!hooks.synchronizes_path(Language::Hcl, &RepoRelativePath::new("main.tf.json")?));
+        assert!(
+            !hooks.synchronizes_path(Language::Hcl, &RepoRelativePath::new("prod.tfvars.json")?)
+        );
+        assert!(!hooks.synchronizes_path(
+            Language::Hcl,
+            &RepoRelativePath::new("tests/x.tftest.json")?
+        ));
         Ok(())
     }
 

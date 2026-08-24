@@ -7,15 +7,21 @@ client record: ADR-0032; terraform-ls integration record: ADR-0040.
 ## What is supported
 
 - Git-aware discovery of tracked and untracked non-ignored `.tf`, `.tfvars`,
-  `.tftest.hcl`, and generic `.hcl` files. Terraform/OpenTofu lock files are
-  freshness metadata, not sources.
+  `.tftest.hcl`, and generic `.hcl` files, plus the Terraform JSON variants
+  `.tf.json`, `.tfvars.json`, and `.tftest.json` (issue #86).
+  Terraform/OpenTofu lock files are freshness metadata, not sources.
 - Project scopes use the nearest directory containing Git-visible
   `.tf` configuration. Terraform tests, generated paths, and
   `.terraform`/`.terragrunt-cache` vendor trees receive explicit roles.
 - Tree-sitter syntax intelligence (`tree-sitter-hcl 1.1.0`): resources, data
   sources, modules, variables, outputs, locals, providers, nested generic HCL
   blocks, provider/module imports, Terraform `run` tests, byte-accurate ranges,
-  diagnostics, and bounded configuration traversals.
+  diagnostics, and bounded configuration traversals. The Terraform JSON
+  encoding parses through `tree-sitter-json` and mirrors the same entity
+  model: identical identities, import facts, byte-accurate ranges,
+  diagnostics, and `${...}` interpolation reference candidates.
+  terraform-ls does not accept JSON files, so they are never synchronized to
+  the provider; their facts stay syntax-derived.
 - Resource/data/module/variable/local/output traversals are represented as
   configuration references, not function calls. Unique local targets produce
   Chakra-owned syntax relations; ambiguity remains explicit.

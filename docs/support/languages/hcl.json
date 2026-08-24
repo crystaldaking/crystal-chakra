@@ -11,7 +11,10 @@
     "name": "terraform-ls",
     "adr": "docs/adr/0040-terraform-ls-reference-enrichment.md",
     "status": "runtime-integrated",
-    "runtime_evidence": ["crates/chakra-cli/src/main.rs", "crates/chakra-provider-terraform-ls/tests/lifecycle.rs"]
+    "runtime_evidence": [
+      "crates/chakra-cli/src/main.rs",
+      "crates/chakra-provider-terraform-ls/tests/lifecycle.rs"
+    ]
   },
   "capabilities": {
     "DISC-01": {
@@ -41,12 +44,17 @@
     "SYNTAX-01": {
       "status": "pass",
       "mechanism": "tree-sitter-hcl 1.1.0",
-      "evidence": ["Cargo.toml"]
+      "evidence": [
+        "Cargo.toml"
+      ]
     },
     "SYNTAX-02": {
       "status": "pass",
-      "mechanism": "tree-sitter Terraform resources, data, modules, variables, outputs, locals, providers, tests, and generic HCL blocks",
-      "evidence": ["crates/chakra-language-hcl/tests/fixture_index.rs"]
+      "mechanism": "tree-sitter Terraform resources, data, modules, variables, outputs, locals, providers, tests, and generic HCL blocks, mirrored for the Terraform JSON encoding (.tf.json/.tfvars.json/.tftest.json, issue #86)",
+      "evidence": [
+        "crates/chakra-language-hcl/tests/fixture_index.rs",
+        "crates/chakra-language-hcl/src/json.rs"
+      ]
     },
     "SYNTAX-03": {
       "status": "pass",
@@ -67,7 +75,9 @@
     "SYNTAX-05": {
       "status": "pass",
       "mechanism": "tree-sitter byte-accurate declaration and traversal ranges",
-      "evidence": ["crates/chakra-language-hcl/tests/fixture_index.rs"]
+      "evidence": [
+        "crates/chakra-language-hcl/tests/fixture_index.rs"
+      ]
     },
     "SYNTAX-06": {
       "status": "pass",
@@ -146,7 +156,9 @@
     "QUERY-02": {
       "status": "pass",
       "mechanism": "chakra-mcp structured tools",
-      "evidence": ["crates/chakra-mcp/tests/contract.rs"]
+      "evidence": [
+        "crates/chakra-mcp/tests/contract.rs"
+      ]
     },
     "QUERY-03": {
       "status": "pass",
@@ -167,7 +179,9 @@
     "FRESH-02": {
       "status": "pass",
       "mechanism": "HCL live freshness barrier and one-file incremental reconciliation",
-      "evidence": ["crates/chakra-language/tests/live_updates.rs"]
+      "evidence": [
+        "crates/chakra-language/tests/live_updates.rs"
+      ]
     },
     "PROV-01": {
       "status": "pass",
@@ -180,7 +194,9 @@
     "AMBIG-01": {
       "status": "pass",
       "mechanism": "query-layer typed ambiguity for duplicate configuration names",
-      "evidence": ["docs/support/conformance/hcl.json"]
+      "evidence": [
+        "docs/support/conformance/hcl.json"
+      ]
     },
     "BUDGET-01": {
       "status": "pass",
@@ -209,23 +225,28 @@
     "CONFORM-01": {
       "status": "pass",
       "mechanism": "chakra-conformance shared scenario harness",
-      "evidence": ["docs/support/conformance/hcl.json"]
+      "evidence": [
+        "docs/support/conformance/hcl.json"
+      ]
     },
     "CORPUS-01": {
       "status": "pass",
-      "mechanism": "pinned terraform-aws-vpc and terraform-aws-eks public-corpus evaluation",
+      "mechanism": "pinned terraform-aws-vpc, terraform-aws-eks, and cztack (Terraform JSON variants) public-corpus evaluation",
       "evidence": [
         "docs/support/corpus/results/hcl-terraform-aws-modules__terraform-aws-vpc.json",
-        "docs/support/corpus/results/hcl-terraform-aws-modules__terraform-aws-eks.json"
+        "docs/support/corpus/results/hcl-terraform-aws-modules__terraform-aws-eks.json",
+        "docs/support/corpus/results/hcl-chanzuckerberg__cztack.json"
       ]
     },
     "DOCS-01": {
       "status": "pass",
       "mechanism": "per-language install requirements and measured limitations",
-      "evidence": ["docs/languages/hcl.md"]
+      "evidence": [
+        "docs/languages/hcl.md"
+      ]
     }
   },
   "conformance_results": "docs/support/conformance/hcl.json",
-  "corpus_results": "docs/support/corpus/results/hcl-terraform-aws-modules__terraform-aws-vpc.json",
+  "corpus_results": "docs/support/corpus/results/hcl-chanzuckerberg__cztack.json",
   "docs": "docs/languages/hcl.md"
 }

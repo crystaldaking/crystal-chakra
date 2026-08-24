@@ -339,9 +339,9 @@ impl<H: ProviderHooks> WorkerCore<H> {
             inputs_deleted,
             inputs_examined: _,
         } = workspace
-            .delta_since_matching(
+            .delta_since_matching_documents(
                 &self.known_workspace,
-                |language| hooks.synchronizes(language),
+                |language, path| hooks.synchronizes_path(language, path),
                 self.active_operation
                     .as_ref()
                     .ok_or(WorkerError::Cancelled)?,
@@ -352,7 +352,7 @@ impl<H: ProviderHooks> WorkerCore<H> {
             })?;
         let target_document = workspace
             .document(target.file())
-            .filter(|document| hooks.synchronizes(document.language))
+            .filter(|document| hooks.synchronizes_path(document.language, &document.path))
             .ok_or(WorkerError::InvalidPosition)?;
         let target_needs_open = !self.opened_versions.contains_key(target.file());
         if !deleted.is_empty()
@@ -482,8 +482,8 @@ impl<H: ProviderHooks> WorkerCore<H> {
         self.known_workspace = workspace.clone();
         self.known_revision = workspace.revision;
         let (workspace_documents, workspace_source_bytes) = workspace
-            .document_stats_with_context_matching(
-                |language| hooks.synchronizes(language),
+            .document_stats_with_context_matching_documents(
+                |language, path| hooks.synchronizes_path(language, path),
                 self.active_operation
                     .as_ref()
                     .ok_or(WorkerError::Cancelled)?,

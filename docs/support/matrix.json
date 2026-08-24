@@ -801,9 +801,10 @@
         },
         "SYNTAX-02": {
           "status": "pass",
-          "mechanism": "tree-sitter Terraform resources, data, modules, variables, outputs, locals, providers, tests, and generic HCL blocks",
+          "mechanism": "tree-sitter Terraform resources, data, modules, variables, outputs, locals, providers, tests, and generic HCL blocks, mirrored for the Terraform JSON encoding (.tf.json/.tfvars.json/.tftest.json, issue #86)",
           "evidence": [
-            "crates/chakra-language-hcl/tests/fixture_index.rs"
+            "crates/chakra-language-hcl/tests/fixture_index.rs",
+            "crates/chakra-language-hcl/src/json.rs"
           ]
         },
         "SYNTAX-03": {
@@ -981,10 +982,11 @@
         },
         "CORPUS-01": {
           "status": "pass",
-          "mechanism": "pinned terraform-aws-vpc and terraform-aws-eks public-corpus evaluation",
+          "mechanism": "pinned terraform-aws-vpc, terraform-aws-eks, and cztack (Terraform JSON variants) public-corpus evaluation",
           "evidence": [
             "docs/support/corpus/results/hcl-terraform-aws-modules__terraform-aws-vpc.json",
-            "docs/support/corpus/results/hcl-terraform-aws-modules__terraform-aws-eks.json"
+            "docs/support/corpus/results/hcl-terraform-aws-modules__terraform-aws-eks.json",
+            "docs/support/corpus/results/hcl-chanzuckerberg__cztack.json"
           ]
         },
         "DOCS-01": {
@@ -996,7 +998,7 @@
         }
       },
       "conformance_results": "docs/support/conformance/hcl.json",
-      "corpus_results": "docs/support/corpus/results/hcl-terraform-aws-modules__terraform-aws-vpc.json",
+      "corpus_results": "docs/support/corpus/results/hcl-chanzuckerberg__cztack.json",
       "docs": "docs/languages/hcl.md"
     },
     {

@@ -1486,12 +1486,19 @@ fn exported_callable_names(file: &ParsedFile) -> HashSet<String> {
         .collect()
 }
 
+/// Mirrors the graph's callable-domain mapping (engine `call_target_kind`):
+/// module/property/configuration entities are Configuration callables, which
+/// Terraform traversals and similar configuration references resolve
+/// against. Languages without configuration call sites are unaffected.
 fn callable_target_kind(kind: SymbolKind) -> Option<chakra_domain::symbol::CallTargetKind> {
     use chakra_domain::symbol::CallTargetKind;
     match kind {
         SymbolKind::Function => Some(CallTargetKind::Function),
         SymbolKind::Method => Some(CallTargetKind::Method),
         SymbolKind::Test => Some(CallTargetKind::Test),
+        SymbolKind::Module | SymbolKind::Property | SymbolKind::Configuration => {
+            Some(CallTargetKind::Configuration)
+        }
         _ => None,
     }
 }
