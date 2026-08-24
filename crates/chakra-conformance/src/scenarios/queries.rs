@@ -267,6 +267,55 @@ pub(super) fn syntax_callers(manifest: &Manifest) -> Check<Vec<String>> {
                 expectations.callee, expectations.caller
             ),
         )?;
+        if let Some(json) = &expectations.json_variant {
+            // Mixed-syntax workspace (issue #86): the JSON-declared resource
+            // is found by exact name with honest syntax quality, and the
+            // native-syntax caller resolves to it across the encoding
+            // boundary.
+            let response = search_symbols(fixture, simple_name(&json.target), None)?;
+            let target = candidate(&response.data, &json.target)?;
+            ensure(
+                target.kind == SymbolKind::Configuration
+                    && target.provenance == Provenance::TreeSitter
+                    && target.precision == Precision::Syntax,
+                format!(
+                    "JSON variant `{}`: expected tree_sitter/syntax configuration, got {:?}/{:?}/{:?}",
+                    json.target, target.kind, target.provenance, target.precision
+                ),
+            )?;
+            ensure(
+                target.location.file().as_str() == json.file,
+                format!(
+                    "JSON variant `{}`: expected file `{}`, found `{}`",
+                    json.target,
+                    json.file,
+                    target.location.file()
+                ),
+            )?;
+            let callers = fixture.engine.callers(CallersRequest {
+                symbol: Some(SymbolRef::ByName(simple_name(&json.target).to_owned())),
+                limit: None,
+                ..CallersRequest::default()
+            })?;
+            ensure(
+                callers
+                    .data
+                    .callers
+                    .iter()
+                    .any(|caller| caller.symbol.qualified_name == json.caller),
+                format!(
+                    "JSON variant `{}`: expected native caller `{}`, found {:?}",
+                    json.target,
+                    json.caller,
+                    callers
+                        .data
+                        .callers
+                        .iter()
+                        .map(|caller| caller.symbol.qualified_name.clone())
+                        .collect::<Vec<_>>()
+                ),
+            )?;
+        }
         Ok(vec![
             "call edges: tree_sitter provenance, heuristic precision, no precise provider"
                 .to_owned(),

@@ -87,6 +87,13 @@ pub trait ProviderHooks: Send + Sync + 'static {
     /// Languages whose documents this provider's session synchronizes.
     fn synchronizes(&self, language: Language) -> bool;
 
+    /// Whether one document synchronizes. Defaults to the language-level
+    /// filter; providers override it to exclude files their server cannot
+    /// parse (terraform-ls rejects Terraform JSON variants, issue #86).
+    fn synchronizes_path(&self, language: Language, _path: &RepoRelativePath) -> bool {
+        self.synchronizes(language)
+    }
+
     /// LSP language id for a synchronized document path.
     fn language_id(&self, path: &RepoRelativePath) -> &'static str;
 

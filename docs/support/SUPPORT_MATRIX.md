@@ -133,7 +133,7 @@ Target list reviewed: 2026-08 (GitHub Octoverse 2025 top languages plus pre-exis
 | BUDGET-01 | pass | query/index work budgets and calibrated public-corpus limits |
 | CANCEL-01 | pass | cooperative syntax and provider cancellation |
 | CONFORM-01 | pass | chakra-conformance shared scenario harness |
-| CORPUS-01 | pass | pinned terraform-aws-vpc and terraform-aws-eks public-corpus evaluation |
+| CORPUS-01 | pass | pinned terraform-aws-vpc, terraform-aws-eks, and cztack (Terraform JSON variants) public-corpus evaluation |
 | DEGRADE-01 | pass | bounded degradation with syntax fallback |
 | DISC-01 | pass | chakra-git discovery for Terraform/OpenTofu and generic HCL sources |
 | DISC-02 | pass | nearest Git-visible .tf Terraform module scope with path fallback |
@@ -151,7 +151,7 @@ Target list reviewed: 2026-08 (GitHub Octoverse 2025 top languages plus pre-exis
 | QUERY-02 | pass | chakra-mcp structured tools |
 | QUERY-03 | pass | chakra-git worktree/base-ref diff provider for HCL files |
 | SYNTAX-01 | pass | tree-sitter-hcl 1.1.0 |
-| SYNTAX-02 | pass | tree-sitter Terraform resources, data, modules, variables, outputs, locals, providers, tests, and generic HCL blocks |
+| SYNTAX-02 | pass | tree-sitter Terraform resources, data, modules, variables, outputs, locals, providers, tests, and generic HCL blocks, mirrored for the Terraform JSON encoding (.tf.json/.tfvars.json/.tftest.json, issue #86) |
 | SYNTAX-03 | pass | tree-sitter file modules and nested configuration block containers |
 | SYNTAX-04 | pass | tree-sitter module/provider source and required-provider import facts |
 | SYNTAX-05 | pass | tree-sitter byte-accurate declaration and traversal ranges |

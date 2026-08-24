@@ -513,6 +513,12 @@ const SOURCE_EXTENSIONS: &[(&str, Language)] = &[
 ];
 
 pub(crate) fn raw_may_be_source(raw: &[u8]) -> bool {
+    if raw.ends_with(b".tf.json")
+        || raw.ends_with(b".tfvars.json")
+        || raw.ends_with(b".tftest.json")
+    {
+        return true;
+    }
     let Some(dot) = raw.iter().rposition(|byte| *byte == b'.') else {
         return false;
     };
@@ -520,6 +526,15 @@ pub(crate) fn raw_may_be_source(raw: &[u8]) -> bool {
     SOURCE_EXTENSIONS
         .iter()
         .any(|(candidate, _)| extension == candidate.as_bytes())
+}
+
+/// Terraform's JSON syntax variants (`.tf.json`, `.tfvars.json`,
+/// `.tftest.json`) are Hcl-language sources even though their plain
+/// extension is `json` (issue #86).
+fn is_terraform_json(file_name: &str) -> bool {
+    file_name.ends_with(".tf.json")
+        || file_name.ends_with(".tfvars.json")
+        || file_name.ends_with(".tftest.json")
 }
 
 /// Recognizes a v0.1 source language without interpreting `target` build
@@ -533,6 +548,9 @@ pub fn source_language(path: &str) -> Option<Language> {
     let file_name = path.file_name().and_then(OsStr::to_str).unwrap_or_default();
     if matches!(file_name, ".terraform.lock.hcl" | ".opentofu.lock.hcl") {
         return None;
+    }
+    if is_terraform_json(file_name) {
+        return Some(Language::Hcl);
     }
     let extension = path.extension().and_then(OsStr::to_str)?;
     SOURCE_EXTENSIONS
@@ -856,6 +874,14 @@ mod tests {
         assert!(!raw_may_be_source(b"src/example.unsupported"));
         assert_eq!(source_language("target/example.rs"), None);
         assert_eq!(source_language(".terraform.lock.hcl"), None);
+        // Terraform JSON variants are Hcl-language sources (issue #86).
+        for path in ["main.tf.json", "prod.tfvars.json", "tests/plan.tftest.json"] {
+            assert!(raw_may_be_source(path.as_bytes()), "missing raw {path}");
+            assert_eq!(source_language(path), Some(Language::Hcl), "wrong {path}");
+        }
+        // Plain JSON stays unsupported.
+        assert!(!raw_may_be_source(b"config.json"));
+        assert_eq!(source_language("config.json"), None);
     }
 
     #[test]
@@ -1282,8 +1308,8 @@ mod tests {
             ("production.tfvars", "region = \"eu-west-1\"\n"),
             ("terragrunt.hcl", "inputs = {}\n"),
             ("tests/flow.tftest.hcl", "run \"flow\" {}\n"),
-            // Terraform JSON needs a JSON-capable syntax adapter and is not
-            // accepted by the native-HCL grammar.
+            // Terraform JSON variants are admitted through the explicit JSON
+            // adapter path (issue #86).
             ("variables.tf.json", "{}\n"),
             ("production.tfvars.json", "{}\n"),
             ("tests/flow.tftest.json", "{}\n"),
@@ -1300,8 +1326,11 @@ mod tests {
             [
                 "main.tf",
                 "production.tfvars",
+                "production.tfvars.json",
                 "terragrunt.hcl",
                 "tests/flow.tftest.hcl",
+                "tests/flow.tftest.json",
+                "variables.tf.json",
             ]
         );
         let inventory = discover_workspace_inventory_in_worktree_with_context(

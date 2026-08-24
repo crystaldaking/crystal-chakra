@@ -61,7 +61,7 @@
     },
     {
       "id": "syntax-callers",
-      "description": "Terraform traversals provide bounded configuration callers without a precise provider.",
+      "description": "Terraform traversals provide bounded configuration callers without a precise provider; the HCL fixture also covers a Terraform JSON declaration referenced from native syntax.",
       "capability_ids": [
         "SYNTAX-08",
         "QUERY-01",
