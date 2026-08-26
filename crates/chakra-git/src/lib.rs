@@ -1368,41 +1368,35 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn cancellation_terminates_and_reaps_an_owned_process() -> Result<(), Box<dyn Error>> {
-        use std::os::unix::fs::PermissionsExt;
-
         let directory = TempDir::new()?;
-        let executable = directory.path().join("fake-git");
         let marker = directory.path().join("pid");
-        fs::write(
-            &executable,
-            "#!/bin/sh\nprintf '%s' \"$$\" > \"$1\"\nexec sleep 30\n",
-        )?;
-        let mut permissions = fs::metadata(&executable)?.permissions();
-        permissions.set_mode(0o755);
-        fs::set_permissions(&executable, permissions)?;
 
         let operation = OperationContext::unbounded();
         let worker_operation = operation.clone();
-        let worker_executable = executable.clone();
         let worker_marker = marker.clone();
         let (completed, result) = mpsc::sync_channel(1);
         let worker = std::thread::spawn(move || {
             let response = capture_command(
-                worker_executable.as_os_str(),
+                OsStr::new("/bin/sh"),
                 directory.path(),
                 "fake cancellable Git",
-                &[worker_marker.as_os_str()],
+                &[
+                    OsStr::new("-c"),
+                    OsStr::new("printf '%s' \"$$\" > \"$1\"; exec sleep 30"),
+                    OsStr::new("chakra-fake-git"),
+                    worker_marker.as_os_str(),
+                ],
                 &worker_operation,
             );
             let _ = completed.send(response);
         });
 
-        let marker_deadline = Instant::now() + Duration::from_secs(5);
+        let marker_deadline = Instant::now() + Duration::from_secs(15);
         while !marker.exists() {
             if Instant::now() >= marker_deadline {
                 return Err("fake Git process did not start".into());
             }
-            std::thread::yield_now();
+            std::thread::park_timeout(Duration::from_millis(10));
         }
         let pid = fs::read_to_string(&marker)?;
         operation.cancel();

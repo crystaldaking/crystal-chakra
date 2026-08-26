@@ -24,9 +24,9 @@ record every pre-1.0 compatibility break explicitly (ADR-0043).
 - The accepted cargo-deny duplicate baseline (bitflags 1.3.2, syn 2.0.119,
   windows-sys 0.60.2) is recorded as exact-version skip entries with reasons
   and re-evaluation triggers, so new duplicates keep warning (issue #88).
-- The Git cancellation/reaping regression uses an idle owned process and a
-  condition-based bounded completion wait instead of a CPU-spinning child and
-  load-sensitive 250 ms assertion (issue #106).
+- The Git cancellation/reaping regression uses an idle owned process and
+  bounded parked startup/completion waits instead of CPU-spinning fixtures and
+  load-sensitive subsecond assertions (issue #106).
 - The public-corpus provider restart check tolerates only transient revision
   catch-up while preserving exact revision safety and hard failures for
   degraded providers (issue #118).
