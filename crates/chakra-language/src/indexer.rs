@@ -311,23 +311,11 @@ pub enum WorkspaceIndexError {
     #[error(transparent)]
     Php(#[from] chakra_language_php::PhpIndexError),
     #[error(transparent)]
-    TypeScript(#[from] chakra_language_typescript::TypeScriptIndexError),
-    #[error(transparent)]
-    Python(#[from] chakra_language_python::PythonIndexError),
-    #[error(transparent)]
-    JavaScript(#[from] chakra_language_javascript::JavaScriptIndexError),
-    #[error(transparent)]
-    Java(#[from] chakra_language_java::JavaIndexError),
-    #[error(transparent)]
     CSharp(#[from] chakra_language_csharp::CSharpIndexError),
+    /// TypeScript, Python, JavaScript, Java, Shell, C++, HCL, and Go adapters
+    /// share one indexing driver and one error type (issue #94).
     #[error(transparent)]
-    Shell(#[from] chakra_language_shell::ShellIndexError),
-    #[error(transparent)]
-    Cpp(#[from] chakra_language_cpp::CppIndexError),
-    #[error(transparent)]
-    Hcl(#[from] chakra_language_hcl::HclIndexError),
-    #[error(transparent)]
-    Go(#[from] chakra_language_go::GoIndexError),
+    Shared(#[from] chakra_language_index::LanguageIndexError),
     #[error(transparent)]
     Graph(#[from] GraphError),
     #[error("constructed workspace syntax graph is inconsistent: {0}")]

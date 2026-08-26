@@ -55,7 +55,7 @@ Requirements:
 ```sh
 git clone https://github.com/crystaldaking/crystal-chakra.git
 cd crystal-chakra
-git checkout v0.1.2
+git checkout v0.1.3
 cargo install --locked --path crates/chakra-cli
 chakra --version
 ```
@@ -107,7 +107,7 @@ workspace before narrowing through symbols and relationships.
 | `status` | Revision, freshness, coverage, diagnostics, budgets, provider state, and operational metrics |
 | `repo_map` | A bounded structural overview and paginated file inventory |
 | `search` | Bounded textual matches in captured source |
-| `symbol_search` | Ranked, filterable declarations with stable revision-local identities |
+| `symbol_search` | Ranked, filterable declarations with stable revision-local identities; `match_mode: "exact"` reads only the exact-name index |
 | `context` | One symbol, source excerpt, callers, callees, implementations, tests, and typed related facts |
 | `callers` | Aggregated incoming relations plus unresolved syntax evidence |
 | `diff_context` | Git/worktree changes joined with current symbols, callers, tests, and call candidates |
@@ -165,7 +165,7 @@ and [ADRs](docs/adr/) for the full contract and trade-offs.
 ## Evidence and validation
 
 The shared conformance harness runs the same behavior catalog for every
-language. A separate opt-in evaluation runs against 19 pinned public
+language. A separate opt-in evaluation runs against 20 pinned public
 repositories, including Kubernetes, VS Code, Kafka, Spring Boot, Django,
 Symfony, Tokio, and the .NET runtime. Results and machine-readable artifacts
 are in [docs/support/corpus](docs/support/corpus/).

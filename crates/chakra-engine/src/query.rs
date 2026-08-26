@@ -28,8 +28,8 @@ use chakra_domain::query::{
     ProviderCapability, ProviderFallbackCause, ProviderInfo, ProviderQueryInfo, QueryError,
     QueryService, RelatedSymbol, RelationDirection, RepoMapCursor, RepoMapData, RepoMapGroup,
     RepoMapGroupKind, RepoMapRequest, RepoMapScope, SearchData, SearchRequest, SourceFilter,
-    SourceSnippet, StatusData, StatusRequest, SymbolRef, SymbolSearchData, SymbolSearchRequest,
-    SymbolView, SyntaxDiagnosticSummary, TextMatch,
+    SourceSnippet, StatusData, StatusRequest, SymbolMatchMode, SymbolRef, SymbolSearchData,
+    SymbolSearchRequest, SymbolView, SyntaxDiagnosticSummary, TextMatch,
 };
 use chakra_domain::revision::Revision;
 use chakra_domain::source::{SourceClassification, SourceMetadata, SourceRole};
@@ -1194,6 +1194,7 @@ fn ranked_symbol_matches(
     limit: usize,
     operation: &OperationContext,
     work: &mut SectionWorkBudget,
+    exact_only: bool,
 ) -> Result<(Vec<EntityId>, bool), QueryError> {
     let query_lower = query.to_lowercase();
     let mut best = BinaryHeap::with_capacity(limit.min(graph.symbol_count() as usize));
@@ -1227,8 +1228,10 @@ fn ranked_symbol_matches(
     // Once more exact filtered matches exist than the response can retain,
     // every prefix/substring match is strictly worse and cannot change the
     // top-k result. Otherwise continue the bounded broad scan so ranking and
-    // truncation semantics remain unchanged.
-    if !work_exhausted && !truncated {
+    // truncation semantics remain unchanged. Exact-match mode (issue #82)
+    // never runs the broad scan: the folded-name candidate set is complete,
+    // so truncation can only come from the limit or the work budget.
+    if !exact_only && !work_exhausted && !truncated {
         for symbol in graph.symbols() {
             let match_rank = match_rank(symbol, &query_lower);
             if match_rank == Some(0) {
@@ -1623,13 +1626,14 @@ fn provider_state_severity(state: ProviderState) -> u8 {
     }
 }
 
-fn provider_state_for_language(
+fn provider_state_for_symbol(
     engine: &WorkspaceEngine,
     snapshot: &WorkspaceSnapshot,
     language: chakra_domain::symbol::Language,
+    path: &RepoRelativePath,
 ) -> ProviderState {
     engine
-        .precise_provider_for(language)
+        .precise_provider_for_path(language, path)
         .map_or(ProviderState::NotConfigured, |provider| {
             provider.state_for(snapshot.revision())
         })
@@ -1638,11 +1642,12 @@ fn provider_state_for_language(
 fn provider_query_info(
     engine: &WorkspaceEngine,
     language: chakra_domain::symbol::Language,
+    path: &RepoRelativePath,
     state: ProviderState,
     fallback_cause: Option<ProviderFallbackCause>,
     freshness: FreshnessRequirement,
 ) -> Option<ProviderQueryInfo> {
-    let provider = engine.precise_provider_for(language)?;
+    let provider = engine.precise_provider_for_path(language, path)?;
     let fallback_reason = if let Some(cause) = fallback_cause {
         Some(
             match cause {
@@ -2024,7 +2029,11 @@ fn envelope<T>(
         truncation,
         data,
     )
-    .with_indexing(snapshot.indexing().clone())
+    .with_indexing(if construction.query == "status" {
+        snapshot.indexing().clone()
+    } else {
+        snapshot.indexing().query_summary()
+    })
 }
 
 fn bounded_match_line(line: &str, match_start: usize, match_end: usize) -> (String, Option<usize>) {
@@ -2310,10 +2319,16 @@ impl QueryService for WorkspaceEngine {
             TruncationSection::StatusProviders,
         )?;
         truncation.extend(providers.truncation.iter().cloned());
+        // Pooled adapters share one workspace-global pool; report its
+        // lifecycle/admission counters once rather than per provider.
+        let provider_pool = precise_providers
+            .iter()
+            .find_map(|provider| provider.orchestration_metrics());
         let data = StatusData {
             workspace: snapshot.identity().clone(),
             counts,
             providers: providers.items,
+            provider_pool,
             query_execution: None,
             source_metadata: snapshot.graph().source_metadata_coverage(),
             syntax_diagnostics: SyntaxDiagnosticSummary {
@@ -2647,6 +2662,7 @@ impl QueryService for WorkspaceEngine {
             limit,
             operation,
             &mut work,
+            request.match_mode == SymbolMatchMode::Exact,
         )?;
         work.add_to_stats(&mut work_stats);
         let candidates: Vec<SymbolView> = matches
@@ -2737,7 +2753,8 @@ impl QueryService for WorkspaceEngine {
             operation,
         )?;
         callees_work.add_to_stats(&mut work_stats);
-        let mut provider_state = provider_state_for_language(self, &snapshot, symbol.key.language);
+        let mut provider_state =
+            provider_state_for_symbol(self, &snapshot, symbol.key.language, &symbol.key.path);
         if request.freshness == FreshnessRequirement::AllowStale
             && provider_state == ProviderState::Ready
         {
@@ -2748,7 +2765,8 @@ impl QueryService for WorkspaceEngine {
         let mut provider_fallback_cause = None;
         if request.freshness == FreshnessRequirement::RequireFresh
             && snapshot.freshness() == Freshness::Fresh
-            && let Some(provider) = self.precise_provider_for(symbol.key.language)
+            && let Some(provider) =
+                self.precise_provider_for_path(symbol.key.language, &symbol.key.path)
         {
             let provider_started = Instant::now();
             let result = provider.enrich_with_context(
@@ -3101,6 +3119,7 @@ impl QueryService for WorkspaceEngine {
             provider: provider_query_info(
                 self,
                 symbol.key.language,
+                &symbol.key.path,
                 provider_state,
                 provider_fallback_cause,
                 request.freshness,
@@ -3160,7 +3179,8 @@ impl QueryService for WorkspaceEngine {
             operation,
         )?;
         callers_work.add_to_stats(&mut work_stats);
-        let mut provider_state = provider_state_for_language(self, &snapshot, target.key.language);
+        let mut provider_state =
+            provider_state_for_symbol(self, &snapshot, target.key.language, &target.key.path);
         if request.freshness == FreshnessRequirement::AllowStale
             && provider_state == ProviderState::Ready
         {
@@ -3175,7 +3195,8 @@ impl QueryService for WorkspaceEngine {
         let mut syntax_candidates = candidate_views.items;
         if request.freshness == FreshnessRequirement::RequireFresh
             && snapshot.freshness() == Freshness::Fresh
-            && let Some(provider) = self.precise_provider_for(target.key.language)
+            && let Some(provider) =
+                self.precise_provider_for_path(target.key.language, &target.key.path)
         {
             let provider_started = Instant::now();
             let result = provider.enrich_with_context(
@@ -3278,6 +3299,7 @@ impl QueryService for WorkspaceEngine {
             provider: provider_query_info(
                 self,
                 target.key.language,
+                &target.key.path,
                 provider_state,
                 provider_fallback_cause,
                 request.freshness,

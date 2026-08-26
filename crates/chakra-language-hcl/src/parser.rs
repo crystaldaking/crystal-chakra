@@ -15,13 +15,16 @@ use chakra_domain::diagnostic::{
 use chakra_domain::location::{RepoRelativePath, SourceRange, TextPosition};
 use chakra_domain::provenance::{Precision, Provenance};
 use chakra_domain::symbol::{CallForm, CallTargetKind, EdgeKind, Language, SymbolKey, SymbolKind};
+pub(crate) use chakra_language_index::facts::{
+    CallDraft, NamedRelationDraft, ParsedFile, SymbolDraft,
+};
 use thiserror::Error;
 use tree_sitter::{Node, Parser, Point};
 
 const MAX_SIGNATURE_CHARS: usize = 512;
 
 #[derive(Debug, Error)]
-pub(crate) enum ParseError {
+pub enum ParseError {
     #[error("failed to load the Tree-sitter HCL grammar: {0}")]
     Language(String),
     #[error("Tree-sitter returned no syntax tree for {0}")]
@@ -43,45 +46,6 @@ pub(crate) enum ParseError {
         path: RepoRelativePath,
         message: String,
     },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ParsedFile {
-    pub source: Arc<str>,
-    pub module_path: Vec<String>,
-    pub symbols: Vec<SymbolDraft>,
-    pub calls: Vec<CallDraft>,
-    pub named_relations: Vec<NamedRelationDraft>,
-    pub has_errors: bool,
-    pub diagnostics: Vec<SyntaxDiagnostic>,
-    pub diagnostic_count: u64,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct SymbolDraft {
-    pub key: SymbolKey,
-    pub location: SourceRange,
-    pub signature: Option<String>,
-    pub parent: Option<usize>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct CallDraft {
-    pub caller: usize,
-    pub form: CallForm,
-    pub target_kind: CallTargetKind,
-    pub name: String,
-    pub qualifier: Option<String>,
-    pub receiver_hint: Option<String>,
-    pub location: SourceRange,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct NamedRelationDraft {
-    pub from: usize,
-    pub candidates: Vec<String>,
-    pub target_kinds: Vec<SymbolKind>,
-    pub kind: EdgeKind,
 }
 
 #[derive(Debug, Clone)]
@@ -462,6 +426,7 @@ impl Extraction<'_> {
             return Ok(());
         };
         self.calls.push(CallDraft {
+            promoted: false,
             caller,
             form: CallForm::Function,
             target_kind: CallTargetKind::Function,
@@ -484,6 +449,7 @@ impl Extraction<'_> {
             return Ok(());
         };
         self.calls.push(CallDraft {
+            promoted: false,
             caller,
             form: CallForm::Scoped,
             target_kind: CallTargetKind::Configuration,
@@ -497,21 +463,21 @@ impl Extraction<'_> {
 }
 
 #[derive(Debug)]
-struct TraversalSegment {
-    name: String,
-    start: usize,
-    end: usize,
+pub(crate) struct TraversalSegment {
+    pub name: String,
+    pub start: usize,
+    pub end: usize,
 }
 
 #[derive(Debug)]
-struct TraversalTarget {
-    name: String,
-    qualifier: String,
-    start: usize,
-    end: usize,
+pub(crate) struct TraversalTarget {
+    pub name: String,
+    pub qualifier: String,
+    pub start: usize,
+    pub end: usize,
 }
 
-fn scan_traversal(source: &str, start: usize) -> Vec<TraversalSegment> {
+pub(crate) fn scan_traversal(source: &str, start: usize) -> Vec<TraversalSegment> {
     let Some(rest) = source.get(start..) else {
         return Vec::new();
     };
@@ -544,7 +510,7 @@ fn scan_traversal(source: &str, start: usize) -> Vec<TraversalSegment> {
     segments
 }
 
-fn traversal_target(segments: &[TraversalSegment]) -> Option<TraversalTarget> {
+pub(crate) fn traversal_target(segments: &[TraversalSegment]) -> Option<TraversalTarget> {
     if segments.len() < 2 {
         return None;
     }
@@ -635,13 +601,15 @@ fn block_identity(
     }
 }
 
-fn is_tfvars(path: &RepoRelativePath) -> bool {
-    path.as_str().ends_with(".tfvars")
+pub(crate) fn is_tfvars(path: &RepoRelativePath) -> bool {
+    let path = path.as_str();
+    path.ends_with(".tfvars") || path.ends_with(".tfvars.json")
 }
 
-fn is_test_file(path: &RepoRelativePath) -> bool {
+pub(crate) fn is_test_file(path: &RepoRelativePath) -> bool {
     let path = path.as_str();
     path.ends_with(".tftest.hcl")
+        || path.ends_with(".tftest.json")
         || path
             .split('/')
             .any(|component| matches!(component, "test" | "tests"))
@@ -655,7 +623,15 @@ pub(crate) fn module_path(path: &RepoRelativePath) -> Vec<String> {
         .map(str::to_owned)
         .collect();
     if let Some(last) = components.last_mut() {
-        for suffix in [".tftest.hcl", ".tfvars", ".hcl", ".tf"] {
+        for suffix in [
+            ".tftest.json",
+            ".tftest.hcl",
+            ".tfvars.json",
+            ".tfvars",
+            ".tf.json",
+            ".hcl",
+            ".tf",
+        ] {
             if let Some(stem) = last.strip_suffix(suffix) {
                 *last = stem.to_owned();
                 break;
@@ -668,12 +644,12 @@ pub(crate) fn module_path(path: &RepoRelativePath) -> Vec<String> {
     components
 }
 
-pub(crate) struct HclParser {
+pub struct HclParser {
     parser: Parser,
 }
 
 impl HclParser {
-    pub(crate) fn new() -> Result<Self, ParseError> {
+    pub fn new() -> Result<Self, ParseError> {
         let mut parser = Parser::new();
         parser
             .set_language(&tree_sitter_hcl::LANGUAGE.into())
@@ -681,12 +657,15 @@ impl HclParser {
         Ok(Self { parser })
     }
 
-    pub(crate) fn parse(
+    pub fn parse(
         &mut self,
         path: RepoRelativePath,
         source: impl Into<Arc<str>>,
     ) -> Result<ParsedFile, ParseError> {
-        let source = source.into();
+        let source: Arc<str> = source.into();
+        if crate::json::is_terraform_json_path(&path) {
+            return crate::json::parse_terraform_json(&path, source);
+        }
         let tree = self
             .parser
             .parse(source.as_ref(), None)

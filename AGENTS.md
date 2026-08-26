@@ -76,6 +76,19 @@ Explicitly deferred unless the task is specifically about a later milestone:
 - Distributed indexing.
 - Web UI.
 
+## Dogfooding
+
+Use Chakra to develop Chakra. When working in this repository, prefer Chakra's
+own query surface (`repo_map`, `search`, `symbol_search`, `context`, `callers`,
+`diff_context`) over ad-hoc text search for code navigation and investigation.
+
+File every problem found while dogfooding as a GitHub issue in this repository,
+with reproduction steps and observed evidence. Incorrect or surprising results,
+provenance/precision gaps, truncation noise, performance regressions, and UX
+friction all count. Do not silently work around a discovered defect — the issue
+is the record. Milestone assignment for dogfooding issues remains subject to
+milestone scope discipline.
+
 ## Rust engineering rules
 
 - Use the pinned stable Rust toolchain and Edition 2024.

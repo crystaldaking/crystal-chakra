@@ -17,7 +17,9 @@ use std::os::unix::fs::MetadataExt;
 use chakra_domain::location::{RepoRelativePath, SourceRange};
 use chakra_domain::operation::{OperationAbort, OperationContext};
 use chakra_domain::provenance::Provenance;
-use chakra_domain::query::{ProviderFallbackCause, ProviderMetrics, ProviderProgress};
+use chakra_domain::query::{
+    ProviderFallbackCause, ProviderMetrics, ProviderOrchestrationMetrics, ProviderProgress,
+};
 use chakra_domain::revision::Revision;
 use chakra_domain::state::ProviderState;
 use chakra_domain::symbol::Language;
@@ -64,8 +66,9 @@ impl ProviderInput {
         })
     }
 
-    fn matches_language(&self, include: &impl Fn(Language) -> bool) -> bool {
-        self.languages.iter().copied().any(include)
+    /// Languages affected by this input.
+    pub fn languages(&self) -> impl Iterator<Item = Language> + '_ {
+        self.languages.iter().copied()
     }
 }
 
@@ -233,6 +236,15 @@ impl ProviderWorkspace {
             .unwrap_or((0, 0))
     }
 
+    /// Unbounded [`Self::document_stats_with_context_matching_documents`].
+    pub fn document_stats_matching_documents(
+        &self,
+        include: impl Fn(Language, &RepoRelativePath) -> bool,
+    ) -> (usize, u64) {
+        self.document_stats_with_context_matching_documents(include, &OperationContext::unbounded())
+            .unwrap_or((0, 0))
+    }
+
     pub fn document_stats_with_context(
         &self,
         language: Language,
@@ -249,10 +261,23 @@ impl ProviderWorkspace {
         include: impl Fn(Language) -> bool,
         operation: &OperationContext,
     ) -> Result<(usize, u64), OperationAbort> {
+        self.document_stats_with_context_matching_documents(
+            |language, _path| include(language),
+            operation,
+        )
+    }
+
+    /// Same statistics as [`Self::document_stats_with_context_matching`],
+    /// but the predicate sees each document's path as well (issue #86).
+    pub fn document_stats_with_context_matching_documents(
+        &self,
+        include: impl Fn(Language, &RepoRelativePath) -> bool,
+        operation: &OperationContext,
+    ) -> Result<(usize, u64), OperationAbort> {
         Ok(self
             .document_catalog(operation)?
             .into_iter()
-            .filter(|document| include(document.language))
+            .filter(|document| include(document.language, &document.path))
             .fold((0_usize, 0_u64), |(count, bytes), document| {
                 (
                     count.saturating_add(1),
@@ -284,6 +309,22 @@ impl ProviderWorkspace {
         include: impl Fn(Language) -> bool,
         operation: &OperationContext,
     ) -> Result<ProviderWorkspaceDelta, OperationAbort> {
+        self.delta_since_matching_documents(
+            previous,
+            |language, _path| include(language),
+            operation,
+        )
+    }
+
+    /// Same delta as [`Self::delta_since_matching`], but the predicate sees
+    /// each document's path as well (terraform-ls must not receive Terraform
+    /// JSON variants it cannot parse, issue #86).
+    pub fn delta_since_matching_documents(
+        &self,
+        previous: &Self,
+        include: impl Fn(Language, &RepoRelativePath) -> bool,
+        operation: &OperationContext,
+    ) -> Result<ProviderWorkspaceDelta, OperationAbort> {
         if self.shares_document_catalog_with(previous)
             && Arc::ptr_eq(&self.inputs, &previous.inputs)
         {
@@ -296,11 +337,11 @@ impl ProviderWorkspace {
             let previous_documents = previous.document_catalog(operation)?;
             let mut current = current
                 .into_iter()
-                .filter(|document| include(document.language))
+                .filter(|document| include(document.language, &document.path))
                 .peekable();
             let mut previous_documents = previous_documents
                 .into_iter()
-                .filter(|document| include(document.language))
+                .filter(|document| include(document.language, &document.path))
                 .peekable();
             loop {
                 operation.check()?;
@@ -352,13 +393,21 @@ impl ProviderWorkspace {
         let current_inputs: Vec<_> = self
             .inputs
             .values()
-            .filter(|input| input.matches_language(&include))
+            .filter(|input| {
+                input
+                    .languages()
+                    .any(|language| include(language, &input.path))
+            })
             .cloned()
             .collect();
         let previous_inputs: Vec<_> = previous
             .inputs
             .values()
-            .filter(|input| input.matches_language(&include))
+            .filter(|input| {
+                input
+                    .languages()
+                    .any(|language| include(language, &input.path))
+            })
             .cloned()
             .collect();
         let mut current_inputs = current_inputs.into_iter().peekable();
@@ -566,6 +615,15 @@ pub trait PreciseProvider: std::fmt::Debug + Send + Sync {
     /// Whether this adapter can enrich symbols in `language`.
     fn supports(&self, language: Language) -> bool;
 
+    /// Whether this adapter can enrich a source document at `path`.
+    ///
+    /// Most providers cover every captured source of a supported language.
+    /// Adapters with path-level exclusions override this without exposing
+    /// transport or language-server types to the engine.
+    fn supports_path(&self, language: Language, _path: &RepoRelativePath) -> bool {
+        self.supports(language)
+    }
+
     /// State relative to a specific published syntax revision.
     fn state_for(&self, revision: Revision) -> ProviderState;
 
@@ -582,7 +640,16 @@ pub trait PreciseProvider: std::fmt::Debug + Send + Sync {
     }
 
     /// Bounded provider-owned cache and synchronization instrumentation.
+    /// These counters are strictly provider-local; workspace-global pool
+    /// lifecycle/admission counters are reported via `orchestration_metrics`.
     fn metrics(&self) -> Option<ProviderMetrics> {
+        None
+    }
+
+    /// Workspace-global provider-pool lifecycle and admission counters, when
+    /// this adapter belongs to a shared pool. Pooled adapters return the same
+    /// shared snapshot; the query layer reports it once (issue #61).
+    fn orchestration_metrics(&self) -> Option<ProviderOrchestrationMetrics> {
         None
     }
 

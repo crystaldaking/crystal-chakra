@@ -483,7 +483,7 @@ impl ChakraMcpServer {
 
     #[tool(
         name = "symbol_search",
-        description = "Find bounded supported-language syntax symbol candidates by simple or qualified name",
+        description = "Find bounded supported-language syntax symbol candidates by simple or qualified name; match_mode=exact restricts matching to the exact-name index",
         output_schema = rmcp::handler::server::tool::schema_for_output::<QueryEnvelope<SymbolSearchData>>(),
         annotations(
             read_only_hint = true,

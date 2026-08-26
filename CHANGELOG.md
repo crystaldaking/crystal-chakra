@@ -5,6 +5,112 @@ version tags prefixed with `v`.
 
 ## [Unreleased]
 
+Post-v0.1.2 correctness, query ergonomics, corpus resilience, dependency
+hygiene, and targeted maintainability follow-ups (milestone v0.1.3), plus the
+agent-facing process rules the milestone was developed under: develop Chakra
+with Chakra and file every discovered problem as an issue (`AGENTS.md`), and
+record every pre-1.0 compatibility break explicitly (ADR-0043).
+
+### Tooling
+
+- The public-corpus fetcher retries transient Git transport failures with a
+  bounded attempt budget and backoff, surfaces captured Git stderr, and fails
+  closed; hermetic tests pin classification and attempt bounds (issue #69).
+  Standard Python bytecode caches are ignored and the duplicate Git helper was
+  removed, so the documented tooling test no longer dirties a clean checkout
+  (issue #115).
+- The accepted cargo-deny duplicate baseline (bitflags 1.3.2, syn 2.0.119,
+  windows-sys 0.60.2) is recorded as exact-version skip entries with reasons
+  and re-evaluation triggers, so new duplicates keep warning (issue #88).
+- The Git cancellation/reaping regression uses an idle owned process and a
+  condition-based bounded completion wait instead of a CPU-spinning child and
+  load-sensitive 250 ms assertion (issue #106).
+- The public-corpus provider restart check tolerates only transient revision
+  catch-up while preserving exact revision safety and hard failures for
+  degraded providers (issue #118).
+
+### Changed
+
+- The eight `chakra-lsp`-based provider adapters (vtsls, pyright, clangd,
+  gopls, csharp-ls, jdtls, bash-language-server, terraform-ls) now share one
+  worker scaffolding crate, `chakra-provider-worker` (issue #94): the
+  owner-thread event loop, session lifecycle with bounded restart/backoff,
+  revision-scoped document synchronization, the post-synchronization request
+  barrier, observability, cancellation, shutdown, and LSP-to-domain
+  conversion. Language-specific seams are typed hooks (name/provenance,
+  language ids, capability gates, readiness budgets, cold-start semantics,
+  query strategies, mid-query document open) instead of ~1,000 copied lines
+  per provider. rust-analyzer keeps its own worker: its custom transport,
+  result cache, and `experimental/serverStatus` readiness are deliberately
+  provider-specific. Public adapter APIs and hermetic lifecycle contract
+  tests are unchanged.
+- The eight syntax adapters with the common per-file fact shape (Go, Java,
+  HCL, TypeScript, JavaScript, Python, Shell, C++) now share one indexing
+  driver crate, `chakra-language-index` (issue #94): cold-build and
+  reconcile scheduling, bounded parser workers, metrics and limits,
+  relationship materialization, and graph publication. Language seams are
+  typed `LanguageHooks` (parser, Git-aware discovery, worker naming, optional
+  post-parse evidence pass — the C++ reclassification/promoted-call passes
+  from this release). Rust (impl-block drafts), PHP (receiver-aware call
+  resolution), and C# (extension-method delta machinery) keep their own
+  indexers because their index semantics are genuinely language-specific.
+  Public adapter APIs and adapter tests are unchanged.
+
+### Added
+
+- Terraform JSON syntax support (issue #86): `.tf.json`, `.tfvars.json`, and
+  `.tftest.json` files are discovered as HCL-language sources and parsed
+  through `tree-sitter-json` into the native-HCL entity model. JSON escapes
+  are decoded for identities and expressions while ranges retain original
+  source bytes; Terraform's literal exceptions and template escaping prevent
+  false references (issue #112). Path-aware provider routing keeps these
+  syntax-only documents out of terraform-ls and its lifecycle metrics (issue
+  #113). Conformance, live-update/diff/MCP checks, and the pinned cztack corpus
+  cover the feature; the public corpus now contains 20 repositories.
+- `symbol_search` accepts `match_mode: "exact"` (issue #82): matching is
+  limited to the exact case-folded simple/qualified name index, existing
+  language/kind/source filters and budgets still apply, and truncation is
+  reported only when the exact candidate set itself exceeds a bound. The
+  default substring ranking is unchanged.
+
+### Fixed
+
+- C++ namespace-qualified free-function definitions such as `void ns::free()`
+  are no longer misclassified as methods (issue #84): qualified callable
+  definitions are reclassified against workspace type/namespace evidence
+  during graph build and reconcile, an unproven qualifier keeps the
+  conservative parse-time kind, and no file is reparsed for the pass.
+- Unqualified calls inside C++ methods no longer commit to the member
+  interpretation too early (issue #83): with workspace evidence a call
+  resolves to a unique free function, reports honest ambiguity when several
+  free functions match, stays a member call when only a same-type member
+  exists, and retains both declaration domains as bounded ambiguous evidence
+  on a genuine member/free collision (issue #111). clangd remains the precise
+  path.
+- Hook-induced structural changes in the shared language-index reconciler now
+  participate in the graph delta even when their source file was not reparsed.
+  C++ namespace evidence can therefore reclassify a retained definition in the
+  same atomic revision without forcing a full index, and adding or removing
+  that evidence reverses the classification deterministically (issues #114
+  and #117).
+- Detailed indexing phase history is returned by `status` instead of being
+  repeated in every small query envelope. Non-status queries still carry the
+  exact revision's coverage, capability, degradation, memory, scheduling, and
+  publication evidence (issue #107).
+
+### Breaking
+
+- `status` now reports workspace-global provider-pool lifecycle/admission
+  counters once under `data.provider_pool` instead of repeating them inside
+  every `data.providers[].metrics.orchestration` entry (issue #61, policy
+  ADR-0043). Per-provider `metrics` keeps only provider-local `cache` and
+  `document_sync` sections. Query-local fallback metadata continues to explain
+  pool saturation or queue timeouts through the typed `fallback_cause`/
+  `fallback_reason` fields.
+- Response schema 14 identifies the changed v0.1.3 status contract and the
+  explicit `function_or_method` syntax target used for honest C++ collisions;
+  v0.1.2 schema 13 is not reused (issue #108).
+
 ## [0.1.2] - 2026-08-21
 
 ### Added

@@ -225,6 +225,7 @@ dependencies = [
  "chakra-language-csharp",
  "chakra-language-go",
  "chakra-language-hcl",
+ "chakra-language-index",
  "chakra-language-java",
  "chakra-language-javascript",
  "chakra-language-php",
@@ -246,6 +247,7 @@ dependencies = [
  "chakra-domain",
  "chakra-engine",
  "chakra-git",
+ "chakra-language-index",
  "nix",
  "tempfile",
  "thiserror",
@@ -276,6 +278,7 @@ dependencies = [
  "chakra-domain",
  "chakra-engine",
  "chakra-git",
+ "chakra-language-index",
  "nix",
  "tempfile",
  "thiserror",
@@ -291,12 +294,28 @@ dependencies = [
  "chakra-domain",
  "chakra-engine",
  "chakra-git",
+ "chakra-language-index",
  "nix",
+ "serde_json",
  "tempfile",
  "thiserror",
  "tracing",
  "tree-sitter",
  "tree-sitter-hcl",
+ "tree-sitter-json",
+]
+
+[[package]]
+name = "chakra-language-index"
+version = "0.1.2"
+dependencies = [
+ "chakra-domain",
+ "chakra-engine",
+ "chakra-git",
+ "nix",
+ "tempfile",
+ "thiserror",
+ "tracing",
 ]
 
 [[package]]
@@ -306,6 +325,7 @@ dependencies = [
  "chakra-domain",
  "chakra-engine",
  "chakra-git",
+ "chakra-language-index",
  "nix",
  "tempfile",
  "thiserror",
@@ -321,6 +341,7 @@ dependencies = [
  "chakra-domain",
  "chakra-engine",
  "chakra-git",
+ "chakra-language-index",
  "nix",
  "tempfile",
  "thiserror",
@@ -352,6 +373,7 @@ dependencies = [
  "chakra-domain",
  "chakra-engine",
  "chakra-git",
+ "chakra-language-index",
  "nix",
  "tempfile",
  "thiserror",
@@ -382,6 +404,7 @@ dependencies = [
  "chakra-domain",
  "chakra-engine",
  "chakra-git",
+ "chakra-language-index",
  "nix",
  "tempfile",
  "thiserror",
@@ -397,6 +420,7 @@ dependencies = [
  "chakra-domain",
  "chakra-engine",
  "chakra-git",
+ "chakra-language-index",
  "nix",
  "tempfile",
  "thiserror",
@@ -445,6 +469,7 @@ dependencies = [
  "chakra-domain",
  "chakra-engine",
  "chakra-lsp",
+ "chakra-provider-worker",
  "crossbeam-channel",
  "lsp-types",
  "serde",
@@ -462,6 +487,7 @@ dependencies = [
  "chakra-domain",
  "chakra-engine",
  "chakra-lsp",
+ "chakra-provider-worker",
  "crossbeam-channel",
  "lsp-types",
  "serde",
@@ -479,6 +505,7 @@ dependencies = [
  "chakra-domain",
  "chakra-engine",
  "chakra-lsp",
+ "chakra-provider-worker",
  "crossbeam-channel",
  "lsp-types",
  "serde",
@@ -496,6 +523,7 @@ dependencies = [
  "chakra-domain",
  "chakra-engine",
  "chakra-lsp",
+ "chakra-provider-worker",
  "crossbeam-channel",
  "lsp-types",
  "serde",
@@ -513,6 +541,7 @@ dependencies = [
  "chakra-domain",
  "chakra-engine",
  "chakra-lsp",
+ "chakra-provider-worker",
  "crossbeam-channel",
  "lsp-types",
  "serde",
@@ -540,6 +569,7 @@ dependencies = [
  "chakra-domain",
  "chakra-engine",
  "chakra-lsp",
+ "chakra-provider-worker",
  "crossbeam-channel",
  "lsp-types",
  "serde",
@@ -575,6 +605,7 @@ dependencies = [
  "chakra-domain",
  "chakra-engine",
  "chakra-lsp",
+ "chakra-provider-worker",
  "crossbeam-channel",
  "lsp-types",
  "serde",
@@ -587,6 +618,24 @@ dependencies = [
 
 [[package]]
 name = "chakra-provider-vtsls"
+version = "0.1.2"
+dependencies = [
+ "chakra-domain",
+ "chakra-engine",
+ "chakra-lsp",
+ "chakra-provider-worker",
+ "crossbeam-channel",
+ "lsp-types",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tracing",
+ "url",
+]
+
+[[package]]
+name = "chakra-provider-worker"
 version = "0.1.2"
 dependencies = [
  "chakra-domain",
@@ -1829,6 +1878,16 @@ name = "tree-sitter-javascript"
 version = "0.25.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "68204f2abc0627a90bdf06e605f5c470aa26fdcb2081ea553a04bdad756693f5"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-json"
+version = "0.24.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4d727acca406c0020cffc6cf35516764f36c8e3dc4408e5ebe2cb35a947ec471"
 dependencies = [
  "cc",
  "tree-sitter-language",

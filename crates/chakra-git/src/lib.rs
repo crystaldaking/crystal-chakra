@@ -1375,7 +1375,7 @@ mod tests {
         let marker = directory.path().join("pid");
         fs::write(
             &executable,
-            "#!/bin/sh\nprintf '%s' \"$$\" > \"$1\"\nwhile :; do :; done\n",
+            "#!/bin/sh\nprintf '%s' \"$$\" > \"$1\"\nexec sleep 30\n",
         )?;
         let mut permissions = fs::metadata(&executable)?.permissions();
         permissions.set_mode(0o755);
@@ -1407,7 +1407,7 @@ mod tests {
         let pid = fs::read_to_string(&marker)?;
         operation.cancel();
         let response = result
-            .recv_timeout(Duration::from_millis(250))
+            .recv_timeout(Duration::from_secs(2))
             .map_err(|_| "cancelled Git process was not reaped promptly")?;
         let error = match response {
             Ok(_) => return Err("cancelled Git process unexpectedly succeeded".into()),

@@ -29,6 +29,12 @@ precise enrichment.
   function, method, or test declaration domains. Rust and PHP names never
   cross-resolve, and a free function never becomes a method candidate solely
   because its text matches.
+- When syntax plus workspace evidence proves that one unqualified C++ call
+  can honestly denote either a same-type member or an unqualified free
+  function, record the explicit `FunctionOrMethod` target domain. Candidate
+  lookup unions those two independently indexed declaration domains; a known
+  method qualifier narrows only the method half. This does not permit ordinary
+  function and method names to cross-resolve.
 - Resolve against the complete callable catalog while materializing a private
   graph revision:
   - exactly one syntax candidate creates one heuristic `CALLS` edge;
@@ -95,6 +101,9 @@ precise enrichment.
 - Some calls that previously appeared as heuristic edges now appear as
   unresolved evidence until a qualifier or precise provider result is
   available. This is an intentional correctness improvement.
+- Genuine C++ member/free collisions remain bounded ambiguous evidence instead
+  of being dropped as unresolved merely because neither single declaration
+  domain is sufficient.
 - ADR-015 refines PHP receiver/type hints without changing graph ownership or
   query contracts.
 
