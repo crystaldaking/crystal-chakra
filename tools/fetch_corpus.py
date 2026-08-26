@@ -19,11 +19,86 @@ import argparse
 import json
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 MANIFEST = REPO_ROOT / "docs" / "support" / "corpus" / "manifest.json"
 CACHE_ROOT = REPO_ROOT / "target" / "corpus"
+
+# Retry budget for transient Git transport failures (issue #69). Bounded: at
+# most FETCH_MAX_ATTEMPTS tries with a short fixed backoff schedule, then the
+# fetch fails closed with the captured Git stderr attached.
+FETCH_MAX_ATTEMPTS = 3
+FETCH_BACKOFF_SECONDS = (2.0, 4.0)
+
+# Lowercase stderr substrings that mark a transport-level failure worth one
+# more attempt. Authentication, missing repositories, and unknown refs (for
+# example an invalid pinned SHA) are deliberately absent: retrying those
+# would only delay a permanent failure.
+RETRYABLE_STDERR_PATTERNS = (
+    "the remote end hung up unexpectedly",
+    "early eof",
+    "rpc failed",
+    "connection reset",
+    "connection timed out",
+    "connection refused",
+    "temporary failure in name resolution",
+    "failed to connect",
+    "could not resolve host",
+    "operation timed out",
+    "http/2 stream",
+    "http 500",
+    "http 502",
+    "bad gateway",
+    "http 503",
+    "http 504",
+    "error: 503",
+    "ssl_read",
+    "ssl syscall",
+    "gnutls",
+    "proxy error",
+)
+
+
+def is_retryable_fetch_error(stderr: str) -> bool:
+    """Return True when captured Git stderr looks like a transient transport failure."""
+    lowered = stderr.lower()
+    return any(pattern in lowered for pattern in RETRYABLE_STDERR_PATTERNS)
+
+
+def run_git(args: list[str], cwd: Path) -> None:
+    subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True, text=True)
+
+
+def fetch_with_retry(name: str, target: Path, sha: str, run=run_git, sleep=time.sleep) -> None:
+    """Fetch one pinned SHA, retrying only transient transport failures.
+
+    Fails closed after FETCH_MAX_ATTEMPTS attempts or immediately on a
+    non-retryable error. The captured Git stderr is always surfaced so
+    operators can distinguish transport failures from invalid SHAs or
+    authentication problems.
+    """
+    attempt = 0
+    while True:
+        try:
+            run(["fetch", "-q", "--depth", "1", "origin", sha], target)
+            return
+        except subprocess.CalledProcessError as exc:
+            attempt += 1
+            stderr = (exc.stderr or "").strip()
+            if attempt >= FETCH_MAX_ATTEMPTS or not is_retryable_fetch_error(stderr):
+                raise RuntimeError(
+                    f"{name}: git fetch failed after {attempt} attempt(s); "
+                    f"git stderr: {stderr or exc}"
+                ) from exc
+            delay = FETCH_BACKOFF_SECONDS[min(attempt - 1, len(FETCH_BACKOFF_SECONDS) - 1)]
+            print(
+                f"retry   {name}: transient fetch failure "
+                f"(attempt {attempt}/{FETCH_MAX_ATTEMPTS}), retrying in {delay:.0f}s"
+            )
+            print(f"        git stderr: {stderr}", file=sys.stderr)
+            sleep(delay)
 
 # Primary-language source extensions used for cache metadata counts.
 LANGUAGE_EXTENSIONS = {
@@ -39,11 +114,6 @@ LANGUAGE_EXTENSIONS = {
     "hcl": {".tf", ".tfvars", ".hcl"},
     "go": {".go"},
 }
-
-
-def run_git(args: list[str], cwd: Path) -> None:
-    subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True, text=True)
-
 
 def current_head(path: Path) -> str | None:
     result = subprocess.run(
@@ -65,7 +135,7 @@ def fetch_repository(name: str, url: str, sha: str) -> Path:
         run_git(["init", "-q"], target)
         run_git(["remote", "add", "origin", url], target)
     print(f"fetch   {name} @ {sha[:12]} (shallow)")
-    run_git(["fetch", "-q", "--depth", "1", "origin", sha], target)
+    fetch_with_retry(name, target, sha)
     run_git(["checkout", "-q", "FETCH_HEAD"], target)
     if current_head(target) != sha:
         raise RuntimeError(f"{name}: checkout did not land on pinned SHA {sha}")

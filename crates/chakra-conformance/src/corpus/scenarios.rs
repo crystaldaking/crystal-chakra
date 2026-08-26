@@ -852,11 +852,27 @@ fn run_provider_lifecycle_scenario(
         call_sites: vec![caller_location],
         provenance: Provenance::ChakraResolver,
     }]);
-    let recovered = workspace.engine.callers(CallersRequest {
-        symbol: Some(SymbolRef::ByName(target.to_owned())),
-        freshness: FreshnessRequirement::RequireFresh,
-        ..CallersRequest::default()
-    })?;
+    let recovered_request = || {
+        workspace.engine.callers(CallersRequest {
+            symbol: Some(SymbolRef::ByName(target.to_owned())),
+            freshness: FreshnessRequirement::RequireFresh,
+            ..CallersRequest::default()
+        })
+    };
+    let mut recovered = recovered_request()?;
+    // A trailing watcher publication may advance the workspace immediately
+    // after the query pins a fresh revision. The engine must reject the now
+    // stale precise result as CatchingUp; retry that honest transient state
+    // within the live index's bounded debounce window. Other provider states
+    // remain immediate failures below.
+    for _ in 0..3 {
+        let state = recovered.data.provider.as_ref().map(|info| info.state);
+        if state != Some(ProviderState::CatchingUp) {
+            break;
+        }
+        std::thread::park_timeout(Duration::from_millis(50));
+        recovered = recovered_request()?;
+    }
     scenario.phase("provider_restart", restart_started);
     let recovered_info = recovered
         .data

@@ -9,6 +9,7 @@
 
 mod discovery;
 mod indexer;
+mod json;
 mod parser;
 
 pub use discovery::{

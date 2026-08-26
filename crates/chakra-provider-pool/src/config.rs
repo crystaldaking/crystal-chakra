@@ -2,6 +2,7 @@ use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
 
+use chakra_domain::location::RepoRelativePath;
 use chakra_domain::operation::{OperationAbort, OperationContext};
 use chakra_domain::symbol::Language;
 use chakra_engine::{PreciseProvider, ProviderWorkspace};
@@ -111,12 +112,14 @@ impl From<OperationAbort> for ProviderStartError {
 type ProviderFactory = dyn Fn(ProviderWorkspace, &OperationContext) -> Result<Arc<dyn PreciseProvider>, ProviderStartError>
     + Send
     + Sync;
+type ProviderPathFilter = dyn Fn(Language, &RepoRelativePath) -> bool + Send + Sync;
 
 pub struct ProviderRegistration {
     pub(crate) name: &'static str,
     pub(crate) languages: Vec<Language>,
     pub(crate) reserved_memory_bytes: u64,
     pub(crate) additional_wait_budget: Duration,
+    pub(crate) path_filter: Option<Arc<ProviderPathFilter>>,
     pub(crate) factory: Arc<ProviderFactory>,
 }
 
@@ -138,6 +141,7 @@ impl ProviderRegistration {
             languages,
             reserved_memory_bytes,
             additional_wait_budget: Duration::ZERO,
+            path_filter: None,
             factory: Arc::new(factory),
         }
     }
@@ -147,6 +151,24 @@ impl ProviderRegistration {
     pub fn with_additional_wait_budget(mut self, budget: Duration) -> Self {
         self.additional_wait_budget = budget;
         self
+    }
+
+    /// Restricts a language route to provider-supported document paths
+    /// without activating the provider.
+    pub fn with_path_filter(
+        mut self,
+        filter: impl Fn(Language, &RepoRelativePath) -> bool + Send + Sync + 'static,
+    ) -> Self {
+        self.path_filter = Some(Arc::new(filter));
+        self
+    }
+
+    pub(crate) fn supports_path(&self, language: Language, path: &RepoRelativePath) -> bool {
+        self.languages.contains(&language)
+            && self
+                .path_filter
+                .as_ref()
+                .is_none_or(|filter| filter(language, path))
     }
 }
 
@@ -158,6 +180,10 @@ impl fmt::Debug for ProviderRegistration {
             .field("languages", &self.languages)
             .field("reserved_memory_bytes", &self.reserved_memory_bytes)
             .field("additional_wait_budget", &self.additional_wait_budget)
+            .field(
+                "path_filter",
+                &self.path_filter.as_ref().map(|_| "configured"),
+            )
             .finish_non_exhaustive()
     }
 }

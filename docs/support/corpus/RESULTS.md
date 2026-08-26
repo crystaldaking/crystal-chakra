@@ -1,6 +1,6 @@
 # Public corpus evaluation results (issue #25)
 
-Produced by `cargo run --release -p chakra-conformance -- corpus --emit docs/support/corpus/results` on macos/aarch64 (10 logical CPUs), 2026-08-21.
+Produced by `cargo run --release -p chakra-conformance -- corpus --emit docs/support/corpus/results` on macos/aarch64 (10 logical CPUs), 2026-08-23.
 
 Measured values vary by machine and run; these artifacts are committed deliberately and are **not** diffed in CI. CI runs `chakra-conformance corpus --verify`, which checks artifact structure and manifest consistency only. Budgets live in `budgets.json`; refreshing budgets or baselines requires review.
 
@@ -11,6 +11,7 @@ Measured values vary by machine and run; these artifacts are committed deliberat
 | csharp | dotnet/runtime | `663c457b86cc` | pass | 18.21 | 1384 | 283524 | 364710 | 937 | 0 |
 | go | kubernetes/kubernetes | `c44d2a82ef7f` | pass | 10.13 | 1951 | 310387 | 379660 | 518 | 0 |
 | go | prometheus/prometheus | `98c983239715` | pass | 0.84 | 242 | 32172 | 40425 | 38 | 0 |
+| hcl | chanzuckerberg/cztack | `b4bdd7cf4adf` | pass | 0.25 | 58 | 10597 | 11817 | 42 | 0 |
 | hcl | terraform-aws-modules/terraform-aws-eks | `48a429f63cf9` | pass | 0.15 | 53 | 7488 | 8308 | 14 | 0 |
 | hcl | terraform-aws-modules/terraform-aws-vpc | `0a36bd54069c` | pass | 0.15 | 46 | 7043 | 8254 | 16 | 0 |
 | java | apache/kafka | `aa502fb153d9` | pass | 8.39 | 1562 | 216728 | 241541 | 236 | 0 |

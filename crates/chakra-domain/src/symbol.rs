@@ -237,6 +237,10 @@ pub enum CallForm {
 pub enum CallTargetKind {
     Function,
     Method,
+    /// Syntax cannot yet choose between an unqualified free function and an
+    /// implicit member method. The optional qualifier narrows the method
+    /// side; the function side remains an unqualified lookup.
+    FunctionOrMethod,
     Test,
     /// A declarative configuration entity referenced from another entity,
     /// such as a Terraform resource, module, variable, or output.
@@ -329,6 +333,16 @@ mod tests {
         assert_eq!(symbol.name(), "refund");
         let flat = sample_symbol("refund")?;
         assert_eq!(flat.name(), "refund");
+        Ok(())
+    }
+
+    #[test]
+    fn mixed_callable_target_has_an_explicit_wire_value() -> Result<(), Box<dyn std::error::Error>>
+    {
+        assert_eq!(
+            serde_json::to_value(CallTargetKind::FunctionOrMethod)?,
+            serde_json::Value::String("function_or_method".to_owned())
+        );
         Ok(())
     }
 }

@@ -16,13 +16,16 @@ use chakra_domain::provenance::{Precision, Provenance};
 use chakra_domain::symbol::{
     CallForm, CallTargetKind, EdgeKind, Language, MAX_RECEIVER_HINT_CHARS, SymbolKey, SymbolKind,
 };
+pub(crate) use chakra_language_index::facts::{
+    CallDraft, NamedRelationDraft, ParsedFile, SymbolDraft,
+};
 use thiserror::Error;
 use tree_sitter::{Node, Parser, Point};
 
 const MAX_SIGNATURE_CHARS: usize = 512;
 
 #[derive(Debug, Error)]
-pub(crate) enum ParseError {
+pub enum ParseError {
     #[error("failed to load the Tree-sitter C++ grammar: {0}")]
     Language(String),
     #[error("Tree-sitter returned no syntax tree for {0}")]
@@ -44,45 +47,6 @@ pub(crate) enum ParseError {
         path: RepoRelativePath,
         message: String,
     },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ParsedFile {
-    pub source: Arc<str>,
-    pub module_path: Vec<String>,
-    pub symbols: Vec<SymbolDraft>,
-    pub calls: Vec<CallDraft>,
-    pub named_relations: Vec<NamedRelationDraft>,
-    pub has_errors: bool,
-    pub diagnostics: Vec<SyntaxDiagnostic>,
-    pub diagnostic_count: u64,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct SymbolDraft {
-    pub key: SymbolKey,
-    pub location: SourceRange,
-    pub signature: Option<String>,
-    pub parent: Option<usize>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct CallDraft {
-    pub caller: usize,
-    pub form: CallForm,
-    pub target_kind: CallTargetKind,
-    pub name: String,
-    pub qualifier: Option<String>,
-    pub receiver_hint: Option<String>,
-    pub location: SourceRange,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct NamedRelationDraft {
-    pub from: usize,
-    pub candidates: Vec<String>,
-    pub target_kinds: Vec<SymbolKind>,
-    pub kind: EdgeKind,
 }
 
 #[derive(Debug, Clone)]
@@ -603,6 +567,7 @@ impl Extraction<'_> {
         if target.name.trim().is_empty() {
             return Ok(());
         }
+        let mut promoted = false;
         if target.form == CallForm::Function
             && target.target_kind == CallTargetKind::Function
             && self
@@ -611,6 +576,7 @@ impl Extraction<'_> {
                 .is_some_and(|symbol| symbol.key.kind == SymbolKind::Method)
         {
             target.target_kind = CallTargetKind::Method;
+            promoted = true;
         }
         self.calls.push(CallDraft {
             caller,
@@ -619,6 +585,7 @@ impl Extraction<'_> {
             name: target.name,
             qualifier: target.qualifier,
             receiver_hint: target.receiver_hint,
+            promoted,
             location: self.range(target.location)?,
         });
         Ok(())
@@ -889,12 +856,12 @@ pub(crate) fn module_path(path: &RepoRelativePath) -> Vec<String> {
     components
 }
 
-pub(crate) struct CppParser {
+pub struct CppParser {
     parser: Parser,
 }
 
 impl CppParser {
-    pub(crate) fn new() -> Result<Self, ParseError> {
+    pub fn new() -> Result<Self, ParseError> {
         let mut parser = Parser::new();
         parser
             .set_language(&tree_sitter_cpp::LANGUAGE.into())
@@ -902,7 +869,7 @@ impl CppParser {
         Ok(Self { parser })
     }
 
-    pub(crate) fn parse(
+    pub fn parse(
         &mut self,
         path: RepoRelativePath,
         source: impl Into<Arc<str>>,

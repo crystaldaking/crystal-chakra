@@ -11,7 +11,7 @@ use crate::revision::Revision;
 use crate::state::{Freshness, ProviderState, WorkspaceStatus};
 
 /// Current envelope schema version.
-pub const SCHEMA_VERSION: u32 = 13;
+pub const SCHEMA_VERSION: u32 = 14;
 
 /// Response section whose contents were cut by a bounded query operation.
 #[derive(
@@ -190,6 +190,10 @@ mod tests {
 
     #[test]
     fn spec_envelope_example_tracks_the_current_schema_version() {
+        assert_eq!(
+            SCHEMA_VERSION, 14,
+            "v0.1.3's breaking status shape must not use v0.1.2 schema 13"
+        );
         let spec = include_str!("../../../docs/SPEC.md");
         let expected = format!("\"schema_version\": {SCHEMA_VERSION}");
         assert!(

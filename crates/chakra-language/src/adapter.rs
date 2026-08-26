@@ -38,6 +38,15 @@ impl LanguageSources {
     }
 }
 
+impl From<LanguageSources> for chakra_language_index::LanguageSources {
+    fn from(sources: LanguageSources) -> Self {
+        Self {
+            files: sources.files,
+            metadata: sources.metadata,
+        }
+    }
+}
+
 impl From<LanguageSources> for chakra_language_rust::RustSources {
     fn from(sources: LanguageSources) -> Self {
         Self {
@@ -56,79 +65,7 @@ impl From<LanguageSources> for chakra_language_php::PhpSources {
     }
 }
 
-impl From<LanguageSources> for chakra_language_typescript::TypeScriptSources {
-    fn from(sources: LanguageSources) -> Self {
-        Self {
-            files: sources.files,
-            metadata: sources.metadata,
-        }
-    }
-}
-
-impl From<LanguageSources> for chakra_language_python::PythonSources {
-    fn from(sources: LanguageSources) -> Self {
-        Self {
-            files: sources.files,
-            metadata: sources.metadata,
-        }
-    }
-}
-
-impl From<LanguageSources> for chakra_language_javascript::JavaScriptSources {
-    fn from(sources: LanguageSources) -> Self {
-        Self {
-            files: sources.files,
-            metadata: sources.metadata,
-        }
-    }
-}
-
-impl From<LanguageSources> for chakra_language_java::JavaSources {
-    fn from(sources: LanguageSources) -> Self {
-        Self {
-            files: sources.files,
-            metadata: sources.metadata,
-        }
-    }
-}
-
 impl From<LanguageSources> for chakra_language_csharp::CSharpSources {
-    fn from(sources: LanguageSources) -> Self {
-        Self {
-            files: sources.files,
-            metadata: sources.metadata,
-        }
-    }
-}
-
-impl From<LanguageSources> for chakra_language_shell::ShellSources {
-    fn from(sources: LanguageSources) -> Self {
-        Self {
-            files: sources.files,
-            metadata: sources.metadata,
-        }
-    }
-}
-
-impl From<LanguageSources> for chakra_language_cpp::CppSources {
-    fn from(sources: LanguageSources) -> Self {
-        Self {
-            files: sources.files,
-            metadata: sources.metadata,
-        }
-    }
-}
-
-impl From<LanguageSources> for chakra_language_hcl::HclSources {
-    fn from(sources: LanguageSources) -> Self {
-        Self {
-            files: sources.files,
-            metadata: sources.metadata,
-        }
-    }
-}
-
-impl From<LanguageSources> for chakra_language_go::GoSources {
     fn from(sources: LanguageSources) -> Self {
         Self {
             files: sources.files,
@@ -147,6 +84,20 @@ pub struct AdapterFactCounts {
     pub relationship_edges: u64,
     pub omitted_relationship_edges: u64,
     pub call_sites: u64,
+}
+
+impl From<chakra_language_index::SyntaxFactCounts> for AdapterFactCounts {
+    fn from(facts: chakra_language_index::SyntaxFactCounts) -> Self {
+        Self {
+            files: facts.files,
+            source_bytes: facts.source_bytes,
+            syntax_error_files: facts.syntax_error_files,
+            symbols: facts.symbols,
+            relationship_edges: facts.relationship_edges,
+            omitted_relationship_edges: facts.omitted_relationship_edges,
+            call_sites: facts.call_sites,
+        }
+    }
 }
 
 impl From<chakra_language_rust::SyntaxFactCounts> for AdapterFactCounts {
@@ -177,120 +128,8 @@ impl From<chakra_language_php::SyntaxFactCounts> for AdapterFactCounts {
     }
 }
 
-impl From<chakra_language_typescript::SyntaxFactCounts> for AdapterFactCounts {
-    fn from(facts: chakra_language_typescript::SyntaxFactCounts) -> Self {
-        Self {
-            files: facts.files,
-            source_bytes: facts.source_bytes,
-            syntax_error_files: facts.syntax_error_files,
-            symbols: facts.symbols,
-            relationship_edges: facts.relationship_edges,
-            omitted_relationship_edges: facts.omitted_relationship_edges,
-            call_sites: facts.call_sites,
-        }
-    }
-}
-
-impl From<chakra_language_python::SyntaxFactCounts> for AdapterFactCounts {
-    fn from(facts: chakra_language_python::SyntaxFactCounts) -> Self {
-        Self {
-            files: facts.files,
-            source_bytes: facts.source_bytes,
-            syntax_error_files: facts.syntax_error_files,
-            symbols: facts.symbols,
-            relationship_edges: facts.relationship_edges,
-            omitted_relationship_edges: facts.omitted_relationship_edges,
-            call_sites: facts.call_sites,
-        }
-    }
-}
-
-impl From<chakra_language_javascript::SyntaxFactCounts> for AdapterFactCounts {
-    fn from(facts: chakra_language_javascript::SyntaxFactCounts) -> Self {
-        Self {
-            files: facts.files,
-            source_bytes: facts.source_bytes,
-            syntax_error_files: facts.syntax_error_files,
-            symbols: facts.symbols,
-            relationship_edges: facts.relationship_edges,
-            omitted_relationship_edges: facts.omitted_relationship_edges,
-            call_sites: facts.call_sites,
-        }
-    }
-}
-
-impl From<chakra_language_java::SyntaxFactCounts> for AdapterFactCounts {
-    fn from(facts: chakra_language_java::SyntaxFactCounts) -> Self {
-        Self {
-            files: facts.files,
-            source_bytes: facts.source_bytes,
-            syntax_error_files: facts.syntax_error_files,
-            symbols: facts.symbols,
-            relationship_edges: facts.relationship_edges,
-            omitted_relationship_edges: facts.omitted_relationship_edges,
-            call_sites: facts.call_sites,
-        }
-    }
-}
-
 impl From<chakra_language_csharp::SyntaxFactCounts> for AdapterFactCounts {
     fn from(facts: chakra_language_csharp::SyntaxFactCounts) -> Self {
-        Self {
-            files: facts.files,
-            source_bytes: facts.source_bytes,
-            syntax_error_files: facts.syntax_error_files,
-            symbols: facts.symbols,
-            relationship_edges: facts.relationship_edges,
-            omitted_relationship_edges: facts.omitted_relationship_edges,
-            call_sites: facts.call_sites,
-        }
-    }
-}
-
-impl From<chakra_language_shell::SyntaxFactCounts> for AdapterFactCounts {
-    fn from(facts: chakra_language_shell::SyntaxFactCounts) -> Self {
-        Self {
-            files: facts.files,
-            source_bytes: facts.source_bytes,
-            syntax_error_files: facts.syntax_error_files,
-            symbols: facts.symbols,
-            relationship_edges: facts.relationship_edges,
-            omitted_relationship_edges: facts.omitted_relationship_edges,
-            call_sites: facts.call_sites,
-        }
-    }
-}
-
-impl From<chakra_language_cpp::SyntaxFactCounts> for AdapterFactCounts {
-    fn from(facts: chakra_language_cpp::SyntaxFactCounts) -> Self {
-        Self {
-            files: facts.files,
-            source_bytes: facts.source_bytes,
-            syntax_error_files: facts.syntax_error_files,
-            symbols: facts.symbols,
-            relationship_edges: facts.relationship_edges,
-            omitted_relationship_edges: facts.omitted_relationship_edges,
-            call_sites: facts.call_sites,
-        }
-    }
-}
-
-impl From<chakra_language_hcl::SyntaxFactCounts> for AdapterFactCounts {
-    fn from(facts: chakra_language_hcl::SyntaxFactCounts) -> Self {
-        Self {
-            files: facts.files,
-            source_bytes: facts.source_bytes,
-            syntax_error_files: facts.syntax_error_files,
-            symbols: facts.symbols,
-            relationship_edges: facts.relationship_edges,
-            omitted_relationship_edges: facts.omitted_relationship_edges,
-            call_sites: facts.call_sites,
-        }
-    }
-}
-
-impl From<chakra_language_go::SyntaxFactCounts> for AdapterFactCounts {
-    fn from(facts: chakra_language_go::SyntaxFactCounts) -> Self {
         Self {
             files: facts.files,
             source_bytes: facts.source_bytes,
@@ -341,6 +180,26 @@ pub struct AdapterReconcileMetrics {
     pub publication: IndexPublicationMetrics,
 }
 
+impl From<chakra_language_index::ReconcileMetrics> for AdapterReconcileMetrics {
+    fn from(metrics: chakra_language_index::ReconcileMetrics) -> Self {
+        Self {
+            scanned_files: metrics.scanned_files,
+            unchanged_files: metrics.unchanged_files,
+            reparsed_files: metrics.reparsed_files,
+            created_files: metrics.created_files,
+            modified_files: metrics.modified_files,
+            deleted_files: metrics.deleted_files,
+            relationship_files_recomputed: metrics.relationship_files_recomputed,
+            framework_files_reparsed: 0,
+            framework_relationship_files_recomputed: 0,
+            framework_truncated_files: 0,
+            syntax_error_files: metrics.syntax_error_files,
+            truncated_call_sites: metrics.truncated_call_sites,
+            publication: metrics.publication,
+        }
+    }
+}
+
 impl From<chakra_language_rust::ReconcileMetrics> for AdapterReconcileMetrics {
     fn from(metrics: chakra_language_rust::ReconcileMetrics) -> Self {
         Self {
@@ -382,168 +241,8 @@ impl From<chakra_language_php::ReconcileMetrics> for AdapterReconcileMetrics {
     }
 }
 
-impl From<chakra_language_typescript::ReconcileMetrics> for AdapterReconcileMetrics {
-    fn from(metrics: chakra_language_typescript::ReconcileMetrics) -> Self {
-        Self {
-            scanned_files: metrics.scanned_files,
-            unchanged_files: metrics.unchanged_files,
-            reparsed_files: metrics.reparsed_files,
-            created_files: metrics.created_files,
-            modified_files: metrics.modified_files,
-            deleted_files: metrics.deleted_files,
-            relationship_files_recomputed: metrics.relationship_files_recomputed,
-            framework_files_reparsed: 0,
-            framework_relationship_files_recomputed: 0,
-            framework_truncated_files: 0,
-            syntax_error_files: metrics.syntax_error_files,
-            truncated_call_sites: metrics.truncated_call_sites,
-            publication: metrics.publication,
-        }
-    }
-}
-
-impl From<chakra_language_python::ReconcileMetrics> for AdapterReconcileMetrics {
-    fn from(metrics: chakra_language_python::ReconcileMetrics) -> Self {
-        Self {
-            scanned_files: metrics.scanned_files,
-            unchanged_files: metrics.unchanged_files,
-            reparsed_files: metrics.reparsed_files,
-            created_files: metrics.created_files,
-            modified_files: metrics.modified_files,
-            deleted_files: metrics.deleted_files,
-            relationship_files_recomputed: metrics.relationship_files_recomputed,
-            framework_files_reparsed: 0,
-            framework_relationship_files_recomputed: 0,
-            framework_truncated_files: 0,
-            syntax_error_files: metrics.syntax_error_files,
-            truncated_call_sites: metrics.truncated_call_sites,
-            publication: metrics.publication,
-        }
-    }
-}
-
-impl From<chakra_language_javascript::ReconcileMetrics> for AdapterReconcileMetrics {
-    fn from(metrics: chakra_language_javascript::ReconcileMetrics) -> Self {
-        Self {
-            scanned_files: metrics.scanned_files,
-            unchanged_files: metrics.unchanged_files,
-            reparsed_files: metrics.reparsed_files,
-            created_files: metrics.created_files,
-            modified_files: metrics.modified_files,
-            deleted_files: metrics.deleted_files,
-            relationship_files_recomputed: metrics.relationship_files_recomputed,
-            framework_files_reparsed: 0,
-            framework_relationship_files_recomputed: 0,
-            framework_truncated_files: 0,
-            syntax_error_files: metrics.syntax_error_files,
-            truncated_call_sites: metrics.truncated_call_sites,
-            publication: metrics.publication,
-        }
-    }
-}
-
-impl From<chakra_language_java::ReconcileMetrics> for AdapterReconcileMetrics {
-    fn from(metrics: chakra_language_java::ReconcileMetrics) -> Self {
-        Self {
-            scanned_files: metrics.scanned_files,
-            unchanged_files: metrics.unchanged_files,
-            reparsed_files: metrics.reparsed_files,
-            created_files: metrics.created_files,
-            modified_files: metrics.modified_files,
-            deleted_files: metrics.deleted_files,
-            relationship_files_recomputed: metrics.relationship_files_recomputed,
-            framework_files_reparsed: 0,
-            framework_relationship_files_recomputed: 0,
-            framework_truncated_files: 0,
-            syntax_error_files: metrics.syntax_error_files,
-            truncated_call_sites: metrics.truncated_call_sites,
-            publication: metrics.publication,
-        }
-    }
-}
-
 impl From<chakra_language_csharp::ReconcileMetrics> for AdapterReconcileMetrics {
     fn from(metrics: chakra_language_csharp::ReconcileMetrics) -> Self {
-        Self {
-            scanned_files: metrics.scanned_files,
-            unchanged_files: metrics.unchanged_files,
-            reparsed_files: metrics.reparsed_files,
-            created_files: metrics.created_files,
-            modified_files: metrics.modified_files,
-            deleted_files: metrics.deleted_files,
-            relationship_files_recomputed: metrics.relationship_files_recomputed,
-            framework_files_reparsed: 0,
-            framework_relationship_files_recomputed: 0,
-            framework_truncated_files: 0,
-            syntax_error_files: metrics.syntax_error_files,
-            truncated_call_sites: metrics.truncated_call_sites,
-            publication: metrics.publication,
-        }
-    }
-}
-
-impl From<chakra_language_shell::ReconcileMetrics> for AdapterReconcileMetrics {
-    fn from(metrics: chakra_language_shell::ReconcileMetrics) -> Self {
-        Self {
-            scanned_files: metrics.scanned_files,
-            unchanged_files: metrics.unchanged_files,
-            reparsed_files: metrics.reparsed_files,
-            created_files: metrics.created_files,
-            modified_files: metrics.modified_files,
-            deleted_files: metrics.deleted_files,
-            relationship_files_recomputed: metrics.relationship_files_recomputed,
-            framework_files_reparsed: 0,
-            framework_relationship_files_recomputed: 0,
-            framework_truncated_files: 0,
-            syntax_error_files: metrics.syntax_error_files,
-            truncated_call_sites: metrics.truncated_call_sites,
-            publication: metrics.publication,
-        }
-    }
-}
-
-impl From<chakra_language_cpp::ReconcileMetrics> for AdapterReconcileMetrics {
-    fn from(metrics: chakra_language_cpp::ReconcileMetrics) -> Self {
-        Self {
-            scanned_files: metrics.scanned_files,
-            unchanged_files: metrics.unchanged_files,
-            reparsed_files: metrics.reparsed_files,
-            created_files: metrics.created_files,
-            modified_files: metrics.modified_files,
-            deleted_files: metrics.deleted_files,
-            relationship_files_recomputed: metrics.relationship_files_recomputed,
-            framework_files_reparsed: 0,
-            framework_relationship_files_recomputed: 0,
-            framework_truncated_files: 0,
-            syntax_error_files: metrics.syntax_error_files,
-            truncated_call_sites: metrics.truncated_call_sites,
-            publication: metrics.publication,
-        }
-    }
-}
-
-impl From<chakra_language_hcl::ReconcileMetrics> for AdapterReconcileMetrics {
-    fn from(metrics: chakra_language_hcl::ReconcileMetrics) -> Self {
-        Self {
-            scanned_files: metrics.scanned_files,
-            unchanged_files: metrics.unchanged_files,
-            reparsed_files: metrics.reparsed_files,
-            created_files: metrics.created_files,
-            modified_files: metrics.modified_files,
-            deleted_files: metrics.deleted_files,
-            relationship_files_recomputed: metrics.relationship_files_recomputed,
-            framework_files_reparsed: 0,
-            framework_relationship_files_recomputed: 0,
-            framework_truncated_files: 0,
-            syntax_error_files: metrics.syntax_error_files,
-            truncated_call_sites: metrics.truncated_call_sites,
-            publication: metrics.publication,
-        }
-    }
-}
-
-impl From<chakra_language_go::ReconcileMetrics> for AdapterReconcileMetrics {
-    fn from(metrics: chakra_language_go::ReconcileMetrics) -> Self {
         Self {
             scanned_files: metrics.scanned_files,
             unchanged_files: metrics.unchanged_files,

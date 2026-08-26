@@ -3,3 +3,7 @@ target/
 
 # OS junk
 .DS_Store
+
+# Python bytecode caches produced by local tooling validation
+__pycache__/
+*.py[cod]

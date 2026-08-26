@@ -1,7 +1,7 @@
 [package]
 name = "chakra-engine"
 description = "In-memory workspace engine: symbol graph, atomic revisions, query service"
-version = "0.1.2"
+version = "0.1.3"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -9,7 +9,7 @@ repository.workspace = true
 publish = false
 
 [dependencies]
-chakra-domain = { path = "../chakra-domain", version = "0.1.2" }
+chakra-domain = { path = "../chakra-domain", version = "0.1.3" }
 arc-swap.workspace = true
 regex.workspace = true
 rpds.workspace = true

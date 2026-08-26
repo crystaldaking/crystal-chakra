@@ -659,7 +659,8 @@ async fn serve(args: ServeArgs) -> ExitCode {
                         .map_err(|error| ProviderStartError::new(error.to_string()))
                 },
             )
-            .with_additional_wait_budget(query_wait_budget),
+            .with_additional_wait_budget(query_wait_budget)
+            .with_path_filter(chakra_provider_terraform_ls::supports_path),
         );
     } else {
         tracing::info!("terraform-ls precise enrichment is disabled");

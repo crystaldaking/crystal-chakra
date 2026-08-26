@@ -12,6 +12,10 @@ use chakra_domain::diagnostic::{
     DiagnosticTruncationCause, SyntaxDiagnostic, SyntaxDiagnosticCause, SyntaxDiagnosticKind,
 };
 use chakra_domain::envelope::{TruncationCause, TruncationSection};
+use chakra_domain::indexing::{
+    IndexBudgetKind, IndexCapability, IndexDegradation, IndexPhase, IndexPhaseMeasurement,
+    IndexingStatus,
+};
 use chakra_domain::location::{RepoRelativePath, SourceRange, TextPosition};
 use chakra_domain::operation::OperationContext;
 use chakra_domain::provenance::{Precision, Provenance};
@@ -45,9 +49,52 @@ struct CountingRustProvider {
 }
 
 #[derive(Debug)]
+struct PathFilteringProvider {
+    calls: Arc<AtomicUsize>,
+}
+
+#[derive(Debug)]
 struct RevisionAdvancingProvider {
     engine: Weak<WorkspaceEngine>,
     result: PreciseQueryResult,
+}
+
+#[derive(Debug)]
+struct PoolAwareProvider;
+
+impl PreciseProvider for PoolAwareProvider {
+    fn name(&self) -> &'static str {
+        "pool-aware-provider"
+    }
+
+    fn supports(&self, language: Language) -> bool {
+        language == Language::Rust
+    }
+
+    fn state_for(&self, _revision: Revision) -> ProviderState {
+        ProviderState::Ready
+    }
+
+    fn metrics(&self) -> Option<chakra_domain::query::ProviderMetrics> {
+        Some(chakra_domain::query::ProviderMetrics::default())
+    }
+
+    fn orchestration_metrics(&self) -> Option<chakra_domain::query::ProviderOrchestrationMetrics> {
+        Some(chakra_domain::query::ProviderOrchestrationMetrics {
+            configured_providers: 1,
+            active_providers: 1,
+            max_active_providers: 3,
+            ..Default::default()
+        })
+    }
+
+    fn enrich_with_context(
+        &self,
+        request: PreciseQueryRequest,
+        _operation: &OperationContext,
+    ) -> PreciseQueryResult {
+        PreciseQueryResult::unavailable(request.workspace.revision, ProviderState::Ready)
+    }
 }
 
 #[derive(Debug)]
@@ -100,6 +147,33 @@ impl PreciseProvider for CountingRustProvider {
 
     fn supports(&self, language: Language) -> bool {
         language == Language::Rust
+    }
+
+    fn state_for(&self, _revision: Revision) -> ProviderState {
+        ProviderState::Ready
+    }
+
+    fn enrich_with_context(
+        &self,
+        request: PreciseQueryRequest,
+        _operation: &OperationContext,
+    ) -> PreciseQueryResult {
+        self.calls.fetch_add(1, Ordering::Relaxed);
+        PreciseQueryResult::unavailable(request.workspace.revision, ProviderState::Degraded)
+    }
+}
+
+impl PreciseProvider for PathFilteringProvider {
+    fn name(&self) -> &'static str {
+        "path-filtering-provider"
+    }
+
+    fn supports(&self, language: Language) -> bool {
+        language == Language::Hcl
+    }
+
+    fn supports_path(&self, language: Language, path: &RepoRelativePath) -> bool {
+        self.supports(language) && !path.as_str().ends_with(".tf.json")
     }
 
     fn state_for(&self, _revision: Revision) -> ProviderState {
@@ -223,6 +297,53 @@ fn status_reports_scenario_counts() -> Result<(), Box<dyn Error>> {
 }
 
 #[test]
+fn detailed_index_phases_are_status_only_but_query_evidence_remains() -> Result<(), Box<dyn Error>>
+{
+    let (engine, _) = scenario_engine()?;
+    let degradation = IndexDegradation {
+        phase: IndexPhase::ParseExtraction,
+        language: Some(Language::Rust),
+        cause: IndexBudgetKind::Files,
+        affected_capabilities: vec![IndexCapability::Declarations],
+        limit: 2,
+        observed: 3,
+        omitted: 1,
+    };
+    let indexing = IndexingStatus {
+        phases: vec![IndexPhaseMeasurement {
+            phase: IndexPhase::GitInventory,
+            language: None,
+            elapsed_micros: 11,
+            cpu_micros: None,
+            cpu_utilization_per_mille: None,
+            work_items: 3,
+            bytes: 0,
+            effective_workers: 1,
+            peak_active_workers: 1,
+            peak_queue_depth: 0,
+            rss_bytes: None,
+            peak_rss_bytes: None,
+        }],
+        degradations: vec![degradation.clone()],
+        ..IndexingStatus::default()
+    };
+    let mut update = engine.begin_update();
+    update.set_indexing(indexing);
+    update.set_freshness(Freshness::Fresh);
+    engine.publish(update)?;
+
+    let status = engine.status(StatusRequest)?;
+    assert_eq!(status.indexing.phases.len(), 1);
+    assert_eq!(status.indexing.degradations, vec![degradation.clone()]);
+
+    let repo_map = engine.repo_map(RepoMapRequest::default())?;
+    assert!(repo_map.indexing.phases.is_empty());
+    assert_eq!(repo_map.indexing.degradations, vec![degradation]);
+    assert_eq!(repo_map.schema_version, status.schema_version);
+    Ok(())
+}
+
+#[test]
 fn status_reports_an_installed_provider_with_its_name_and_languages() -> Result<(), Box<dyn Error>>
 {
     let (engine, _) = scenario_engine()?;
@@ -244,6 +365,33 @@ fn status_reports_an_installed_provider_with_its_name_and_languages() -> Result<
             .capabilities
             .contains(&chakra_domain::query::ProviderCapability::IncomingCalls)
     );
+    Ok(())
+}
+
+#[test]
+fn status_reports_pool_metrics_once_and_keeps_provider_metrics_local() -> Result<(), Box<dyn Error>>
+{
+    let (engine, _) = scenario_engine()?;
+    engine.install_precise_provider(Arc::new(PoolAwareProvider))?;
+    let envelope = engine.status(StatusRequest)?;
+    let pool = envelope
+        .data
+        .provider_pool
+        .as_ref()
+        .ok_or("workspace-global pool metrics must be reported once")?;
+    assert_eq!(pool.configured_providers, 1);
+    assert_eq!(pool.active_providers, 1);
+    assert_eq!(pool.max_active_providers, 3);
+    // Per-provider metrics stay provider-local: no orchestration section may
+    // leak into the serialized provider entry (issue #61).
+    let provider = &envelope.data.providers[0];
+    let serialized = serde_json::to_value(provider)?;
+    let metrics = serialized
+        .get("metrics")
+        .ok_or("provider-local metrics must be present")?;
+    assert!(metrics.get("orchestration").is_none());
+    assert!(metrics.get("cache").is_some());
+    assert!(metrics.get("document_sync").is_some());
     Ok(())
 }
 
@@ -627,6 +775,112 @@ fn exact_symbol_search_reaches_later_partition_before_bounded_scan() -> Result<(
             .all(|candidate| candidate.language == Language::Php)
     );
     assert!(found.truncation.iter().any(|detail| {
+        detail.section == TruncationSection::SymbolSearchCandidates
+            && detail.cause == TruncationCause::ExaminedWorkLimit
+    }));
+    Ok(())
+}
+
+#[test]
+fn symbol_search_exact_mode_reads_only_the_exact_name_index() -> Result<(), Box<dyn Error>> {
+    let identity = chakra_domain::identity::WorkspaceIdentity::for_primary_worktree(
+        std::path::Path::new("."),
+    )?;
+    let engine = chakra_engine::WorkspaceEngine::new(identity);
+    let mut rust = SymbolGraph::new();
+    for index in 0..1_025 {
+        let path = format!("src/noise_{index:04}.rs");
+        add_search_symbol(
+            &mut rust,
+            &path,
+            Language::Rust,
+            &format!("noise::item_{index:04}"),
+            SymbolKind::Function,
+            SourceMetadata::path_fallback(&RepoRelativePath::new(path.clone())?),
+        )?;
+    }
+    let mut php = SymbolGraph::new();
+    for (name, symbol) in [
+        ("app/Service.php", "App::Service::run"),
+        ("app/Runner.php", "App::Runner::run"),
+        ("app/ServiceRunAll.php", "App::Service::run_all"),
+    ] {
+        add_search_symbol(
+            &mut php,
+            name,
+            Language::Php,
+            symbol,
+            SymbolKind::Method,
+            SourceMetadata::path_fallback(&RepoRelativePath::new(name)?),
+        )?;
+    }
+    let graph = SymbolGraph::merge([rust, php])?;
+    let mut update = engine.begin_update();
+    update.replace_graph(graph);
+    update.set_status(WorkspaceStatus::Ready);
+    update.set_freshness(Freshness::Fresh);
+    engine.publish(update)?;
+
+    // Exact mode returns every exact-name candidate across partitions, skips
+    // the substring scan over unrelated noise symbols, and therefore reports
+    // no truncation at all (issue #82).
+    let exact = engine.symbol_search(SymbolSearchRequest {
+        query: "RUN".to_owned(),
+        match_mode: chakra_domain::query::SymbolMatchMode::Exact,
+        limit: Some(20),
+        ..SymbolSearchRequest::default()
+    })?;
+    assert_eq!(exact.data.candidates.len(), 2);
+    assert!(
+        exact
+            .data
+            .candidates
+            .iter()
+            .all(|candidate| candidate.name == "run")
+    );
+    assert!(!exact.truncated);
+    assert!(exact.truncation.is_empty());
+
+    // Qualified exact names match through the same folded index.
+    let qualified = engine.symbol_search(SymbolSearchRequest {
+        query: "app::service::run".to_owned(),
+        match_mode: chakra_domain::query::SymbolMatchMode::Exact,
+        limit: Some(20),
+        ..SymbolSearchRequest::default()
+    })?;
+    assert_eq!(qualified.data.candidates.len(), 1);
+    assert_eq!(qualified.data.candidates[0].name, "run");
+    assert!(qualified.truncation.is_empty());
+
+    // Prefix/substring spellings are not exact-name matches.
+    let prefix = engine.symbol_search(SymbolSearchRequest {
+        query: "run_a".to_owned(),
+        match_mode: chakra_domain::query::SymbolMatchMode::Exact,
+        limit: Some(20),
+        ..SymbolSearchRequest::default()
+    })?;
+    assert!(prefix.data.candidates.is_empty());
+    assert!(prefix.truncation.is_empty());
+
+    // Filters still apply to the exact candidate set.
+    let filtered = engine.symbol_search(SymbolSearchRequest {
+        query: "run".to_owned(),
+        match_mode: chakra_domain::query::SymbolMatchMode::Exact,
+        include_languages: vec![Language::Rust],
+        limit: Some(20),
+        ..SymbolSearchRequest::default()
+    })?;
+    assert!(filtered.data.candidates.is_empty());
+
+    // Default substring mode is unchanged by the new field: it still runs the
+    // bounded broad scan and honestly reports the examined-work limit.
+    let substring = engine.symbol_search(SymbolSearchRequest {
+        query: "RUN".to_owned(),
+        limit: Some(20),
+        ..SymbolSearchRequest::default()
+    })?;
+    assert_eq!(substring.data.candidates.len(), 2);
+    assert!(substring.truncation.iter().any(|detail| {
         detail.section == TruncationSection::SymbolSearchCandidates
             && detail.cause == TruncationCause::ExaminedWorkLimit
     }));
@@ -1865,6 +2119,61 @@ fn rust_provider_is_not_invoked_for_php_symbols() -> Result<(), Box<dyn Error>> 
     assert_eq!(context.data.symbol.precision, Precision::Syntax);
     assert_eq!(context.provider_state, ProviderState::NotConfigured);
     assert_eq!(calls.load(Ordering::Relaxed), 0);
+    Ok(())
+}
+
+#[test]
+fn path_ineligible_symbols_skip_precise_context_and_callers() -> Result<(), Box<dyn Error>> {
+    let identity = chakra_domain::identity::WorkspaceIdentity::for_primary_worktree(
+        std::path::Path::new("."),
+    )?;
+    let engine = chakra_engine::WorkspaceEngine::new(identity);
+    let path = RepoRelativePath::new("main.tf.json")?;
+    let position = TextPosition::new(1, 1)?;
+    let mut graph = SymbolGraph::new();
+    graph.add_file(path.clone(), "{\"resource\":{}}\n")?;
+    let symbol = graph.add_symbol(
+        SymbolKey {
+            language: Language::Hcl,
+            qualified_name: "resource::aws_vpc::main".to_owned(),
+            container: Some("main".to_owned()),
+            kind: SymbolKind::Configuration,
+            path: path.clone(),
+        },
+        SourceRange::new(path, position, TextPosition::new(1, 16)?)?,
+        Some("resource aws_vpc main".to_owned()),
+        Provenance::TreeSitter,
+        Precision::Syntax,
+    )?;
+    let mut update = engine.begin_update();
+    update.replace_graph(graph);
+    update.set_status(WorkspaceStatus::Ready);
+    update.set_freshness(Freshness::Fresh);
+    engine.publish(update)?;
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    engine.install_precise_provider(Arc::new(PathFilteringProvider {
+        calls: calls.clone(),
+    }))?;
+    let revision = engine.snapshot().revision();
+    let reference = SymbolRef::ById {
+        id: symbol,
+        revision,
+    };
+    let context = engine.context(ContextRequest {
+        symbol: Some(reference.clone()),
+        ..ContextRequest::default()
+    })?;
+    let callers = engine.callers(CallersRequest {
+        symbol: Some(reference),
+        ..CallersRequest::default()
+    })?;
+
+    assert_eq!(calls.load(Ordering::Relaxed), 0);
+    assert_eq!(context.provider_state, ProviderState::NotConfigured);
+    assert!(context.data.provider.is_none());
+    assert_eq!(callers.provider_state, ProviderState::NotConfigured);
+    assert!(callers.data.provider.is_none());
     Ok(())
 }
 

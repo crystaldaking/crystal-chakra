@@ -7,15 +7,22 @@ client record: ADR-0032; terraform-ls integration record: ADR-0040.
 ## What is supported
 
 - Git-aware discovery of tracked and untracked non-ignored `.tf`, `.tfvars`,
-  `.tftest.hcl`, and generic `.hcl` files. Terraform/OpenTofu lock files are
-  freshness metadata, not sources.
+  `.tftest.hcl`, and generic `.hcl` files, plus the Terraform JSON variants
+  `.tf.json`, `.tfvars.json`, and `.tftest.json` (issue #86).
+  Terraform/OpenTofu lock files are freshness metadata, not sources.
 - Project scopes use the nearest directory containing Git-visible
   `.tf` configuration. Terraform tests, generated paths, and
   `.terraform`/`.terragrunt-cache` vendor trees receive explicit roles.
 - Tree-sitter syntax intelligence (`tree-sitter-hcl 1.1.0`): resources, data
   sources, modules, variables, outputs, locals, providers, nested generic HCL
   blocks, provider/module imports, Terraform `run` tests, byte-accurate ranges,
-  diagnostics, and bounded configuration traversals.
+  diagnostics, and bounded configuration traversals. The Terraform JSON
+  encoding parses through `tree-sitter-json` and mirrors the same entity
+  model: identical identities, import facts, byte-accurate ranges,
+  diagnostics, decoded JSON names, and `${...}` interpolation reference
+  candidates only where Terraform treats the value as an expression.
+  terraform-ls does not accept JSON files, so they are never synchronized to
+  the provider; their facts stay syntax-derived.
 - Resource/data/module/variable/local/output traversals are represented as
   configuration references, not function calls. Unique local targets produce
   Chakra-owned syntax relations; ambiguity remains explicit.
@@ -59,9 +66,12 @@ schemas. Indirect and dynamically indexed traversals may stay unresolved or
 ambiguous. Generic HCL is parsed and queryable, but Terraform-specific symbol
 kinds apply only to recognized Terraform block shapes.
 
-Terraform JSON configuration and variable/test forms are not indexed because
-the selected grammar parses native HCL only; dedicated JSON syntax support is
-tracked in GitHub issue #86.
+Terraform JSON expression extraction follows Terraform's block-specific
+literal rules. It does not treat variable defaults/descriptions, module
+source/version/provider maps, provider alias/version values, or `terraform`
+settings as templates. JSON/template escapes are decoded before traversals are
+identified, while reported ranges continue to point to the original encoded
+source bytes.
 
 Provider references with no enclosing document symbol and locations outside
 captured workspace documents are omitted. Provider absence, missing
@@ -78,4 +88,6 @@ available and reports degradation.
 - Live and MCP tests: `crates/chakra-language/tests/live_updates.rs` and
   `crates/chakra-mcp/tests/contract.rs`.
 - Corpus: `docs/support/corpus/results/hcl-terraform-aws-modules__terraform-aws-vpc.json`
-  and `docs/support/corpus/results/hcl-terraform-aws-modules__terraform-aws-eks.json`.
+  and `docs/support/corpus/results/hcl-terraform-aws-modules__terraform-aws-eks.json`,
+  plus the Terraform JSON-heavy
+  `docs/support/corpus/results/hcl-chanzuckerberg__cztack.json`.

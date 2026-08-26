@@ -211,6 +211,16 @@
           "size_kb": 5138,
           "primary_language": "HCL",
           "rationale": "Larger module with nested submodules; exercises module composition and cross-file references."
+        },
+        {
+          "name": "chanzuckerberg/cztack",
+          "url": "https://github.com/chanzuckerberg/cztack",
+          "branch": "main",
+          "sha": "b4bdd7cf4adf8fa0703831549a67f5a4e9b2c40e",
+          "license": "MIT",
+          "size_kb": 1446,
+          "primary_language": "HCL",
+          "rationale": "Machine-generated Terraform JSON modules (*.tf.json) alongside HCL; exercises the Terraform JSON adapter path (issue #86)."
         }
       ]
     },

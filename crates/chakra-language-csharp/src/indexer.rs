@@ -1912,8 +1912,9 @@ fn callable_kind_key(kind: chakra_domain::symbol::CallTargetKind) -> u8 {
     match kind {
         CallTargetKind::Function => 0,
         CallTargetKind::Method => 1,
-        CallTargetKind::Test => 2,
-        CallTargetKind::Configuration => 3,
+        CallTargetKind::FunctionOrMethod => 2,
+        CallTargetKind::Test => 3,
+        CallTargetKind::Configuration => 4,
     }
 }
 

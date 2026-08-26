@@ -328,6 +328,25 @@ impl IndexingStatus {
     pub fn is_degraded(&self) -> bool {
         !self.degradations.is_empty()
     }
+
+    /// Revision metadata suitable for non-status query envelopes.
+    ///
+    /// Coverage, capability, degradation, memory, scheduling, and publication
+    /// facts still explain the exact observed revision. The per-phase cold
+    /// index history is operator telemetry and remains available from
+    /// `status`; repeating it in every small query wastes response bytes.
+    pub fn query_summary(&self) -> Self {
+        Self {
+            budgets: self.budgets,
+            coverage: self.coverage.clone(),
+            capabilities: self.capabilities.clone(),
+            degradations: self.degradations.clone(),
+            phases: Vec::new(),
+            scheduling: self.scheduling.clone(),
+            memory: self.memory.clone(),
+            publication: self.publication,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -386,5 +405,41 @@ mod tests {
         assert!(!observer.is_cancelled());
         cancellation.cancel();
         assert!(observer.is_cancelled());
+    }
+
+    #[test]
+    fn query_summary_keeps_revision_evidence_without_phase_history() {
+        let status = IndexingStatus {
+            phases: vec![IndexPhaseMeasurement {
+                phase: IndexPhase::GitInventory,
+                language: None,
+                elapsed_micros: 7,
+                cpu_micros: Some(3),
+                cpu_utilization_per_mille: Some(428),
+                work_items: 2,
+                bytes: 0,
+                effective_workers: 1,
+                peak_active_workers: 1,
+                peak_queue_depth: 0,
+                rss_bytes: None,
+                peak_rss_bytes: None,
+            }],
+            degradations: vec![IndexDegradation {
+                phase: IndexPhase::ParseExtraction,
+                language: Some(Language::Rust),
+                cause: IndexBudgetKind::Files,
+                affected_capabilities: vec![IndexCapability::Declarations],
+                limit: 1,
+                observed: 2,
+                omitted: 1,
+            }],
+            ..IndexingStatus::default()
+        };
+
+        let summary = status.query_summary();
+        assert!(summary.phases.is_empty());
+        assert_eq!(summary.degradations, status.degradations);
+        assert_eq!(summary.coverage, status.coverage);
+        assert_eq!(summary.publication, status.publication);
     }
 }

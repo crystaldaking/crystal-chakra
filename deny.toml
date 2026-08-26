@@ -18,6 +18,23 @@ confidence-threshold = 0.8
 multiple-versions = "warn"
 wildcards = "deny"
 highlight = "all"
+# Accepted duplicate baseline (issue #88, recorded 2026-08-22). Each entry
+# skips one exact transitive version so the check output stays clean and any
+# NEW duplicate keeps warning — do not add blanket allowances. Re-evaluate an
+# entry whenever the direct dependency named in its reason is upgraded, and
+# remove the entry once upstream version convergence makes it unnecessary.
+skip = [
+    # Pulled by lsp-types 0.97 (via fluent-uri); the rest of the tree uses
+    # bitflags 2.x. Converges when lsp-types upgrades to bitflags 2.
+    { crate = "bitflags@1.3.2", reason = "transitive via lsp-types/fluent-uri; tracked in issue #88" },
+    # Pulled by the synstructure/yoke-derive/icu macro stack under url; the
+    # clap/darling stacks already use syn 3.x. Converges as the icu macro
+    # stack upgrades to syn 3.
+    { crate = "syn@2.0.119", reason = "transitive via synstructure/yoke-derive/icu under url; tracked in issue #88" },
+    # Pulled by notify 8.2; the clap/anstream stack uses windows-sys 0.61.
+    # Converges when notify targets windows-sys 0.61.
+    { crate = "windows-sys@0.60.2", reason = "transitive via notify; tracked in issue #88" },
+]
 
 [sources]
 unknown-registry = "deny"

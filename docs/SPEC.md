@@ -601,7 +601,7 @@ Conceptual fields:
 
 ```json
 {
-  "schema_version": 13,
+  "schema_version": 14,
   "workspace_id": "...",
   "revision": 42,
   "freshness": "fresh",
@@ -618,6 +618,11 @@ response section, the budget cause, the configured limit, and the omitted
 amount when it is known without unbounded work. Workspace-wide ambiguity or
 indexing degradation is status data, not a reason to mark an unrelated query
 section incomplete.
+
+Every query carries the observed revision's bounded indexing coverage,
+capability, degradation, memory, scheduling, and publication summary. Detailed
+per-phase indexing measurements are operator telemetry exposed by `status`
+rather than repeated in every query envelope.
 
 The exact schema is an implementation decision and should be tested as a contract.
 
