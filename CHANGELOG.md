@@ -5,6 +5,8 @@ version tags prefixed with `v`.
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-08-26
+
 Post-v0.1.2 correctness, query ergonomics, corpus resilience, dependency
 hygiene, and targeted maintainability follow-ups (milestone v0.1.3), plus the
 agent-facing process rules the milestone was developed under: develop Chakra
@@ -355,7 +357,8 @@ record every pre-1.0 compatibility break explicitly (ADR-0043).
 - All development after this release follows the Gitflow policy in
   `CONTRIBUTING.md` and `AGENTS.md`.
 
-[Unreleased]: https://github.com/crystaldaking/crystal-chakra/compare/v0.1.2...develop
+[Unreleased]: https://github.com/crystaldaking/crystal-chakra/compare/v0.1.3...develop
+[0.1.3]: https://github.com/crystaldaking/crystal-chakra/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/crystaldaking/crystal-chakra/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/crystaldaking/crystal-chakra/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/crystaldaking/crystal-chakra/releases/tag/v0.1.0
