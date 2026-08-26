@@ -55,7 +55,7 @@ Requirements:
 ```sh
 git clone https://github.com/crystaldaking/crystal-chakra.git
 cd crystal-chakra
-git checkout v0.1.2
+git checkout v0.1.3
 cargo install --locked --path crates/chakra-cli
 chakra --version
 ```
@@ -165,7 +165,7 @@ and [ADRs](docs/adr/) for the full contract and trade-offs.
 ## Evidence and validation
 
 The shared conformance harness runs the same behavior catalog for every
-language. A separate opt-in evaluation runs against 19 pinned public
+language. A separate opt-in evaluation runs against 20 pinned public
 repositories, including Kubernetes, VS Code, Kafka, Spring Boot, Django,
 Symfony, Tokio, and the .NET runtime. Results and machine-readable artifacts
 are in [docs/support/corpus](docs/support/corpus/).

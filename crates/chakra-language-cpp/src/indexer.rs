@@ -115,36 +115,41 @@ fn reclassify_qualified_callables(files: &mut BTreeMap<RepoRelativePath, Arc<Par
             }
         }
     }
-    if namespaces.is_empty() {
-        return;
-    }
     for file in files.values_mut() {
         let reclassifiable = file.symbols.iter().any(|symbol| {
-            symbol.key.kind == SymbolKind::Method
-                && owner_is_namespace_only(&symbol.key.qualified_name, &namespaces, &types)
+            matches!(symbol.key.kind, SymbolKind::Function | SymbolKind::Method)
+                && qualified_callable_kind(&symbol.key.qualified_name, &namespaces, &types)
+                    .is_some_and(|kind| kind != symbol.key.kind)
         });
         if !reclassifiable {
             continue;
         }
         for symbol in &mut Arc::make_mut(file).symbols {
-            if symbol.key.kind == SymbolKind::Method
-                && owner_is_namespace_only(&symbol.key.qualified_name, &namespaces, &types)
+            if matches!(symbol.key.kind, SymbolKind::Function | SymbolKind::Method)
+                && let Some(kind) =
+                    qualified_callable_kind(&symbol.key.qualified_name, &namespaces, &types)
             {
-                symbol.key.kind = SymbolKind::Function;
+                symbol.key.kind = kind;
             }
         }
     }
 }
 
-fn owner_is_namespace_only(
+/// The parser's conservative kind for an explicitly qualified definition is
+/// `Method`. A namespace owner upgrades it to `Function`; a type or an owner
+/// no longer proven by workspace evidence restores `Method`. Applying this to
+/// both retained variants makes the post-parse pass reversible across edits.
+fn qualified_callable_kind(
     qualified_name: &str,
     namespaces: &HashSet<String>,
     types: &HashSet<String>,
-) -> bool {
-    let Some((owner, _)) = qualified_name.rsplit_once("::") else {
-        return false;
-    };
-    namespaces.contains(owner) && !types.contains(owner)
+) -> Option<SymbolKind> {
+    let (owner, _) = qualified_name.rsplit_once("::")?;
+    Some(if namespaces.contains(owner) && !types.contains(owner) {
+        SymbolKind::Function
+    } else {
+        SymbolKind::Method
+    })
 }
 
 /// Resolves unqualified function-form calls that the parser promoted to the
@@ -158,9 +163,9 @@ fn owner_is_namespace_only(
 /// - retargets it to the function domain when no same-type member exists but
 ///   a free function does — a unique free function then resolves, and several
 ///   report ambiguity through the usual lazy candidate contract;
-/// - converts a genuine member/free collision to unresolved member-form
-///   evidence instead of silently committing to the member (clangd remains
-///   the precise path);
+/// - represents a genuine member/free collision as one bounded mixed-domain
+///   ambiguity, with the same-type method and unqualified free functions all
+///   enumerable (clangd remains the precise path);
 /// - returns calls inside callables reclassified as free functions (issue
 ///   #84) to the function domain.
 ///
@@ -200,6 +205,7 @@ fn resolve_unqualified_method_calls(files: &mut BTreeMap<RepoRelativePath, Arc<P
             // pure, reversible function of the current workspace evidence.
             call.form = CallForm::Function;
             call.target_kind = CallTargetKind::Method;
+            call.qualifier = None;
             let Some(caller) = symbols.get(call.caller) else {
                 continue;
             };
@@ -209,20 +215,28 @@ fn resolve_unqualified_method_calls(files: &mut BTreeMap<RepoRelativePath, Arc<P
                 call.target_kind = CallTargetKind::Function;
                 continue;
             }
-            let member_exists = caller
+            let owner = caller
                 .key
                 .qualified_name
                 .rsplit_once("::")
-                .is_some_and(|(owner, _)| methods.contains(&format!("{owner}::{}", call.name)));
+                .map(|(owner, _)| owner.to_owned());
+            let member_exists = owner
+                .as_deref()
+                .is_some_and(|owner| methods.contains(&format!("{owner}::{}", call.name)));
             let free_candidates = free_functions.get(call.name.as_str()).copied().unwrap_or(0);
             match (member_exists, free_candidates) {
-                (true, 0) | (false, 0) => {}
+                (true, 0) => call.qualifier = owner,
+                // Preserve the existing bounded method-domain ambiguity when
+                // workspace evidence cannot prove a free function or a
+                // same-type member; inheritance may still supply the target.
+                (false, 0) => {}
                 (false, _) => call.target_kind = CallTargetKind::Function,
-                // Member and free-function candidates both survive: the
-                // syntax tier must not commit to either. Member form without
-                // a qualifier is unresolved by construction, so the call
-                // remains visible as bounded syntax evidence.
-                (true, _) => call.form = CallForm::Member,
+                // The qualifier narrows only the method side of this explicit
+                // mixed-domain lookup; free functions remain unqualified.
+                (true, _) => {
+                    call.target_kind = CallTargetKind::FunctionOrMethod;
+                    call.qualifier = owner;
+                }
             }
         }
     }
@@ -396,27 +410,57 @@ mod tests {
             RepoRelativePath::new("src/lib.cpp")?,
             Arc::<str>::from("void ns::free() {}\n"),
         );
+        sources.insert(
+            RepoRelativePath::new("include/evidence.h")?,
+            Arc::<str>::from("namespace other { void untouched(); }\n"),
+        );
         let (index, graph) = CppSyntaxIndex::from_sources(sources.clone())?;
-        let kind_of = |graph: &SymbolGraph| {
+        let kind_of = |graph: &SymbolGraph, path: &str| {
             graph
                 .symbols()
                 .iter()
-                .find(|symbol| symbol.key.qualified_name == "ns::free")
+                .find(|symbol| {
+                    symbol.key.qualified_name == "ns::free" && symbol.key.path.as_str() == path
+                })
                 .map(|symbol| symbol.key.kind)
         };
         // Without namespace evidence the conservative kind is kept.
-        assert_eq!(kind_of(&graph), Some(SymbolKind::Method));
+        assert_eq!(kind_of(&graph, "src/lib.cpp"), Some(SymbolKind::Method));
 
-        // Introducing the namespace declaration in another file reclassifies
-        // the retained definition without reparsing it.
+        // Modifying an already-discovered evidence file keeps the structural
+        // delta eligible. The retained definition must still be republished
+        // after the workspace evidence pass changes its facts.
         sources.insert(
-            RepoRelativePath::new("include/ns.h")?,
+            RepoRelativePath::new("include/evidence.h")?,
             Arc::<str>::from("namespace ns { void free(); }\n"),
         );
-        let report = index.reconcile_sources(sources)?;
+        let report = index.reconcile_sources(sources.clone())?;
         let next = report.next_index.ok_or("reconcile must publish a graph")?;
-        assert_eq!(kind_of(next.graph()), Some(SymbolKind::Function));
+        assert_eq!(
+            kind_of(next.graph(), "src/lib.cpp"),
+            Some(SymbolKind::Function)
+        );
         assert_eq!(report.metrics.reparsed_files, 1);
+        assert!(report.metrics.publication.structurally_incremental);
+        assert_eq!(report.metrics.publication.rebuilt_files, 2);
+        next.graph().validate_consistency()?;
+
+        // Removing the same evidence must reverse the retained definition's
+        // classification without reparsing its source file (issue #117).
+        sources.insert(
+            RepoRelativePath::new("include/evidence.h")?,
+            Arc::<str>::from("namespace other { void untouched(); }\n"),
+        );
+        let report = next.reconcile_sources(sources)?;
+        let reverted = report.next_index.ok_or("reconcile must publish a graph")?;
+        assert_eq!(
+            kind_of(reverted.graph(), "src/lib.cpp"),
+            Some(SymbolKind::Method)
+        );
+        assert_eq!(report.metrics.reparsed_files, 1);
+        assert!(report.metrics.publication.structurally_incremental);
+        assert_eq!(report.metrics.publication.rebuilt_files, 2);
+        reverted.graph().validate_consistency()?;
         Ok(())
     }
 
@@ -427,7 +471,7 @@ mod tests {
             RepoRelativePath::new("include/api.h")?,
             Arc::<str>::from(
                 "namespace ns {\n\
-                 struct Type { void member_only(); void colliding(); void helper(); };\n\
+                 struct Type { void member_only(); void colliding(); void helper(); void run_collision(); };\n\
                  }\n\
                  void unique_free();\n\
                  void shared_name();\n\
@@ -439,7 +483,7 @@ mod tests {
             RepoRelativePath::new("src/impl.cpp")?,
             Arc::<str>::from(
                 "void ns::Type::member_only() { unique_free(); }\n\
-                 void ns::Type::colliding() { colliding(); }\n\
+                 void ns::Type::run_collision() { colliding(); }\n\
                  void ns::Type::helper() { shared_name(); }\n",
             ),
         );
@@ -479,12 +523,38 @@ mod tests {
         assert_eq!(target.key.qualified_name, "unique_free");
         assert_eq!(target.key.kind, SymbolKind::Function);
 
-        // Member/free collision: neither side may win silently.
-        let colliding = single_call(&graph, "ns::Type::colliding", "src/impl.cpp")?;
-        assert_eq!(colliding.resolution, CallResolution::Unresolved);
+        // Member/free collision: neither side may win silently and both
+        // declarations remain enumerable.
+        let colliding = single_call(&graph, "ns::Type::run_collision", "src/impl.cpp")?;
+        assert_eq!(colliding.target_kind, CallTargetKind::FunctionOrMethod);
+        assert_eq!(
+            colliding.resolution,
+            CallResolution::Ambiguous { candidates: 2 }
+        );
         assert_eq!(colliding.name, "colliding");
         assert_eq!(colliding.provenance, Provenance::TreeSitter);
         assert_eq!(colliding.precision, Precision::Syntax);
+        let (candidates, truncated) = graph.call_candidates(&colliding, 8);
+        assert!(!truncated);
+        let mut identities: Vec<_> = candidates
+            .iter()
+            .map(|symbol| {
+                (
+                    symbol.key.qualified_name.as_str(),
+                    symbol.key.kind,
+                    symbol.key.path.as_str(),
+                )
+            })
+            .collect();
+        identities
+            .sort_unstable_by(|left, right| left.0.cmp(right.0).then_with(|| left.2.cmp(right.2)));
+        assert_eq!(
+            identities,
+            [
+                ("colliding", SymbolKind::Function, "include/api.h"),
+                ("ns::Type::colliding", SymbolKind::Method, "include/api.h"),
+            ]
+        );
 
         // Two free functions, no member: honest ambiguity with both
         // candidates enumerable.
@@ -581,7 +651,7 @@ mod tests {
         ));
 
         // A new colliding free function in another file must flip the call to
-        // unresolved without reparsing the call's own file.
+        // explicit ambiguity without reparsing the call's own file.
         sources.insert(
             RepoRelativePath::new("src/free.cpp")?,
             Arc::<str>::from("void helper() {}\n"),
@@ -589,7 +659,10 @@ mod tests {
         let report = index.reconcile_sources(sources.clone())?;
         let next = report.next_index.ok_or("reconcile must publish a graph")?;
         assert_eq!(report.metrics.reparsed_files, 1);
-        assert_eq!(resolution_of(next.graph())?, CallResolution::Unresolved);
+        assert_eq!(
+            resolution_of(next.graph())?,
+            CallResolution::Ambiguous { candidates: 2 }
+        );
         next.graph().validate_consistency()?;
 
         // Removing it restores the member resolution; a deletion reparses

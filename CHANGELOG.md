@@ -5,6 +5,30 @@ version tags prefixed with `v`.
 
 ## [Unreleased]
 
+Post-v0.1.2 correctness, query ergonomics, corpus resilience, dependency
+hygiene, and targeted maintainability follow-ups (milestone v0.1.3), plus the
+agent-facing process rules the milestone was developed under: develop Chakra
+with Chakra and file every discovered problem as an issue (`AGENTS.md`), and
+record every pre-1.0 compatibility break explicitly (ADR-0043).
+
+### Tooling
+
+- The public-corpus fetcher retries transient Git transport failures with a
+  bounded attempt budget and backoff, surfaces captured Git stderr, and fails
+  closed; hermetic tests pin classification and attempt bounds (issue #69).
+  Standard Python bytecode caches are ignored and the duplicate Git helper was
+  removed, so the documented tooling test no longer dirties a clean checkout
+  (issue #115).
+- The accepted cargo-deny duplicate baseline (bitflags 1.3.2, syn 2.0.119,
+  windows-sys 0.60.2) is recorded as exact-version skip entries with reasons
+  and re-evaluation triggers, so new duplicates keep warning (issue #88).
+- The Git cancellation/reaping regression uses an idle owned process and a
+  condition-based bounded completion wait instead of a CPU-spinning child and
+  load-sensitive 250 ms assertion (issue #106).
+- The public-corpus provider restart check tolerates only transient revision
+  catch-up while preserving exact revision safety and hard failures for
+  degraded providers (issue #118).
+
 ### Changed
 
 - The eight `chakra-lsp`-based provider adapters (vtsls, pyright, clangd,
@@ -34,6 +58,15 @@ version tags prefixed with `v`.
 
 ### Added
 
+- Terraform JSON syntax support (issue #86): `.tf.json`, `.tfvars.json`, and
+  `.tftest.json` files are discovered as HCL-language sources and parsed
+  through `tree-sitter-json` into the native-HCL entity model. JSON escapes
+  are decoded for identities and expressions while ranges retain original
+  source bytes; Terraform's literal exceptions and template escaping prevent
+  false references (issue #112). Path-aware provider routing keeps these
+  syntax-only documents out of terraform-ls and its lifecycle metrics (issue
+  #113). Conformance, live-update/diff/MCP checks, and the pinned cztack corpus
+  cover the feature; the public corpus now contains 20 repositories.
 - `symbol_search` accepts `match_mode: "exact"` (issue #82): matching is
   limited to the exact case-folded simple/qualified name index, existing
   language/kind/source filters and budgets still apply, and truncation is
@@ -51,8 +84,19 @@ version tags prefixed with `v`.
   interpretation too early (issue #83): with workspace evidence a call
   resolves to a unique free function, reports honest ambiguity when several
   free functions match, stays a member call when only a same-type member
-  exists, and becomes unresolved member-form evidence on a genuine
-  member/free collision. clangd remains the precise path.
+  exists, and retains both declaration domains as bounded ambiguous evidence
+  on a genuine member/free collision (issue #111). clangd remains the precise
+  path.
+- Hook-induced structural changes in the shared language-index reconciler now
+  participate in the graph delta even when their source file was not reparsed.
+  C++ namespace evidence can therefore reclassify a retained definition in the
+  same atomic revision without forcing a full index, and adding or removing
+  that evidence reverses the classification deterministically (issues #114
+  and #117).
+- Detailed indexing phase history is returned by `status` instead of being
+  repeated in every small query envelope. Non-status queries still carry the
+  exact revision's coverage, capability, degradation, memory, scheduling, and
+  publication evidence (issue #107).
 
 ### Breaking
 
@@ -63,6 +107,9 @@ version tags prefixed with `v`.
   `document_sync` sections. Query-local fallback metadata continues to explain
   pool saturation or queue timeouts through the typed `fallback_cause`/
   `fallback_reason` fields.
+- Response schema 14 identifies the changed v0.1.3 status contract and the
+  explicit `function_or_method` syntax target used for honest C++ collisions;
+  v0.1.2 schema 13 is not reused (issue #108).
 
 ## [0.1.2] - 2026-08-21
 

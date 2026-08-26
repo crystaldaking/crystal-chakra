@@ -19,7 +19,8 @@ client record: ADR-0032; terraform-ls integration record: ADR-0040.
   diagnostics, and bounded configuration traversals. The Terraform JSON
   encoding parses through `tree-sitter-json` and mirrors the same entity
   model: identical identities, import facts, byte-accurate ranges,
-  diagnostics, and `${...}` interpolation reference candidates.
+  diagnostics, decoded JSON names, and `${...}` interpolation reference
+  candidates only where Terraform treats the value as an expression.
   terraform-ls does not accept JSON files, so they are never synchronized to
   the provider; their facts stay syntax-derived.
 - Resource/data/module/variable/local/output traversals are represented as
@@ -65,9 +66,12 @@ schemas. Indirect and dynamically indexed traversals may stay unresolved or
 ambiguous. Generic HCL is parsed and queryable, but Terraform-specific symbol
 kinds apply only to recognized Terraform block shapes.
 
-Terraform JSON configuration and variable/test forms are not indexed because
-the selected grammar parses native HCL only; dedicated JSON syntax support is
-tracked in GitHub issue #86.
+Terraform JSON expression extraction follows Terraform's block-specific
+literal rules. It does not treat variable defaults/descriptions, module
+source/version/provider maps, provider alias/version values, or `terraform`
+settings as templates. JSON/template escapes are decoded before traversals are
+identified, while reported ranges continue to point to the original encoded
+source bytes.
 
 Provider references with no enclosing document symbol and locations outside
 captured workspace documents are omitted. Provider absence, missing
@@ -84,4 +88,6 @@ available and reports degradation.
 - Live and MCP tests: `crates/chakra-language/tests/live_updates.rs` and
   `crates/chakra-mcp/tests/contract.rs`.
 - Corpus: `docs/support/corpus/results/hcl-terraform-aws-modules__terraform-aws-vpc.json`
-  and `docs/support/corpus/results/hcl-terraform-aws-modules__terraform-aws-eks.json`.
+  and `docs/support/corpus/results/hcl-terraform-aws-modules__terraform-aws-eks.json`,
+  plus the Terraform JSON-heavy
+  `docs/support/corpus/results/hcl-chanzuckerberg__cztack.json`.

@@ -1788,7 +1788,7 @@ impl SymbolGraph {
                 match call_site.resolution {
                     CallResolution::Ambiguous { .. } => {
                         self.ambiguous_call_sites = self.ambiguous_call_sites.saturating_sub(1);
-                        if let Some(key) = call_site_lookup_key(
+                        for key in call_site_lookup_keys(
                             self.symbol(call_site.caller)
                                 .map(|symbol| symbol.key.language),
                             call_site.form,
@@ -1843,24 +1843,37 @@ impl SymbolGraph {
         if !matches!(call_site.resolution, CallResolution::Ambiguous { .. }) {
             return (Vec::new(), false);
         }
-        let Some(key) = call_site_lookup_key(
+        let keys = call_site_lookup_keys(
             self.symbol(call_site.caller)
                 .map(|symbol| symbol.key.language),
             call_site.form,
             call_site.target_kind,
             &call_site.name,
             call_site.qualifier.as_deref(),
-        ) else {
+        );
+        if keys.is_empty() {
             return (Vec::new(), false);
-        };
-        let Some(ids) = self.callables.get(&key) else {
-            return (Vec::new(), false);
-        };
-        let truncated = ids.len() > limit;
-        let candidates = ids
-            .iter()
-            .take(limit)
-            .filter_map(|id| self.symbol(*id))
+        }
+        let mut candidate_ids = Vec::with_capacity(limit.saturating_add(1));
+        let mut seen = HashSet::with_capacity(limit.saturating_add(1));
+        'keys: for key in keys {
+            let Some(ids) = self.callables.get(&key) else {
+                continue;
+            };
+            for id in ids.iter() {
+                if seen.insert(*id) {
+                    candidate_ids.push(*id);
+                    if candidate_ids.len() > limit {
+                        break 'keys;
+                    }
+                }
+            }
+        }
+        let truncated = candidate_ids.len() > limit;
+        candidate_ids.truncate(limit);
+        let candidates = candidate_ids
+            .into_iter()
+            .filter_map(|id| self.symbol(id))
             .collect();
         (candidates, truncated)
     }
@@ -1963,7 +1976,7 @@ impl SymbolGraph {
         match call_site.resolution {
             CallResolution::Ambiguous { .. } => {
                 self.ambiguous_call_sites += 1;
-                if let Some(key) = call_site_lookup_key(
+                for key in call_site_lookup_keys(
                     self.symbol(call_site.caller)
                         .map(|symbol| symbol.key.language),
                     call_site.form,
@@ -1995,16 +2008,18 @@ impl SymbolGraph {
         name: &str,
         qualifier: Option<&str>,
     ) -> CallResolution {
-        let Some(key) = call_site_lookup_key(Some(language), form, target_kind, name, qualifier)
-        else {
+        let keys = call_site_lookup_keys(Some(language), form, target_kind, name, qualifier);
+        if keys.is_empty() {
             return CallResolution::Unresolved;
-        };
-        match self
-            .callables
-            .get(&key)
-            .map(|ids| ids.as_slice())
-            .unwrap_or(&[])
-        {
+        }
+        let mut candidates = Vec::new();
+        let mut seen = HashSet::new();
+        for key in keys {
+            if let Some(ids) = self.callables.get(&key) {
+                candidates.extend(ids.iter().copied().filter(|id| seen.insert(*id)));
+            }
+        }
+        match candidates.as_slice() {
             [] => CallResolution::Unresolved,
             [target] => CallResolution::Resolved { target: *target },
             candidates => CallResolution::Ambiguous {
@@ -2275,17 +2290,21 @@ impl SymbolGraph {
                 }
                 CallResolution::Ambiguous { .. } => {
                     ambiguous += 1;
-                    let key = call_site_lookup_key(
+                    let keys = call_site_lookup_keys(
                         Some(caller.key.language),
                         call_site.form,
                         call_site.target_kind,
                         &call_site.name,
                         call_site.qualifier.as_deref(),
-                    )
-                    .ok_or(ConsistencyError::CallSiteResolutionMismatch {
-                        index: *index as usize,
-                    })?;
-                    expected_by_lookup.entry(key).or_default().push(*index);
+                    );
+                    if keys.is_empty() {
+                        return Err(ConsistencyError::CallSiteResolutionMismatch {
+                            index: *index as usize,
+                        });
+                    }
+                    for key in keys {
+                        expected_by_lookup.entry(key).or_default().push(*index);
+                    }
                 }
                 CallResolution::Unresolved => unresolved += 1,
             }
@@ -2478,14 +2497,46 @@ fn callable_lookup_keys(symbol: &Symbol) -> Vec<CallLookupKey> {
         .collect()
 }
 
-fn call_site_lookup_key(
+fn call_site_lookup_keys(
     language: Option<Language>,
     form: CallForm,
     target_kind: CallTargetKind,
     name: &str,
     qualifier: Option<&str>,
+) -> Vec<CallLookupKey> {
+    let Some(language) = language else {
+        return Vec::new();
+    };
+    if target_kind == CallTargetKind::FunctionOrMethod {
+        let mut keys = Vec::with_capacity(2);
+        if let Some(method) =
+            call_site_lookup_key(language, form, CallTargetKind::Method, name, qualifier)
+        {
+            keys.push(method);
+        }
+        if let Some(function) = call_site_lookup_key(
+            language,
+            CallForm::Function,
+            CallTargetKind::Function,
+            name,
+            None,
+        ) {
+            keys.push(function);
+        }
+        return keys;
+    }
+    call_site_lookup_key(language, form, target_kind, name, qualifier)
+        .into_iter()
+        .collect()
+}
+
+fn call_site_lookup_key(
+    language: Language,
+    form: CallForm,
+    target_kind: CallTargetKind,
+    name: &str,
+    qualifier: Option<&str>,
 ) -> Option<CallLookupKey> {
-    let language = language?;
     if qualifier.is_none()
         && matches!(
             form,

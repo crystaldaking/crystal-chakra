@@ -107,7 +107,8 @@ impl JsonExtraction<'_> {
 
     fn key_text(&self, pair: Node<'_>) -> Option<String> {
         let key = pair.child_by_field_name("key")?;
-        json_string_text(self.text(key))
+        decode_json_string(self.text(key))
+            .and_then(|decoded| (!decoded.value.is_empty()).then_some(decoded.value))
     }
 
     fn add_symbol(
@@ -147,7 +148,7 @@ impl JsonExtraction<'_> {
             let Some(name) = self.key_text(pair) else {
                 continue;
             };
-            let symbol = self.add_symbol(
+            self.add_symbol(
                 Some(module),
                 Some("tfvars".to_owned()),
                 vec!["tfvars".to_owned(), name.clone()],
@@ -155,9 +156,8 @@ impl JsonExtraction<'_> {
                 pair,
                 Some("tfvars assignment (JSON)".to_owned()),
             )?;
-            if let Some(value) = pair.child_by_field_name("value") {
-                self.scan_interpolations(value, symbol)?;
-            }
+            // Terraform variable definition files contain literal values;
+            // references to configuration objects are not evaluated here.
         }
         Ok(())
     }
@@ -270,7 +270,7 @@ impl JsonExtraction<'_> {
             let name = identity.last().cloned().unwrap_or_default();
             let (segments, kind) = json_block_identity(block_type, &identity, &self.path);
             let signature = Some(format!("{} \"{}\" (JSON)", block_type, name));
-            let container = segments.join("::");
+            let container = module_path(&self.path).join("::");
             let symbol = self.add_symbol(
                 Some(module),
                 Some(container),
@@ -293,6 +293,15 @@ impl JsonExtraction<'_> {
         caller: usize,
         block_type: Option<&str>,
     ) -> Result<(), ParseError> {
+        if body.kind() == "array" {
+            let mut cursor = body.walk();
+            for child in body.named_children(&mut cursor) {
+                if child.kind() == "object" {
+                    self.scan_object_expressions(child, caller, block_type)?;
+                }
+            }
+            return Ok(());
+        }
         if body.kind() != "object" {
             self.scan_interpolations(body, caller)?;
             return Ok(());
@@ -313,10 +322,18 @@ impl JsonExtraction<'_> {
                 SymbolKind::Property
             };
             let caller_name = self.symbols[caller].key.qualified_name.clone();
+            let attribute_prefix = if block_type == Some("locals") {
+                "local".to_owned()
+            } else {
+                caller_name.clone()
+            };
+            let mut attribute_segments: Vec<String> =
+                attribute_prefix.split("::").map(str::to_owned).collect();
+            attribute_segments.push(name.clone());
             let attribute = self.add_symbol(
                 Some(caller),
                 Some(caller_name),
-                vec![name.clone()],
+                attribute_segments,
                 kind,
                 pair,
                 None,
@@ -333,9 +350,36 @@ impl JsonExtraction<'_> {
             if let Some(value) = pair.child_by_field_name("value") {
                 if block_type == Some("terraform") && name == "required_providers" {
                     self.block_body(value, caller, Some("required_providers"))?;
-                } else {
+                } else if attribute_uses_template_expression(block_type, &name) {
                     self.scan_interpolations(value, attribute)?;
                 }
+            }
+        }
+        Ok(())
+    }
+
+    /// Array-form block bodies can repeat the same attribute keys, so they
+    /// cannot safely create duplicate graph identities without provider
+    /// schema/type information. They still apply the same Terraform literal
+    /// rules and retain bounded reference evidence on the enclosing block.
+    fn scan_object_expressions(
+        &mut self,
+        object: Node<'_>,
+        caller: usize,
+        block_type: Option<&str>,
+    ) -> Result<(), ParseError> {
+        let mut cursor = object.walk();
+        for pair in object.named_children(&mut cursor) {
+            if pair.kind() != "pair" {
+                continue;
+            }
+            let Some(name) = self.key_text(pair) else {
+                continue;
+            };
+            if attribute_uses_template_expression(block_type, &name)
+                && let Some(value) = pair.child_by_field_name("value")
+            {
+                self.scan_interpolations(value, caller)?;
             }
         }
         Ok(())
@@ -348,16 +392,31 @@ impl JsonExtraction<'_> {
         let mut stack = vec![node];
         while let Some(current) = stack.pop() {
             if current.kind() == "string" {
-                let text = self.text(current).to_owned();
+                let Some(decoded) = decode_json_string(self.text(current)) else {
+                    continue;
+                };
                 let mut offset = 0_usize;
                 let mut found = 0_usize;
                 while found < MAX_INTERPOLATIONS_PER_STRING {
-                    let Some(relative) = text[offset..].find("${") else {
+                    let Some(relative) = decoded.value[offset..].find("${") else {
                         break;
                     };
-                    let start = current.start_byte() + offset + relative + 2;
-                    let segments = scan_traversal(self.source, start);
+                    let marker = offset + relative;
+                    offset = marker + 2;
+                    found += 1;
+                    // Terraform's `$${` escape emits a literal `${` and must
+                    // not become a configuration reference.
+                    if marker > 0 && decoded.value.as_bytes().get(marker - 1) == Some(&b'$') {
+                        continue;
+                    }
+                    let segments = scan_traversal(&decoded.value, offset);
                     if let Some(target) = traversal_target(&segments) {
+                        let Some(raw_start) = decoded.source_offset(target.start) else {
+                            continue;
+                        };
+                        let Some(raw_end) = decoded.source_offset(target.end) else {
+                            continue;
+                        };
                         self.calls.push(CallDraft {
                             promoted: false,
                             caller,
@@ -369,13 +428,11 @@ impl JsonExtraction<'_> {
                             location: byte_range_of(
                                 &self.path,
                                 self.source,
-                                target.start,
-                                target.end,
+                                current.start_byte() + raw_start,
+                                current.start_byte() + raw_end,
                             )?,
                         });
                     }
-                    offset += relative + 2;
-                    found += 1;
                 }
             }
             let mut cursor = current.walk();
@@ -411,13 +468,116 @@ fn json_block_identity(
     }
 }
 
-fn json_string_text(raw: &str) -> Option<String> {
-    let trimmed = raw.trim();
-    let inner = trimmed
-        .strip_prefix('"')
-        .and_then(|value| value.strip_suffix('"'))
-        .unwrap_or(trimmed);
-    (!inner.is_empty()).then(|| inner.to_owned())
+fn attribute_uses_template_expression(block_type: Option<&str>, name: &str) -> bool {
+    match block_type {
+        Some("variable") => !matches!(
+            name,
+            "type"
+                | "default"
+                | "description"
+                | "sensitive"
+                | "nullable"
+                | "ephemeral"
+                | "deprecated"
+        ),
+        Some("output") => !matches!(name, "description" | "sensitive"),
+        Some("module") => !matches!(name, "source" | "version" | "providers"),
+        Some("provider") => !matches!(name, "alias" | "version"),
+        Some("terraform" | "required_providers") => false,
+        _ => true,
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct DecodedJsonString {
+    value: String,
+    /// Original-string byte boundary for each decoded UTF-8 byte boundary.
+    source_offsets: Vec<usize>,
+}
+
+impl DecodedJsonString {
+    fn source_offset(&self, decoded_byte: usize) -> Option<usize> {
+        self.source_offsets.get(decoded_byte).copied()
+    }
+}
+
+/// Decodes a JSON string while retaining a boundary map back to the original
+/// bytes. Semantic names use the decoded value; source ranges still identify
+/// the exact encoded spelling in the repository.
+fn decode_json_string(raw: &str) -> Option<DecodedJsonString> {
+    let value = serde_json::from_str::<String>(raw).ok()?;
+    let bytes = raw.as_bytes();
+    if bytes.first() != Some(&b'"') || bytes.last() != Some(&b'"') {
+        return None;
+    }
+    let mut decoded = String::with_capacity(value.len());
+    let mut source_offsets = vec![1];
+    let mut index = 1_usize;
+    while index + 1 < bytes.len() {
+        let raw_start = index;
+        let (character, raw_end, escaped) = if bytes[index] == b'\\' {
+            let escape = *bytes.get(index + 1)?;
+            match escape {
+                b'"' => ('"', index + 2, true),
+                b'\\' => ('\\', index + 2, true),
+                b'/' => ('/', index + 2, true),
+                b'b' => ('\u{0008}', index + 2, true),
+                b'f' => ('\u{000c}', index + 2, true),
+                b'n' => ('\n', index + 2, true),
+                b'r' => ('\r', index + 2, true),
+                b't' => ('\t', index + 2, true),
+                b'u' => {
+                    let first = decode_hex_quad(bytes.get(index + 2..index + 6)?)?;
+                    if (0xd800..=0xdbff).contains(&first) {
+                        if bytes.get(index + 6..index + 8) != Some(b"\\u") {
+                            return None;
+                        }
+                        let second = decode_hex_quad(bytes.get(index + 8..index + 12)?)?;
+                        if !(0xdc00..=0xdfff).contains(&second) {
+                            return None;
+                        }
+                        let scalar = 0x1_0000
+                            + ((u32::from(first) - 0xd800) << 10)
+                            + (u32::from(second) - 0xdc00);
+                        (char::from_u32(scalar)?, index + 12, true)
+                    } else {
+                        (char::from_u32(u32::from(first))?, index + 6, true)
+                    }
+                }
+                _ => return None,
+            }
+        } else {
+            let character = raw.get(index..bytes.len() - 1)?.chars().next()?;
+            (character, index + character.len_utf8(), false)
+        };
+        decoded.push(character);
+        let decoded_bytes = character.len_utf8();
+        for byte in 1..=decoded_bytes {
+            let source = if escaped {
+                if byte == decoded_bytes {
+                    raw_end
+                } else {
+                    raw_start
+                }
+            } else {
+                raw_start + byte
+            };
+            source_offsets.push(source);
+        }
+        index = raw_end;
+    }
+    (decoded == value).then_some(DecodedJsonString {
+        value,
+        source_offsets,
+    })
+}
+
+fn decode_hex_quad(bytes: &[u8]) -> Option<u16> {
+    if bytes.len() != 4 {
+        return None;
+    }
+    let text = std::str::from_utf8(bytes).ok()?;
+    u16::from_str_radix(text, 16).ok()
 }
 
 /// Scalar-column position for a byte offset, matching the native parser's
@@ -562,7 +722,7 @@ mod tests {
             .iter()
             .find(|symbol| symbol.key.kind == SymbolKind::Import)
             .ok_or("missing import")?;
-        assert_eq!(import.key.qualified_name, "source");
+        assert_eq!(import.key.qualified_name, "module::vpc::source");
         assert!(
             file.named_relations
                 .iter()
@@ -578,6 +738,111 @@ mod tests {
         assert_eq!(reference.name, "main");
         assert_eq!(reference.qualifier.as_deref(), Some("resource::aws_vpc"));
         assert_eq!(reference.location.start().line(), 6);
+        Ok(())
+    }
+
+    #[test]
+    fn json_decoding_literal_rules_and_containers_match_native_semantics()
+    -> Result<(), Box<dyn Error>> {
+        let source = r#"{
+  "resource": {"aws_vpc": {"ma\u0069n": {
+    "name": "${var.live}",
+    "escaped": "$${var.skipped}"
+  }}},
+  "variable": {"text": {
+    "default": "${aws_vpc.main.id}",
+    "description": "${var.skipped}"
+  }},
+  "output": {"id": {
+    "description": "${var.skipped}",
+    "value": "${aws_vpc.ma\u0069n.id}"
+  }},
+  "module": {"child": {
+    "source": "${var.skipped}",
+    "version": "${var.skipped}"
+  }},
+  "provider": {"aws": [{
+    "alias": "${var.skipped}",
+    "region": "${var.region}"
+  }]},
+  "terraform": {"required_version": "${var.skipped}"}
+}
+"#;
+        let file = parse("main.tf.json", source)?;
+
+        let resource = file
+            .symbols
+            .iter()
+            .find(|symbol| symbol.key.qualified_name == "resource::aws_vpc::main")
+            .ok_or("decoded resource missing")?;
+        assert_eq!(resource.key.container.as_deref(), Some("main"));
+        let attribute = file
+            .symbols
+            .iter()
+            .find(|symbol| symbol.key.qualified_name == "resource::aws_vpc::main::name")
+            .ok_or("qualified resource attribute missing")?;
+        assert_eq!(
+            attribute.key.container.as_deref(),
+            Some("resource::aws_vpc::main")
+        );
+
+        let mut native_parser = crate::parser::HclParser::new()?;
+        let native = native_parser.parse(
+            RepoRelativePath::new("main.tf")?,
+            Arc::<str>::from("resource \"aws_vpc\" \"main\" { name = var.live }\n"),
+        )?;
+        let native_resource = native
+            .symbols
+            .iter()
+            .find(|symbol| symbol.key.qualified_name == "resource::aws_vpc::main")
+            .ok_or("native resource missing")?;
+        let native_attribute = native
+            .symbols
+            .iter()
+            .find(|symbol| symbol.key.qualified_name == "resource::aws_vpc::main::name")
+            .ok_or("native attribute missing")?;
+        assert_eq!(resource.key.container, native_resource.key.container);
+        assert_eq!(attribute.key.container, native_attribute.key.container);
+
+        let mut references: Vec<_> = file
+            .calls
+            .iter()
+            .map(|call| {
+                (
+                    call.qualifier.as_deref().unwrap_or_default(),
+                    call.name.as_str(),
+                )
+            })
+            .collect();
+        references.sort_unstable();
+        assert_eq!(
+            references,
+            [
+                ("resource::aws_vpc", "main"),
+                ("var", "live"),
+                ("var", "region"),
+            ]
+        );
+        let encoded_reference = file
+            .calls
+            .iter()
+            .find(|call| call.name == "main")
+            .ok_or("decoded reference missing")?;
+        assert_eq!(
+            encoded_reference.location.end().column() - encoded_reference.location.start().column(),
+            9,
+            "source range must cover the original ma\\u0069n spelling"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn json_string_decoder_maps_semantic_text_to_encoded_boundaries() -> Result<(), Box<dyn Error>>
+    {
+        let decoded = decode_json_string(r#""ma\u0069n""#).ok_or("valid JSON string rejected")?;
+        assert_eq!(decoded.value, "main");
+        assert_eq!(decoded.source_offset(0), Some(1));
+        assert_eq!(decoded.source_offset(decoded.value.len()), Some(10));
         Ok(())
     }
 

@@ -462,13 +462,29 @@ impl<H: LanguageHooks> LanguageSyntaxIndex<H> {
         }
         let parse_elapsed = parse_started.elapsed();
         check_cancelled(cancellation)?;
+        let files_before_post_parse = next_files.clone();
         H::post_parse(&mut next_files);
+        // A workspace-evidence hook may change retained facts in a file whose
+        // source was not edited (for example C++ qualified-callable
+        // reclassification). Those files must participate in the structural
+        // graph delta even though they were not reparsed.
+        let mut structural_changed_paths = changed_paths.clone();
+        for (path, next) in &next_files {
+            if files_before_post_parse.get(path) != Some(next) {
+                structural_changed_paths.insert(path.clone());
+            }
+        }
+        for path in files_before_post_parse.keys() {
+            if !next_files.contains_key(path) {
+                structural_changed_paths.insert(path.clone());
+            }
+        }
 
         let mut stable_symbol_paths = BTreeSet::new();
         let mut unchanged_fact_paths = BTreeSet::new();
         let mut changed_dependencies = HashSet::new();
         let mut changed_callable_names = HashSet::new();
-        for path in &changed_paths {
+        for path in &structural_changed_paths {
             match (self.files.get(path), next_files.get(path)) {
                 (Some(previous), Some(next)) if symbol_keys_equal(previous, next) => {
                     stable_symbol_paths.insert(path.clone());
@@ -489,7 +505,7 @@ impl<H: LanguageHooks> LanguageSyntaxIndex<H> {
             }
         }
 
-        let mut affected_owners: BTreeSet<_> = changed_paths
+        let mut affected_owners: BTreeSet<_> = structural_changed_paths
             .difference(&unchanged_fact_paths)
             .cloned()
             .collect();
@@ -504,7 +520,7 @@ impl<H: LanguageHooks> LanguageSyntaxIndex<H> {
                 })
                 .map(|(path, _)| path.clone()),
         );
-        let mut affected_call_owners: BTreeSet<_> = changed_paths
+        let mut affected_call_owners: BTreeSet<_> = structural_changed_paths
             .difference(&unchanged_fact_paths)
             .cloned()
             .collect();
@@ -594,7 +610,7 @@ impl<H: LanguageHooks> LanguageSyntaxIndex<H> {
         let delta = if delta_candidate {
             next.materialize_graph_delta(
                 &self.graph,
-                &changed_paths,
+                &structural_changed_paths,
                 &affected_owners,
                 &affected_call_owners,
                 &stable_symbol_paths,
@@ -615,6 +631,7 @@ impl<H: LanguageHooks> LanguageSyntaxIndex<H> {
         metrics.publication = if structurally_incremental {
             next.delta_publication(
                 self,
+                &structural_changed_paths,
                 &changed_paths,
                 &affected_owners,
                 &affected_call_owners,
@@ -985,21 +1002,22 @@ impl<H: LanguageHooks> LanguageSyntaxIndex<H> {
     fn delta_publication(
         &self,
         previous: &Self,
-        changed_paths: &BTreeSet<RepoRelativePath>,
+        structural_changed_paths: &BTreeSet<RepoRelativePath>,
+        source_changed_paths: &BTreeSet<RepoRelativePath>,
         relationship_owners: &BTreeSet<RepoRelativePath>,
         call_owners: &BTreeSet<RepoRelativePath>,
         stable_symbol_paths: &BTreeSet<RepoRelativePath>,
     ) -> IndexPublicationMetrics {
-        let rebuilt_files = changed_paths
+        let rebuilt_files = structural_changed_paths
             .iter()
             .filter(|path| self.files.contains_key(*path))
             .count() as u64;
-        let rebuilt_source_bytes = changed_paths
+        let rebuilt_source_bytes = source_changed_paths
             .iter()
             .filter_map(|path| self.files.get(path))
             .map(|file| file.source.len() as u64)
             .sum();
-        let rebuilt_symbols = changed_paths
+        let rebuilt_symbols = structural_changed_paths
             .iter()
             .map(|path| {
                 let Some(next) = self.files.get(path) else {

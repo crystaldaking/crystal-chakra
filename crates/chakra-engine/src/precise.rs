@@ -615,6 +615,15 @@ pub trait PreciseProvider: std::fmt::Debug + Send + Sync {
     /// Whether this adapter can enrich symbols in `language`.
     fn supports(&self, language: Language) -> bool;
 
+    /// Whether this adapter can enrich a source document at `path`.
+    ///
+    /// Most providers cover every captured source of a supported language.
+    /// Adapters with path-level exclusions override this without exposing
+    /// transport or language-server types to the engine.
+    fn supports_path(&self, language: Language, _path: &RepoRelativePath) -> bool {
+        self.supports(language)
+    }
+
     /// State relative to a specific published syntax revision.
     fn state_for(&self, revision: Revision) -> ProviderState;
 

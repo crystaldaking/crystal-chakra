@@ -263,6 +263,14 @@ impl PreciseProvider for PooledProvider {
         self.slot().registration.languages.contains(&language)
     }
 
+    fn supports_path(
+        &self,
+        language: Language,
+        path: &chakra_domain::location::RepoRelativePath,
+    ) -> bool {
+        self.slot().registration.supports_path(language, path)
+    }
+
     fn state_for(&self, revision: Revision) -> ProviderState {
         if self.inner.stopped.load(Ordering::Acquire) {
             return ProviderState::Degraded;
@@ -1300,6 +1308,27 @@ mod tests {
             }
             thread::sleep(Duration::from_millis(5));
         }
+        Ok(())
+    }
+
+    #[test]
+    fn path_filter_skips_ineligible_documents_without_activation() -> Result<(), TestError> {
+        let controls = FakeControls::new(None);
+        let registration = controls
+            .registration("terraform-ls", vec![Language::Hcl], 10)
+            .with_path_filter(|language, path| {
+                language == Language::Hcl && !path.as_str().ends_with(".tf.json")
+            });
+        let pool = ProviderPool::start(ProviderPoolConfig::default(), vec![registration])?;
+        let provider = provider_for(&pool.providers(), Language::Hcl)?;
+
+        assert!(provider.supports_path(Language::Hcl, &RepoRelativePath::new("main.tf")?));
+        assert!(!provider.supports_path(
+            Language::Hcl,
+            &RepoRelativePath::new("generated/main.tf.json")?
+        ));
+        assert_eq!(controls.activations.load(Ordering::Acquire), 0);
+        pool.shutdown()?;
         Ok(())
     }
 

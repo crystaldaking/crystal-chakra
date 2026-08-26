@@ -12,6 +12,7 @@ use std::sync::{Arc, OnceLock, RwLock};
 use arc_swap::ArcSwap;
 use chakra_domain::identity::WorkspaceIdentity;
 use chakra_domain::indexing::IndexingStatus;
+use chakra_domain::location::RepoRelativePath;
 use chakra_domain::operation::OperationContext;
 use chakra_domain::revision::Revision;
 use chakra_domain::state::{Freshness, ProviderState, WorkspaceStatus};
@@ -329,13 +330,14 @@ impl WorkspaceEngine {
         read_providers(&self.precise_providers).clone()
     }
 
-    pub(crate) fn precise_provider_for(
+    pub(crate) fn precise_provider_for_path(
         &self,
         language: Language,
+        path: &RepoRelativePath,
     ) -> Option<Arc<dyn PreciseProvider>> {
         read_providers(&self.precise_providers)
             .iter()
-            .find(|provider| provider.supports(language))
+            .find(|provider| provider.supports_path(language, path))
             .cloned()
     }
 
@@ -516,17 +518,21 @@ mod tests {
 
         assert_eq!(
             engine
-                .precise_provider_for(Language::Rust)
+                .precise_provider_for_path(Language::Rust, &RepoRelativePath::new("src/lib.rs")?)
                 .map(|provider| provider.name()),
             Some("rust")
         );
         assert_eq!(
             engine
-                .precise_provider_for(Language::Python)
+                .precise_provider_for_path(Language::Python, &RepoRelativePath::new("src/app.py")?)
                 .map(|provider| provider.name()),
             Some("python")
         );
-        assert!(engine.precise_provider_for(Language::Php).is_none());
+        assert!(
+            engine
+                .precise_provider_for_path(Language::Php, &RepoRelativePath::new("src/app.php")?)
+                .is_none()
+        );
         assert_eq!(engine.precise_providers().len(), 2);
         Ok(())
     }

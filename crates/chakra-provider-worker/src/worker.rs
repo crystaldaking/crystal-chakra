@@ -71,8 +71,10 @@ impl<H: ProviderHooks> WorkerCore<H> {
         initial_workspace: chakra_engine::ProviderWorkspace,
     ) -> Self {
         let known_revision = initial_workspace.revision;
-        let (workspace_documents, workspace_source_bytes) =
-            initial_workspace.document_stats_matching(|language| hooks.synchronizes(language));
+        let (workspace_documents, workspace_source_bytes) = initial_workspace
+            .document_stats_matching_documents(|language, path| {
+                hooks.synchronizes_path(language, path)
+            });
         let root = initial_workspace.repository_root.clone();
         Self {
             commands,

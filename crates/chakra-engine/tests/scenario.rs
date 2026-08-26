@@ -12,6 +12,10 @@ use chakra_domain::diagnostic::{
     DiagnosticTruncationCause, SyntaxDiagnostic, SyntaxDiagnosticCause, SyntaxDiagnosticKind,
 };
 use chakra_domain::envelope::{TruncationCause, TruncationSection};
+use chakra_domain::indexing::{
+    IndexBudgetKind, IndexCapability, IndexDegradation, IndexPhase, IndexPhaseMeasurement,
+    IndexingStatus,
+};
 use chakra_domain::location::{RepoRelativePath, SourceRange, TextPosition};
 use chakra_domain::operation::OperationContext;
 use chakra_domain::provenance::{Precision, Provenance};
@@ -41,6 +45,11 @@ struct FixedProvider {
 
 #[derive(Debug)]
 struct CountingRustProvider {
+    calls: Arc<AtomicUsize>,
+}
+
+#[derive(Debug)]
+struct PathFilteringProvider {
     calls: Arc<AtomicUsize>,
 }
 
@@ -138,6 +147,33 @@ impl PreciseProvider for CountingRustProvider {
 
     fn supports(&self, language: Language) -> bool {
         language == Language::Rust
+    }
+
+    fn state_for(&self, _revision: Revision) -> ProviderState {
+        ProviderState::Ready
+    }
+
+    fn enrich_with_context(
+        &self,
+        request: PreciseQueryRequest,
+        _operation: &OperationContext,
+    ) -> PreciseQueryResult {
+        self.calls.fetch_add(1, Ordering::Relaxed);
+        PreciseQueryResult::unavailable(request.workspace.revision, ProviderState::Degraded)
+    }
+}
+
+impl PreciseProvider for PathFilteringProvider {
+    fn name(&self) -> &'static str {
+        "path-filtering-provider"
+    }
+
+    fn supports(&self, language: Language) -> bool {
+        language == Language::Hcl
+    }
+
+    fn supports_path(&self, language: Language, path: &RepoRelativePath) -> bool {
+        self.supports(language) && !path.as_str().ends_with(".tf.json")
     }
 
     fn state_for(&self, _revision: Revision) -> ProviderState {
@@ -257,6 +293,53 @@ fn status_reports_scenario_counts() -> Result<(), Box<dyn Error>> {
     assert_eq!(envelope.data.syntax_diagnostics.total_diagnostics, 0);
     assert!(!envelope.data.syntax_diagnostics.truncated);
     assert!(envelope.data.providers.is_empty());
+    Ok(())
+}
+
+#[test]
+fn detailed_index_phases_are_status_only_but_query_evidence_remains() -> Result<(), Box<dyn Error>>
+{
+    let (engine, _) = scenario_engine()?;
+    let degradation = IndexDegradation {
+        phase: IndexPhase::ParseExtraction,
+        language: Some(Language::Rust),
+        cause: IndexBudgetKind::Files,
+        affected_capabilities: vec![IndexCapability::Declarations],
+        limit: 2,
+        observed: 3,
+        omitted: 1,
+    };
+    let indexing = IndexingStatus {
+        phases: vec![IndexPhaseMeasurement {
+            phase: IndexPhase::GitInventory,
+            language: None,
+            elapsed_micros: 11,
+            cpu_micros: None,
+            cpu_utilization_per_mille: None,
+            work_items: 3,
+            bytes: 0,
+            effective_workers: 1,
+            peak_active_workers: 1,
+            peak_queue_depth: 0,
+            rss_bytes: None,
+            peak_rss_bytes: None,
+        }],
+        degradations: vec![degradation.clone()],
+        ..IndexingStatus::default()
+    };
+    let mut update = engine.begin_update();
+    update.set_indexing(indexing);
+    update.set_freshness(Freshness::Fresh);
+    engine.publish(update)?;
+
+    let status = engine.status(StatusRequest)?;
+    assert_eq!(status.indexing.phases.len(), 1);
+    assert_eq!(status.indexing.degradations, vec![degradation.clone()]);
+
+    let repo_map = engine.repo_map(RepoMapRequest::default())?;
+    assert!(repo_map.indexing.phases.is_empty());
+    assert_eq!(repo_map.indexing.degradations, vec![degradation]);
+    assert_eq!(repo_map.schema_version, status.schema_version);
     Ok(())
 }
 
@@ -2036,6 +2119,61 @@ fn rust_provider_is_not_invoked_for_php_symbols() -> Result<(), Box<dyn Error>> 
     assert_eq!(context.data.symbol.precision, Precision::Syntax);
     assert_eq!(context.provider_state, ProviderState::NotConfigured);
     assert_eq!(calls.load(Ordering::Relaxed), 0);
+    Ok(())
+}
+
+#[test]
+fn path_ineligible_symbols_skip_precise_context_and_callers() -> Result<(), Box<dyn Error>> {
+    let identity = chakra_domain::identity::WorkspaceIdentity::for_primary_worktree(
+        std::path::Path::new("."),
+    )?;
+    let engine = chakra_engine::WorkspaceEngine::new(identity);
+    let path = RepoRelativePath::new("main.tf.json")?;
+    let position = TextPosition::new(1, 1)?;
+    let mut graph = SymbolGraph::new();
+    graph.add_file(path.clone(), "{\"resource\":{}}\n")?;
+    let symbol = graph.add_symbol(
+        SymbolKey {
+            language: Language::Hcl,
+            qualified_name: "resource::aws_vpc::main".to_owned(),
+            container: Some("main".to_owned()),
+            kind: SymbolKind::Configuration,
+            path: path.clone(),
+        },
+        SourceRange::new(path, position, TextPosition::new(1, 16)?)?,
+        Some("resource aws_vpc main".to_owned()),
+        Provenance::TreeSitter,
+        Precision::Syntax,
+    )?;
+    let mut update = engine.begin_update();
+    update.replace_graph(graph);
+    update.set_status(WorkspaceStatus::Ready);
+    update.set_freshness(Freshness::Fresh);
+    engine.publish(update)?;
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    engine.install_precise_provider(Arc::new(PathFilteringProvider {
+        calls: calls.clone(),
+    }))?;
+    let revision = engine.snapshot().revision();
+    let reference = SymbolRef::ById {
+        id: symbol,
+        revision,
+    };
+    let context = engine.context(ContextRequest {
+        symbol: Some(reference.clone()),
+        ..ContextRequest::default()
+    })?;
+    let callers = engine.callers(CallersRequest {
+        symbol: Some(reference),
+        ..CallersRequest::default()
+    })?;
+
+    assert_eq!(calls.load(Ordering::Relaxed), 0);
+    assert_eq!(context.provider_state, ProviderState::NotConfigured);
+    assert!(context.data.provider.is_none());
+    assert_eq!(callers.provider_state, ProviderState::NotConfigured);
+    assert!(callers.data.provider.is_none());
     Ok(())
 }
 

@@ -79,9 +79,10 @@ language server prerequisites for the syntax tier.
 - Terraform locks, version files, and CLI configuration are revision-bound
   provider inputs and produce watched-file events independently of source
   document deltas (ADR-0042).
-- Terraform JSON configuration and variable/test forms are not indexed by the
-  native-HCL grammar; a dedicated JSON adapter path remains tracked in issue
-  #86.
+- The original v0.1.2 native-HCL grammar did not index Terraform JSON. Issue
+  #86 added a dedicated `tree-sitter-json` adapter in v0.1.3 that decodes JSON
+  into the same syntax entity model. Terraform JSON remains ineligible for
+  terraform-ls and is never synchronized to the provider.
 
 ## Validation / follow-up
 
@@ -93,5 +94,6 @@ language server prerequisites for the syntax tier.
   gates, synchronization, cancellation, restart, degradation, and orphan-free
   shutdown.
 - HCL conformance passes 14/14 scenarios. The pinned terraform-aws-vpc and
-  terraform-aws-eks corpora each pass 12/12; observed release cold indexes were
-  about 0.12–0.13 seconds with 49–77 MiB peak RSS.
+  terraform-aws-eks corpora each pass 12/12; v0.1.3 adds the pinned
+  Terraform JSON-heavy cztack corpus at 12/12. Observed release cold indexes
+  remain within the recorded corpus budgets.

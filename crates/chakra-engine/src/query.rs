@@ -1626,13 +1626,14 @@ fn provider_state_severity(state: ProviderState) -> u8 {
     }
 }
 
-fn provider_state_for_language(
+fn provider_state_for_symbol(
     engine: &WorkspaceEngine,
     snapshot: &WorkspaceSnapshot,
     language: chakra_domain::symbol::Language,
+    path: &RepoRelativePath,
 ) -> ProviderState {
     engine
-        .precise_provider_for(language)
+        .precise_provider_for_path(language, path)
         .map_or(ProviderState::NotConfigured, |provider| {
             provider.state_for(snapshot.revision())
         })
@@ -1641,11 +1642,12 @@ fn provider_state_for_language(
 fn provider_query_info(
     engine: &WorkspaceEngine,
     language: chakra_domain::symbol::Language,
+    path: &RepoRelativePath,
     state: ProviderState,
     fallback_cause: Option<ProviderFallbackCause>,
     freshness: FreshnessRequirement,
 ) -> Option<ProviderQueryInfo> {
-    let provider = engine.precise_provider_for(language)?;
+    let provider = engine.precise_provider_for_path(language, path)?;
     let fallback_reason = if let Some(cause) = fallback_cause {
         Some(
             match cause {
@@ -2027,7 +2029,11 @@ fn envelope<T>(
         truncation,
         data,
     )
-    .with_indexing(snapshot.indexing().clone())
+    .with_indexing(if construction.query == "status" {
+        snapshot.indexing().clone()
+    } else {
+        snapshot.indexing().query_summary()
+    })
 }
 
 fn bounded_match_line(line: &str, match_start: usize, match_end: usize) -> (String, Option<usize>) {
@@ -2747,7 +2753,8 @@ impl QueryService for WorkspaceEngine {
             operation,
         )?;
         callees_work.add_to_stats(&mut work_stats);
-        let mut provider_state = provider_state_for_language(self, &snapshot, symbol.key.language);
+        let mut provider_state =
+            provider_state_for_symbol(self, &snapshot, symbol.key.language, &symbol.key.path);
         if request.freshness == FreshnessRequirement::AllowStale
             && provider_state == ProviderState::Ready
         {
@@ -2758,7 +2765,8 @@ impl QueryService for WorkspaceEngine {
         let mut provider_fallback_cause = None;
         if request.freshness == FreshnessRequirement::RequireFresh
             && snapshot.freshness() == Freshness::Fresh
-            && let Some(provider) = self.precise_provider_for(symbol.key.language)
+            && let Some(provider) =
+                self.precise_provider_for_path(symbol.key.language, &symbol.key.path)
         {
             let provider_started = Instant::now();
             let result = provider.enrich_with_context(
@@ -3111,6 +3119,7 @@ impl QueryService for WorkspaceEngine {
             provider: provider_query_info(
                 self,
                 symbol.key.language,
+                &symbol.key.path,
                 provider_state,
                 provider_fallback_cause,
                 request.freshness,
@@ -3170,7 +3179,8 @@ impl QueryService for WorkspaceEngine {
             operation,
         )?;
         callers_work.add_to_stats(&mut work_stats);
-        let mut provider_state = provider_state_for_language(self, &snapshot, target.key.language);
+        let mut provider_state =
+            provider_state_for_symbol(self, &snapshot, target.key.language, &target.key.path);
         if request.freshness == FreshnessRequirement::AllowStale
             && provider_state == ProviderState::Ready
         {
@@ -3185,7 +3195,8 @@ impl QueryService for WorkspaceEngine {
         let mut syntax_candidates = candidate_views.items;
         if request.freshness == FreshnessRequirement::RequireFresh
             && snapshot.freshness() == Freshness::Fresh
-            && let Some(provider) = self.precise_provider_for(target.key.language)
+            && let Some(provider) =
+                self.precise_provider_for_path(target.key.language, &target.key.path)
         {
             let provider_started = Instant::now();
             let result = provider.enrich_with_context(
@@ -3288,6 +3299,7 @@ impl QueryService for WorkspaceEngine {
             provider: provider_query_info(
                 self,
                 target.key.language,
+                &target.key.path,
                 provider_state,
                 provider_fallback_cause,
                 request.freshness,

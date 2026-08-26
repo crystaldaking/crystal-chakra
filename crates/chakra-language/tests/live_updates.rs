@@ -225,6 +225,13 @@ fn degraded_budget_metadata_survives_incremental_live_updates() -> Result<(), Bo
     assert_eq!(updated.status, WorkspaceStatus::Degraded);
     assert_eq!(updated.indexing.coverage.discovered_files, 3);
     assert_eq!(updated.indexing.coverage.indexed_files, 2);
+    assert!(
+        updated.indexing.phases.is_empty(),
+        "ordinary queries keep revision evidence but omit detailed phase history"
+    );
+    let status = engine.status(StatusRequest)?;
+    assert_eq!(status.revision, updated.revision);
+    assert_eq!(status.indexing.coverage, updated.indexing.coverage);
     for required in [
         IndexPhase::ParseExtraction,
         IndexPhase::SymbolCatalog,
@@ -234,7 +241,7 @@ fn degraded_budget_metadata_survives_incremental_live_updates() -> Result<(), Bo
         IndexPhase::LiveReconciliation,
     ] {
         assert!(
-            updated
+            status
                 .indexing
                 .phases
                 .iter()

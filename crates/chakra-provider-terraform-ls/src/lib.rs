@@ -183,6 +183,12 @@ fn is_terraform_json(path: &RepoRelativePath) -> bool {
     path.ends_with(".tf.json") || path.ends_with(".tfvars.json") || path.ends_with(".tftest.json")
 }
 
+/// Adapter-neutral eligibility predicate used by the lazy provider pool
+/// before terraform-ls is activated.
+pub fn supports_path(language: Language, path: &RepoRelativePath) -> bool {
+    terraform_ls_language(language) && !is_terraform_json(path)
+}
+
 /// terraform-ls language hooks: HCL documents synchronize through the
 /// session and the precise surface is references + document symbols.
 #[derive(Debug, Clone, Copy, Default)]
@@ -264,7 +270,7 @@ impl ProviderHooks for TerraformLsHooks {
     /// (.tf.json/.tfvars.json/.tftest.json); they stay Chakra-side syntax
     /// facts and are never sent to the server (issue #86).
     fn synchronizes_path(&self, language: Language, path: &RepoRelativePath) -> bool {
-        terraform_ls_language(language) && !is_terraform_json(path)
+        supports_path(language, path)
     }
 
     fn language_id(&self, path: &RepoRelativePath) -> &'static str {
@@ -406,6 +412,10 @@ impl chakra_engine::PreciseProvider for TerraformLsProvider {
 
     fn supports(&self, language: Language) -> bool {
         self.inner.supports(language)
+    }
+
+    fn supports_path(&self, language: Language, path: &RepoRelativePath) -> bool {
+        self.inner.supports_path(language, path)
     }
 
     fn state_for(

@@ -115,11 +115,6 @@ LANGUAGE_EXTENSIONS = {
     "go": {".go"},
 }
 
-
-def run_git(args: list[str], cwd: Path) -> None:
-    subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True, text=True)
-
-
 def current_head(path: Path) -> str | None:
     result = subprocess.run(
         ["git", "rev-parse", "HEAD"],

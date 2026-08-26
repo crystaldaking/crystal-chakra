@@ -8,6 +8,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
+use chakra_domain::location::RepoRelativePath;
 use chakra_domain::operation::OperationContext;
 use chakra_domain::query::{ProviderMetrics, ProviderProgress};
 use chakra_domain::revision::Revision;
@@ -189,6 +190,10 @@ impl<H: ProviderHooks> PreciseProvider for ProviderHandle<H> {
 
     fn supports(&self, language: Language) -> bool {
         self.hooks.synchronizes(language)
+    }
+
+    fn supports_path(&self, language: Language, path: &RepoRelativePath) -> bool {
+        self.hooks.synchronizes_path(language, path)
     }
 
     fn state_for(&self, revision: Revision) -> ProviderState {

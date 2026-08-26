@@ -296,6 +296,7 @@ dependencies = [
  "chakra-git",
  "chakra-language-index",
  "nix",
+ "serde_json",
  "tempfile",
  "thiserror",
  "tracing",

@@ -56,7 +56,8 @@ an excuse for undocumented drift.
 
 - Issue #61 may change the `status` response shape within the v0.1.3 line,
   provided the changelog, contract tests, and schema documentation move
-  together.
+  together. v0.1.3 publishes that new shape as response schema 14 rather than
+  reusing v0.1.2's schema 13.
 - Reviewers and agents gain a checklist for any contract change: changelog
   `Breaking` entry, contract tests, schema docs — or the change does not
   merge.
@@ -65,7 +66,7 @@ an excuse for undocumented drift.
 
 ## Validation / follow-up
 
-- First applied to the v0.1.3 milestone (issues #61, #82).
+- First applied to the v0.1.3 milestone (issues #61, #82, #108).
 - Release review checklist in `CONTRIBUTING.md` already requires comparing
   schema-version claims with the final implementation; this ADR adds the
   `Breaking` changelog heading to that comparison.

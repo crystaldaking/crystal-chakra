@@ -6,6 +6,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, OnceLock};
+use std::thread;
 use std::time::{Duration, Instant};
 
 use chakra_domain::location::{RepoRelativePath, SourceRange, TextPosition};
@@ -369,16 +370,41 @@ fn referenced_documents_are_opened_before_document_symbol_requests() -> Result<(
     let mut request = request(repository.path(), Revision(1))?;
     let main_path = RepoRelativePath::new("main.tf")?;
     let other_path = RepoRelativePath::new("other.tf")?;
+    let json_path = RepoRelativePath::new("generated.tf.json")?;
     fs::write(repository.path().join(other_path.as_str()), TARGET_SOURCE)?;
+    fs::write(
+        repository.path().join(json_path.as_str()),
+        r#"{"resource":{"null_resource":{"json_only":{}}}}"#,
+    )?;
     request.workspace = workspace(
         repository.path(),
         Revision(1),
         vec![
             document(&main_path, TARGET_SOURCE),
             document(&other_path, TARGET_SOURCE),
+            document(
+                &json_path,
+                r#"{"resource":{"null_resource":{"json_only":{}}}}"#,
+            ),
         ],
     )?;
     let provider = TerraformLsProvider::start(request.workspace.clone(), config(&executable))?;
+
+    // Assert the constructor-time observability before any query-side delta
+    // recalculates it: Terraform JSON is not a terraform-ls input (#113).
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let initial_metrics = loop {
+        if let Some(metrics) = provider.metrics()
+            && metrics.document_sync.revision == Some(Revision(1))
+        {
+            break metrics;
+        }
+        if Instant::now() >= deadline {
+            return Err("initial provider metrics were not published".into());
+        }
+        thread::sleep(Duration::from_millis(5));
+    };
+    assert_eq!(initial_metrics.document_sync.workspace_documents, 2);
 
     let result = provider.enrich(request);
     assert_eq!(
@@ -391,6 +417,7 @@ fn referenced_documents_are_opened_before_document_symbol_requests() -> Result<(
     assert_eq!(result.incoming[0].name, "caller");
     assert_eq!(counter(&executable, "opened"), "2");
     let metrics = provider.metrics().ok_or("provider metrics unavailable")?;
+    assert_eq!(metrics.document_sync.workspace_documents, 2);
     assert_eq!(metrics.document_sync.opened_documents, 2);
     assert_eq!(metrics.document_sync.total_text_documents_sent, 2);
     provider.shutdown()?;
