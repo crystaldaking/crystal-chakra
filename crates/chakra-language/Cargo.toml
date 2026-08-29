@@ -24,6 +24,7 @@ chakra-language-php = { path = "../chakra-language-php", version = "0.1.3" }
 chakra-language-python = { path = "../chakra-language-python", version = "0.1.3" }
 chakra-language-rust = { path = "../chakra-language-rust", version = "0.1.3" }
 chakra-language-typescript = { path = "../chakra-language-typescript", version = "0.1.3" }
+blake3.workspace = true
 notify.workspace = true
 thiserror.workspace = true
 tracing.workspace = true

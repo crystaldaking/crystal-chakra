@@ -97,9 +97,22 @@ enum Command {
         /// Measurement runs per target (default: 2, for spread estimates).
         #[arg(long, default_value_t = 2)]
         runs: u32,
+        /// Measure the production per-file syntax fact cache (issue #39,
+        /// budgets B1–B6) instead of the synthetic model cache.
+        #[arg(long)]
+        real: bool,
         /// Internal: evaluate exactly one named target (process isolation).
         #[arg(long, hide = true)]
         only: Option<String>,
+        /// Internal: restore-only child process for the B6 memory budget.
+        #[arg(long, hide = true)]
+        real_restore_child: bool,
+        /// Internal: worktree for the restore-only child.
+        #[arg(long, hide = true)]
+        checkout: Option<PathBuf>,
+        /// Internal: populated cache directory for the restore-only child.
+        #[arg(long, hide = true)]
+        cache_dir: Option<PathBuf>,
     },
 }
 
@@ -162,7 +175,11 @@ fn execute() -> Check<u64> {
             manifest,
             cache,
             runs,
+            real,
             only,
+            real_restore_child,
+            checkout,
+            cache_dir,
         } => persistence(
             language,
             repository,
@@ -173,6 +190,10 @@ fn execute() -> Check<u64> {
             only,
             no_fixtures,
             no_corpus,
+            real,
+            real_restore_child,
+            checkout,
+            cache_dir,
         ),
     }
 }
@@ -343,11 +364,16 @@ fn persistence(
     only: Option<String>,
     no_fixtures: bool,
     no_corpus: bool,
+    real: bool,
+    real_restore_child: bool,
+    checkout: Option<PathBuf>,
+    cache_dir: Option<PathBuf>,
 ) -> Check<u64> {
     use chakra_conformance::corpus::workspace_root;
     use chakra_conformance::persistence::{
         PersistenceReport, PersistenceTarget, TargetKind, corpus_targets, default_emit_dir,
-        default_spool_dir, evaluate_target, fixture_targets, summarize,
+        default_spool_dir, evaluate_real_target, evaluate_target, fixture_targets,
+        restore_only_child, summarize, summarize_real,
     };
 
     if cfg!(debug_assertions) {
@@ -355,6 +381,11 @@ fn persistence(
             "persistence benchmarks require an optimized binary; run `cargo run --release -p chakra-conformance -- persistence ...`",
         )
         .into());
+    }
+    if real_restore_child {
+        let checkout = checkout.ok_or_else(|| failure("restore child needs --checkout"))?;
+        let cache_dir = cache_dir.ok_or_else(|| failure("restore child needs --cache-dir"))?;
+        return restore_only_child(&checkout, &cache_dir).map(|()| 0);
     }
     let manifest_path = manifest.unwrap_or_else(default_manifest_path);
     let cache = cache.unwrap_or_else(default_cache_root);
@@ -395,6 +426,17 @@ fn persistence(
             .iter()
             .find(|target| target.name == only)
             .ok_or_else(|| failure(format!("persistence target `{only}` is not selected")))?;
+        if real {
+            let executable = std::env::current_exe()?;
+            let report = evaluate_real_target(target, runs, &spool, &executable)?;
+            println!("{}", summarize_real(&report));
+            let path = emit.join(
+                chakra_conformance::persistence::RealPersistenceReport::file_name(&report.target),
+            );
+            std::fs::write(&path, report.render()?)?;
+            println!("wrote {}", path.display());
+            return Ok(u64::from(!report.budgets.all_pass()));
+        }
         let report = evaluate_target(target, runs, &spool)?;
         println!("{}", summarize(&report));
         let path = emit.join(PersistenceReport::file_name(&report.target));
@@ -404,6 +446,17 @@ fn persistence(
     }
 
     if targets.len() == 1 {
+        if real {
+            let executable = std::env::current_exe()?;
+            let report = evaluate_real_target(&targets[0], runs, &spool, &executable)?;
+            println!("{}", summarize_real(&report));
+            let path = emit.join(
+                chakra_conformance::persistence::RealPersistenceReport::file_name(&report.target),
+            );
+            std::fs::write(&path, report.render()?)?;
+            println!("wrote {}", path.display());
+            return Ok(u64::from(!report.budgets.all_pass()));
+        }
         let report = evaluate_target(&targets[0], runs, &spool)?;
         println!("{}", summarize(&report));
         let path = emit.join(PersistenceReport::file_name(&report.target));
@@ -433,6 +486,9 @@ fn persistence(
         }
         if no_corpus {
             child.arg("--no-corpus");
+        }
+        if real {
+            child.arg("--real");
         }
         if matches!(target.kind, TargetKind::Corpus)
             && let Some(language) = target.name.split('/').nth(1)

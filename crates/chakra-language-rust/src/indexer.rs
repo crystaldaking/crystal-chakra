@@ -371,6 +371,76 @@ impl RustSyntaxIndex {
             parse_schedule.peak_active_workers,
             parse_schedule.peak_queue_depth,
         );
+        Self::assemble(files, metadata, graph_limits, parse_phase, cancellation)
+    }
+
+    /// Rebuilds the index from previously exported per-file parse facts for
+    /// `known_files`, parsing only the remaining sources (issue #39). Every
+    /// known file is re-checked against the current source text; anything
+    /// else is parsed. The result is identical to a cold build of the same
+    /// classified sources.
+    pub fn restore_classified_sources_scheduled(
+        sources: RustSources,
+        known_files: &BTreeMap<RepoRelativePath, Arc<ParsedFile>>,
+        graph_limits: GraphBuildLimits,
+        worker_limit: usize,
+        parallel_file_threshold: usize,
+        cancellation: &IndexCancellation,
+    ) -> Result<(Self, SymbolGraph, LanguageBuildMetrics), RustIndexError> {
+        let RustSources {
+            files: sources,
+            metadata,
+        } = sources;
+        let metadata = normalized_metadata(&sources, metadata);
+        check_cancelled(cancellation)?;
+        let mut files = BTreeMap::new();
+        let mut misses = BTreeMap::new();
+        for (path, source) in sources {
+            match known_files.get(&path) {
+                Some(known) if known.source.as_ref() == source.as_ref() => {
+                    files.insert(path, Arc::clone(known));
+                }
+                _ => {
+                    misses.insert(path, source);
+                }
+            }
+        }
+        let parse_started = PhaseTimer::start();
+        let (parsed, parse_schedule) = parse_sources_scheduled(
+            misses,
+            worker_limit.max(1),
+            parallel_file_threshold,
+            cancellation,
+        )?;
+        let parsed_source_bytes = parsed.values().fold(0_u64, |bytes, file| {
+            bytes.saturating_add(file.source.len() as u64)
+        });
+        let parsed_files = parsed.len() as u64;
+        for (path, file) in parsed {
+            files.insert(path, file);
+        }
+        let parse_phase = measured_phase(
+            IndexPhase::ParseExtraction,
+            parse_started,
+            parsed_files,
+            parsed_source_bytes,
+            parse_schedule.effective_workers,
+            parse_schedule.peak_active_workers,
+            parse_schedule.peak_queue_depth,
+        );
+        Self::assemble(files, metadata, graph_limits, parse_phase, cancellation)
+    }
+
+    /// Shared post-parse pipeline: symbol catalog, relationship
+    /// contributions, bounded graph materialization, and build metrics. Used
+    /// by both the cold build and the cache restore path.
+    fn assemble(
+        files: BTreeMap<RepoRelativePath, Arc<ParsedFile>>,
+        metadata: BTreeMap<RepoRelativePath, SourceMetadata>,
+        graph_limits: GraphBuildLimits,
+        parse_phase: IndexPhaseMeasurement,
+        cancellation: &IndexCancellation,
+    ) -> Result<(Self, SymbolGraph, LanguageBuildMetrics), RustIndexError> {
         check_cancelled(cancellation)?;
         let catalog_started = PhaseTimer::start();
         let catalog = SymbolCatalog::new(&files);
@@ -440,6 +510,13 @@ impl RustSyntaxIndex {
                 phases,
             },
         ))
+    }
+
+    /// Per-file parse facts of the current index, keyed by path. Entity ids
+    /// are absent: they are revision-scoped and assigned only while a
+    /// complete immutable graph is materialized.
+    pub fn parsed_files(&self) -> &BTreeMap<RepoRelativePath, Arc<ParsedFile>> {
+        &self.files
     }
 
     pub fn paths(&self) -> Vec<RepoRelativePath> {

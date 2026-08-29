@@ -17,3 +17,4 @@ pub use indexer::{
     RustIndexError, RustSources, RustSyntaxIndex, SyntaxFactCounts, index_repository,
     scan_repository_sources,
 };
+pub use parser::{CallDraft, ImplDraft, ParsedFile, SymbolDraft};

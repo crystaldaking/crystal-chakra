@@ -5,6 +5,7 @@
 //! watcher/freshness barrier for that revision.
 
 mod adapter;
+pub mod cache;
 mod indexer;
 mod live;
 
@@ -12,6 +13,9 @@ pub use adapter::{
     AdapterBuildMetrics, AdapterColdBuild, AdapterFactCounts, AdapterFrameworkMetrics,
     AdapterReconcile, AdapterReconcileMetrics, LanguageSources, SyntaxLanguageAdapter,
     default_adapters, registered_languages,
+};
+pub use cache::{
+    CacheRestoreOutcome, FileSyntaxFacts, SyntaxCacheConfig, SyntaxCacheMode, SyntaxCacheReport,
 };
 pub use indexer::{
     IndexMetrics, IndexOptions, IndexReport, ReconcileMetrics, ReconcileReport,

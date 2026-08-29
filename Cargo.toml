@@ -11,6 +11,7 @@ license = "MIT"
 repository = "https://github.com/crystaldaking/crystal-chakra"
 
 [workspace.dependencies]
+blake3 = "1"
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

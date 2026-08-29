@@ -5,6 +5,30 @@ version tags prefixed with `v`.
 
 ## [Unreleased]
 
+### Added
+
+- Versioned per-file syntax fact cache in `chakra-language` (issue #39),
+  opt-in through `IndexOptions::cache` and disabled by default and below the
+  1,000-file B1 gate. The cache persists only materialization-independent
+  per-file facts (declarations, call candidates, relation drafts,
+  diagnostics, content hashes) in a compact checksummed binary encoding
+  (BLAKE3; new dependency), gated by a SPEC §14 compatibility key
+  (repository identity, HEAD commit, index format version, graph model
+  version, per-language extractor versions, Chakra version, indexing
+  configuration fingerprint). Restore validates per-file content hashes and
+  rebuilds each language partition through the same bounded pipeline a cold
+  build uses, publishing through the same atomic revision path; restored
+  revisions are fingerprint-identical to deterministic rebuilds. Corrupt or
+  truncated fact files are isolated per-file reparse misses; corrupt,
+  oversized, or incompatible manifests fall back to a full deterministic
+  rebuild. Publication is atomic (temporary file plus rename, manifest
+  last), incremental (unchanged payloads are reused), and bounded (entry
+  count, entry bytes, total bytes). The acceptance verdict against the
+  issue #38 budgets B1–B6 is recorded in
+  `docs/evaluation/v0.2.0-syntax-fact-cache.md`: restore with real
+  reassembly reaches only ~1.1–1.3× (B1/B3 no-go), so the cache stays
+  opt-in and off by default.
+
 ### Tooling
 
 - New `chakra-conformance persistence` benchmark (issue #38): measures cold
@@ -16,6 +40,12 @@ version tags prefixed with `v`.
   per-file cache is explicitly a model — it does not implement graph
   restoration. The acceptance decision and go/no-go budgets for issue #39 are
   recorded in `docs/evaluation/v0.2.0-persistence-acceptance.md`.
+- The benchmark grows a `--real` mode (issue #39) that measures budgets
+  B1–B6 against the production syntax fact cache on the same fixture and
+  pinned corpus targets, including real graph reassembly, a restore-only
+  child process for the B6 memory budget, and fingerprint equivalence checks
+  between restored and deterministically rebuilt graphs. Artifacts are
+  written as `persistence-real-<target>.json` under `target/persistence/`.
 
 ## [0.1.3] - 2026-08-26
 

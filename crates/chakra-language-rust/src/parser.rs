@@ -43,7 +43,7 @@ pub(crate) enum ParseError {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ParsedFile {
+pub struct ParsedFile {
     pub source: Arc<str>,
     pub module_path: Vec<String>,
     pub symbols: Vec<SymbolDraft>,
@@ -55,7 +55,7 @@ pub(crate) struct ParsedFile {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct SymbolDraft {
+pub struct SymbolDraft {
     pub key: SymbolKey,
     pub location: SourceRange,
     pub signature: Option<String>,
@@ -63,7 +63,7 @@ pub(crate) struct SymbolDraft {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct CallDraft {
+pub struct CallDraft {
     pub caller: usize,
     pub form: CallForm,
     pub target_kind: CallTargetKind,
@@ -83,7 +83,7 @@ struct CallTarget<'tree> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ImplDraft {
+pub struct ImplDraft {
     pub symbol: usize,
     /// Exact syntactic container prefix at the impl site, including inline
     /// modules nested inside the physical file module.

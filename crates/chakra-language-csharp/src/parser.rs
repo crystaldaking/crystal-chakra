@@ -48,7 +48,7 @@ pub(crate) enum ParseError {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ParsedFile {
+pub struct ParsedFile {
     pub source: Arc<str>,
     pub module_path: Vec<String>,
     pub extension_scopes: Vec<String>,
@@ -61,7 +61,7 @@ pub(crate) struct ParsedFile {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct SymbolDraft {
+pub struct SymbolDraft {
     pub key: SymbolKey,
     pub location: SourceRange,
     pub signature: Option<String>,
@@ -70,7 +70,7 @@ pub(crate) struct SymbolDraft {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct CallDraft {
+pub struct CallDraft {
     pub caller: usize,
     pub form: CallForm,
     pub target_kind: CallTargetKind,
@@ -91,7 +91,7 @@ struct CallTarget<'tree> {
 
 /// One syntax-derived base-type relation with ordered resolution candidates.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct NamedRelationDraft {
+pub struct NamedRelationDraft {
     pub from: usize,
     pub candidates: Vec<String>,
     pub target_kinds: Vec<SymbolKind>,

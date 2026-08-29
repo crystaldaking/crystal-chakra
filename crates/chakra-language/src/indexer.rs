@@ -27,8 +27,12 @@ use nix::sys::resource::{UsageWho, getrusage};
 use nix::sys::time::TimeValLike;
 
 use crate::adapter::{
-    AdapterFactCounts, AdapterFrameworkMetrics, AdapterReconcileMetrics, LanguageSources,
-    SyntaxLanguageAdapter, default_adapters, registered_languages,
+    AdapterColdBuild, AdapterFactCounts, AdapterFrameworkMetrics, AdapterReconcileMetrics,
+    LanguageSources, SyntaxLanguageAdapter, default_adapters, registered_languages,
+};
+use crate::cache::{
+    CacheRestoreOutcome, CacheStore, CompatibilityKey, FactsToStore, ManifestEntry,
+    SyntaxCacheMode, SyntaxCacheReport, content_hash,
 };
 
 const PARALLEL_PARSE_FILE_THRESHOLD: u64 = 32;
@@ -102,6 +106,9 @@ pub struct WorkspaceSourceScan {
 pub struct IndexOptions {
     pub budgets: IndexBudgets,
     pub cancellation: IndexCancellation,
+    /// Opt-in per-file syntax fact cache (issue #39). Disabled by default;
+    /// below the configured size gate the cache is neither read nor written.
+    pub cache: SyntaxCacheMode,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -222,6 +229,7 @@ impl IndexOptions {
         Ok(Self {
             budgets: budgets.validate()?,
             cancellation,
+            cache: SyntaxCacheMode::default(),
         })
     }
 }
@@ -288,6 +296,8 @@ pub struct IndexReport {
     pub metrics: IndexMetrics,
     pub syntax_index: WorkspaceSyntaxIndex,
     pub provider_inputs: Vec<ProviderInput>,
+    /// Syntax fact cache participation of this run (issue #39).
+    pub cache: SyntaxCacheReport,
 }
 
 #[derive(Debug, Error)]
@@ -644,27 +654,15 @@ pub fn index_repository_with_options(
 
     let prototypes = default_adapters();
     let limits = split_graph_limits(budgets, &scan.sources.counts());
-    let mut builds = Vec::with_capacity(prototypes.len());
-    for (adapter, limits) in prototypes.iter().zip(limits.iter().copied()) {
-        let language = adapter.language();
-        let sources = scan.sources.take(language);
-        builds.push(
-            adapter
-                .cold_build(
-                    sources,
-                    limits,
-                    worker_policy.effective_worker_limit as usize,
-                    PARALLEL_PARSE_FILE_THRESHOLD as usize,
-                    &repository_root,
-                    &options.cancellation,
-                )
-                .map_err(|source| WorkspaceIndexError::Adapter {
-                    language,
-                    source: Box::new(source),
-                })?,
-        );
-        rss_peak = max_option(rss_peak, process_rss_bytes());
-    }
+    let (builds, mut cache_report, cache_write_plan) = build_adapters(
+        &repository_root,
+        &options,
+        &mut scan,
+        &prototypes,
+        &limits,
+        &worker_policy,
+        &mut rss_peak,
+    )?;
     check_cancelled(&options.cancellation)?;
     let adapter_count = builds.len() as u64;
     let mut built_adapters = Vec::with_capacity(builds.len());
@@ -792,6 +790,37 @@ pub fn index_repository_with_options(
             .truncated_files
             .saturating_add(metrics.framework.truncated_files);
     }
+    if let Some((key, store, source_hashes)) = cache_write_plan.as_ref() {
+        let needs_write = !matches!(
+            cache_report.restore,
+            CacheRestoreOutcome::Restored { misses: 0, .. }
+        );
+        if needs_write {
+            let mut files = Vec::new();
+            for adapter in &built_adapters {
+                let language = adapter.language();
+                for facts in adapter.export_file_facts() {
+                    let Some(hash) = source_hashes.get(&facts.path).copied() else {
+                        continue;
+                    };
+                    files.push(FactsToStore {
+                        language,
+                        facts,
+                        content_hash: hash,
+                    });
+                }
+            }
+            match store.write(key, &files) {
+                Ok(outcome) => cache_report.write = Some(outcome),
+                Err(error) => {
+                    warn!(
+                        error = %error,
+                        "syntax fact cache publication failed; continuing without a cache"
+                    );
+                }
+            }
+        }
+    }
     let syntax_index = WorkspaceSyntaxIndex {
         adapters: built_adapters
             .into_iter()
@@ -849,7 +878,229 @@ pub fn index_repository_with_options(
         metrics,
         provider_inputs: syntax_index.provider_inputs.clone(),
         syntax_index,
+        cache: cache_report,
     })
+}
+
+/// Cache write inputs threaded from the build attempt to the post-build
+/// publication: the resolved key, the store, and the content hashes of every
+/// scanned source.
+type CacheWritePlan = (
+    CompatibilityKey,
+    CacheStore,
+    BTreeMap<RepoRelativePath, [u8; 16]>,
+);
+
+/// Builds every language partition, restoring from the syntax fact cache
+/// when it is enabled, above the B1 size gate, and compatible. Every cache
+/// failure mode degrades to the deterministic cold build — per file
+/// (reparse), per partition (adapter cold build), or for the whole
+/// workspace (full rebuild). The returned report records exactly which path
+/// produced the revision.
+#[allow(clippy::too_many_arguments)]
+fn build_adapters(
+    repository_root: &Path,
+    options: &IndexOptions,
+    scan: &mut WorkspaceSourceScan,
+    prototypes: &[Box<dyn SyntaxLanguageAdapter>],
+    limits: &[GraphBuildLimits],
+    worker_policy: &WorkerPolicy,
+    rss_peak: &mut Option<u64>,
+) -> Result<
+    (
+        Vec<AdapterColdBuild>,
+        SyntaxCacheReport,
+        Option<CacheWritePlan>,
+    ),
+    WorkspaceIndexError,
+> {
+    let Some(config) = options.cache.config() else {
+        let builds = cold_builds(
+            scan,
+            prototypes,
+            limits,
+            worker_policy,
+            repository_root,
+            &options.cancellation,
+            rss_peak,
+        )?;
+        return Ok((builds, SyntaxCacheReport::default(), None));
+    };
+    if scan.indexed_files <= config.min_indexed_files {
+        let report = SyntaxCacheReport {
+            restore: CacheRestoreOutcome::BelowGate {
+                indexed_files: scan.indexed_files,
+                gate: config.min_indexed_files,
+            },
+            ..SyntaxCacheReport::default()
+        };
+        let builds = cold_builds(
+            scan,
+            prototypes,
+            limits,
+            worker_policy,
+            repository_root,
+            &options.cancellation,
+            rss_peak,
+        )?;
+        return Ok((builds, report, None));
+    }
+
+    let cold_fallback = |scan: &mut WorkspaceSourceScan,
+                         rss_peak: &mut Option<u64>|
+     -> Result<Vec<AdapterColdBuild>, WorkspaceIndexError> {
+        cold_builds(
+            scan,
+            prototypes,
+            limits,
+            worker_policy,
+            repository_root,
+            &options.cancellation,
+            rss_peak,
+        )
+    };
+    let extractors = prototypes
+        .iter()
+        .map(|adapter| (adapter.language(), adapter.extractor_version()))
+        .collect();
+    let key = match CompatibilityKey::resolve(repository_root, &options.budgets, extractors) {
+        Ok(key) => key,
+        Err(error) => {
+            let report = SyntaxCacheReport {
+                restore: CacheRestoreOutcome::Fallback {
+                    reason: format!("cache identity resolution failed: {error}"),
+                },
+                ..SyntaxCacheReport::default()
+            };
+            return Ok((cold_fallback(scan, rss_peak)?, report, None));
+        }
+    };
+    let store = CacheStore::new(config.clone());
+    let source_hashes = hash_scan_sources(scan);
+    let (manifest, rejection) = store.read_compatible_manifest(&key);
+    let Some((entries, manifest_bytes)) = manifest else {
+        let report = SyntaxCacheReport {
+            restore: CacheRestoreOutcome::Fallback {
+                reason: rejection.unwrap_or_else(|| "cache unavailable".to_owned()),
+            },
+            ..SyntaxCacheReport::default()
+        };
+        let builds = cold_fallback(scan, rss_peak)?;
+        return Ok((builds, report, Some((key, store, source_hashes))));
+    };
+
+    let entry_map: std::collections::HashMap<&RepoRelativePath, &ManifestEntry> =
+        entries.iter().map(|entry| (&entry.path, entry)).collect();
+    let mut hits = 0_u64;
+    let mut misses = 0_u64;
+    let mut bytes_read = manifest_bytes;
+    let mut builds = Vec::with_capacity(prototypes.len());
+    for (adapter, limits) in prototypes.iter().zip(limits.iter().copied()) {
+        let language = adapter.language();
+        let sources = scan.sources.take(language);
+        let mut facts = Vec::new();
+        for path in sources.files.keys() {
+            let hit = entry_map
+                .get(path)
+                .filter(|entry| source_hashes.get(path) == Some(&entry.content_hash))
+                .and_then(|entry| store.read_facts(entry, language).ok());
+            match hit {
+                Some((fact, bytes)) => {
+                    bytes_read = bytes_read.saturating_add(bytes);
+                    facts.push(fact);
+                    hits = hits.saturating_add(1);
+                }
+                None => misses = misses.saturating_add(1),
+            }
+        }
+        let fallback_sources = sources.clone();
+        let build = match adapter.cached_build(
+            sources,
+            facts,
+            limits,
+            worker_policy.effective_worker_limit as usize,
+            PARALLEL_PARSE_FILE_THRESHOLD as usize,
+            repository_root,
+            &options.cancellation,
+        ) {
+            Ok(build) => build,
+            Err(error) => {
+                warn!(
+                    error = %error,
+                    ?language,
+                    "cached build failed; falling back to a deterministic build for this partition"
+                );
+                adapter
+                    .cold_build(
+                        fallback_sources,
+                        limits,
+                        worker_policy.effective_worker_limit as usize,
+                        PARALLEL_PARSE_FILE_THRESHOLD as usize,
+                        repository_root,
+                        &options.cancellation,
+                    )
+                    .map_err(|source| WorkspaceIndexError::Adapter {
+                        language,
+                        source: Box::new(source),
+                    })?
+            }
+        };
+        builds.push(build);
+        *rss_peak = max_option(*rss_peak, process_rss_bytes());
+    }
+    let report = SyntaxCacheReport {
+        restore: CacheRestoreOutcome::Restored { hits, misses },
+        write: None,
+        bytes_read,
+    };
+    Ok((builds, report, Some((key, store, source_hashes))))
+}
+
+/// The deterministic build path: every partition parses its classified
+/// sources through the bounded cold build.
+fn cold_builds(
+    scan: &mut WorkspaceSourceScan,
+    prototypes: &[Box<dyn SyntaxLanguageAdapter>],
+    limits: &[GraphBuildLimits],
+    worker_policy: &WorkerPolicy,
+    repository_root: &Path,
+    cancellation: &IndexCancellation,
+    rss_peak: &mut Option<u64>,
+) -> Result<Vec<AdapterColdBuild>, WorkspaceIndexError> {
+    let mut builds = Vec::with_capacity(prototypes.len());
+    for (adapter, limits) in prototypes.iter().zip(limits.iter().copied()) {
+        let language = adapter.language();
+        let sources = scan.sources.take(language);
+        builds.push(
+            adapter
+                .cold_build(
+                    sources,
+                    limits,
+                    worker_policy.effective_worker_limit as usize,
+                    PARALLEL_PARSE_FILE_THRESHOLD as usize,
+                    repository_root,
+                    cancellation,
+                )
+                .map_err(|source| WorkspaceIndexError::Adapter {
+                    language,
+                    source: Box::new(source),
+                })?,
+        );
+        *rss_peak = max_option(*rss_peak, process_rss_bytes());
+    }
+    Ok(builds)
+}
+
+/// Content hashes of every scanned source, computed once and shared by
+/// cache validation (restore) and cache publication (write).
+fn hash_scan_sources(scan: &WorkspaceSourceScan) -> BTreeMap<RepoRelativePath, [u8; 16]> {
+    let mut hashes = BTreeMap::new();
+    for language in scan.sources.languages() {
+        for (path, source) in &language.sources.files {
+            hashes.insert(path.clone(), content_hash(source));
+        }
+    }
+    hashes
 }
 
 /// Compatibility helper using safe defaults.

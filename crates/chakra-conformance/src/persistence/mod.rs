@@ -13,9 +13,15 @@
 //! SHA-mismatched checkouts are skipped repositories. Unlike the corpus
 //! runner it writes its artifacts under `target/persistence/` (git-ignored);
 //! nothing in `docs/support/corpus/results/` is touched.
+//!
+//! The `--real` mode (issue #39, [`real`]) measures the same phases against
+//! the production per-file syntax fact cache in `chakra-language::cache`,
+//! including real graph reassembly, and evaluates the B1–B6 budgets; see
+//! `docs/evaluation/v0.2.0-syntax-fact-cache.md`.
 
 mod model;
 mod projection;
+mod real;
 mod report;
 mod runner;
 
@@ -23,6 +29,7 @@ use std::path::PathBuf;
 
 pub use model::{CompatibilityKey, PhaseMeasurement, PhaseTimer, RestoreOutcome};
 pub use projection::{FileFacts, MODEL_FORMAT_VERSION};
+pub use real::{RealPersistenceReport, evaluate_real_target, restore_only_child, summarize_real};
 pub use report::{
     MachineContext, PERSISTENCE_SCHEMA_VERSION, PersistenceReport, TargetKind, TargetStatus,
 };

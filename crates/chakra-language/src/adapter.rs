@@ -18,6 +18,7 @@ use chakra_domain::symbol::Language;
 use chakra_engine::{GraphBuildLimits, GraphBuildReport, SymbolGraph};
 use tracing::warn;
 
+use crate::cache::FileSyntaxFacts;
 use crate::indexer::WorkspaceIndexError;
 
 /// Latest source text plus role/package metadata for one language, exactly as
@@ -320,6 +321,43 @@ pub trait SyntaxLanguageAdapter: Debug + Send + Sync {
 
     /// Fact counts backing the workspace indexing status.
     fn fact_counts(&self) -> AdapterFactCounts;
+
+    /// Versioned extractor identity for the syntax fact cache (SPEC §14).
+    /// Bump the `fN` suffix when the adapter's grammar or extraction changes
+    /// in a way that invalidates previously exported facts.
+    fn extractor_version(&self) -> String;
+
+    /// Per-file syntax facts of the current index, in path order, for cache
+    /// publication. The default exports nothing: the adapter's partition is
+    /// then never cached and always rebuilt deterministically.
+    fn export_file_facts(&self) -> Vec<FileSyntaxFacts> {
+        Vec::new()
+    }
+
+    /// Rebuilds this partition from content-validated cached facts, parsing
+    /// only files without valid facts. The default ignores the facts and
+    /// runs the deterministic cold build.
+    #[allow(clippy::too_many_arguments)]
+    fn cached_build(
+        &self,
+        sources: LanguageSources,
+        facts: Vec<FileSyntaxFacts>,
+        graph_limits: GraphBuildLimits,
+        worker_limit: usize,
+        parallel_file_threshold: usize,
+        repository_root: &Path,
+        cancellation: &IndexCancellation,
+    ) -> Result<AdapterColdBuild, WorkspaceIndexError> {
+        let _ = facts;
+        self.cold_build(
+            sources,
+            graph_limits,
+            worker_limit,
+            parallel_file_threshold,
+            repository_root,
+            cancellation,
+        )
+    }
 }
 
 impl Clone for Box<dyn SyntaxLanguageAdapter> {
@@ -435,6 +473,54 @@ impl SyntaxLanguageAdapter for chakra_language_rust::RustSyntaxIndex {
     fn fact_counts(&self) -> AdapterFactCounts {
         self.fact_counts().into()
     }
+
+    fn extractor_version(&self) -> String {
+        "rust:f1".to_owned()
+    }
+
+    fn export_file_facts(&self) -> Vec<FileSyntaxFacts> {
+        crate::cache::convert::export_rust(self.parsed_files())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn cached_build(
+        &self,
+        sources: LanguageSources,
+        facts: Vec<FileSyntaxFacts>,
+        graph_limits: GraphBuildLimits,
+        worker_limit: usize,
+        parallel_file_threshold: usize,
+        _repository_root: &Path,
+        cancellation: &IndexCancellation,
+    ) -> Result<AdapterColdBuild, WorkspaceIndexError> {
+        let mut known = std::collections::BTreeMap::new();
+        for fact in &facts {
+            let Some(source) = sources.files.get(&fact.path).cloned() else {
+                continue;
+            };
+            if let Some(parsed) = crate::cache::convert::import_rust(fact, source) {
+                known.insert(fact.path.clone(), std::sync::Arc::new(parsed));
+            }
+        }
+        let (index, graph, metrics) = Self::restore_classified_sources_scheduled(
+            sources.into(),
+            &known,
+            graph_limits,
+            worker_limit,
+            parallel_file_threshold,
+            cancellation,
+        )?;
+        Ok(AdapterColdBuild {
+            index: Box::new(index),
+            graph,
+            metrics: AdapterBuildMetrics {
+                facts: metrics.facts.into(),
+                graph: metrics.graph,
+                framework: AdapterFrameworkMetrics::default(),
+                phases: metrics.phases,
+            },
+        })
+    }
 }
 
 impl SyntaxLanguageAdapter for chakra_language_php::PhpSyntaxIndex {
@@ -533,6 +619,70 @@ impl SyntaxLanguageAdapter for chakra_language_php::PhpSyntaxIndex {
     fn fact_counts(&self) -> AdapterFactCounts {
         self.fact_counts().into()
     }
+
+    fn extractor_version(&self) -> String {
+        "php:f1".to_owned()
+    }
+
+    fn export_file_facts(&self) -> Vec<FileSyntaxFacts> {
+        crate::cache::convert::export_php(self.parsed_files())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn cached_build(
+        &self,
+        sources: LanguageSources,
+        facts: Vec<FileSyntaxFacts>,
+        graph_limits: GraphBuildLimits,
+        worker_limit: usize,
+        parallel_file_threshold: usize,
+        repository_root: &Path,
+        cancellation: &IndexCancellation,
+    ) -> Result<AdapterColdBuild, WorkspaceIndexError> {
+        let laravel_detected = match chakra_language_php::detect_laravel(repository_root) {
+            Ok(detected) => detected,
+            Err(error) => {
+                warn!(
+                    error = %error,
+                    "Laravel enrichment disabled because Composer metadata is unavailable or invalid"
+                );
+                false
+            }
+        };
+        let mut known = std::collections::BTreeMap::new();
+        for fact in &facts {
+            let Some(source) = sources.files.get(&fact.path).cloned() else {
+                continue;
+            };
+            if let Some(parsed) = crate::cache::convert::import_php(fact, source) {
+                known.insert(fact.path.clone(), std::sync::Arc::new(parsed));
+            }
+        }
+        let (index, graph, metrics) = Self::restore_classified_sources_scheduled(
+            sources.into(),
+            &known,
+            graph_limits,
+            worker_limit,
+            parallel_file_threshold,
+            laravel_detected,
+            cancellation,
+        )?;
+        Ok(AdapterColdBuild {
+            index: Box::new(index),
+            graph,
+            metrics: AdapterBuildMetrics {
+                facts: metrics.facts.into(),
+                graph: metrics.graph,
+                framework: AdapterFrameworkMetrics {
+                    detected: metrics.laravel_detected,
+                    symbols: metrics.framework_symbols,
+                    edges: metrics.framework_edges,
+                    truncated_files: metrics.framework_truncated_files,
+                },
+                phases: metrics.phases,
+            },
+        })
+    }
 }
 
 impl SyntaxLanguageAdapter for chakra_language_typescript::TypeScriptSyntaxIndex {
@@ -609,6 +759,55 @@ impl SyntaxLanguageAdapter for chakra_language_typescript::TypeScriptSyntaxIndex
 
     fn fact_counts(&self) -> AdapterFactCounts {
         self.fact_counts().into()
+    }
+
+    fn extractor_version(&self) -> String {
+        "typescript:f1".to_owned()
+    }
+
+    fn export_file_facts(&self) -> Vec<FileSyntaxFacts> {
+        crate::cache::convert::export_shared(self.parsed_files())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn cached_build(
+        &self,
+        sources: LanguageSources,
+        facts: Vec<FileSyntaxFacts>,
+        graph_limits: GraphBuildLimits,
+        worker_limit: usize,
+        parallel_file_threshold: usize,
+        _repository_root: &Path,
+        cancellation: &IndexCancellation,
+    ) -> Result<AdapterColdBuild, WorkspaceIndexError> {
+        let language = self.language();
+        let mut known = std::collections::BTreeMap::new();
+        for fact in &facts {
+            let Some(source) = sources.files.get(&fact.path).cloned() else {
+                continue;
+            };
+            if let Some(parsed) = crate::cache::convert::import_shared(fact, source, language) {
+                known.insert(fact.path.clone(), std::sync::Arc::new(parsed));
+            }
+        }
+        let (index, graph, metrics) = Self::restore_classified_sources_scheduled(
+            sources.into(),
+            &known,
+            graph_limits,
+            worker_limit,
+            parallel_file_threshold,
+            cancellation,
+        )?;
+        Ok(AdapterColdBuild {
+            index: Box::new(index),
+            graph,
+            metrics: AdapterBuildMetrics {
+                facts: metrics.facts.into(),
+                graph: metrics.graph,
+                framework: AdapterFrameworkMetrics::default(),
+                phases: metrics.phases,
+            },
+        })
     }
 }
 
@@ -687,6 +886,55 @@ impl SyntaxLanguageAdapter for chakra_language_python::PythonSyntaxIndex {
     fn fact_counts(&self) -> AdapterFactCounts {
         self.fact_counts().into()
     }
+
+    fn extractor_version(&self) -> String {
+        "python:f1".to_owned()
+    }
+
+    fn export_file_facts(&self) -> Vec<FileSyntaxFacts> {
+        crate::cache::convert::export_shared(self.parsed_files())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn cached_build(
+        &self,
+        sources: LanguageSources,
+        facts: Vec<FileSyntaxFacts>,
+        graph_limits: GraphBuildLimits,
+        worker_limit: usize,
+        parallel_file_threshold: usize,
+        _repository_root: &Path,
+        cancellation: &IndexCancellation,
+    ) -> Result<AdapterColdBuild, WorkspaceIndexError> {
+        let language = self.language();
+        let mut known = std::collections::BTreeMap::new();
+        for fact in &facts {
+            let Some(source) = sources.files.get(&fact.path).cloned() else {
+                continue;
+            };
+            if let Some(parsed) = crate::cache::convert::import_shared(fact, source, language) {
+                known.insert(fact.path.clone(), std::sync::Arc::new(parsed));
+            }
+        }
+        let (index, graph, metrics) = Self::restore_classified_sources_scheduled(
+            sources.into(),
+            &known,
+            graph_limits,
+            worker_limit,
+            parallel_file_threshold,
+            cancellation,
+        )?;
+        Ok(AdapterColdBuild {
+            index: Box::new(index),
+            graph,
+            metrics: AdapterBuildMetrics {
+                facts: metrics.facts.into(),
+                graph: metrics.graph,
+                framework: AdapterFrameworkMetrics::default(),
+                phases: metrics.phases,
+            },
+        })
+    }
 }
 
 impl SyntaxLanguageAdapter for chakra_language_javascript::JavaScriptSyntaxIndex {
@@ -763,6 +1011,55 @@ impl SyntaxLanguageAdapter for chakra_language_javascript::JavaScriptSyntaxIndex
 
     fn fact_counts(&self) -> AdapterFactCounts {
         self.fact_counts().into()
+    }
+
+    fn extractor_version(&self) -> String {
+        "javascript:f1".to_owned()
+    }
+
+    fn export_file_facts(&self) -> Vec<FileSyntaxFacts> {
+        crate::cache::convert::export_shared(self.parsed_files())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn cached_build(
+        &self,
+        sources: LanguageSources,
+        facts: Vec<FileSyntaxFacts>,
+        graph_limits: GraphBuildLimits,
+        worker_limit: usize,
+        parallel_file_threshold: usize,
+        _repository_root: &Path,
+        cancellation: &IndexCancellation,
+    ) -> Result<AdapterColdBuild, WorkspaceIndexError> {
+        let language = self.language();
+        let mut known = std::collections::BTreeMap::new();
+        for fact in &facts {
+            let Some(source) = sources.files.get(&fact.path).cloned() else {
+                continue;
+            };
+            if let Some(parsed) = crate::cache::convert::import_shared(fact, source, language) {
+                known.insert(fact.path.clone(), std::sync::Arc::new(parsed));
+            }
+        }
+        let (index, graph, metrics) = Self::restore_classified_sources_scheduled(
+            sources.into(),
+            &known,
+            graph_limits,
+            worker_limit,
+            parallel_file_threshold,
+            cancellation,
+        )?;
+        Ok(AdapterColdBuild {
+            index: Box::new(index),
+            graph,
+            metrics: AdapterBuildMetrics {
+                facts: metrics.facts.into(),
+                graph: metrics.graph,
+                framework: AdapterFrameworkMetrics::default(),
+                phases: metrics.phases,
+            },
+        })
     }
 }
 
@@ -841,6 +1138,55 @@ impl SyntaxLanguageAdapter for chakra_language_java::JavaSyntaxIndex {
     fn fact_counts(&self) -> AdapterFactCounts {
         self.fact_counts().into()
     }
+
+    fn extractor_version(&self) -> String {
+        "java:f1".to_owned()
+    }
+
+    fn export_file_facts(&self) -> Vec<FileSyntaxFacts> {
+        crate::cache::convert::export_shared(self.parsed_files())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn cached_build(
+        &self,
+        sources: LanguageSources,
+        facts: Vec<FileSyntaxFacts>,
+        graph_limits: GraphBuildLimits,
+        worker_limit: usize,
+        parallel_file_threshold: usize,
+        _repository_root: &Path,
+        cancellation: &IndexCancellation,
+    ) -> Result<AdapterColdBuild, WorkspaceIndexError> {
+        let language = self.language();
+        let mut known = std::collections::BTreeMap::new();
+        for fact in &facts {
+            let Some(source) = sources.files.get(&fact.path).cloned() else {
+                continue;
+            };
+            if let Some(parsed) = crate::cache::convert::import_shared(fact, source, language) {
+                known.insert(fact.path.clone(), std::sync::Arc::new(parsed));
+            }
+        }
+        let (index, graph, metrics) = Self::restore_classified_sources_scheduled(
+            sources.into(),
+            &known,
+            graph_limits,
+            worker_limit,
+            parallel_file_threshold,
+            cancellation,
+        )?;
+        Ok(AdapterColdBuild {
+            index: Box::new(index),
+            graph,
+            metrics: AdapterBuildMetrics {
+                facts: metrics.facts.into(),
+                graph: metrics.graph,
+                framework: AdapterFrameworkMetrics::default(),
+                phases: metrics.phases,
+            },
+        })
+    }
 }
 
 impl SyntaxLanguageAdapter for chakra_language_csharp::CSharpSyntaxIndex {
@@ -917,6 +1263,54 @@ impl SyntaxLanguageAdapter for chakra_language_csharp::CSharpSyntaxIndex {
 
     fn fact_counts(&self) -> AdapterFactCounts {
         self.fact_counts().into()
+    }
+
+    fn extractor_version(&self) -> String {
+        "csharp:f1".to_owned()
+    }
+
+    fn export_file_facts(&self) -> Vec<FileSyntaxFacts> {
+        crate::cache::convert::export_csharp(self.parsed_files())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn cached_build(
+        &self,
+        sources: LanguageSources,
+        facts: Vec<FileSyntaxFacts>,
+        graph_limits: GraphBuildLimits,
+        worker_limit: usize,
+        parallel_file_threshold: usize,
+        _repository_root: &Path,
+        cancellation: &IndexCancellation,
+    ) -> Result<AdapterColdBuild, WorkspaceIndexError> {
+        let mut known = std::collections::BTreeMap::new();
+        for fact in &facts {
+            let Some(source) = sources.files.get(&fact.path).cloned() else {
+                continue;
+            };
+            if let Some(parsed) = crate::cache::convert::import_csharp(fact, source) {
+                known.insert(fact.path.clone(), std::sync::Arc::new(parsed));
+            }
+        }
+        let (index, graph, metrics) = Self::restore_classified_sources_scheduled(
+            sources.into(),
+            &known,
+            graph_limits,
+            worker_limit,
+            parallel_file_threshold,
+            cancellation,
+        )?;
+        Ok(AdapterColdBuild {
+            index: Box::new(index),
+            graph,
+            metrics: AdapterBuildMetrics {
+                facts: metrics.facts.into(),
+                graph: metrics.graph,
+                framework: AdapterFrameworkMetrics::default(),
+                phases: metrics.phases,
+            },
+        })
     }
 }
 
@@ -995,6 +1389,55 @@ impl SyntaxLanguageAdapter for chakra_language_shell::ShellSyntaxIndex {
     fn fact_counts(&self) -> AdapterFactCounts {
         self.fact_counts().into()
     }
+
+    fn extractor_version(&self) -> String {
+        "shell:f1".to_owned()
+    }
+
+    fn export_file_facts(&self) -> Vec<FileSyntaxFacts> {
+        crate::cache::convert::export_shared(self.parsed_files())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn cached_build(
+        &self,
+        sources: LanguageSources,
+        facts: Vec<FileSyntaxFacts>,
+        graph_limits: GraphBuildLimits,
+        worker_limit: usize,
+        parallel_file_threshold: usize,
+        _repository_root: &Path,
+        cancellation: &IndexCancellation,
+    ) -> Result<AdapterColdBuild, WorkspaceIndexError> {
+        let language = self.language();
+        let mut known = std::collections::BTreeMap::new();
+        for fact in &facts {
+            let Some(source) = sources.files.get(&fact.path).cloned() else {
+                continue;
+            };
+            if let Some(parsed) = crate::cache::convert::import_shared(fact, source, language) {
+                known.insert(fact.path.clone(), std::sync::Arc::new(parsed));
+            }
+        }
+        let (index, graph, metrics) = Self::restore_classified_sources_scheduled(
+            sources.into(),
+            &known,
+            graph_limits,
+            worker_limit,
+            parallel_file_threshold,
+            cancellation,
+        )?;
+        Ok(AdapterColdBuild {
+            index: Box::new(index),
+            graph,
+            metrics: AdapterBuildMetrics {
+                facts: metrics.facts.into(),
+                graph: metrics.graph,
+                framework: AdapterFrameworkMetrics::default(),
+                phases: metrics.phases,
+            },
+        })
+    }
 }
 
 impl SyntaxLanguageAdapter for chakra_language_cpp::CppSyntaxIndex {
@@ -1071,6 +1514,55 @@ impl SyntaxLanguageAdapter for chakra_language_cpp::CppSyntaxIndex {
 
     fn fact_counts(&self) -> AdapterFactCounts {
         self.fact_counts().into()
+    }
+
+    fn extractor_version(&self) -> String {
+        "cpp:f1".to_owned()
+    }
+
+    fn export_file_facts(&self) -> Vec<FileSyntaxFacts> {
+        crate::cache::convert::export_shared(self.parsed_files())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn cached_build(
+        &self,
+        sources: LanguageSources,
+        facts: Vec<FileSyntaxFacts>,
+        graph_limits: GraphBuildLimits,
+        worker_limit: usize,
+        parallel_file_threshold: usize,
+        _repository_root: &Path,
+        cancellation: &IndexCancellation,
+    ) -> Result<AdapterColdBuild, WorkspaceIndexError> {
+        let language = self.language();
+        let mut known = std::collections::BTreeMap::new();
+        for fact in &facts {
+            let Some(source) = sources.files.get(&fact.path).cloned() else {
+                continue;
+            };
+            if let Some(parsed) = crate::cache::convert::import_shared(fact, source, language) {
+                known.insert(fact.path.clone(), std::sync::Arc::new(parsed));
+            }
+        }
+        let (index, graph, metrics) = Self::restore_classified_sources_scheduled(
+            sources.into(),
+            &known,
+            graph_limits,
+            worker_limit,
+            parallel_file_threshold,
+            cancellation,
+        )?;
+        Ok(AdapterColdBuild {
+            index: Box::new(index),
+            graph,
+            metrics: AdapterBuildMetrics {
+                facts: metrics.facts.into(),
+                graph: metrics.graph,
+                framework: AdapterFrameworkMetrics::default(),
+                phases: metrics.phases,
+            },
+        })
     }
 }
 
@@ -1149,6 +1641,55 @@ impl SyntaxLanguageAdapter for chakra_language_hcl::HclSyntaxIndex {
     fn fact_counts(&self) -> AdapterFactCounts {
         self.fact_counts().into()
     }
+
+    fn extractor_version(&self) -> String {
+        "hcl:f1".to_owned()
+    }
+
+    fn export_file_facts(&self) -> Vec<FileSyntaxFacts> {
+        crate::cache::convert::export_shared(self.parsed_files())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn cached_build(
+        &self,
+        sources: LanguageSources,
+        facts: Vec<FileSyntaxFacts>,
+        graph_limits: GraphBuildLimits,
+        worker_limit: usize,
+        parallel_file_threshold: usize,
+        _repository_root: &Path,
+        cancellation: &IndexCancellation,
+    ) -> Result<AdapterColdBuild, WorkspaceIndexError> {
+        let language = self.language();
+        let mut known = std::collections::BTreeMap::new();
+        for fact in &facts {
+            let Some(source) = sources.files.get(&fact.path).cloned() else {
+                continue;
+            };
+            if let Some(parsed) = crate::cache::convert::import_shared(fact, source, language) {
+                known.insert(fact.path.clone(), std::sync::Arc::new(parsed));
+            }
+        }
+        let (index, graph, metrics) = Self::restore_classified_sources_scheduled(
+            sources.into(),
+            &known,
+            graph_limits,
+            worker_limit,
+            parallel_file_threshold,
+            cancellation,
+        )?;
+        Ok(AdapterColdBuild {
+            index: Box::new(index),
+            graph,
+            metrics: AdapterBuildMetrics {
+                facts: metrics.facts.into(),
+                graph: metrics.graph,
+                framework: AdapterFrameworkMetrics::default(),
+                phases: metrics.phases,
+            },
+        })
+    }
 }
 
 impl SyntaxLanguageAdapter for chakra_language_go::GoSyntaxIndex {
@@ -1225,6 +1766,55 @@ impl SyntaxLanguageAdapter for chakra_language_go::GoSyntaxIndex {
 
     fn fact_counts(&self) -> AdapterFactCounts {
         self.fact_counts().into()
+    }
+
+    fn extractor_version(&self) -> String {
+        "go:f1".to_owned()
+    }
+
+    fn export_file_facts(&self) -> Vec<FileSyntaxFacts> {
+        crate::cache::convert::export_shared(self.parsed_files())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn cached_build(
+        &self,
+        sources: LanguageSources,
+        facts: Vec<FileSyntaxFacts>,
+        graph_limits: GraphBuildLimits,
+        worker_limit: usize,
+        parallel_file_threshold: usize,
+        _repository_root: &Path,
+        cancellation: &IndexCancellation,
+    ) -> Result<AdapterColdBuild, WorkspaceIndexError> {
+        let language = self.language();
+        let mut known = std::collections::BTreeMap::new();
+        for fact in &facts {
+            let Some(source) = sources.files.get(&fact.path).cloned() else {
+                continue;
+            };
+            if let Some(parsed) = crate::cache::convert::import_shared(fact, source, language) {
+                known.insert(fact.path.clone(), std::sync::Arc::new(parsed));
+            }
+        }
+        let (index, graph, metrics) = Self::restore_classified_sources_scheduled(
+            sources.into(),
+            &known,
+            graph_limits,
+            worker_limit,
+            parallel_file_threshold,
+            cancellation,
+        )?;
+        Ok(AdapterColdBuild {
+            index: Box::new(index),
+            graph,
+            metrics: AdapterBuildMetrics {
+                facts: metrics.facts.into(),
+                graph: metrics.graph,
+                framework: AdapterFrameworkMetrics::default(),
+                phases: metrics.phases,
+            },
+        })
     }
 }
 

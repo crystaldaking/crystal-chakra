@@ -120,11 +120,67 @@ pub fn corpus_targets(
 /// Languages the refresh probe can edit. Other languages are measured for
 /// rebuild/write/restore only when a probe plan exists; today that is Rust
 /// and PHP (the v0.1 baseline languages).
-fn probe_declaration(language: &str) -> Option<(&'static [&'static str], &'static str)> {
+pub(crate) fn probe_declaration(language: &str) -> Option<(&'static [&'static str], &'static str)> {
     match language {
         "rust" => Some((&["rs"], "\npub fn chakra_persistence_probe() {}\n")),
         "php" => Some((&["php"], "\nfunction chakra_persistence_probe(): void {}\n")),
         _ => None,
+    }
+}
+
+/// Resolved worktree of one target, or the reason it cannot be evaluated.
+pub(crate) enum TargetCheckout {
+    Resolved {
+        checkout: PathBuf,
+        sha: String,
+        /// Keeps the temporary fixture repository alive.
+        fixture: Option<TempDir>,
+    },
+    Skipped(String),
+}
+
+/// Resolves the worktree of one target: corpus checkouts are used in place
+/// (SHA-verified); fixtures are seeded into a temporary Git repository.
+pub(crate) fn resolve_target_checkout(target: &PersistenceTarget) -> Check<TargetCheckout> {
+    match target.kind {
+        TargetKind::Corpus => {
+            let checkout = target
+                .checkout
+                .clone()
+                .ok_or_else(|| failure("corpus target without a checkout path"))?;
+            if !checkout.is_dir() {
+                return Ok(TargetCheckout::Skipped(format!(
+                    "checkout not cached at {}; fetch with `python3 tools/fetch_corpus.py`",
+                    checkout.display()
+                )));
+            }
+            let head = git(&checkout, &["rev-parse", "HEAD"])?;
+            if head != target.sha {
+                return Ok(TargetCheckout::Skipped(format!(
+                    "checkout HEAD {head} does not match pinned SHA {}; refusing to evaluate",
+                    target.sha
+                )));
+            }
+            Ok(TargetCheckout::Resolved {
+                checkout,
+                sha: target.sha.clone(),
+                fixture: None,
+            })
+        }
+        TargetKind::Fixture => {
+            let fixture_dir = target
+                .fixture_dir
+                .clone()
+                .ok_or_else(|| failure("fixture target without a fixture directory"))?;
+            let seeded = seed_fixture(&fixture_dir)?;
+            let sha = git(seeded.path(), &["rev-parse", "HEAD"])?;
+            let checkout = seeded.path().to_path_buf();
+            Ok(TargetCheckout::Resolved {
+                checkout,
+                sha,
+                fixture: Some(seeded),
+            })
+        }
     }
 }
 
@@ -153,48 +209,19 @@ pub fn evaluate_target(
 
     // Resolve the worktree: corpus checkouts are used in place; fixtures are
     // seeded into a temporary Git repository kept alive for the evaluation.
-    let mut fixture_repo: Option<TempDir> = None;
-    let (checkout, sha) = match target.kind {
-        TargetKind::Corpus => {
-            let checkout = target
-                .checkout
-                .clone()
-                .ok_or_else(|| failure("corpus target without a checkout path"))?;
-            if !checkout.is_dir() {
-                return Ok(PersistenceReport::skipped(
-                    &target.name,
-                    target.kind,
-                    &target.sha,
-                    format!(
-                        "checkout not cached at {}; fetch with `python3 tools/fetch_corpus.py`",
-                        checkout.display()
-                    ),
-                ));
-            }
-            let head = git(&checkout, &["rev-parse", "HEAD"])?;
-            if head != target.sha {
-                return Ok(PersistenceReport::skipped(
-                    &target.name,
-                    target.kind,
-                    &target.sha,
-                    format!(
-                        "checkout HEAD {head} does not match pinned SHA {}; refusing to evaluate",
-                        target.sha
-                    ),
-                ));
-            }
-            (checkout, target.sha.clone())
-        }
-        TargetKind::Fixture => {
-            let fixture_dir = target
-                .fixture_dir
-                .clone()
-                .ok_or_else(|| failure("fixture target without a fixture directory"))?;
-            let seeded = seed_fixture(&fixture_dir)?;
-            let sha = git(seeded.path(), &["rev-parse", "HEAD"])?;
-            let checkout = seeded.path().to_path_buf();
-            fixture_repo = Some(seeded);
-            (checkout, sha)
+    let (checkout, sha, fixture_repo) = match resolve_target_checkout(target)? {
+        TargetCheckout::Resolved {
+            checkout,
+            sha,
+            fixture,
+        } => (checkout, sha, fixture),
+        TargetCheckout::Skipped(reason) => {
+            return Ok(PersistenceReport::skipped(
+                &target.name,
+                target.kind,
+                &target.sha,
+                reason,
+            ));
         }
     };
 
@@ -377,25 +404,13 @@ fn measure_one_file_refresh(
     // The edit is always reverted, even when the measurement failed; a pinned
     // corpus checkout must never be left dirty.
     fs::write(&absolute, &original)?;
-    git(checkout, &["checkout", "--", "."])?;
-    let status = git(checkout, &["status", "--porcelain"])?;
-    let dirty: Vec<&str> = status
-        .lines()
-        .filter(|line| !line.is_empty())
-        .filter(|line| line.trim_start_matches("?? ").trim() != CACHE_METADATA_FILE)
-        .collect();
-    if !dirty.is_empty() {
-        return Err(failure(format!(
-            "worktree is dirty after the refresh edit: {dirty:?}"
-        ))
-        .into());
-    }
+    verify_clean_checkout(checkout)?;
     refresh
 }
 
 /// Copies a fixture tree into a fresh Git repository inside the system temp
 /// directory and commits it with a fixed identity.
-fn seed_fixture(fixture_dir: &Path) -> Check<TempDir> {
+pub(crate) fn seed_fixture(fixture_dir: &Path) -> Check<TempDir> {
     let seeded = TempDir::new()?;
     copy_fixture_tree(fixture_dir, seeded.path())?;
     git(seeded.path(), &["init", "--quiet"])?;
@@ -414,6 +429,25 @@ fn seed_fixture(fixture_dir: &Path) -> Check<TempDir> {
         ],
     )?;
     Ok(seeded)
+}
+
+/// Asserts the checkout is clean after a refresh edit (the fetch tool's
+/// `.chakra-corpus.json` metadata excepted).
+pub(crate) fn verify_clean_checkout(checkout: &Path) -> Check<()> {
+    git(checkout, &["checkout", "--", "."])?;
+    let status = git(checkout, &["status", "--porcelain"])?;
+    let dirty: Vec<&str> = status
+        .lines()
+        .filter(|line| !line.is_empty())
+        .filter(|line| line.trim_start_matches("?? ").trim() != CACHE_METADATA_FILE)
+        .collect();
+    if !dirty.is_empty() {
+        return Err(failure(format!(
+            "worktree is dirty after the refresh edit: {dirty:?}"
+        ))
+        .into());
+    }
+    Ok(())
 }
 
 fn git(root: &Path, args: &[&str]) -> Check<String> {

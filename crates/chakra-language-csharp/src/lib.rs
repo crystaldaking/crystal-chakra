@@ -20,3 +20,4 @@ pub use indexer::{
     LanguageBuildMetrics, ReconcileMetrics, ReconcileReport, SyntaxFactCounts, index_repository,
     scan_repository_sources,
 };
+pub use parser::{CallDraft, NamedRelationDraft, ParsedFile, SymbolDraft};

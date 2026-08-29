@@ -274,6 +274,16 @@ fn parse_object_id(output: &[u8], operation: &str) -> Result<String, WorkspaceDi
     Ok(object_id.to_owned())
 }
 
+/// Resolves the current HEAD commit of the repository owning `root`, or
+/// `None` for an unborn HEAD. Resolved through Git itself, so linked
+/// worktrees and shared administrative storage are handled (SPEC §12).
+pub fn resolve_head_commit_with_context(
+    root: &Path,
+    operation: &OperationContext,
+) -> Result<Option<String>, WorkspaceDiffError> {
+    resolve_head(root, operation)
+}
+
 fn resolve_head(
     root: &Path,
     operation: &OperationContext,

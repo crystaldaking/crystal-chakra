@@ -13,3 +13,6 @@ pub use indexer::{
     ReconcileMetrics, ReconcileReport, SyntaxFactCounts, detect_laravel, index_repository,
     scan_repository_sources,
 };
+pub use parser::{
+    CallDraft, NamedRelationDraft, ParsedFile, SymbolDraft, TypeRelationDraft, TypeRelationKind,
+};

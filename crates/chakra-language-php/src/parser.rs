@@ -45,7 +45,7 @@ pub(crate) enum ParseError {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ParsedFile {
+pub struct ParsedFile {
     pub source: Arc<str>,
     pub symbols: Vec<SymbolDraft>,
     pub calls: Vec<CallDraft>,
@@ -57,7 +57,7 @@ pub(crate) struct ParsedFile {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct SymbolDraft {
+pub struct SymbolDraft {
     pub key: SymbolKey,
     pub location: SourceRange,
     pub signature: Option<String>,
@@ -65,7 +65,7 @@ pub(crate) struct SymbolDraft {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct CallDraft {
+pub struct CallDraft {
     pub caller: usize,
     pub form: CallForm,
     pub target_kind: CallTargetKind,
@@ -89,7 +89,7 @@ struct CallTarget<'tree> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct NamedRelationDraft {
+pub struct NamedRelationDraft {
     pub from: usize,
     pub target: String,
     pub target_kinds: Vec<SymbolKind>,
@@ -97,14 +97,14 @@ pub(crate) struct NamedRelationDraft {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct TypeRelationDraft {
+pub struct TypeRelationDraft {
     pub from: usize,
     pub target: String,
     pub kind: TypeRelationKind,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub(crate) enum TypeRelationKind {
+pub enum TypeRelationKind {
     Trait,
     Extends,
     Implements,
