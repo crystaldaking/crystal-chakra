@@ -545,8 +545,10 @@ fn repo_map_pages_every_large_repo_file_and_rejects_stale_cursors() -> Result<()
 
     let started = Instant::now();
     let first = engine.repo_map(RepoMapRequest {
+        include_project_scope: false,
         include_languages: vec![Language::Php],
         source: SourceFilter {
+            project: None,
             package: Some(" vendor/app ".to_owned()),
             ..SourceFilter::default()
         },
@@ -554,8 +556,10 @@ fn repo_map_pages_every_large_repo_file_and_rejects_stale_cursors() -> Result<()
         ..RepoMapRequest::default()
     })?;
     let first_again = engine.repo_map(RepoMapRequest {
+        include_project_scope: false,
         include_languages: vec![Language::Php],
         source: SourceFilter {
+            project: None,
             package: Some("vendor/app".to_owned()),
             ..SourceFilter::default()
         },
@@ -584,6 +588,7 @@ fn repo_map_pages_every_large_repo_file_and_rejects_stale_cursors() -> Result<()
         .clone()
         .ok_or("first page cursor missing")?;
     let conflicting_scope = engine.repo_map(RepoMapRequest {
+        include_project_scope: false,
         include_languages: vec![Language::Php],
         cursor: Some(stale_cursor.clone()),
         ..RepoMapRequest::default()
@@ -598,6 +603,7 @@ fn repo_map_pages_every_large_repo_file_and_rejects_stale_cursors() -> Result<()
     other_update.set_freshness(Freshness::Fresh);
     other_engine.publish(other_update)?;
     let wrong_workspace = other_engine.repo_map(RepoMapRequest {
+        include_project_scope: false,
         cursor: Some(stale_cursor.clone()),
         ..RepoMapRequest::default()
     });
@@ -617,6 +623,7 @@ fn repo_map_pages_every_large_repo_file_and_rejects_stale_cursors() -> Result<()
     let mut cursor = first.data.next_cursor;
     while let Some(next) = cursor {
         let page = engine.repo_map(RepoMapRequest {
+            include_project_scope: false,
             cursor: Some(next),
             limit: Some(113),
             ..RepoMapRequest::default()
@@ -633,6 +640,7 @@ fn repo_map_pages_every_large_repo_file_and_rejects_stale_cursors() -> Result<()
     );
 
     let rust_first = engine.repo_map(RepoMapRequest {
+        include_project_scope: false,
         include_languages: vec![Language::Rust],
         limit: Some(127),
         ..RepoMapRequest::default()
@@ -650,6 +658,7 @@ fn repo_map_pages_every_large_repo_file_and_rejects_stale_cursors() -> Result<()
     let mut rust_cursor = rust_first.data.next_cursor;
     while let Some(next) = rust_cursor {
         let page = engine.repo_map(RepoMapRequest {
+            include_project_scope: false,
             cursor: Some(next),
             limit: Some(127),
             ..RepoMapRequest::default()
@@ -669,6 +678,7 @@ fn repo_map_pages_every_large_repo_file_and_rejects_stale_cursors() -> Result<()
     update.set_freshness(Freshness::Fresh);
     engine.publish(update)?;
     let stale = engine.repo_map(RepoMapRequest {
+        include_project_scope: false,
         cursor: Some(stale_cursor),
         limit: Some(113),
         ..RepoMapRequest::default()
@@ -965,6 +975,7 @@ fn source_filters_scope_rust_and_php_without_hiding_default_results() -> Result<
     let production = engine.symbol_search(SymbolSearchRequest {
         query: "Editor".to_owned(),
         source: SourceFilter {
+            project: None,
             package: Some("app".to_owned()),
             exclude_roles: vec![SourceRole::Test],
             ..SourceFilter::default()
@@ -988,6 +999,7 @@ fn source_filters_scope_rust_and_php_without_hiding_default_results() -> Result<
     let fixture = engine.symbol_search(SymbolSearchRequest {
         query: "Editor".to_owned(),
         source: SourceFilter {
+            project: None,
             include_roles: vec![SourceRole::Fixture],
             ..SourceFilter::default()
         },
@@ -997,7 +1009,9 @@ fn source_filters_scope_rust_and_php_without_hiding_default_results() -> Result<
     assert_eq!(fixture.data.candidates[0].language, Language::Php);
 
     let test_map = engine.repo_map(RepoMapRequest {
+        include_project_scope: false,
         source: SourceFilter {
+            project: None,
             path_prefix: Some("tests".to_owned()),
             include_roles: vec![SourceRole::Test],
             ..SourceFilter::default()
@@ -1017,6 +1031,7 @@ fn source_filters_reject_unbounded_or_invalid_input() -> Result<(), Box<dyn Erro
     let invalid_path = engine.symbol_search(SymbolSearchRequest {
         query: "refund".to_owned(),
         source: SourceFilter {
+            project: None,
             path_prefix: Some("../outside".to_owned()),
             ..SourceFilter::default()
         },
@@ -1025,7 +1040,9 @@ fn source_filters_reject_unbounded_or_invalid_input() -> Result<(), Box<dyn Erro
     assert!(matches!(invalid_path, Err(QueryError::Invalid(_))));
 
     let empty_package = engine.repo_map(RepoMapRequest {
+        include_project_scope: false,
         source: SourceFilter {
+            project: None,
             package: Some("  ".to_owned()),
             ..SourceFilter::default()
         },
@@ -1034,6 +1051,7 @@ fn source_filters_reject_unbounded_or_invalid_input() -> Result<(), Box<dyn Erro
     assert!(matches!(empty_package, Err(QueryError::Invalid(_))));
 
     let zero_page = engine.repo_map(RepoMapRequest {
+        include_project_scope: false,
         limit: Some(0),
         ..RepoMapRequest::default()
     });
@@ -1042,6 +1060,7 @@ fn source_filters_reject_unbounded_or_invalid_input() -> Result<(), Box<dyn Erro
     let too_many_roles = engine.symbol_search(SymbolSearchRequest {
         query: "refund".to_owned(),
         source: SourceFilter {
+            project: None,
             include_roles: vec![SourceRole::Production; 17],
             ..SourceFilter::default()
         },
@@ -1243,6 +1262,7 @@ fn symbol_search_ranks_declarations_and_applies_every_filter() -> Result<(), Box
         exclude_kinds: vec![SymbolKind::Import],
         namespace_prefix: Some("core::".to_owned()),
         source: SourceFilter {
+            project: None,
             package: Some("editor".to_owned()),
             path_prefix: Some("crates/editor".to_owned()),
             exclude_roles: vec![SourceRole::Fixture, SourceRole::Generated],
@@ -1266,6 +1286,7 @@ fn symbol_search_ranks_declarations_and_applies_every_filter() -> Result<(), Box
     let fixtures = engine.symbol_search(SymbolSearchRequest {
         query: "Editor".to_owned(),
         source: SourceFilter {
+            project: None,
             include_roles: vec![SourceRole::Fixture],
             ..SourceFilter::default()
         },
@@ -1286,11 +1307,13 @@ fn symbol_search_ranks_declarations_and_applies_every_filter() -> Result<(), Box
     assert_eq!(imports.data.candidates[0].kind, SymbolKind::Import);
 
     let ambiguous = engine.context(ContextRequest {
+        source: Default::default(),
         symbol: Some(SymbolRef::ByName("Editor".to_owned())),
         ..ContextRequest::default()
     });
     assert!(matches!(ambiguous, Err(QueryError::AmbiguousSymbol { .. })));
     let resolved = engine.context(ContextRequest {
+        source: Default::default(),
         symbol: Some(SymbolRef::ById {
             id: best_editor.data.candidates[0].id,
             revision: best_editor.revision,
@@ -1333,6 +1356,7 @@ fn symbol_search_ranks_declarations_and_applies_every_filter() -> Result<(), Box
 fn bare_name_refund_is_ambiguous_not_guessed() -> Result<(), Box<dyn Error>> {
     let (engine, _) = scenario_engine()?;
     let result = engine.callers(CallersRequest {
+        source: Default::default(),
         symbol: Some(SymbolRef::ByName("refund".to_owned())),
         ..CallersRequest::default()
     });
@@ -1348,6 +1372,7 @@ fn bare_name_refund_is_ambiguous_not_guessed() -> Result<(), Box<dyn Error>> {
 fn qualified_name_resolves_unambiguously() -> Result<(), Box<dyn Error>> {
     let (engine, ids) = scenario_engine()?;
     let envelope = engine.callers(CallersRequest {
+        source: Default::default(),
         symbol: Some(SymbolRef::ByName(
             "service::payment_service::PaymentService::refund".to_owned(),
         )),
@@ -1364,6 +1389,7 @@ fn callers_of_provider_trait_method_is_the_service() -> Result<(), Box<dyn Error
     let (engine, ids) = scenario_engine()?;
     let revision = engine.snapshot().revision();
     let envelope = engine.callers(CallersRequest {
+        source: Default::default(),
         symbol: Some(SymbolRef::ById {
             id: ids.provider_refund,
             revision,
@@ -1506,6 +1532,7 @@ fn repeated_call_sites_are_aggregated_by_caller_and_target() -> Result<(), Box<d
     let revision = engine.publish(update)?.revision();
 
     let ambiguous = engine.callers(CallersRequest {
+        source: Default::default(),
         symbol: Some(SymbolRef::ById {
             id: target_a,
             revision,
@@ -1520,6 +1547,7 @@ fn repeated_call_sites_are_aggregated_by_caller_and_target() -> Result<(), Box<d
     assert_eq!(candidate.evidence_omitted, 2);
 
     let exact = engine.context(ContextRequest {
+        source: Default::default(),
         symbol: Some(SymbolRef::ById {
             id: unique,
             revision,
@@ -1566,6 +1594,7 @@ fn response_sections_enforce_exact_byte_budgets_for_multibyte_paths() -> Result<
     engine.publish(update)?;
 
     let result = engine.repo_map(RepoMapRequest {
+        include_project_scope: false,
         limit: Some(500),
         ..RepoMapRequest::default()
     })?;
@@ -1616,6 +1645,7 @@ fn context_source_byte_budget_handles_multibyte_snippets() -> Result<(), Box<dyn
     engine.publish(update)?;
 
     let result = engine.context(ContextRequest {
+        source: Default::default(),
         symbol: Some(SymbolRef::ByName("multibyte::multibyte".to_owned())),
         ..ContextRequest::default()
     })?;
@@ -1725,6 +1755,7 @@ fn noisy_caller_section_cannot_starve_tests_or_declaration() -> Result<(), Box<d
     update.set_freshness(Freshness::Fresh);
     let revision = engine.publish(update)?.revision();
     let result = engine.context(ContextRequest {
+        source: Default::default(),
         symbol: Some(SymbolRef::ById {
             id: target,
             revision,
@@ -1787,6 +1818,7 @@ fn current_precise_callers_replace_matching_syntax_candidates() -> Result<(), Bo
     }))?;
 
     let envelope = engine.callers(CallersRequest {
+        source: Default::default(),
         symbol: Some(SymbolRef::ById {
             id: ids.service_refund,
             revision,
@@ -1850,6 +1882,7 @@ fn older_precise_result_is_never_labeled_current_after_revision_change()
     let next = engine.publish(update)?;
 
     let envelope = engine.callers(CallersRequest {
+        source: Default::default(),
         symbol: Some(SymbolRef::ByName(
             "service::payment_service::PaymentService::refund".to_owned(),
         )),
@@ -1876,6 +1909,7 @@ fn degraded_provider_preserves_useful_syntax_callers() -> Result<(), Box<dyn Err
         last_error: Some("provider process stopped"),
     }))?;
     let envelope = engine.callers(CallersRequest {
+        source: Default::default(),
         symbol: Some(SymbolRef::ById {
             id: ids.provider_refund,
             revision,
@@ -1934,6 +1968,7 @@ fn precise_result_is_discarded_if_workspace_advances_during_provider_query()
     }))?;
 
     let envelope = engine.callers(CallersRequest {
+        source: Default::default(),
         symbol: Some(SymbolRef::ById {
             id: ids.provider_refund,
             revision,
@@ -1989,6 +2024,7 @@ fn precise_result_is_discarded_if_post_provider_freshness_advances() -> Result<(
     }))?;
 
     let envelope = engine.callers(CallersRequest {
+        source: Default::default(),
         symbol: Some(SymbolRef::ById {
             id: ids.provider_refund,
             revision,
@@ -2034,6 +2070,7 @@ fn post_provider_freshness_failure_keeps_syntax_fallback() -> Result<(), Box<dyn
     engine.install_freshness_barrier(Arc::new(FailAfterProviderBarrier::default()))?;
 
     let envelope = engine.callers(CallersRequest {
+        source: Default::default(),
         symbol: Some(SymbolRef::ById {
             id: ids.provider_refund,
             revision,
@@ -2056,6 +2093,7 @@ fn allow_stale_uses_syntax_without_waiting_for_precise_provider() -> Result<(), 
     }))?;
 
     let envelope = engine.callers(CallersRequest {
+        source: Default::default(),
         symbol: Some(SymbolRef::ById {
             id: ids.provider_refund,
             revision: engine.snapshot().revision(),
@@ -2112,6 +2150,7 @@ fn rust_provider_is_not_invoked_for_php_symbols() -> Result<(), Box<dyn Error>> 
         calls: calls.clone(),
     }))?;
     let context = engine.context(ContextRequest {
+        source: Default::default(),
         symbol: Some(SymbolRef::ByName("refund".to_owned())),
         ..ContextRequest::default()
     })?;
@@ -2161,10 +2200,12 @@ fn path_ineligible_symbols_skip_precise_context_and_callers() -> Result<(), Box<
         revision,
     };
     let context = engine.context(ContextRequest {
+        source: Default::default(),
         symbol: Some(reference.clone()),
         ..ContextRequest::default()
     })?;
     let callers = engine.callers(CallersRequest {
+        source: Default::default(),
         symbol: Some(reference),
         ..CallersRequest::default()
     })?;
@@ -2182,6 +2223,7 @@ fn context_combines_bounded_relations() -> Result<(), Box<dyn Error>> {
     let (engine, ids) = scenario_engine()?;
     let revision = engine.snapshot().revision();
     let envelope = engine.context(ContextRequest {
+        source: Default::default(),
         symbol: Some(SymbolRef::ById {
             id: ids.service_refund,
             revision,
@@ -2270,6 +2312,7 @@ fn context_preserves_direction_and_provenance_for_framework_relations() -> Resul
     engine.publish(update)?;
 
     let model_context = engine.context(ContextRequest {
+        source: Default::default(),
         symbol: Some(SymbolRef::ByName("App::Models::User".to_owned())),
         ..ContextRequest::default()
     })?;
@@ -2285,6 +2328,7 @@ fn context_preserves_direction_and_provenance_for_framework_relations() -> Resul
     assert_eq!(relation.relation.precision, Precision::Heuristic);
 
     let policy_context = engine.context(ContextRequest {
+        source: Default::default(),
         symbol: Some(SymbolRef::ByName("App::Policies::UserPolicy".to_owned())),
         ..ContextRequest::default()
     })?;
@@ -2304,6 +2348,7 @@ fn trait_method_context_shows_implementations() -> Result<(), Box<dyn Error>> {
     let (engine, ids) = scenario_engine()?;
     let revision = engine.snapshot().revision();
     let envelope = engine.context(ContextRequest {
+        source: Default::default(),
         symbol: Some(SymbolRef::ById {
             id: ids.provider_refund,
             revision,
@@ -2368,6 +2413,7 @@ fn missing_and_unknown_symbol_refs_are_typed_errors() -> Result<(), Box<dyn Erro
     assert!(matches!(missing, Err(QueryError::MissingSymbolRef)));
 
     let unknown = engine.callers(CallersRequest {
+        source: Default::default(),
         symbol: Some(SymbolRef::ById {
             id: chakra_domain::symbol::EntityId(9999),
             revision,
@@ -2377,6 +2423,7 @@ fn missing_and_unknown_symbol_refs_are_typed_errors() -> Result<(), Box<dyn Erro
     assert!(matches!(unknown, Err(QueryError::SymbolNotFound(_))));
 
     let absent = engine.callers(CallersRequest {
+        source: Default::default(),
         symbol: Some(SymbolRef::ByName("does_not_exist".to_owned())),
         ..CallersRequest::default()
     });
@@ -2393,6 +2440,7 @@ fn entity_ids_are_scoped_to_their_revision() -> Result<(), Box<dyn Error>> {
     engine.publish(engine.begin_update())?;
 
     let result = engine.callers(CallersRequest {
+        source: Default::default(),
         symbol: Some(SymbolRef::ById {
             id: ids.provider_refund,
             revision: stale_revision,
@@ -2462,6 +2510,7 @@ fn entity_ids_are_scoped_to_their_revision() -> Result<(), Box<dyn Error>> {
     assert_ne!(fresh_id, ids.provider_refund);
 
     let resolved = engine.callers(CallersRequest {
+        source: Default::default(),
         symbol: Some(SymbolRef::ById {
             id: fresh_id,
             revision: current_revision,

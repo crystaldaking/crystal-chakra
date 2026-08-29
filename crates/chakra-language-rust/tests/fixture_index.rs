@@ -332,6 +332,7 @@ fn real_index_serves_bounded_repo_text_symbol_and_context_queries() -> Result<()
     }));
 
     let ambiguous = engine.callers(CallersRequest {
+        source: Default::default(),
         symbol: Some(SymbolRef::ByName("refund".to_owned())),
         ..CallersRequest::default()
     });
@@ -341,6 +342,7 @@ fn real_index_serves_bounded_repo_text_symbol_and_context_queries() -> Result<()
     ));
 
     let context = engine.context(ContextRequest {
+        source: Default::default(),
         symbol: Some(SymbolRef::ByName(
             "service::payment_service::PaymentService::refund".to_owned(),
         )),
@@ -436,6 +438,7 @@ fn context_source_budget_sets_both_local_and_envelope_truncation() -> Result<(),
     engine.publish(update)?;
 
     let result = engine.context(ContextRequest {
+        source: Default::default(),
         symbol: Some(SymbolRef::ByName("long_context".to_owned())),
         ..ContextRequest::default()
     })?;
@@ -514,6 +517,7 @@ fn ambiguous_call_candidates_are_lazy_and_bounded() -> Result<(), Box<dyn Error>
         .last()
         .ok_or("target candidate missing")?;
     let callers = engine.callers(CallersRequest {
+        source: Default::default(),
         symbol: Some(SymbolRef::ById {
             id: target.id,
             revision,
@@ -529,6 +533,7 @@ fn ambiguous_call_candidates_are_lazy_and_bounded() -> Result<(), Box<dyn Error>
     assert!(!callers.truncated);
 
     let context = engine.context(ContextRequest {
+        source: Default::default(),
         symbol: Some(SymbolRef::ByName("invoke".to_owned())),
         ..ContextRequest::default()
     })?;
@@ -554,6 +559,7 @@ fn indexing_and_query_latencies_are_directly_measurable() -> Result<(), Box<dyn 
     let symbol_search_elapsed = symbol_started.elapsed();
     let context_started = Instant::now();
     let context = engine.context(ContextRequest {
+        source: Default::default(),
         symbol: Some(SymbolRef::ByName(
             "service::payment_service::PaymentService::refund".to_owned(),
         )),

@@ -5,6 +5,32 @@ version tags prefixed with `v`.
 
 ## [Unreleased]
 
+### Added
+
+- Cargo and Composer packages are now modeled as explicit, typed project
+  scopes (issue #41). A new `ProjectModel` in `chakra-domain` represents
+  workspace/package identity, unit roots, source roots with roles, declared
+  dependency edges (Cargo path dependencies resolve to workspace units;
+  Composer platform packages are not edges), and generated/vendor boundaries
+  as Chakra-owned types built from the existing bounded manifest probing — no
+  Cargo or Composer protocol structures leak into the domain. Sources no
+  Cargo/Composer unit claims group into deterministic path-fallback units;
+  other ecosystems stay on the path fallback by design.
+- The model is built from the same pinned Git inventory during the syntax
+  scan and published in the same atomic snapshot revision as the graph, so
+  metadata-only manifest edits reconcile and republish it without reparsing
+  sources, and fresh queries observe it (read-your-writes).
+- Query surface: `repo_map` gains an opt-in `include_project_scope` summary
+  section (per-unit file/symbol counts, source roots, dependencies, manifest
+  issues, honest ambiguous/unassigned file counts), and `repo_map`,
+  `symbol_search`, `context`, `callers`, and `diff_context` accept a typed
+  `source.project` selector (`unit` id or `package` name). Ambiguous
+  ownership matches no unit selector and is counted honestly; unknown
+  units/packages are typed invalid-request errors, never silent empty
+  filters. Malformed or unprobeable manifests degrade to recorded
+  `ProjectManifestIssue` entries plus path-fallback units. The query envelope
+  schema is version 15.
+
 ## [0.1.3] - 2026-08-26
 
 Post-v0.1.2 correctness, query ergonomics, corpus resilience, dependency

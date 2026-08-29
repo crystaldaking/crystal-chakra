@@ -11,6 +11,7 @@ pub mod identity;
 pub mod indexing;
 pub mod location;
 pub mod operation;
+pub mod project;
 pub mod provenance;
 pub mod query;
 pub mod revision;

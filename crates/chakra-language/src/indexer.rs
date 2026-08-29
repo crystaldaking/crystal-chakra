@@ -14,6 +14,7 @@ use chakra_domain::indexing::{
 };
 use chakra_domain::location::RepoRelativePath;
 use chakra_domain::operation::OperationContext;
+use chakra_domain::project::ProjectModel;
 use chakra_domain::symbol::Language;
 use chakra_engine::{
     ConsistencyError, GraphBuildLimits, GraphBuildReport, GraphError, ProviderInput, SymbolGraph,
@@ -86,6 +87,9 @@ pub struct WorkspaceSourceScan {
     /// Non-source manifests/configuration captured with this exact scan for
     /// revision-scoped provider watched-file synchronization.
     pub provider_inputs: Vec<ProviderInput>,
+    /// Typed Cargo/Composer project model built from this exact scan's
+    /// manifest evidence (issue #41).
+    pub project_model: ProjectModel,
     pub discovered_files: u64,
     pub indexed_files: u64,
     pub source_bytes: u64,
@@ -249,6 +253,9 @@ pub struct ReconcileReport {
     pub metrics: ReconcileMetrics,
     pub next_index: Option<WorkspaceSyntaxIndex>,
     pub indexing: IndexingStatus,
+    /// The scan's typed project model when it differs from the currently
+    /// published one (issue #41). `None` means the model is unchanged.
+    pub project_model: Option<ProjectModel>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -288,6 +295,9 @@ pub struct IndexReport {
     pub metrics: IndexMetrics,
     pub syntax_index: WorkspaceSyntaxIndex,
     pub provider_inputs: Vec<ProviderInput>,
+    /// Typed project model built from the cold scan's manifest evidence
+    /// (issue #41).
+    pub project_model: ProjectModel,
 }
 
 #[derive(Debug, Error)]
@@ -340,6 +350,7 @@ pub struct WorkspaceSyntaxIndex {
     budgets: IndexBudgets,
     indexing: IndexingStatus,
     provider_inputs: Vec<ProviderInput>,
+    project_model: ProjectModel,
 }
 
 impl WorkspaceSyntaxIndex {
@@ -363,6 +374,11 @@ impl WorkspaceSyntaxIndex {
 
     pub fn provider_inputs(&self) -> &[ProviderInput] {
         &self.provider_inputs
+    }
+
+    /// Typed project model captured by this index's latest scan (issue #41).
+    pub fn project_model(&self) -> &ProjectModel {
+        &self.project_model
     }
 
     pub fn scan_repository(
@@ -515,12 +531,15 @@ impl WorkspaceSyntaxIndex {
 
         let indexing_changed = !indexing_semantically_equal(&self.indexing, &indexing);
         let provider_inputs_changed = self.provider_inputs != scan.provider_inputs;
-        if !graph_changed && !indexing_changed && !provider_inputs_changed {
+        let project_model_changed = self.project_model != scan.project_model;
+        if !graph_changed && !indexing_changed && !provider_inputs_changed && !project_model_changed
+        {
             return Ok(ReconcileReport {
                 graph: None,
                 metrics,
                 next_index: None,
                 indexing: self.indexing.clone(),
+                project_model: None,
             });
         }
 
@@ -532,13 +551,15 @@ impl WorkspaceSyntaxIndex {
                 .collect(),
             budgets: self.budgets,
             indexing: indexing.clone(),
-            provider_inputs: scan.provider_inputs,
+            provider_inputs: scan.provider_inputs.clone(),
+            project_model: scan.project_model.clone(),
         };
         Ok(ReconcileReport {
             graph,
             metrics,
             next_index: Some(next),
             indexing,
+            project_model: project_model_changed.then(|| scan.project_model.clone()),
         })
     }
 
@@ -801,6 +822,7 @@ pub fn index_repository_with_options(
         budgets,
         indexing: indexing.clone(),
         provider_inputs: scan.provider_inputs.clone(),
+        project_model: scan.project_model.clone(),
     };
     let metrics = IndexMetrics {
         discovered_files: scan.discovered_files,
@@ -848,6 +870,7 @@ pub fn index_repository_with_options(
         graph,
         metrics,
         provider_inputs: syntax_index.provider_inputs.clone(),
+        project_model: syntax_index.project_model.clone(),
         syntax_index,
     })
 }
@@ -1140,9 +1163,16 @@ fn scan_discovered_sources_with_inventory_phase(
             PhaseConcurrency::SERIAL,
         ),
     ];
+    let project_model = chakra_git::discover_project_model_with_context(
+        repository_root,
+        &inventory.sources,
+        &inventory.metadata_inputs,
+        operation,
+    )?;
     Ok(WorkspaceSourceScan {
         sources: WorkspaceSources { languages },
         provider_inputs,
+        project_model,
         discovered_files,
         indexed_files,
         source_bytes,

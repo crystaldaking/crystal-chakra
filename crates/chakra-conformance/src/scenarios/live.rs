@@ -127,6 +127,7 @@ pub(super) fn file_lifecycle(manifest: &Manifest) -> Check<Vec<String>> {
             "deleted file content survived the delete",
         )?;
         let map = fixture.engine.repo_map(RepoMapRequest {
+            include_project_scope: false,
             limit: None,
             ..RepoMapRequest::default()
         })?;

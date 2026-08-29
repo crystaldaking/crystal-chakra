@@ -1327,6 +1327,7 @@ fn reconcile(
                 metrics: reconcile_metrics,
                 next_index,
                 indexing,
+                project_model,
             } = syntax_index
                 .reconcile_sources_with_cancellation(stable.scan, &operation.cancellation())?;
             let next_paths: Vec<_> = stable.cache.entries.keys().cloned().collect();
@@ -1370,9 +1371,15 @@ fn reconcile(
                 || syntax_index.provider_inputs(),
                 |next| next.provider_inputs(),
             );
-            let published =
-                publish_fresh(engine, graph.as_ref(), status, &indexing, provider_inputs)
-                    .map_err(WorkspaceIndexError::Update)?;
+            let published = publish_fresh(
+                engine,
+                graph.as_ref(),
+                status,
+                &indexing,
+                provider_inputs,
+                project_model.as_ref(),
+            )
+            .map_err(WorkspaceIndexError::Update)?;
             if let Some(next_index) = next_index {
                 *syntax_index = next_index;
             }
@@ -1734,10 +1741,12 @@ fn publish_fresh(
     status: WorkspaceStatus,
     indexing: &chakra_domain::indexing::IndexingStatus,
     provider_inputs: &[chakra_engine::ProviderInput],
+    project_model: Option<&chakra_domain::project::ProjectModel>,
 ) -> Result<bool, String> {
     let started = Instant::now();
     let current = engine.snapshot();
     if graph.is_none()
+        && project_model.is_none()
         && current.freshness() == Freshness::Fresh
         && current.status() == status
         && current.indexing() == indexing
@@ -1749,6 +1758,9 @@ fn publish_fresh(
         let mut update = engine.begin_update();
         if let Some(graph) = graph {
             update.replace_graph(graph.clone());
+        }
+        if let Some(model) = project_model {
+            update.set_project_model(model.clone());
         }
         update.set_indexing(indexing.clone());
         update.set_provider_inputs(provider_inputs.iter().cloned());

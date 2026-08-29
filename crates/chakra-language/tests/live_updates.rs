@@ -333,6 +333,7 @@ fn immediate_fresh_read_is_atomic_and_reindexes_only_one_file() -> Result<(), Bo
     );
     assert!(matches!(
         engine.context(ContextRequest {
+            source: Default::default(),
             symbol: Some(SymbolRef::ById {
                 id: unchanged_symbol,
                 revision: old_snapshot.revision(),
@@ -494,6 +495,7 @@ fn declaration_edit_re_resolves_call_sites_without_recomputing_callers()
     let (engine, live) = start(&repository)?;
 
     let initial = engine.context(ContextRequest {
+        source: Default::default(),
         symbol: Some(SymbolRef::ByName("caller::invoke".to_owned())),
         freshness: FreshnessRequirement::RequireFresh,
         ..ContextRequest::default()
@@ -514,6 +516,7 @@ fn declaration_edit_re_resolves_call_sites_without_recomputing_callers()
         "pub fn other_target() {}\n",
     )?;
     let updated = engine.context(ContextRequest {
+        source: Default::default(),
         symbol: Some(SymbolRef::ByName("caller::invoke".to_owned())),
         freshness: FreshnessRequirement::RequireFresh,
         ..ContextRequest::default()
@@ -598,6 +601,7 @@ fn create_rename_and_delete_are_visible_without_sleeps() -> Result<(), Box<dyn E
         ["created::appeared"]
     );
     let before_rename = engine.repo_map(RepoMapRequest {
+        include_project_scope: false,
         limit: Some(1),
         ..RepoMapRequest::default()
     })?;
@@ -617,12 +621,14 @@ fn create_rename_and_delete_are_visible_without_sleeps() -> Result<(), Box<dyn E
     assert!(symbols(&engine, "created::appeared")?.is_empty());
     assert!(matches!(
         engine.repo_map(RepoMapRequest {
+            include_project_scope: false,
             cursor: Some(rename_cursor),
             ..RepoMapRequest::default()
         }),
         Err(QueryError::StaleCursor { .. })
     ));
     let before_delete = engine.repo_map(RepoMapRequest {
+        include_project_scope: false,
         limit: Some(1),
         ..RepoMapRequest::default()
     })?;
@@ -635,12 +641,14 @@ fn create_rename_and_delete_are_visible_without_sleeps() -> Result<(), Box<dyn E
     assert!(symbols(&engine, "appeared")?.is_empty());
     assert!(matches!(
         engine.repo_map(RepoMapRequest {
+            include_project_scope: false,
             cursor: Some(delete_cursor),
             ..RepoMapRequest::default()
         }),
         Err(QueryError::StaleCursor { .. })
     ));
     let map = engine.repo_map(RepoMapRequest {
+        include_project_scope: false,
         source: Default::default(),
         limit: None,
         freshness: FreshnessRequirement::RequireFresh,
@@ -1349,6 +1357,7 @@ fn clean_diff_context_uses_two_lightweight_proofs_without_body_scans() -> Result
     let baseline = live.metrics();
 
     let response = engine.diff_context(DiffContextRequest {
+        source: Default::default(),
         limit: None,
         freshness: FreshnessRequirement::RequireFresh,
         ..DiffContextRequest::default()
@@ -1475,6 +1484,7 @@ final class Provider {
     write(repository.path(), path, source)?;
     let (engine, live) = start(&repository)?;
     let initial = engine.context(ContextRequest {
+        source: Default::default(),
         symbol: Some(SymbolRef::ByName("App::DatabaseReporter".to_owned())),
         freshness: FreshnessRequirement::RequireFresh,
         ..ContextRequest::default()
@@ -1491,6 +1501,7 @@ final class Provider {
         &source.replace("->bind(", "->singleton("),
     )?;
     let current = engine.context(ContextRequest {
+        source: Default::default(),
         symbol: Some(SymbolRef::ByName("App::DatabaseReporter".to_owned())),
         freshness: FreshnessRequirement::RequireFresh,
         ..ContextRequest::default()

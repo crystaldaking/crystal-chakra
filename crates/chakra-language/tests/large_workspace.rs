@@ -149,6 +149,7 @@ fn large_repository_stays_within_published_budgets() -> Result<(), Box<dyn Error
         publication_started.elapsed().as_micros(),
     );
     let map = engine.repo_map(RepoMapRequest {
+        include_project_scope: false,
         limit: Some(1),
         ..RepoMapRequest::default()
     })?;

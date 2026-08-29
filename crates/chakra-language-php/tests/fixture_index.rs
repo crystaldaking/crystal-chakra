@@ -160,6 +160,7 @@ fn realistic_php_fixture_exposes_bounded_syntax_intelligence() -> Result<(), Box
     // Strict-tier promotion (ADR-0030) must survive the query layer with its
     // provenance intact; the dynamic test-file call stays out of `callers`.
     let callers = engine.callers(CallersRequest {
+        source: Default::default(),
         symbol: Some(SymbolRef::ByName(
             "ChakraFixture::Service::PaymentService::refund".to_owned(),
         )),
@@ -175,6 +176,7 @@ fn realistic_php_fixture_exposes_bounded_syntax_intelligence() -> Result<(), Box
     assert_eq!(caller.precision, Precision::Precise);
 
     let context = engine.context(ContextRequest {
+        source: Default::default(),
         symbol: Some(SymbolRef::ByName(
             "ChakraFixture::Api::PaymentController::refund".to_owned(),
         )),
