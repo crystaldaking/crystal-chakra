@@ -59,6 +59,51 @@ cargo test -p chakra-provider-rust-analyzer --test real_provider -- --ignored --
 The repository's `AGENTS.md` defines additional mandatory self-review,
 architecture-review, validation, staging, and commit gates for coding agents.
 
+## Containerized language-server tests
+
+Real-provider tests (`tests/real_provider.rs` in the provider crates) are
+ignored by default because they need a language server on `PATH`.
+`tools/Dockerfile.lsp` builds an image carrying every supported server pinned
+to the versions recorded in `docs/languages/*.md`: rust-analyzer from the
+pinned rustup toolchain, clangd 21, gopls 0.23.x with the Go toolchain,
+pyright, vtsls with a resolvable TypeScript, bash-language-server 5.6.x,
+jdtls with a JDK 21 runtime, csharp-ls on the .NET 10 SDK, and terraform-ls
+0.39.x. `tools/run_lsp_tests.sh` wraps image build and test execution; only
+Docker is required on the host.
+
+Run the full suite, including the real-provider tests:
+
+```sh
+./tools/run_lsp_tests.sh
+```
+
+Without arguments this runs `cargo test --locked --workspace -- --include-ignored`
+inside the container. Any arguments replace the default command tail, so a
+selective provider run looks like:
+
+```sh
+./tools/run_lsp_tests.sh -p chakra-provider-gopls -- --ignored
+```
+
+The repository is mounted read-write at `/workspace`; `target/`, the Cargo
+registry, and the Cargo Git cache live in named volumes (`chakra-lsp-target`,
+`chakra-lsp-cargo-registry`, `chakra-lsp-cargo-git`), so reruns stay
+incremental and the host `target/` is never touched by the root-owned
+container. Remove those volumes to force a cold rebuild.
+
+The image is about 5 GB; a cold build takes on the order of 15–20 minutes
+(mostly toolchain downloads) and is then fully cached by Docker. A cold
+container test run additionally compiles the workspace into the target
+volume once; subsequent runs start in seconds.
+
+Note that `--include-ignored` also enables opt-in harnesses gated on external
+inputs: `chakra-language/tests/large_workspace.rs` requires
+`CHAKRA_LARGE_REPOSITORY` naming an external Git worktree, and
+`chakra-mcp/tests/large_repository_gate.rs` must run with
+`cargo test --release`. Without those prerequisites they fail by design; the
+failure is unrelated to the language-server environment. The real-provider
+smoke tests themselves need nothing beyond the image.
+
 ## Release review
 
 Before freezing an Unreleased changelog section on `release/<version>`:
