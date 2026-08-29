@@ -5,6 +5,18 @@ version tags prefixed with `v`.
 
 ## [Unreleased]
 
+### Tooling
+
+- New `chakra-conformance persistence` benchmark (issue #38): measures cold
+  rebuild, model-cache write, warm restore, cache validation, and one-file
+  refresh for small fixtures and the pinned Rust/PHP corpus repositories,
+  recording machine context, corpus fingerprint, index configuration, wall
+  time, CPU, peak RSS, bytes read/written, and hit ratio into
+  schema-versioned artifacts under `target/persistence/`. The synthetic
+  per-file cache is explicitly a model — it does not implement graph
+  restoration. The acceptance decision and go/no-go budgets for issue #39 are
+  recorded in `docs/evaluation/v0.2.0-persistence-acceptance.md`.
+
 ## [0.1.3] - 2026-08-26
 
 Post-v0.1.2 correctness, query ergonomics, corpus resilience, dependency

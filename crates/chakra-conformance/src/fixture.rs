@@ -121,7 +121,7 @@ pub fn with_live<T>(fixture_dir: &Path, body: impl FnOnce(&LiveFixture) -> Check
     }
 }
 
-fn copy_fixture_tree(source: &Path, target: &Path) -> Check<()> {
+pub(crate) fn copy_fixture_tree(source: &Path, target: &Path) -> Check<()> {
     for entry in fs::read_dir(source)? {
         let entry = entry?;
         let name = entry.file_name();
