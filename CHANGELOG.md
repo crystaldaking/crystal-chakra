@@ -7,6 +7,33 @@ version tags prefixed with `v`.
 
 ### Added
 
+- Dependency-aware index invalidation (issue #40). Derived facts now track
+  their external inputs as typed records: a `ProjectModelImpact` diff between
+  the published and the scanned project model records exactly which units
+  changed and why (added/removed packages — covering moves and renames —
+  source-root/autoload edits, dependency-edge edits, workspace membership
+  edits, and manifest probe/parse issue transitions) plus the unchanged units
+  that declare dependency edges targeting them. Manifest/config-driven
+  `SourceMetadata` changes are diffed per retained path inside every language
+  adapter, so a Composer autoload edit, a Cargo membership edit, or a
+  manifest delete re-materializes exactly the affected files' graph records
+  in place (symbol ids, edges, and call sites are preserved) instead of
+  rebuilding the whole language graph; pure per-file syntax facts remain a
+  deterministic function of file content and extractor version and are never
+  reparsed by manifest edits. The Laravel framework opt-in is re-derived from
+  the typed project model on every reconcile, so adding or removing
+  `laravel/framework` toggles framework facts for PHP files only, without
+  touching other languages.
+- New typed metrics prove the invalidation scope: per-reconciliation
+  `metadata_files_recomputed`, `framework_config_changes`, and
+  `DependencyImpactMetrics` (impacted units/dependents and per-reason unit
+  change counts) on `ReconcileReport`, accumulated live on
+  `LiveIndexMetrics`. Full content rereads stay the bounded conservative
+  fallback for missed watcher events and now always record a typed
+  `FullReconciliationReason` (`FullReconciliationReasons` counters plus the
+  last reason), covering cache initialization, watcher errors, dropped
+  events, uncertain hints/epoch gaps, checkpoint intervals, and scan
+  instability.
 - Cargo and Composer packages are now modeled as explicit, typed project
   scopes (issue #41). A new `ProjectModel` in `chakra-domain` represents
   workspace/package identity, unit roots, source roots with roles, declared

@@ -915,6 +915,28 @@ impl SymbolGraph {
         Ok(())
     }
 
+    /// Replaces manifest-derived file metadata while preserving declaration
+    /// ids and every edge: metadata never participates in symbol identity,
+    /// so a metadata-only change touches exactly this one file record
+    /// (issue #40).
+    pub fn replace_file_metadata(
+        &mut self,
+        path: &RepoRelativePath,
+        metadata: SourceMetadata,
+    ) -> Result<bool, GraphError> {
+        self.ensure_owned()?;
+        let Some(existing) = self.files.get(path) else {
+            return Err(GraphError::UnknownFile(path.clone()));
+        };
+        if existing.metadata == metadata {
+            return Ok(false);
+        }
+        let mut file = existing.as_ref().clone();
+        file.metadata = metadata;
+        self.files.insert_mut(path.clone(), Arc::new(file));
+        Ok(true)
+    }
+
     /// Replaces revision-local symbol details while retaining an id only when
     /// its language-aware key is unchanged.
     pub fn replace_symbol_payload(
@@ -2916,6 +2938,47 @@ mod tests {
             ),
             Err(GraphError::UnknownEntity(id)) if id == ghost
         ));
+        Ok(())
+    }
+
+    #[test]
+    fn replace_file_metadata_preserves_ids_edges_and_sources()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut graph = SymbolGraph::new();
+        let caller = add_fn(&mut graph, "caller", "src/a.rs")?;
+        let callee = add_fn(&mut graph, "callee", "src/b.rs")?;
+        graph.add_edge(
+            EdgeKind::Calls,
+            caller,
+            callee,
+            Provenance::TreeSitter,
+            Precision::Syntax,
+            None,
+        )?;
+        let path = file("src/b.rs")?;
+        let packaged = SourceMetadata {
+            package: Some(chakra_domain::source::SourcePackage {
+                name: "acme/pkg".to_owned(),
+                root: None,
+            }),
+            ..SourceMetadata::path_fallback(&path)
+        };
+
+        assert!(graph.replace_file_metadata(&path, packaged.clone())?);
+        assert_eq!(graph.file_metadata(&path), Some(&packaged));
+        // A no-op replacement is reported honestly.
+        assert!(!graph.replace_file_metadata(&path, packaged)?);
+        assert!(matches!(
+            graph.replace_file_metadata(
+                &file("src/missing.rs")?,
+                SourceMetadata::path_fallback(&file("src/missing.rs")?)
+            ),
+            Err(GraphError::UnknownFile(_))
+        ));
+        // Symbol ids and edges survived the metadata swap.
+        assert_eq!(graph.resolve_name("callee"), vec![callee]);
+        assert_eq!(graph.outgoing_edges(caller).len(), 1);
+        graph.validate_consistency()?;
         Ok(())
     }
 

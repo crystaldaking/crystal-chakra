@@ -172,12 +172,26 @@ pub struct AdapterReconcileMetrics {
     pub modified_files: u64,
     pub deleted_files: u64,
     pub relationship_files_recomputed: u64,
+    /// Retained files whose manifest-derived metadata record was replaced
+    /// without a source reparse (issue #40).
+    pub metadata_files_recomputed: u64,
     pub framework_files_reparsed: u64,
     pub framework_relationship_files_recomputed: u64,
     pub framework_truncated_files: u64,
+    /// Framework-enrichment configuration toggles applied (issue #40).
+    pub framework_config_changes: u64,
     pub syntax_error_files: u64,
     pub truncated_call_sites: u64,
     pub publication: IndexPublicationMetrics,
+}
+
+/// Typed external-input evidence the workspace owner derived from the scan's
+/// manifest/config diff (issue #40). `None` fields mean "no decisive
+/// evidence; keep the adapter's current derived state".
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DependencyEvidence {
+    /// Framework-enrichment opt-in evidenced by the typed project model.
+    pub framework_detected: Option<bool>,
 }
 
 impl From<chakra_language_index::ReconcileMetrics> for AdapterReconcileMetrics {
@@ -190,9 +204,11 @@ impl From<chakra_language_index::ReconcileMetrics> for AdapterReconcileMetrics {
             modified_files: metrics.modified_files,
             deleted_files: metrics.deleted_files,
             relationship_files_recomputed: metrics.relationship_files_recomputed,
+            metadata_files_recomputed: metrics.metadata_files_recomputed,
             framework_files_reparsed: 0,
             framework_relationship_files_recomputed: 0,
             framework_truncated_files: 0,
+            framework_config_changes: 0,
             syntax_error_files: metrics.syntax_error_files,
             truncated_call_sites: metrics.truncated_call_sites,
             publication: metrics.publication,
@@ -210,9 +226,11 @@ impl From<chakra_language_rust::ReconcileMetrics> for AdapterReconcileMetrics {
             modified_files: metrics.modified_files,
             deleted_files: metrics.deleted_files,
             relationship_files_recomputed: metrics.relationship_files_recomputed,
+            metadata_files_recomputed: metrics.metadata_files_recomputed,
             framework_files_reparsed: 0,
             framework_relationship_files_recomputed: 0,
             framework_truncated_files: 0,
+            framework_config_changes: 0,
             syntax_error_files: metrics.syntax_error_files,
             truncated_call_sites: metrics.truncated_call_sites,
             publication: metrics.publication,
@@ -230,10 +248,12 @@ impl From<chakra_language_php::ReconcileMetrics> for AdapterReconcileMetrics {
             modified_files: metrics.modified_files,
             deleted_files: metrics.deleted_files,
             relationship_files_recomputed: metrics.relationship_files_recomputed,
+            metadata_files_recomputed: metrics.metadata_files_recomputed,
             framework_files_reparsed: metrics.framework_files_reparsed,
             framework_relationship_files_recomputed: metrics
                 .framework_relationship_files_recomputed,
             framework_truncated_files: metrics.framework_truncated_files,
+            framework_config_changes: metrics.framework_config_changes,
             syntax_error_files: metrics.syntax_error_files,
             truncated_call_sites: metrics.truncated_call_sites,
             publication: metrics.publication,
@@ -251,9 +271,11 @@ impl From<chakra_language_csharp::ReconcileMetrics> for AdapterReconcileMetrics 
             modified_files: metrics.modified_files,
             deleted_files: metrics.deleted_files,
             relationship_files_recomputed: metrics.relationship_files_recomputed,
+            metadata_files_recomputed: metrics.metadata_files_recomputed,
             framework_files_reparsed: 0,
             framework_relationship_files_recomputed: 0,
             framework_truncated_files: 0,
+            framework_config_changes: 0,
             syntax_error_files: metrics.syntax_error_files,
             truncated_call_sites: metrics.truncated_call_sites,
             publication: metrics.publication,
@@ -302,10 +324,13 @@ pub trait SyntaxLanguageAdapter: Debug + Send + Sync {
     ) -> Result<AdapterColdBuild, WorkspaceIndexError>;
 
     /// Incremental reconcile of classified sources against the current index.
+    /// `dependencies` carries typed manifest/config evidence derived by the
+    /// workspace owner (issue #40).
     fn reconcile(
         &self,
         sources: LanguageSources,
         graph_limits: GraphBuildLimits,
+        dependencies: DependencyEvidence,
         cancellation: &IndexCancellation,
     ) -> Result<AdapterReconcile, WorkspaceIndexError>;
 
@@ -401,6 +426,7 @@ impl SyntaxLanguageAdapter for chakra_language_rust::RustSyntaxIndex {
         &self,
         sources: LanguageSources,
         graph_limits: GraphBuildLimits,
+        _dependencies: DependencyEvidence,
         cancellation: &IndexCancellation,
     ) -> Result<AdapterReconcile, WorkspaceIndexError> {
         let report =
@@ -494,10 +520,15 @@ impl SyntaxLanguageAdapter for chakra_language_php::PhpSyntaxIndex {
         &self,
         sources: LanguageSources,
         graph_limits: GraphBuildLimits,
+        dependencies: DependencyEvidence,
         cancellation: &IndexCancellation,
     ) -> Result<AdapterReconcile, WorkspaceIndexError> {
-        let report =
-            self.reconcile_classified_sources_bounded(sources.into(), graph_limits, cancellation)?;
+        let report = self.reconcile_classified_sources_with_evidence(
+            sources.into(),
+            graph_limits,
+            dependencies.framework_detected,
+            cancellation,
+        )?;
         Ok(AdapterReconcile {
             graph: report.graph,
             metrics: report.metrics.into(),
@@ -576,6 +607,7 @@ impl SyntaxLanguageAdapter for chakra_language_typescript::TypeScriptSyntaxIndex
         &self,
         sources: LanguageSources,
         graph_limits: GraphBuildLimits,
+        _dependencies: DependencyEvidence,
         cancellation: &IndexCancellation,
     ) -> Result<AdapterReconcile, WorkspaceIndexError> {
         let report =
@@ -653,6 +685,7 @@ impl SyntaxLanguageAdapter for chakra_language_python::PythonSyntaxIndex {
         &self,
         sources: LanguageSources,
         graph_limits: GraphBuildLimits,
+        _dependencies: DependencyEvidence,
         cancellation: &IndexCancellation,
     ) -> Result<AdapterReconcile, WorkspaceIndexError> {
         let report =
@@ -730,6 +763,7 @@ impl SyntaxLanguageAdapter for chakra_language_javascript::JavaScriptSyntaxIndex
         &self,
         sources: LanguageSources,
         graph_limits: GraphBuildLimits,
+        _dependencies: DependencyEvidence,
         cancellation: &IndexCancellation,
     ) -> Result<AdapterReconcile, WorkspaceIndexError> {
         let report =
@@ -807,6 +841,7 @@ impl SyntaxLanguageAdapter for chakra_language_java::JavaSyntaxIndex {
         &self,
         sources: LanguageSources,
         graph_limits: GraphBuildLimits,
+        _dependencies: DependencyEvidence,
         cancellation: &IndexCancellation,
     ) -> Result<AdapterReconcile, WorkspaceIndexError> {
         let report =
@@ -884,6 +919,7 @@ impl SyntaxLanguageAdapter for chakra_language_csharp::CSharpSyntaxIndex {
         &self,
         sources: LanguageSources,
         graph_limits: GraphBuildLimits,
+        _dependencies: DependencyEvidence,
         cancellation: &IndexCancellation,
     ) -> Result<AdapterReconcile, WorkspaceIndexError> {
         let report =
@@ -961,6 +997,7 @@ impl SyntaxLanguageAdapter for chakra_language_shell::ShellSyntaxIndex {
         &self,
         sources: LanguageSources,
         graph_limits: GraphBuildLimits,
+        _dependencies: DependencyEvidence,
         cancellation: &IndexCancellation,
     ) -> Result<AdapterReconcile, WorkspaceIndexError> {
         let report =
@@ -1038,6 +1075,7 @@ impl SyntaxLanguageAdapter for chakra_language_cpp::CppSyntaxIndex {
         &self,
         sources: LanguageSources,
         graph_limits: GraphBuildLimits,
+        _dependencies: DependencyEvidence,
         cancellation: &IndexCancellation,
     ) -> Result<AdapterReconcile, WorkspaceIndexError> {
         let report =
@@ -1115,6 +1153,7 @@ impl SyntaxLanguageAdapter for chakra_language_hcl::HclSyntaxIndex {
         &self,
         sources: LanguageSources,
         graph_limits: GraphBuildLimits,
+        _dependencies: DependencyEvidence,
         cancellation: &IndexCancellation,
     ) -> Result<AdapterReconcile, WorkspaceIndexError> {
         let report =
@@ -1192,6 +1231,7 @@ impl SyntaxLanguageAdapter for chakra_language_go::GoSyntaxIndex {
         &self,
         sources: LanguageSources,
         graph_limits: GraphBuildLimits,
+        _dependencies: DependencyEvidence,
         cancellation: &IndexCancellation,
     ) -> Result<AdapterReconcile, WorkspaceIndexError> {
         let report =

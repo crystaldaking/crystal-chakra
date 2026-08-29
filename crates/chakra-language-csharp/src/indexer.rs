@@ -85,6 +85,9 @@ pub struct ReconcileMetrics {
     pub modified_files: u64,
     pub deleted_files: u64,
     pub relationship_files_recomputed: u64,
+    /// Retained files whose manifest-derived metadata record was replaced
+    /// without a source reparse (issue #40).
+    pub metadata_files_recomputed: u64,
     pub syntax_error_files: u64,
     pub truncated_call_sites: u64,
     pub publication: IndexPublicationMetrics,
@@ -93,7 +96,8 @@ pub struct ReconcileMetrics {
 /// Result of reconciling exact worktree contents with the reusable index.
 #[derive(Debug)]
 pub struct ReconcileReport {
-    /// Present only when source content changed and a new graph is ready.
+    /// Present when source content or manifest-derived metadata changed and
+    /// a new graph is ready.
     pub graph: Option<SymbolGraph>,
     pub metrics: ReconcileMetrics,
     pub next_index: Option<CSharpSyntaxIndex>,
@@ -216,6 +220,7 @@ struct RelationshipContribution {
 
 struct DeltaPlan<'a> {
     changed_paths: &'a BTreeSet<RepoRelativePath>,
+    metadata_changed_paths: &'a BTreeSet<RepoRelativePath>,
     relationship_owners: &'a BTreeSet<RepoRelativePath>,
     call_owners: &'a BTreeSet<RepoRelativePath>,
     stable_symbol_paths: &'a BTreeSet<RepoRelativePath>,
@@ -623,16 +628,17 @@ impl CSharpSyntaxIndex {
                 changed_paths.insert(path.clone());
             }
         }
-        let metadata_changed = self.metadata != metadata;
-        let metadata_changed_paths: BTreeSet<_> = self
-            .metadata
+        // Manifest-derived metadata is tracked per retained path so an
+        // external manifest/config edit invalidates exactly the files whose
+        // derived metadata changed instead of the whole language (issue #40).
+        let metadata_changed_paths: BTreeSet<RepoRelativePath> = sources
             .keys()
-            .chain(metadata.keys())
+            .filter(|path| self.files.contains_key(*path))
             .filter(|path| self.metadata.get(*path) != metadata.get(*path))
             .cloned()
             .collect();
-        let metadata_delta_covered = metadata_changed_paths.is_subset(&changed_paths);
-        if changed_paths.is_empty() && !limits_changed && !metadata_changed {
+        metrics.metadata_files_recomputed = metadata_changed_paths.len() as u64;
+        if changed_paths.is_empty() && !limits_changed && metadata_changed_paths.is_empty() {
             metrics.syntax_error_files = self.syntax_error_files();
             metrics.truncated_call_sites = self.truncated_call_sites();
             metrics.publication = self.reuse_all_publication();
@@ -833,10 +839,10 @@ impl CSharpSyntaxIndex {
             && self.graph_report.omitted_call_sites == 0;
         let delta_fits = next_facts.symbols <= graph_limits.max_symbols
             && next_facts.call_sites <= graph_limits.max_call_sites;
-        let delta_candidate =
-            !limits_changed && metadata_delta_covered && complete_previous && delta_fits;
+        let delta_candidate = !limits_changed && complete_previous && delta_fits;
         let delta_plan = DeltaPlan {
             changed_paths: &changed_paths,
+            metadata_changed_paths: &metadata_changed_paths,
             relationship_owners: &affected_owners,
             call_owners: &affected_call_owners,
             stable_symbol_paths: &stable_symbol_paths,
@@ -1156,6 +1162,22 @@ impl CSharpSyntaxIndex {
                     Precision::Syntax,
                 )?;
             }
+        }
+        // Manifest/config-driven metadata changes update exactly the affected
+        // file records in place: symbol ids, edges, and call sites are
+        // preserved because metadata never participates in identity.
+        for path in plan.metadata_changed_paths {
+            check_cancelled(cancellation)?;
+            let Some(metadata) = self.metadata.get(path) else {
+                continue;
+            };
+            if graph
+                .file_metadata(path)
+                .is_some_and(|current| current == metadata)
+            {
+                continue;
+            }
+            graph.replace_file_metadata(path, metadata.clone())?;
         }
         for owner in plan.relationship_owners {
             check_cancelled(cancellation)?;

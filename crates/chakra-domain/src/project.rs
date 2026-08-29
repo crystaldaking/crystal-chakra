@@ -281,6 +281,116 @@ pub enum ProjectScopeError {
     UnknownPackage(String),
 }
 
+/// Why one project unit's external inputs changed between two model
+/// revisions (issue #40). Typed so invalidation and diagnostics never
+/// pattern-match on free-form strings.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Serialize,
+    Deserialize,
+    schemars::JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectUnitChangeKind {
+    /// The unit appeared: a manifest was created or a package newly joined.
+    Added,
+    /// The unit disappeared: its manifest was deleted, renamed away, or the
+    /// package left its workspace.
+    Removed,
+    /// Identity-carrier fields other than source roots or dependency edges
+    /// changed (for example the contributing manifest path or language).
+    DefinitionChanged,
+    /// Declared source roots changed: Cargo targets or Composer PSR-4
+    /// autoload/autoload-dev roots.
+    SourceRootsChanged,
+    /// Declared dependency edges changed.
+    DependenciesChanged,
+    /// The unit's workspace grouping membership changed.
+    MembershipChanged,
+}
+
+/// One unit whose external manifest/config inputs changed, with every
+/// reason that applies.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectUnitChange {
+    pub unit: ProjectUnitId,
+    /// Sorted, deduplicated reasons for the change.
+    pub kinds: Vec<ProjectUnitChangeKind>,
+}
+
+/// Aggregated per-reason unit change counts of one impact diff.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ProjectUnitChangeCounts {
+    pub added: u64,
+    pub removed: u64,
+    pub definition_changed: u64,
+    pub source_roots_changed: u64,
+    pub dependencies_changed: u64,
+    pub membership_changed: u64,
+}
+
+/// Typed record of which project units a manifest/config edit invalidated
+/// between two model revisions, and which units depend on them (issue #40).
+///
+/// This is the dependency-tracking contract for derived facts: package
+/// moves surface as `Removed` + `Added`, autoload edits as
+/// [`ProjectUnitChangeKind::SourceRootsChanged`], membership edits as
+/// [`ProjectUnitChangeKind::MembershipChanged`], and dependency-edge edits
+/// as [`ProjectUnitChangeKind::DependenciesChanged`]. All collections are
+/// bounded; cuts are counted in the matching `*_omitted` field.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ProjectModelImpact {
+    /// Units whose own manifest evidence changed, sorted by unit id.
+    pub changes: Vec<ProjectUnitChange>,
+    pub changes_omitted: u64,
+    /// Units that declare a dependency edge targeting a changed unit, in
+    /// either revision, sorted by unit id. Changed units are not repeated
+    /// here.
+    pub dependents: Vec<ProjectUnitId>,
+    pub dependents_omitted: u64,
+    /// Manifests whose recorded probe/parse issue state changed.
+    pub manifest_issue_changes: Vec<RepoRelativePath>,
+    pub manifest_issue_changes_omitted: u64,
+}
+
+impl ProjectModelImpact {
+    /// No unit, dependent, or manifest-issue state changed.
+    pub fn is_empty(&self) -> bool {
+        self.changes.is_empty()
+            && self.changes_omitted == 0
+            && self.dependents.is_empty()
+            && self.manifest_issue_changes.is_empty()
+            && self.manifest_issue_changes_omitted == 0
+    }
+
+    /// Aggregated per-reason counts over [`Self::changes`], including the
+    /// units cut by the change bound (an omitted unit changed for at least
+    /// one reason, but the specific kinds are unknown and not counted).
+    pub fn counts(&self) -> ProjectUnitChangeCounts {
+        let mut counts = ProjectUnitChangeCounts::default();
+        for change in &self.changes {
+            for kind in &change.kinds {
+                match kind {
+                    ProjectUnitChangeKind::Added => counts.added += 1,
+                    ProjectUnitChangeKind::Removed => counts.removed += 1,
+                    ProjectUnitChangeKind::DefinitionChanged => counts.definition_changed += 1,
+                    ProjectUnitChangeKind::SourceRootsChanged => counts.source_roots_changed += 1,
+                    ProjectUnitChangeKind::DependenciesChanged => counts.dependencies_changed += 1,
+                    ProjectUnitChangeKind::MembershipChanged => counts.membership_changed += 1,
+                }
+            }
+        }
+        counts
+    }
+}
+
 /// Typed, queryable project model published with one workspace revision.
 ///
 /// All collections are bounded by the `MAX_PROJECT_*` constants; anything cut
@@ -388,6 +498,171 @@ impl ProjectModel {
             _ => Err(ProjectScopeError::InvalidSelector),
         }
     }
+
+    /// Typed diff of this (current) model against a `previous` revision
+    /// (issue #40): which units' external inputs changed, why, and which
+    /// unchanged units declare dependency edges targeting them.
+    ///
+    /// The diff is a pure function of the two models, so the same manifest
+    /// evidence always produces the same impact record.
+    pub fn impact_since(&self, previous: &ProjectModel) -> ProjectModelImpact {
+        let previous_units: std::collections::BTreeMap<&ProjectUnitId, &ProjectUnit> =
+            previous.units.iter().map(|unit| (&unit.id, unit)).collect();
+        let current_units: std::collections::BTreeMap<&ProjectUnitId, &ProjectUnit> =
+            self.units.iter().map(|unit| (&unit.id, unit)).collect();
+
+        let mut kinds: std::collections::BTreeMap<ProjectUnitId, BTreeSet<ProjectUnitChangeKind>> =
+            std::collections::BTreeMap::new();
+        for (id, unit) in &current_units {
+            let mut unit_kinds = BTreeSet::new();
+            match previous_units.get(id) {
+                None => {
+                    unit_kinds.insert(ProjectUnitChangeKind::Added);
+                }
+                Some(previous_unit) => {
+                    if unit.source_roots != previous_unit.source_roots
+                        || unit.source_roots_omitted != previous_unit.source_roots_omitted
+                    {
+                        unit_kinds.insert(ProjectUnitChangeKind::SourceRootsChanged);
+                    }
+                    if unit.dependencies != previous_unit.dependencies
+                        || unit.dependencies_omitted != previous_unit.dependencies_omitted
+                    {
+                        unit_kinds.insert(ProjectUnitChangeKind::DependenciesChanged);
+                    }
+                    if unit.manifest != previous_unit.manifest
+                        || unit.language != previous_unit.language
+                    {
+                        unit_kinds.insert(ProjectUnitChangeKind::DefinitionChanged);
+                    }
+                }
+            }
+            if !unit_kinds.is_empty() {
+                kinds.insert((*id).clone(), unit_kinds);
+            }
+        }
+        for id in previous_units.keys() {
+            if !current_units.contains_key(id) {
+                kinds
+                    .entry((*id).clone())
+                    .or_default()
+                    .insert(ProjectUnitChangeKind::Removed);
+            }
+        }
+        // Workspace membership is tracked for units present in both
+        // revisions; joining or leaving units already read as Added/Removed.
+        let previous_membership = workspace_membership(previous);
+        let current_membership = workspace_membership(self);
+        let membership_ids: BTreeSet<&ProjectUnitId> = previous_membership
+            .keys()
+            .chain(current_membership.keys())
+            .collect();
+        for id in membership_ids {
+            if previous_membership.get(id) == current_membership.get(id) {
+                continue;
+            }
+            if previous_units.contains_key(id) && current_units.contains_key(id) {
+                kinds
+                    .entry(id.clone())
+                    .or_default()
+                    .insert(ProjectUnitChangeKind::MembershipChanged);
+            }
+        }
+
+        let mut impact = ProjectModelImpact::default();
+        let changed_ids: BTreeSet<ProjectUnitId> = kinds.keys().cloned().collect();
+        let total_changes = kinds.len();
+        for (unit, unit_kinds) in kinds {
+            if impact.changes.len() < MAX_PROJECT_UNITS {
+                impact.changes.push(ProjectUnitChange {
+                    unit,
+                    kinds: unit_kinds.into_iter().collect(),
+                });
+            }
+        }
+        impact.changes_omitted = total_changes.saturating_sub(impact.changes.len()) as u64;
+
+        // Dependents come from both revisions so that a removed edge still
+        // reports the previously dependent unit.
+        let mut dependents = BTreeSet::new();
+        for unit in previous.units.iter().chain(self.units.iter()) {
+            if changed_ids.contains(&unit.id) {
+                continue;
+            }
+            if unit
+                .dependencies
+                .iter()
+                .filter_map(|dependency| dependency.target.as_ref())
+                .any(|target| changed_ids.contains(target))
+            {
+                dependents.insert(unit.id.clone());
+            }
+        }
+        let total_dependents = dependents.len();
+        for dependent in dependents.into_iter().take(MAX_PROJECT_UNITS) {
+            impact.dependents.push(dependent);
+        }
+        impact.dependents_omitted = total_dependents.saturating_sub(impact.dependents.len()) as u64;
+
+        let previous_issues = issue_kinds_by_manifest(previous);
+        let current_issues = issue_kinds_by_manifest(self);
+        let manifests: BTreeSet<&RepoRelativePath> = previous_issues
+            .keys()
+            .chain(current_issues.keys())
+            .copied()
+            .collect();
+        let mut issue_changes = Vec::new();
+        for manifest in manifests {
+            if previous_issues.get(manifest) != current_issues.get(manifest) {
+                issue_changes.push(manifest.clone());
+            }
+        }
+        let total_issue_changes = issue_changes.len();
+        impact.manifest_issue_changes =
+            issue_changes.into_iter().take(MAX_PROJECT_ISSUES).collect();
+        impact.manifest_issue_changes_omitted =
+            total_issue_changes.saturating_sub(impact.manifest_issue_changes.len()) as u64;
+        impact
+    }
+}
+
+/// Maps each workspace member unit id to the workspaces containing it.
+fn workspace_membership(
+    model: &ProjectModel,
+) -> std::collections::BTreeMap<
+    ProjectUnitId,
+    BTreeSet<(ProjectWorkspaceKind, Option<RepoRelativePath>)>,
+> {
+    let mut membership: std::collections::BTreeMap<
+        ProjectUnitId,
+        BTreeSet<(ProjectWorkspaceKind, Option<RepoRelativePath>)>,
+    > = std::collections::BTreeMap::new();
+    for workspace in &model.workspaces {
+        for member in &workspace.members {
+            membership
+                .entry(member.clone())
+                .or_default()
+                .insert((workspace.kind, workspace.root.clone()));
+        }
+    }
+    membership
+}
+
+/// Maps each manifest with recorded issues to its issue kinds.
+fn issue_kinds_by_manifest(
+    model: &ProjectModel,
+) -> std::collections::BTreeMap<&RepoRelativePath, BTreeSet<ProjectManifestIssueKind>> {
+    let mut issues: std::collections::BTreeMap<
+        &RepoRelativePath,
+        BTreeSet<ProjectManifestIssueKind>,
+    > = std::collections::BTreeMap::new();
+    for issue in &model.issues {
+        issues
+            .entry(&issue.manifest)
+            .or_default()
+            .insert(issue.kind);
+    }
+    issues
 }
 
 fn path_within(root: Option<&RepoRelativePath>, path: &RepoRelativePath) -> bool {
@@ -636,6 +911,204 @@ mod tests {
         );
         let empty: ProjectScopeSelector = serde_json::from_value(serde_json::json!({}))?;
         assert_eq!(empty, ProjectScopeSelector::default());
+        Ok(())
+    }
+
+    fn change<'a>(
+        model: &'a ProjectModelImpact,
+        unit: &ProjectUnitId,
+    ) -> Option<&'a ProjectUnitChange> {
+        model.changes.iter().find(|change| &change.unit == unit)
+    }
+
+    #[test]
+    fn unchanged_models_produce_an_empty_impact() -> Result<(), Box<dyn std::error::Error>> {
+        let model = ProjectModel {
+            units: vec![cargo_unit(
+                "core",
+                Some("crates/core"),
+                "crates/core/Cargo.toml",
+            )?],
+            ..ProjectModel::default()
+        };
+        assert!(model.impact_since(&model).is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn package_move_reads_as_remove_and_add() -> Result<(), Box<dyn std::error::Error>> {
+        let previous = ProjectModel {
+            units: vec![cargo_unit(
+                "core",
+                Some("crates/core"),
+                "crates/core/Cargo.toml",
+            )?],
+            ..ProjectModel::default()
+        };
+        let current = ProjectModel {
+            units: vec![cargo_unit(
+                "core",
+                Some("packages/core"),
+                "packages/core/Cargo.toml",
+            )?],
+            ..ProjectModel::default()
+        };
+        let impact = current.impact_since(&previous);
+        let counts = impact.counts();
+        assert_eq!(counts.added, 1);
+        assert_eq!(counts.removed, 1);
+        assert_eq!(impact.changes.len(), 2);
+        assert!(impact.dependents.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn autoload_edits_read_as_source_root_changes() -> Result<(), Box<dyn std::error::Error>> {
+        let previous = ProjectModel {
+            units: vec![composer_unit(
+                "acme/blog",
+                "composer.json",
+                &[("src", SourceRole::Production)],
+            )?],
+            ..ProjectModel::default()
+        };
+        let current = ProjectModel {
+            units: vec![composer_unit(
+                "acme/blog",
+                "composer.json",
+                &[
+                    ("src", SourceRole::Production),
+                    ("lib", SourceRole::Production),
+                ],
+            )?],
+            ..ProjectModel::default()
+        };
+        let impact = current.impact_since(&previous);
+        assert_eq!(impact.changes.len(), 1);
+        assert_eq!(
+            impact.changes[0].kinds,
+            vec![ProjectUnitChangeKind::SourceRootsChanged]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn dependency_edits_report_the_edge_owner_and_unchanged_dependents()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let core = ProjectUnitId::new(
+            ProjectUnitKind::CargoPackage,
+            Some(&path("crates/core")?),
+            "core",
+        );
+        let cli = ProjectUnitId::new(
+            ProjectUnitKind::CargoPackage,
+            Some(&path("crates/cli")?),
+            "cli",
+        );
+        let dependent = ProjectUnitId::new(
+            ProjectUnitKind::CargoPackage,
+            Some(&path("crates/app")?),
+            "app",
+        );
+        let mut cli_unit = cargo_unit("cli", Some("crates/cli"), "crates/cli/Cargo.toml")?;
+        let mut app_unit = cargo_unit("app", Some("crates/app"), "crates/app/Cargo.toml")?;
+        app_unit.dependencies = vec![ProjectDependency {
+            name: "core".to_owned(),
+            kind: ProjectDependencyKind::Normal,
+            target: Some(core.clone()),
+        }];
+        let previous = ProjectModel {
+            units: vec![
+                cargo_unit("core", Some("crates/core"), "crates/core/Cargo.toml")?,
+                cli_unit.clone(),
+                app_unit.clone(),
+            ],
+            ..ProjectModel::default()
+        };
+        cli_unit.dependencies = vec![ProjectDependency {
+            name: "serde".to_owned(),
+            kind: ProjectDependencyKind::Normal,
+            target: None,
+        }];
+        let current = ProjectModel {
+            units: vec![
+                cargo_unit("core", Some("crates/core"), "crates/core/Cargo.toml")?,
+                cli_unit,
+                app_unit,
+            ],
+            ..ProjectModel::default()
+        };
+        let impact = current.impact_since(&previous);
+        assert_eq!(
+            change(&impact, &cli).map(|change| change.kinds.as_slice()),
+            Some([ProjectUnitChangeKind::DependenciesChanged].as_slice())
+        );
+        // `app` depends on `core`, which did not change: no dependent noise.
+        assert!(impact.dependents.is_empty());
+
+        // Now change `core` itself: `app` must surface as a dependent.
+        let mut renamed_core_dependencies = previous.units.clone();
+        renamed_core_dependencies[0].dependencies = vec![ProjectDependency {
+            name: "anyhow".to_owned(),
+            kind: ProjectDependencyKind::Normal,
+            target: None,
+        }];
+        let current = ProjectModel {
+            units: renamed_core_dependencies,
+            ..ProjectModel::default()
+        };
+        let impact = current.impact_since(&previous);
+        assert_eq!(
+            change(&impact, &core).map(|change| change.kinds.as_slice()),
+            Some([ProjectUnitChangeKind::DependenciesChanged].as_slice())
+        );
+        assert_eq!(impact.dependents, vec![dependent]);
+        Ok(())
+    }
+
+    #[test]
+    fn workspace_membership_changes_are_typed() -> Result<(), Box<dyn std::error::Error>> {
+        let core = cargo_unit("core", Some("crates/core"), "crates/core/Cargo.toml")?;
+        let previous = ProjectModel {
+            workspaces: vec![ProjectWorkspace {
+                kind: ProjectWorkspaceKind::Cargo,
+                root: None,
+                members: Vec::new(),
+            }],
+            units: vec![core.clone()],
+            ..ProjectModel::default()
+        };
+        let current = ProjectModel {
+            workspaces: vec![ProjectWorkspace {
+                kind: ProjectWorkspaceKind::Cargo,
+                root: None,
+                members: vec![core.id.clone()],
+            }],
+            units: vec![core.clone()],
+            ..ProjectModel::default()
+        };
+        let impact = current.impact_since(&previous);
+        assert_eq!(
+            change(&impact, &core.id).map(|change| change.kinds.as_slice()),
+            Some([ProjectUnitChangeKind::MembershipChanged].as_slice())
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn manifest_issue_transitions_are_recorded() -> Result<(), Box<dyn std::error::Error>> {
+        let previous = ProjectModel::default();
+        let current = ProjectModel {
+            issues: vec![ProjectManifestIssue {
+                manifest: path("composer.json")?,
+                kind: ProjectManifestIssueKind::MalformedContent,
+            }],
+            ..ProjectModel::default()
+        };
+        let impact = current.impact_since(&previous);
+        assert_eq!(impact.manifest_issue_changes, vec![path("composer.json")?]);
+        assert!(impact.changes.is_empty());
+        assert!(!impact.is_empty());
         Ok(())
     }
 }

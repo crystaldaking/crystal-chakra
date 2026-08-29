@@ -39,6 +39,15 @@ const MAX_REPOSITORY_SOURCE_BYTES: usize = 256 * 1024 * 1024;
 const PHASE_RESOURCE_SAMPLE_THRESHOLD: u64 = 32;
 const MAX_COMPOSER_METADATA_BYTES: usize = 1024 * 1024;
 
+/// Composer packages that opt a repository into Laravel syntax enrichment,
+/// shared by the cold-build filesystem probe and the typed project-model
+/// evidence (issue #40).
+const LARAVEL_PACKAGE_NAMES: [&str; 3] = [
+    "laravel/framework",
+    "laravel/lumen-framework",
+    "illuminate/foundation",
+];
+
 #[derive(Debug, Clone, Copy)]
 struct PhaseTimer {
     wall: Instant,
@@ -93,6 +102,13 @@ pub struct ReconcileMetrics {
     pub framework_files_reparsed: u64,
     pub framework_relationship_files_recomputed: u64,
     pub framework_truncated_files: u64,
+    /// Retained files whose manifest-derived metadata record was replaced
+    /// without a source reparse (issue #40).
+    pub metadata_files_recomputed: u64,
+    /// Framework-enrichment configuration toggles applied during this
+    /// reconciliation (issue #40). A toggle re-derives framework facts for
+    /// this language's files only.
+    pub framework_config_changes: u64,
     pub syntax_error_files: u64,
     pub truncated_call_sites: u64,
     pub publication: IndexPublicationMetrics,
@@ -750,6 +766,20 @@ impl PhpSyntaxIndex {
         graph_limits: GraphBuildLimits,
         cancellation: &IndexCancellation,
     ) -> Result<ReconcileReport, PhpIndexError> {
+        self.reconcile_classified_sources_with_evidence(sources, graph_limits, None, cancellation)
+    }
+
+    /// Bounded incremental reconcile with typed external-input evidence
+    /// (issue #40). `framework_detected` carries the manifest-derived
+    /// framework opt-in: `Some` is decisive in both directions, `None` keeps
+    /// the currently published enrichment state.
+    pub fn reconcile_classified_sources_with_evidence(
+        &self,
+        sources: PhpSources,
+        graph_limits: GraphBuildLimits,
+        framework_detected: Option<bool>,
+        cancellation: &IndexCancellation,
+    ) -> Result<ReconcileReport, PhpIndexError> {
         let PhpSources {
             files: sources,
             metadata,
@@ -783,8 +813,24 @@ impl PhpSyntaxIndex {
                 changed_paths.insert(path.clone());
             }
         }
-        let metadata_changed = self.metadata != metadata;
-        if changed_paths.is_empty() && !limits_changed && !metadata_changed {
+        // Manifest-derived metadata is tracked per retained path so an
+        // external manifest/config edit invalidates exactly the files whose
+        // derived metadata changed instead of the whole language (issue #40).
+        let metadata_changed_paths: BTreeSet<RepoRelativePath> = sources
+            .keys()
+            .filter(|path| self.files.contains_key(*path))
+            .filter(|path| self.metadata.get(*path) != metadata.get(*path))
+            .cloned()
+            .collect();
+        metrics.metadata_files_recomputed = metadata_changed_paths.len() as u64;
+        let framework_toggled =
+            framework_detected.is_some_and(|detected| detected != self.laravel_detected);
+        let next_laravel_detected = framework_detected.unwrap_or(self.laravel_detected);
+        if changed_paths.is_empty()
+            && !limits_changed
+            && metadata_changed_paths.is_empty()
+            && !framework_toggled
+        {
             metrics.syntax_error_files = self.syntax_error_files();
             metrics.truncated_call_sites = self.truncated_call_sites();
             metrics.publication = self.reuse_all_publication();
@@ -801,8 +847,7 @@ impl PhpSyntaxIndex {
         let mut next_framework_files = self.framework_files.clone();
         let parse_started = Instant::now();
         let mut parser = PhpParser::new().map_err(parse_error)?;
-        let mut laravel_parser = self
-            .laravel_detected
+        let mut laravel_parser = next_laravel_detected
             .then(LaravelParser::new)
             .transpose()
             .map_err(parse_error)?;
@@ -810,7 +855,7 @@ impl PhpSyntaxIndex {
             check_cancelled(cancellation)?;
             match sources.get(path) {
                 Some(source) => {
-                    if let Some(laravel_parser) = laravel_parser.as_mut() {
+                    if !framework_toggled && let Some(laravel_parser) = laravel_parser.as_mut() {
                         let framework = laravel_parser
                             .parse(path.clone(), source.as_ref())
                             .map_err(parse_error)?;
@@ -829,6 +874,14 @@ impl PhpSyntaxIndex {
                 }
             }
         }
+        if framework_toggled {
+            metrics.framework_config_changes += 1;
+            // A framework opt-in toggle re-derives framework facts for this
+            // language's files only; pure syntax facts stay content-derived.
+            next_framework_files =
+                parse_framework_files(&next_files, next_laravel_detected, cancellation)?;
+            metrics.framework_files_reparsed = next_framework_files.len() as u64;
+        }
         let parse_elapsed = parse_started.elapsed();
         check_cancelled(cancellation)?;
 
@@ -836,7 +889,7 @@ impl PhpSyntaxIndex {
         let mut unchanged_fact_paths = BTreeSet::new();
         let mut changed_dependencies = HashSet::new();
         let mut changed_callables = HashSet::new();
-        let mut framework_symbols_changed = false;
+        let mut framework_symbols_changed = framework_toggled;
         for path in &changed_paths {
             match (self.files.get(path), next_files.get(path)) {
                 (Some(previous), Some(next)) if symbol_keys_equal(previous, next) => {
@@ -961,23 +1014,27 @@ impl PhpSyntaxIndex {
                 .map(|(path, _)| path.clone()),
         );
         let mut next_framework_relationships = self.framework_relationships.clone();
-        for path in &affected_framework_owners {
-            match (next_files.get(path), next_framework_files.get(path)) {
-                (Some(file), Some(framework)) => {
-                    next_framework_relationships.insert(
-                        path.clone(),
-                        Arc::new(framework_relationships_for_file(
-                            path,
-                            file,
-                            framework,
-                            &catalog,
-                            graph_limits.max_edges,
-                        )),
-                    );
-                    metrics.framework_relationship_files_recomputed += 1;
-                }
-                _ => {
-                    next_framework_relationships.remove(path);
+        // A framework opt-in toggle replaces every framework contribution;
+        // the bounded full rebuild below materializes it.
+        if !framework_toggled {
+            for path in &affected_framework_owners {
+                match (next_files.get(path), next_framework_files.get(path)) {
+                    (Some(file), Some(framework)) => {
+                        next_framework_relationships.insert(
+                            path.clone(),
+                            Arc::new(framework_relationships_for_file(
+                                path,
+                                file,
+                                framework,
+                                &catalog,
+                                graph_limits.max_edges,
+                            )),
+                        );
+                        metrics.framework_relationship_files_recomputed += 1;
+                    }
+                    _ => {
+                        next_framework_relationships.remove(path);
+                    }
                 }
             }
         }
@@ -989,7 +1046,8 @@ impl PhpSyntaxIndex {
             .values()
             .map(|contribution| contribution.omitted_edges)
             .sum::<u64>();
-        if retained_edges.saturating_add(retained_framework_edges) > graph_limits.max_edges
+        if framework_toggled
+            || retained_edges.saturating_add(retained_framework_edges) > graph_limits.max_edges
             || omitted_edges.saturating_add(omitted_framework_edges) > 0
         {
             next_relationships = build_all_relationships(
@@ -1018,7 +1076,7 @@ impl PhpSyntaxIndex {
             files: next_files,
             metadata,
             relationships: next_relationships,
-            laravel_detected: self.laravel_detected,
+            laravel_detected: next_laravel_detected,
             framework_files: next_framework_files,
             framework_relationships: next_framework_relationships,
             graph_limits,
@@ -1032,15 +1090,13 @@ impl PhpSyntaxIndex {
             && self.graph_report.omitted_call_sites == 0;
         let delta_fits = next_facts.symbols <= graph_limits.max_symbols
             && next_facts.call_sites <= graph_limits.max_call_sites;
-        let delta_candidate = !limits_changed
-            && !metadata_changed
-            && !framework_symbols_changed
-            && complete_previous
-            && delta_fits;
+        let delta_candidate =
+            !limits_changed && !framework_symbols_changed && complete_previous && delta_fits;
         let delta = if delta_candidate {
             next.materialize_graph_delta(
                 &self.graph,
                 &changed_paths,
+                &metadata_changed_paths,
                 &all_relationship_owners,
                 &affected_call_owners,
                 &stable_symbol_paths,
@@ -1358,10 +1414,12 @@ impl PhpSyntaxIndex {
         Ok((graph, report))
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn materialize_graph_delta(
         &self,
         previous: &SymbolGraph,
         changed_paths: &BTreeSet<RepoRelativePath>,
+        metadata_changed_paths: &BTreeSet<RepoRelativePath>,
         relationship_owners: &BTreeSet<RepoRelativePath>,
         call_owners: &BTreeSet<RepoRelativePath>,
         stable_symbol_paths: &BTreeSet<RepoRelativePath>,
@@ -1478,6 +1536,22 @@ impl PhpSyntaxIndex {
                     )?;
                 }
             }
+        }
+        // Manifest/config-driven metadata changes update exactly the affected
+        // file records in place: symbol ids, edges, and call sites are
+        // preserved because metadata never participates in identity.
+        for path in metadata_changed_paths {
+            check_cancelled(cancellation)?;
+            let Some(metadata) = self.metadata.get(path) else {
+                continue;
+            };
+            if graph
+                .file_metadata(path)
+                .is_some_and(|current| current == metadata)
+            {
+                continue;
+            }
+            graph.replace_file_metadata(path, metadata.clone())?;
         }
         for owner in relationship_owners {
             check_cancelled(cancellation)?;
@@ -2395,13 +2469,35 @@ fn composer_declares_laravel(repository_root: &Path) -> Result<bool, PhpIndexErr
     else {
         return Ok(false);
     };
-    Ok([
-        "laravel/framework",
-        "laravel/lumen-framework",
-        "illuminate/foundation",
-    ]
-    .iter()
-    .any(|package| require.contains_key(*package)))
+    Ok(LARAVEL_PACKAGE_NAMES
+        .iter()
+        .any(|package| require.contains_key(*package)))
+}
+
+/// Derives the Laravel enrichment opt-in from the typed project model
+/// (issue #40), mirroring `detect_laravel` semantics on the root
+/// `composer.json`: a present root Composer unit is decisive in both
+/// directions, and a malformed, oversized, or absent root manifest maps to
+/// `false`, exactly like the cold-build probe.
+pub fn laravel_detected_from_model(model: &chakra_domain::project::ProjectModel) -> bool {
+    use chakra_domain::project::{ProjectDependencyKind, ProjectUnitKind};
+
+    model
+        .units
+        .iter()
+        .find(|unit| {
+            unit.kind == ProjectUnitKind::ComposerPackage
+                && unit
+                    .manifest
+                    .as_ref()
+                    .is_some_and(|manifest| manifest.as_str() == "composer.json")
+        })
+        .is_some_and(|unit| {
+            unit.dependencies.iter().any(|dependency| {
+                dependency.kind == ProjectDependencyKind::Normal
+                    && LARAVEL_PACKAGE_NAMES.contains(&dependency.name.as_str())
+            })
+        })
 }
 
 /// Detects whether Composer metadata opts the repository into Laravel syntax
@@ -3276,6 +3372,145 @@ final class Controller { public function __invoke(): void {} }
                 .map(|package| package.name.as_str()),
             Some("after/package")
         );
+        Ok(())
+    }
+
+    #[test]
+    fn metadata_change_revalidates_only_the_affected_files() -> Result<(), Box<dyn Error>> {
+        let files = in_memory_sources(&[
+            ("app/Service.php", "<?php namespace App; class Service {}\n"),
+            ("app/Other.php", "<?php namespace App; class Other {}\n"),
+        ])?;
+        let metadata_for = |files: &BTreeMap<RepoRelativePath, Arc<str>>, package: &str| {
+            files
+                .keys()
+                .map(|path| {
+                    let mut metadata = SourceMetadata::path_fallback(path);
+                    if path.as_str() == "app/Service.php" {
+                        metadata.package = Some(chakra_domain::source::SourcePackage {
+                            name: package.to_owned(),
+                            root: None,
+                        });
+                    }
+                    (path.clone(), metadata)
+                })
+                .collect()
+        };
+        let (index, _) = PhpSyntaxIndex::from_classified_sources(PhpSources {
+            files: files.clone(),
+            metadata: metadata_for(&files, "before/package"),
+        })?;
+
+        let reconciled = index.reconcile_classified_sources(PhpSources {
+            files: files.clone(),
+            metadata: metadata_for(&files, "after/package"),
+        })?;
+        // Exactly the metadata-changed file is re-materialized; nothing is
+        // reparsed and the graph delta stays structurally incremental.
+        assert_eq!(reconciled.metrics.reparsed_files, 0);
+        assert_eq!(reconciled.metrics.metadata_files_recomputed, 1);
+        assert!(reconciled.metrics.publication.structurally_incremental);
+        let graph = reconciled.graph.ok_or("metadata graph missing")?;
+        let service = RepoRelativePath::new("app/Service.php")?;
+        let other = RepoRelativePath::new("app/Other.php")?;
+        assert_eq!(
+            graph
+                .file_metadata(&service)
+                .and_then(|metadata| metadata.package.as_ref())
+                .map(|package| package.name.as_str()),
+            Some("after/package")
+        );
+        assert_eq!(
+            graph
+                .file_metadata(&other)
+                .and_then(|metadata| metadata.package.as_ref())
+                .map(|package| package.name.as_str()),
+            None
+        );
+        // Symbol identity and count are untouched by the metadata swap.
+        assert_eq!(graph.resolve_name("App::Service").len(), 1);
+        assert_eq!(graph.resolve_name("App::Other").len(), 1);
+        graph.validate_consistency()?;
+        Ok(())
+    }
+
+    #[test]
+    fn framework_config_toggle_rederives_framework_facts_without_reparsing()
+    -> Result<(), Box<dyn Error>> {
+        let files = || {
+            in_memory_sources(&[(
+                "routes/web.php",
+                "<?php\nuse Illuminate\\Support\\Facades\\Route;\nfinal class Controller { public function __invoke(): void {} }\nRoute::get('/users', Controller::class);\n",
+            )])
+        };
+        let classified = |files: BTreeMap<RepoRelativePath, Arc<str>>| PhpSources {
+            files,
+            metadata: BTreeMap::new(),
+        };
+        let (index, off_graph) = PhpSyntaxIndex::from_sources_with_laravel(files()?, false)?;
+        assert_eq!(index.framework_symbol_count(), 0);
+        let (on_index, on_graph) = PhpSyntaxIndex::from_sources_with_laravel(files()?, true)?;
+        assert!(on_index.framework_symbol_count() > 0);
+
+        // Toggle on through typed evidence: no source reparse, framework
+        // facts match a cold Laravel-enabled build exactly.
+        let reconciled = index.reconcile_classified_sources_with_evidence(
+            classified(files()?),
+            GraphBuildLimits::UNLIMITED,
+            Some(true),
+            &IndexCancellation::default(),
+        )?;
+        assert_eq!(reconciled.metrics.reparsed_files, 0);
+        assert_eq!(reconciled.metrics.framework_config_changes, 1);
+        assert_eq!(reconciled.metrics.framework_files_reparsed, 1);
+        let toggled_on = reconciled.graph.ok_or("toggle-on graph missing")?;
+        assert_eq!(toggled_on.symbol_count(), on_graph.symbol_count());
+        assert_eq!(toggled_on.edge_count(), on_graph.edge_count());
+        assert_eq!(
+            reconciled
+                .next_index
+                .as_ref()
+                .ok_or("toggle-on index missing")?
+                .framework_symbol_count(),
+            on_index.framework_symbol_count()
+        );
+        toggled_on.validate_consistency()?;
+
+        // Toggling back off removes exactly the framework facts again.
+        let reconciled = reconciled
+            .next_index
+            .ok_or("toggle-on index missing")?
+            .reconcile_classified_sources_with_evidence(
+                classified(files()?),
+                GraphBuildLimits::UNLIMITED,
+                Some(false),
+                &IndexCancellation::default(),
+            )?;
+        assert_eq!(reconciled.metrics.reparsed_files, 0);
+        assert_eq!(reconciled.metrics.framework_config_changes, 1);
+        let toggled_off = reconciled.graph.ok_or("toggle-off graph missing")?;
+        assert_eq!(toggled_off.symbol_count(), off_graph.symbol_count());
+        assert_eq!(toggled_off.edge_count(), off_graph.edge_count());
+        toggled_off.validate_consistency()?;
+        Ok(())
+    }
+
+    #[test]
+    fn unchanged_framework_evidence_keeps_the_noop_fast_path() -> Result<(), Box<dyn Error>> {
+        let files = in_memory_sources(&[("web.php", "<?php function retained(): void {}\n")])?;
+        let (index, _) = PhpSyntaxIndex::from_sources_with_laravel(files.clone(), false)?;
+        let reconciled = index.reconcile_classified_sources_with_evidence(
+            PhpSources {
+                files,
+                metadata: BTreeMap::new(),
+            },
+            GraphBuildLimits::UNLIMITED,
+            Some(false),
+            &IndexCancellation::default(),
+        )?;
+        assert!(reconciled.graph.is_none());
+        assert_eq!(reconciled.metrics.framework_config_changes, 0);
+        assert_eq!(reconciled.metrics.metadata_files_recomputed, 0);
         Ok(())
     }
 }
