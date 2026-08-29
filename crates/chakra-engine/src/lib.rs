@@ -16,8 +16,9 @@ pub use diff::{
     WorkspaceDiffProvider, WorkspaceFileChange,
 };
 pub use engine::{
-    BarrierAlreadyInstalled, DiffProviderAlreadyInstalled, FreshnessBarrier, FreshnessBarrierError,
-    ProviderInstallError, PublishError, UpdateBuilder, WorkspaceEngine, WorkspaceSnapshot,
+    BarrierAlreadyInstalled, DiagnosticsAlreadyInstalled, DiffProviderAlreadyInstalled,
+    FreshnessBarrier, FreshnessBarrierError, IndexDiagnosticsSource, ProviderInstallError,
+    PublishError, UpdateBuilder, WorkspaceEngine, WorkspaceSnapshot,
 };
 pub use graph::{
     BoundedGraphBuilder, CallSiteInput, ConsistencyAudit, ConsistencyError, GraphBuildLimits,

@@ -13,6 +13,7 @@ pub use adapter::{
     AdapterReconcile, AdapterReconcileMetrics, LanguageSources, SyntaxLanguageAdapter,
     default_adapters, registered_languages,
 };
+pub use chakra_domain::indexing::ReconciliationKind;
 pub use indexer::{
     IndexMetrics, IndexOptions, IndexReport, ReconcileMetrics, ReconcileReport,
     WorkspaceIndexError, WorkspaceLanguageSources, WorkspaceSourceScan, WorkspaceSources,
@@ -20,6 +21,6 @@ pub use indexer::{
     scan_repository_sources_with_options,
 };
 pub use live::{
-    LiveIndex, LiveIndexError, LiveIndexMetrics, LiveIndexOptions, ReconciliationKind,
-    start_live_index, start_live_index_with_options,
+    LiveIndex, LiveIndexError, LiveIndexMetrics, LiveIndexOptions, start_live_index,
+    start_live_index_with_options,
 };

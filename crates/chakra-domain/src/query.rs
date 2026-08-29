@@ -362,6 +362,10 @@ pub struct StatusData {
     pub query_execution: Option<QueryExecutionMetrics>,
     pub source_metadata: SourceMetadataCoverage,
     pub syntax_diagnostics: SyntaxDiagnosticSummary,
+    /// Bounded machine-readable live indexing diagnostics (issue #43).
+    /// Absent when no live indexing owner is installed on the engine.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub index_diagnostics: Option<crate::indexing::IndexingDiagnostics>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]

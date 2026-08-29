@@ -13,8 +13,10 @@ use chakra_domain::diagnostic::{
 };
 use chakra_domain::envelope::{TruncationCause, TruncationSection};
 use chakra_domain::indexing::{
+    CacheHealth, FileInvalidation, FileInvalidationReason, FullReconciliationReason,
     IndexBudgetKind, IndexCapability, IndexDegradation, IndexPhase, IndexPhaseMeasurement,
-    IndexingStatus,
+    IndexingDiagnostics, IndexingStatus, ReconciliationCounters, ReconciliationKind,
+    SYNTAX_FACT_CACHE_DISABLED_REASON,
 };
 use chakra_domain::location::{RepoRelativePath, SourceRange, TextPosition};
 use chakra_domain::operation::OperationContext;
@@ -31,8 +33,9 @@ use chakra_domain::symbol::{
     CallForm, CallResolution, CallTargetKind, EdgeKind, Language, SymbolKey, SymbolKind,
 };
 use chakra_engine::{
-    CallSiteInput, FreshnessBarrier, FreshnessBarrierError, PreciseProvider, PreciseQueryRequest,
-    PreciseQueryResult, PreciseRelation, SymbolGraph, WorkspaceEngine,
+    CallSiteInput, FreshnessBarrier, FreshnessBarrierError, IndexDiagnosticsSource,
+    PreciseProvider, PreciseQueryRequest, PreciseQueryResult, PreciseRelation, SymbolGraph,
+    WorkspaceEngine,
 };
 
 use common::{scenario_engine, scenario_graph};
@@ -293,6 +296,101 @@ fn status_reports_scenario_counts() -> Result<(), Box<dyn Error>> {
     assert_eq!(envelope.data.syntax_diagnostics.total_diagnostics, 0);
     assert!(!envelope.data.syntax_diagnostics.truncated);
     assert!(envelope.data.providers.is_empty());
+    Ok(())
+}
+
+#[derive(Debug)]
+struct FixedDiagnosticsSource {
+    diagnostics: IndexingDiagnostics,
+}
+
+impl IndexDiagnosticsSource for FixedDiagnosticsSource {
+    fn index_diagnostics(&self) -> IndexingDiagnostics {
+        self.diagnostics.clone()
+    }
+}
+
+fn fixed_diagnostics() -> Result<IndexingDiagnostics, Box<dyn Error>> {
+    Ok(IndexingDiagnostics {
+        cache: CacheHealth::Disabled {
+            reason: SYNTAX_FACT_CACHE_DISABLED_REASON.to_owned(),
+        },
+        counters: ReconciliationCounters {
+            no_op_reconciliations: 2,
+            targeted_reconciliations: 1,
+            ..ReconciliationCounters::default()
+        },
+        queue: Default::default(),
+        last_reconciliation_kind: ReconciliationKind::Targeted,
+        full_reconciliation_reasons: Default::default(),
+        last_full_reconciliation_reasons: vec![FullReconciliationReason::ColdStart],
+        recent_file_invalidations: vec![FileInvalidation {
+            path: RepoRelativePath::new("src/service/payment_service.rs")?,
+            reason: FileInvalidationReason::ContentChanged,
+        }],
+        file_invalidation_records: 1,
+    })
+}
+
+#[test]
+fn status_reports_installed_index_diagnostics_and_engine_cold_builds() -> Result<(), Box<dyn Error>>
+{
+    let (engine, _) = scenario_engine()?;
+    // No live owner installed: the additive field stays absent.
+    assert!(
+        engine
+            .status(StatusRequest)?
+            .data
+            .index_diagnostics
+            .is_none()
+    );
+
+    engine.install_index_diagnostics(Arc::new(FixedDiagnosticsSource {
+        diagnostics: fixed_diagnostics()?,
+    }))?;
+    assert!(
+        engine
+            .install_index_diagnostics(Arc::new(FixedDiagnosticsSource {
+                diagnostics: fixed_diagnostics()?,
+            }))
+            .is_err(),
+        "a second diagnostics owner must be rejected"
+    );
+
+    let envelope = engine.status(StatusRequest)?;
+    let diagnostics = envelope
+        .data
+        .index_diagnostics
+        .ok_or("installed diagnostics must reach status")?;
+    assert_eq!(
+        diagnostics.cache,
+        CacheHealth::Disabled {
+            reason: SYNTAX_FACT_CACHE_DISABLED_REASON.to_owned(),
+        }
+    );
+    assert_eq!(diagnostics.counters.targeted_reconciliations, 1);
+    assert_eq!(diagnostics.counters.cold_builds, 0);
+    assert_eq!(
+        diagnostics.last_full_reconciliation_reasons,
+        vec![FullReconciliationReason::ColdStart]
+    );
+
+    // A publication that rebuilds every retained file is an engine-observed
+    // cold build; the status query merges that count into the diagnostics.
+    let mut update = engine.begin_update();
+    let mut indexing = IndexingStatus::default();
+    indexing.publication.rebuilt_files = 3;
+    update.set_indexing(indexing);
+    update.set_freshness(Freshness::Fresh);
+    engine.publish(update)?;
+
+    let envelope = engine.status(StatusRequest)?;
+    let diagnostics = envelope
+        .data
+        .index_diagnostics
+        .ok_or("installed diagnostics must reach status")?;
+    assert_eq!(diagnostics.counters.cold_builds, 1);
+    assert_eq!(engine.cold_builds(), 1);
     Ok(())
 }
 

@@ -7,11 +7,12 @@
 //! never overwrite a newer revision.
 
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock, RwLock};
 
 use arc_swap::ArcSwap;
 use chakra_domain::identity::WorkspaceIdentity;
-use chakra_domain::indexing::IndexingStatus;
+use chakra_domain::indexing::{IndexingDiagnostics, IndexingStatus};
 use chakra_domain::location::RepoRelativePath;
 use chakra_domain::operation::OperationContext;
 use chakra_domain::revision::Revision;
@@ -129,6 +130,20 @@ pub trait FreshnessBarrier: std::fmt::Debug + Send + Sync {
 #[error("a freshness barrier is already installed")]
 pub struct BarrierAlreadyInstalled;
 
+/// Language-neutral source of live indexing diagnostics (issue #43).
+///
+/// Implemented by the live indexing owner (the watcher/reconciliation
+/// pipeline). The engine deliberately knows nothing about filesystem watcher
+/// or language types; it only snapshots the typed domain model for `status`.
+pub trait IndexDiagnosticsSource: std::fmt::Debug + Send + Sync {
+    fn index_diagnostics(&self) -> IndexingDiagnostics;
+}
+
+/// A workspace has at most one live indexing diagnostics owner.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+#[error("an index diagnostics source is already installed")]
+pub struct DiagnosticsAlreadyInstalled;
+
 /// A provider cannot be installed unless routing stays unambiguous.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum ProviderInstallError {
@@ -241,6 +256,8 @@ pub struct WorkspaceEngine {
     freshness_barrier: OnceLock<Arc<dyn FreshnessBarrier>>,
     precise_providers: RwLock<Vec<Arc<dyn PreciseProvider>>>,
     diff_provider: OnceLock<Arc<dyn WorkspaceDiffProvider>>,
+    diagnostics_source: OnceLock<Arc<dyn IndexDiagnosticsSource>>,
+    cold_builds: AtomicU64,
 }
 
 impl WorkspaceEngine {
@@ -266,6 +283,8 @@ impl WorkspaceEngine {
             freshness_barrier: OnceLock::new(),
             precise_providers: RwLock::new(Vec::new()),
             diff_provider: OnceLock::new(),
+            diagnostics_source: OnceLock::new(),
+            cold_builds: AtomicU64::new(0),
         }
     }
 
@@ -319,6 +338,36 @@ impl WorkspaceEngine {
         self.diff_provider
             .set(provider)
             .map_err(|_| DiffProviderAlreadyInstalled)
+    }
+
+    /// Installs the single live indexing diagnostics owner for this
+    /// workspace (issue #43).
+    pub fn install_index_diagnostics(
+        &self,
+        source: Arc<dyn IndexDiagnosticsSource>,
+    ) -> Result<(), DiagnosticsAlreadyInstalled> {
+        self.diagnostics_source
+            .set(source)
+            .map_err(|_| DiagnosticsAlreadyInstalled)
+    }
+
+    /// Published revisions whose graph was fully rebuilt instead of
+    /// structurally reused (initial cold builds), observed at publication.
+    pub fn cold_builds(&self) -> u64 {
+        self.cold_builds.load(Ordering::Relaxed)
+    }
+
+    /// Snapshots the installed live diagnostics owner, if any, with the
+    /// engine-observed cold-build counter merged in.
+    pub(crate) fn index_diagnostics(&self) -> Option<IndexingDiagnostics> {
+        let diagnostics = self
+            .diagnostics_source
+            .get()
+            .map(|source| source.index_diagnostics());
+        diagnostics.map(|mut diagnostics| {
+            diagnostics.counters.cold_builds = self.cold_builds();
+            diagnostics
+        })
     }
 
     /// Captures the current immutable syntax input for provider startup.
@@ -427,6 +476,13 @@ impl WorkspaceEngine {
                 base: update.base_revision,
                 current: previous.revision,
             });
+        }
+        // A publication that reports every retained file as rebuilt is an
+        // initial/full (cold) build; structurally incremental revisions reuse
+        // payloads instead (issue #43).
+        let publication = &next.indexing.publication;
+        if !publication.structurally_incremental && publication.rebuilt_files > 0 {
+            self.cold_builds.fetch_add(1, Ordering::Relaxed);
         }
         Ok(next)
     }
