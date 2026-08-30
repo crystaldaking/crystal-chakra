@@ -68,7 +68,7 @@ pub struct CallCandidateFact {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FileFacts {
     pub path: String,
-    /// Model content hash of the retained source (see [`model_hash`]).
+    /// Model content hash of the retained source (see `model_hash`).
     pub content_hash: String,
     pub byte_len: u64,
     pub diagnostic_count: u64,

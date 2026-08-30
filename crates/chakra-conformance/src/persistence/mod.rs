@@ -3,8 +3,8 @@
 //! Measures, per target repository, whether restoring persistent syntax facts
 //! beats a deterministic rebuild by enough to justify cache complexity
 //! (SPEC §14: "Cache existence must be justified by benchmarks"). The
-//! synthetic per-file cache **model** lives in [`model`]; it serializes the
-//! benchmark projection from [`projection`] but deliberately does **not**
+//! synthetic per-file cache **model** lives in `model`; it serializes the
+//! benchmark projection from `projection` but deliberately does **not**
 //! implement graph restoration — restore timings therefore cover read,
 //! compatibility validation, and deserialization, and the speedups recorded
 //! in `docs/evaluation/v0.2.0-persistence-acceptance.md` are upper bounds.
