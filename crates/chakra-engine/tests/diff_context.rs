@@ -187,6 +187,7 @@ fn joins_changed_files_to_bounded_symbols_callers_and_tests() -> Result<(), Box<
     engine.install_diff_provider(Arc::new(StaticDiffProvider::default()))?;
 
     let result = engine.diff_context(DiffContextRequest {
+        source: Default::default(),
         limit: Some(20),
         ..DiffContextRequest::default()
     })?;
@@ -221,6 +222,7 @@ fn joins_changed_files_to_bounded_symbols_callers_and_tests() -> Result<(), Box<
     assert_eq!(result.data.related_tests.len(), 2);
 
     let bounded = engine.diff_context(DiffContextRequest {
+        source: Default::default(),
         limit: Some(1),
         ..DiffContextRequest::default()
     })?;
@@ -246,6 +248,7 @@ fn changed_file_byte_budget_does_not_starve_changed_symbols() -> Result<(), Box<
     engine.install_diff_provider(Arc::new(NoisyDiffProvider))?;
 
     let result = engine.diff_context(DiffContextRequest {
+        source: Default::default(),
         limit: Some(500),
         ..DiffContextRequest::default()
     })?;
@@ -298,6 +301,7 @@ fn diff_inventory_truncation_is_reported_separately_from_query_item_limits()
     }))?;
 
     let result = engine.diff_context(DiffContextRequest {
+        source: Default::default(),
         limit: Some(20),
         ..DiffContextRequest::default()
     })?;

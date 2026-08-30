@@ -20,11 +20,11 @@ use crate::{
 
 const COMMAND_OUTPUT_LIMIT: usize = 8 * 1024 * 1024;
 const COMMAND_STDERR_LIMIT: usize = 16 * 1024;
-const COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
+pub(crate) const COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
 const COMMAND_POLL_INTERVAL: Duration = Duration::from_millis(1);
-const MAX_CARGO_METADATA_INVOCATIONS: usize = 64;
-const MAX_COMPOSER_MANIFESTS: usize = 64;
-const MAX_COMPOSER_MANIFEST_BYTES: usize = 1024 * 1024;
+pub(crate) const MAX_CARGO_METADATA_INVOCATIONS: usize = 64;
+pub(crate) const MAX_COMPOSER_MANIFESTS: usize = 64;
+pub(crate) const MAX_COMPOSER_MANIFEST_BYTES: usize = 1024 * 1024;
 const MAX_PACKAGE_JSON_MANIFESTS: usize = 256;
 const MAX_PACKAGE_JSON_MANIFEST_BYTES: usize = 1024 * 1024;
 const MAX_PYPROJECT_MANIFESTS: usize = 256;
@@ -53,14 +53,14 @@ struct BoundedRead {
 }
 
 #[derive(Debug)]
-struct CommandOutput {
-    success: bool,
-    stdout: Vec<u8>,
-    exceeded: bool,
+pub(crate) struct CommandOutput {
+    pub(crate) success: bool,
+    pub(crate) stdout: Vec<u8>,
+    pub(crate) exceeded: bool,
 }
 
 #[derive(Debug)]
-enum MetadataCommandError {
+pub(crate) enum MetadataCommandError {
     Operation(OperationAbort),
     Io,
 }
@@ -172,7 +172,7 @@ fn terminate(child: &mut std::process::Child) {
     let _ = child.wait();
 }
 
-fn capture_command(
+pub(crate) fn capture_command(
     root: &Path,
     program: &str,
     args: &[OsString],
@@ -260,7 +260,7 @@ fn capture_command(
     })
 }
 
-fn repository_path(root: &Path, path: &Path) -> Option<RepoRelativePath> {
+pub(crate) fn repository_path(root: &Path, path: &Path) -> Option<RepoRelativePath> {
     let absolute = if path.is_absolute() {
         path.to_path_buf()
     } else {
@@ -282,7 +282,7 @@ fn repository_path(root: &Path, path: &Path) -> Option<RepoRelativePath> {
     }
 }
 
-fn package_root(root: &Path, manifest: &Path) -> Option<Option<RepoRelativePath>> {
+pub(crate) fn package_root(root: &Path, manifest: &Path) -> Option<Option<RepoRelativePath>> {
     let directory = manifest.parent()?;
     if directory == root {
         Some(None)
@@ -291,7 +291,7 @@ fn package_root(root: &Path, manifest: &Path) -> Option<Option<RepoRelativePath>
     }
 }
 
-fn manifests_named(
+pub(crate) fn manifests_named(
     metadata_inputs: &[RepoRelativePath],
     manifest_name: &str,
 ) -> Vec<RepoRelativePath> {

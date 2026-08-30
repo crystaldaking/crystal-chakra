@@ -439,8 +439,17 @@ impl<H: LanguageHooks> LanguageSyntaxIndex<H> {
                 changed_paths.insert(path.clone());
             }
         }
-        let metadata_changed = self.metadata != metadata;
-        if changed_paths.is_empty() && !limits_changed && !metadata_changed {
+        // Manifest-derived metadata is tracked per retained path so an
+        // external manifest/config edit invalidates exactly the files whose
+        // derived metadata changed instead of the whole language (issue #40).
+        let metadata_changed_paths: BTreeSet<RepoRelativePath> = sources
+            .keys()
+            .filter(|path| self.files.contains_key(*path))
+            .filter(|path| self.metadata.get(*path) != metadata.get(*path))
+            .cloned()
+            .collect();
+        metrics.metadata_files_recomputed = metadata_changed_paths.len() as u64;
+        if changed_paths.is_empty() && !limits_changed && metadata_changed_paths.is_empty() {
             metrics.syntax_error_files = self.syntax_error_files();
             metrics.truncated_call_sites = self.truncated_call_sites();
             metrics.publication = self.reuse_all_publication();
@@ -613,12 +622,12 @@ impl<H: LanguageHooks> LanguageSyntaxIndex<H> {
             && self.graph_report.omitted_call_sites == 0;
         let delta_fits = next_facts.symbols <= graph_limits.max_symbols
             && next_facts.call_sites <= graph_limits.max_call_sites;
-        let delta_candidate =
-            !limits_changed && !metadata_changed && complete_previous && delta_fits;
+        let delta_candidate = !limits_changed && complete_previous && delta_fits;
         let delta = if delta_candidate {
             next.materialize_graph_delta(
                 &self.graph,
                 &structural_changed_paths,
+                &metadata_changed_paths,
                 &affected_owners,
                 &affected_call_owners,
                 &stable_symbol_paths,
@@ -849,10 +858,12 @@ impl<H: LanguageHooks> LanguageSyntaxIndex<H> {
         Ok((graph, report))
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn materialize_graph_delta(
         &self,
         previous: &SymbolGraph,
         changed_paths: &BTreeSet<RepoRelativePath>,
+        metadata_changed_paths: &BTreeSet<RepoRelativePath>,
         relationship_owners: &BTreeSet<RepoRelativePath>,
         call_owners: &BTreeSet<RepoRelativePath>,
         stable_symbol_paths: &BTreeSet<RepoRelativePath>,
@@ -925,6 +936,22 @@ impl<H: LanguageHooks> LanguageSyntaxIndex<H> {
                     Precision::Syntax,
                 )?;
             }
+        }
+        // Manifest/config-driven metadata changes update exactly the affected
+        // file records in place: symbol ids, edges, and call sites are
+        // preserved because metadata never participates in identity.
+        for path in metadata_changed_paths {
+            check_cancelled(cancellation)?;
+            let Some(metadata) = self.metadata.get(path) else {
+                continue;
+            };
+            if graph
+                .file_metadata(path)
+                .is_some_and(|current| current == metadata)
+            {
+                continue;
+            }
+            graph.replace_file_metadata(path, metadata.clone())?;
         }
         for owner in relationship_owners {
             check_cancelled(cancellation)?;

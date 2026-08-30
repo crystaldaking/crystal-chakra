@@ -23,8 +23,9 @@ use thiserror::Error;
 use tracing::{error, info, warn};
 
 use crate::indexer::{
-    IndexOptions, ReconcileMetrics, ReconcileReport, WorkspaceIndexError, WorkspaceSourceLoader,
-    WorkspaceSourceScan, WorkspaceSyntaxIndex, scan_discovered_sources_with_options,
+    DependencyImpactMetrics, IndexOptions, ReconcileMetrics, ReconcileReport, WorkspaceIndexError,
+    WorkspaceSourceLoader, WorkspaceSourceScan, WorkspaceSyntaxIndex,
+    scan_discovered_sources_with_options,
 };
 
 const EVENT_QUEUE_CAPACITY: usize = 256;
@@ -46,6 +47,37 @@ pub enum ReconciliationKind {
     Noop,
     Targeted,
     Full,
+}
+
+/// Why a reconciliation escalated to a full content reread (issue #40).
+/// Full rereads are the bounded, conservative fallback for missed or
+/// untrustworthy watcher evidence; the reason is always recorded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FullReconciliationReason {
+    /// The source snapshot cache was not initialized yet (first pass).
+    CacheUninitialized,
+    /// The watcher reported a new error since the last reconciliation.
+    WatcherErrors,
+    /// Watcher events were dropped from the bounded queue.
+    DroppedEvents,
+    /// Event hints were uncertain: epoch gaps (missed events), hint
+    /// overflow, or paths that could not be mapped into the repository.
+    UncertainEventHints,
+    /// The configured periodic full-reread checkpoint was reached.
+    CheckpointInterval,
+    /// The stable-scan loop observed the worktree changing underneath it.
+    ScanInstability,
+}
+
+/// Accumulated per-reason full-reconciliation counters (issue #40).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct FullReconciliationReasons {
+    pub cache_uninitialized: u64,
+    pub watcher_errors: u64,
+    pub dropped_events: u64,
+    pub uncertain_event_hints: u64,
+    pub checkpoint_interval: u64,
+    pub scan_instability: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -114,6 +146,17 @@ pub struct LiveIndexMetrics {
     pub no_op_reconciliations: u64,
     pub targeted_reconciliations: u64,
     pub full_reconciliations: u64,
+    /// Per-reason full-reconciliation counters (issue #40).
+    pub full_reconciliation_reasons: FullReconciliationReasons,
+    /// Reason of the most recent full reconciliation, if any.
+    pub last_full_reconciliation_reason: Option<FullReconciliationReason>,
+    /// Retained files whose manifest-derived metadata record was replaced
+    /// without a source reparse (issue #40).
+    pub metadata_files_recomputed: u64,
+    /// Framework-enrichment configuration toggles applied (issue #40).
+    pub framework_config_changes: u64,
+    /// Accumulated typed external-input invalidation picture (issue #40).
+    pub dependency_impact: DependencyImpactMetrics,
     pub watch_set_recomputations: u64,
     pub last_reconciliation_kind: ReconciliationKind,
 }
@@ -166,6 +209,24 @@ struct MetricsState {
     no_op_reconciliations: AtomicU64,
     targeted_reconciliations: AtomicU64,
     full_reconciliations: AtomicU64,
+    full_reason_cache_uninitialized: AtomicU64,
+    full_reason_watcher_errors: AtomicU64,
+    full_reason_dropped_events: AtomicU64,
+    full_reason_uncertain_event_hints: AtomicU64,
+    full_reason_checkpoint_interval: AtomicU64,
+    full_reason_scan_instability: AtomicU64,
+    last_full_reconciliation_reason: AtomicU64,
+    metadata_files_recomputed: AtomicU64,
+    framework_config_changes: AtomicU64,
+    dependency_impacted_units: AtomicU64,
+    dependency_impacted_dependents: AtomicU64,
+    dependency_manifest_issue_changes: AtomicU64,
+    dependency_units_added: AtomicU64,
+    dependency_units_removed: AtomicU64,
+    dependency_units_definition_changed: AtomicU64,
+    dependency_units_source_roots_changed: AtomicU64,
+    dependency_units_dependencies_changed: AtomicU64,
+    dependency_units_membership_changed: AtomicU64,
     watch_set_recomputations: AtomicU64,
     last_reconciliation_kind: AtomicU64,
     event_epoch: AtomicU64,
@@ -223,6 +284,38 @@ impl MetricsState {
             no_op_reconciliations: load(&self.no_op_reconciliations),
             targeted_reconciliations: load(&self.targeted_reconciliations),
             full_reconciliations: load(&self.full_reconciliations),
+            full_reconciliation_reasons: FullReconciliationReasons {
+                cache_uninitialized: load(&self.full_reason_cache_uninitialized),
+                watcher_errors: load(&self.full_reason_watcher_errors),
+                dropped_events: load(&self.full_reason_dropped_events),
+                uncertain_event_hints: load(&self.full_reason_uncertain_event_hints),
+                checkpoint_interval: load(&self.full_reason_checkpoint_interval),
+                scan_instability: load(&self.full_reason_scan_instability),
+            },
+            last_full_reconciliation_reason: match load(&self.last_full_reconciliation_reason) {
+                1 => Some(FullReconciliationReason::CacheUninitialized),
+                2 => Some(FullReconciliationReason::WatcherErrors),
+                3 => Some(FullReconciliationReason::DroppedEvents),
+                4 => Some(FullReconciliationReason::UncertainEventHints),
+                5 => Some(FullReconciliationReason::CheckpointInterval),
+                6 => Some(FullReconciliationReason::ScanInstability),
+                _ => None,
+            },
+            metadata_files_recomputed: load(&self.metadata_files_recomputed),
+            framework_config_changes: load(&self.framework_config_changes),
+            dependency_impact: DependencyImpactMetrics {
+                impacted_units: load(&self.dependency_impacted_units),
+                impacted_dependents: load(&self.dependency_impacted_dependents),
+                manifest_issue_changes: load(&self.dependency_manifest_issue_changes),
+                unit_changes: chakra_domain::project::ProjectUnitChangeCounts {
+                    added: load(&self.dependency_units_added),
+                    removed: load(&self.dependency_units_removed),
+                    definition_changed: load(&self.dependency_units_definition_changed),
+                    source_roots_changed: load(&self.dependency_units_source_roots_changed),
+                    dependencies_changed: load(&self.dependency_units_dependencies_changed),
+                    membership_changed: load(&self.dependency_units_membership_changed),
+                },
+            },
             watch_set_recomputations: load(&self.watch_set_recomputations),
             last_reconciliation_kind: match load(&self.last_reconciliation_kind) {
                 1 => ReconciliationKind::Noop,
@@ -244,6 +337,26 @@ impl MetricsState {
         self.last_reconciliation_kind.store(raw, Ordering::Relaxed);
     }
 
+    fn record_full_reconciliation_reason(&self, reason: FullReconciliationReason) {
+        let (counter, raw) = match reason {
+            FullReconciliationReason::CacheUninitialized => {
+                (&self.full_reason_cache_uninitialized, 1)
+            }
+            FullReconciliationReason::WatcherErrors => (&self.full_reason_watcher_errors, 2),
+            FullReconciliationReason::DroppedEvents => (&self.full_reason_dropped_events, 3),
+            FullReconciliationReason::UncertainEventHints => {
+                (&self.full_reason_uncertain_event_hints, 4)
+            }
+            FullReconciliationReason::CheckpointInterval => {
+                (&self.full_reason_checkpoint_interval, 5)
+            }
+            FullReconciliationReason::ScanInstability => (&self.full_reason_scan_instability, 6),
+        };
+        counter.fetch_add(1, Ordering::Relaxed);
+        self.last_full_reconciliation_reason
+            .store(raw, Ordering::Relaxed);
+    }
+
     fn record_barrier_completion(&self, covered: u64, completed_before: u64) {
         let completed = covered.saturating_sub(completed_before);
         self.barrier_generations_completed
@@ -260,6 +373,29 @@ impl MetricsState {
             .fetch_add(metrics.reparsed_files, Ordering::Relaxed);
         self.relationship_files_recomputed
             .fetch_add(metrics.relationship_files_recomputed, Ordering::Relaxed);
+        self.metadata_files_recomputed
+            .fetch_add(metrics.metadata_files_recomputed, Ordering::Relaxed);
+        self.framework_config_changes
+            .fetch_add(metrics.framework_config_changes, Ordering::Relaxed);
+        let impact = &metrics.dependency_impact;
+        self.dependency_impacted_units
+            .fetch_add(impact.impacted_units, Ordering::Relaxed);
+        self.dependency_impacted_dependents
+            .fetch_add(impact.impacted_dependents, Ordering::Relaxed);
+        self.dependency_manifest_issue_changes
+            .fetch_add(impact.manifest_issue_changes, Ordering::Relaxed);
+        self.dependency_units_added
+            .fetch_add(impact.unit_changes.added, Ordering::Relaxed);
+        self.dependency_units_removed
+            .fetch_add(impact.unit_changes.removed, Ordering::Relaxed);
+        self.dependency_units_definition_changed
+            .fetch_add(impact.unit_changes.definition_changed, Ordering::Relaxed);
+        self.dependency_units_source_roots_changed
+            .fetch_add(impact.unit_changes.source_roots_changed, Ordering::Relaxed);
+        self.dependency_units_dependencies_changed
+            .fetch_add(impact.unit_changes.dependencies_changed, Ordering::Relaxed);
+        self.dependency_units_membership_changed
+            .fetch_add(impact.unit_changes.membership_changed, Ordering::Relaxed);
         self.framework_files_reparsed
             .fetch_add(metrics.framework_files_reparsed, Ordering::Relaxed);
         self.framework_relationship_files_recomputed.fetch_add(
@@ -1295,7 +1431,7 @@ fn reconcile(
     let dropped_events = metrics.dropped_watcher_events.load(Ordering::Acquire);
     let watcher_error_advanced = watcher_errors > *reconciled_watcher_errors;
     let dropped_event_advanced = dropped_events > *reconciled_dropped_events;
-    let force_full = requires_full_reconciliation(ReconciliationPolicy {
+    let full_reason = full_reconciliation_reason(ReconciliationPolicy {
         cache_initialized: source_cache.initialized,
         watcher_health_degraded: *watcher_degraded,
         watcher_error_advanced,
@@ -1304,6 +1440,7 @@ fn reconcile(
         reconciliations_since_full: *reconciliations_since_full,
         full_reconcile_interval: options.full_reconcile_interval,
     });
+    let force_full = full_reason.is_some();
     // A stable partial watch set (for example after the 4,096-directory cap)
     // degrades notification coverage, not authoritative reconciliation.
     // RequireFresh still verifies the complete Git inventory and every file
@@ -1320,6 +1457,7 @@ fn reconcile(
                 shared,
                 source_cache,
                 force_full,
+                full_reason,
                 &operation,
             )?;
             let ReconcileReport {
@@ -1327,6 +1465,8 @@ fn reconcile(
                 metrics: reconcile_metrics,
                 next_index,
                 indexing,
+                project_model,
+                dependency_impact,
             } = syntax_index
                 .reconcile_sources_with_cancellation(stable.scan, &operation.cancellation())?;
             let next_paths: Vec<_> = stable.cache.entries.keys().cloned().collect();
@@ -1370,9 +1510,15 @@ fn reconcile(
                 || syntax_index.provider_inputs(),
                 |next| next.provider_inputs(),
             );
-            let published =
-                publish_fresh(engine, graph.as_ref(), status, &indexing, provider_inputs)
-                    .map_err(WorkspaceIndexError::Update)?;
+            let published = publish_fresh(
+                engine,
+                graph.as_ref(),
+                status,
+                &indexing,
+                provider_inputs,
+                project_model.as_ref(),
+            )
+            .map_err(WorkspaceIndexError::Update)?;
             if let Some(next_index) = next_index {
                 *syntax_index = next_index;
             }
@@ -1380,6 +1526,9 @@ fn reconcile(
             *indexed_paths = next_paths;
             watch_set_dirty = false;
             if stable.kind == ReconciliationKind::Full {
+                if let Some(reason) = stable.full_reason {
+                    metrics.record_full_reconciliation_reason(reason);
+                }
                 *reconciliations_since_full = 0;
             } else {
                 *reconciliations_since_full = (*reconciliations_since_full).saturating_add(1);
@@ -1400,8 +1549,12 @@ fn reconcile(
                 kind = ?stable.kind,
                 hinted_paths = hints.len(),
                 force_full,
+                full_reason = ?stable.full_reason,
                 files_read = stable.files_read,
                 covered_generation = stable.covered_generation,
+                dependency_impacted_units = dependency_impact
+                    .as_ref()
+                    .map_or(0, |impact| impact.changes.len() as u64 + impact.changes_omitted),
                 "freshness reconciliation completed"
             );
             return Ok(stable.covered_generation);
@@ -1445,13 +1598,24 @@ struct ReconciliationPolicy {
     full_reconcile_interval: u64,
 }
 
-fn requires_full_reconciliation(policy: ReconciliationPolicy) -> bool {
+/// Returns the typed reason a reconciliation must escalate to a full content
+/// reread, or `None` when targeted/identity-verified reconciliation is
+/// trustworthy (issue #40).
+fn full_reconciliation_reason(policy: ReconciliationPolicy) -> Option<FullReconciliationReason> {
     let _watcher_health_degraded = policy.watcher_health_degraded;
-    !policy.cache_initialized
-        || policy.watcher_error_advanced
-        || policy.dropped_event_advanced
-        || policy.uncertain_hint
-        || policy.reconciliations_since_full >= policy.full_reconcile_interval
+    if !policy.cache_initialized {
+        Some(FullReconciliationReason::CacheUninitialized)
+    } else if policy.watcher_error_advanced {
+        Some(FullReconciliationReason::WatcherErrors)
+    } else if policy.dropped_event_advanced {
+        Some(FullReconciliationReason::DroppedEvents)
+    } else if policy.uncertain_hint {
+        Some(FullReconciliationReason::UncertainEventHints)
+    } else if policy.reconciliations_since_full >= policy.full_reconcile_interval {
+        Some(FullReconciliationReason::CheckpointInterval)
+    } else {
+        None
+    }
 }
 
 struct StableSourceSnapshot {
@@ -1460,9 +1624,12 @@ struct StableSourceSnapshot {
     covered_generation: u64,
     cache: SourceSnapshotCache,
     kind: ReconciliationKind,
+    /// Typed reason when `kind` is `Full` (issue #40).
+    full_reason: Option<FullReconciliationReason>,
     files_read: u64,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn stable_scan(
     repository_root: &Path,
     syntax_index: &WorkspaceSyntaxIndex,
@@ -1470,11 +1637,13 @@ fn stable_scan(
     shared: &BarrierShared,
     previous: &SourceSnapshotCache,
     force_full: bool,
+    full_reason: Option<FullReconciliationReason>,
     operation: &OperationContext,
 ) -> Result<StableSourceSnapshot, WorkspaceIndexError> {
     let mut last_error = None;
     let mut attempt_force_full = force_full;
     let mut full_performed = force_full;
+    let mut full_reason = full_reason;
     let mut retry_cache = None;
     let mut files_read = 0_u64;
     let initial_watcher_errors = metrics.watcher_errors.load(Ordering::Acquire);
@@ -1495,6 +1664,7 @@ fn stable_scan(
                 last_error = Some(WorkspaceIndexError::Discovery(error));
                 attempt_force_full = true;
                 full_performed = true;
+                full_reason = full_reason.or(Some(FullReconciliationReason::ScanInstability));
                 continue;
             }
         };
@@ -1518,6 +1688,7 @@ fn stable_scan(
                 last_error = Some(error);
                 attempt_force_full = true;
                 full_performed = true;
+                full_reason = full_reason.or(Some(FullReconciliationReason::ScanInstability));
                 continue;
             }
         };
@@ -1536,6 +1707,7 @@ fn stable_scan(
                     last_error = Some(WorkspaceIndexError::Discovery(error));
                     attempt_force_full = true;
                     full_performed = true;
+                    full_reason = full_reason.or(Some(FullReconciliationReason::ScanInstability));
                     continue;
                 }
             };
@@ -1545,6 +1717,7 @@ fn stable_scan(
             ));
             attempt_force_full = true;
             full_performed = true;
+            full_reason = full_reason.or(Some(FullReconciliationReason::ScanInstability));
             continue;
         }
 
@@ -1600,6 +1773,7 @@ fn stable_scan(
             if new_watcher_uncertainty {
                 attempt_force_full = true;
                 full_performed = true;
+                full_reason = full_reason.or(Some(FullReconciliationReason::ScanInstability));
                 retry_cache = None;
             } else {
                 let entries = std::mem::take(&mut loader.next);
@@ -1630,6 +1804,7 @@ fn stable_scan(
                 entries: loader.next,
             },
             kind,
+            full_reason,
             files_read,
         });
     }
@@ -1734,10 +1909,12 @@ fn publish_fresh(
     status: WorkspaceStatus,
     indexing: &chakra_domain::indexing::IndexingStatus,
     provider_inputs: &[chakra_engine::ProviderInput],
+    project_model: Option<&chakra_domain::project::ProjectModel>,
 ) -> Result<bool, String> {
     let started = Instant::now();
     let current = engine.snapshot();
     if graph.is_none()
+        && project_model.is_none()
         && current.freshness() == Freshness::Fresh
         && current.status() == status
         && current.indexing() == indexing
@@ -1749,6 +1926,9 @@ fn publish_fresh(
         let mut update = engine.begin_update();
         if let Some(graph) = graph {
             update.replace_graph(graph.clone());
+        }
+        if let Some(model) = project_model {
+            update.set_project_model(model.clone());
         }
         update.set_indexing(indexing.clone());
         update.set_provider_inputs(provider_inputs.iter().cloned());
@@ -1925,31 +2105,49 @@ mod tests {
             reconciliations_since_full: 1,
             full_reconcile_interval: 256,
         };
-        assert!(!requires_full_reconciliation(baseline));
-        assert!(requires_full_reconciliation(ReconciliationPolicy {
-            cache_initialized: false,
-            ..baseline
-        }));
-        assert!(!requires_full_reconciliation(ReconciliationPolicy {
-            watcher_health_degraded: true,
-            ..baseline
-        }));
-        assert!(requires_full_reconciliation(ReconciliationPolicy {
-            watcher_error_advanced: true,
-            ..baseline
-        }));
-        assert!(requires_full_reconciliation(ReconciliationPolicy {
-            dropped_event_advanced: true,
-            ..baseline
-        }));
-        assert!(requires_full_reconciliation(ReconciliationPolicy {
-            uncertain_hint: true,
-            ..baseline
-        }));
-        assert!(requires_full_reconciliation(ReconciliationPolicy {
-            reconciliations_since_full: 256,
-            ..baseline
-        }));
+        assert_eq!(full_reconciliation_reason(baseline), None);
+        assert_eq!(
+            full_reconciliation_reason(ReconciliationPolicy {
+                cache_initialized: false,
+                ..baseline
+            }),
+            Some(FullReconciliationReason::CacheUninitialized)
+        );
+        assert_eq!(
+            full_reconciliation_reason(ReconciliationPolicy {
+                watcher_health_degraded: true,
+                ..baseline
+            }),
+            None
+        );
+        assert_eq!(
+            full_reconciliation_reason(ReconciliationPolicy {
+                watcher_error_advanced: true,
+                ..baseline
+            }),
+            Some(FullReconciliationReason::WatcherErrors)
+        );
+        assert_eq!(
+            full_reconciliation_reason(ReconciliationPolicy {
+                dropped_event_advanced: true,
+                ..baseline
+            }),
+            Some(FullReconciliationReason::DroppedEvents)
+        );
+        assert_eq!(
+            full_reconciliation_reason(ReconciliationPolicy {
+                uncertain_hint: true,
+                ..baseline
+            }),
+            Some(FullReconciliationReason::UncertainEventHints)
+        );
+        assert_eq!(
+            full_reconciliation_reason(ReconciliationPolicy {
+                reconciliations_since_full: 256,
+                ..baseline
+            }),
+            Some(FullReconciliationReason::CheckpointInterval)
+        );
     }
 
     #[test]

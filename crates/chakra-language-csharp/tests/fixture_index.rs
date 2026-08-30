@@ -280,6 +280,7 @@ fn callers_context_and_incremental_reconcile_work_at_syntax_precision() -> Resul
 {
     let (repository, engine, _metrics) = indexed_engine()?;
     let callers = engine.callers(CallersRequest {
+        source: Default::default(),
         symbol: Some(SymbolRef::ByName(
             "Chakra::Payments::Shared::Shared::SharedUniqueTarget".to_owned(),
         )),
@@ -309,6 +310,7 @@ fn callers_context_and_incremental_reconcile_work_at_syntax_precision() -> Resul
     );
 
     let context = engine.context(ContextRequest {
+        source: Default::default(),
         symbol: Some(SymbolRef::ByName(
             "Chakra::Payments::Service::PaymentService::RefundAsync".to_owned(),
         )),
@@ -340,6 +342,7 @@ fn callers_context_and_incremental_reconcile_work_at_syntax_precision() -> Resul
     engine.publish(update)?;
 
     let callers = engine.callers(CallersRequest {
+        source: Default::default(),
         symbol: Some(SymbolRef::ByName(
             "Chakra::Payments::Shared::Shared::SharedUniqueTarget".to_owned(),
         )),

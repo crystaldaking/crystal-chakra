@@ -325,6 +325,7 @@ fn ambiguous_names_never_resolve_silently() -> Result<(), Box<dyn Error>> {
     found.sort_unstable();
     assert_eq!(found, ["a::colliding_helper", "b::colliding_helper"]);
     let ambiguous = engine.callers(CallersRequest {
+        source: Default::default(),
         symbol: Some(SymbolRef::ByName("colliding_helper".to_owned())),
         ..CallersRequest::default()
     });
@@ -340,6 +341,7 @@ fn callers_and_context_answer_at_syntax_precision() -> Result<(), Box<dyn Error>
     let (_repository, engine, _metrics) = indexed_engine()?;
 
     let callers = engine.callers(CallersRequest {
+        source: Default::default(),
         symbol: Some(SymbolRef::ByName("shared::shared_unique_target".to_owned())),
         ..CallersRequest::default()
     })?;
@@ -353,6 +355,7 @@ fn callers_and_context_answer_at_syntax_precision() -> Result<(), Box<dyn Error>
     assert_eq!(caller.precision, Precision::Heuristic);
 
     let context = engine.context(ContextRequest {
+        source: Default::default(),
         symbol: Some(SymbolRef::ByName(
             "service::payment_service::PaymentService::refund".to_owned(),
         )),
@@ -368,6 +371,7 @@ fn callers_and_context_answer_at_syntax_precision() -> Result<(), Box<dyn Error>
     // The test constructs the controller: the test function is a test-kind
     // caller of the constructor, surfaced as a test relation in context.
     let constructor_context = engine.context(ContextRequest {
+        source: Default::default(),
         symbol: Some(SymbolRef::ByName(
             "api::controller::PaymentController::__init__".to_owned(),
         )),

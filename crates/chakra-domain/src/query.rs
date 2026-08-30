@@ -14,6 +14,10 @@ use crate::envelope::QueryEnvelope;
 use crate::identity::{WorkspaceId, WorkspaceIdentity};
 use crate::location::{RepoRelativePath, SourceRange};
 use crate::operation::{OperationAbort, OperationContext};
+use crate::project::{
+    ProjectDependency, ProjectManifestIssue, ProjectScopeSelector, ProjectSourceRoot,
+    ProjectUnitId, ProjectUnitKind,
+};
 use crate::provenance::{Precision, Provenance};
 use crate::revision::Revision;
 use crate::source::{
@@ -383,6 +387,11 @@ pub struct RepoMapRequest {
     pub include_languages: Vec<Language>,
     #[serde(default)]
     pub source: SourceFilter,
+    /// Also emit the typed project-unit summary section on the first page
+    /// (issue #41). The section respects the same revision and source scope
+    /// as `files`.
+    #[serde(default)]
+    pub include_project_scope: bool,
     /// Self-contained continuation returned by an earlier `repo_map` page.
     /// Filters must be omitted when a cursor is supplied because the cursor
     /// already carries the normalized scope.
@@ -462,6 +471,43 @@ pub struct RepoMapData {
     pub files: Vec<FileSummary>,
     pub next_cursor: Option<RepoMapCursor>,
     pub source_metadata: SourceMetadataCoverage,
+    /// Typed project-unit summary requested via
+    /// [`RepoMapRequest::include_project_scope`]; present only on the first
+    /// page (issue #41).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_scope: Option<ProjectScopeData>,
+}
+
+/// One project unit summarized against the files of the same filtered
+/// `repo_map` page scope (issue #41).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct ProjectUnitSummary {
+    pub id: ProjectUnitId,
+    pub kind: ProjectUnitKind,
+    pub name: String,
+    /// Repository-relative unit directory. `None` denotes the repository
+    /// root.
+    pub root: Option<RepoRelativePath>,
+    pub manifest: Option<RepoRelativePath>,
+    pub source_roots: Vec<ProjectSourceRoot>,
+    pub dependencies: Vec<ProjectDependency>,
+    pub file_count: u64,
+    pub symbol_count: u64,
+}
+
+/// Typed project-model summary for one filtered `repo_map` first page.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct ProjectScopeData {
+    /// Units owning at least one file in the filtered scope, ordered by id.
+    pub units: Vec<ProjectUnitSummary>,
+    /// Filtered files claimed by several units at the same deepest root.
+    /// They are reported here instead of being silently assigned to one.
+    pub ambiguous_files: u64,
+    /// Filtered files no retained unit claims (for example because unit
+    /// bounds were hit).
+    pub unassigned_files: u64,
+    /// Manifests whose evidence degraded to path fallback in this revision.
+    pub issues: Vec<ProjectManifestIssue>,
 }
 
 /// Language-neutral source scope shared by repository and symbol queries.
@@ -480,6 +526,11 @@ pub struct SourceFilter {
     /// Applied after `include_roles`.
     #[serde(default)]
     pub exclude_roles: Vec<SourceRole>,
+    /// Typed project-unit scope (issue #41). Files whose ownership is
+    /// ambiguous match no unit selector; path-fallback units are selectable
+    /// like any other unit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project: Option<ProjectScopeSelector>,
 }
 
 // --- search (text) ---
@@ -571,6 +622,11 @@ pub struct SymbolSearchData {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ContextRequest {
     pub symbol: Option<SymbolRef>,
+    /// Restricts the related sections (callers, callees, implementations,
+    /// tests, relations, call candidates) to a source scope (issue #41). The
+    /// anchor symbol itself is never filtered out.
+    #[serde(default)]
+    pub source: SourceFilter,
     #[serde(default)]
     pub limit: Option<u32>,
     #[serde(default)]
@@ -613,6 +669,10 @@ pub struct ContextData {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct CallersRequest {
     pub symbol: Option<SymbolRef>,
+    /// Restricts callers and syntax candidates to a source scope (issue #41).
+    /// The target symbol itself is never filtered out.
+    #[serde(default)]
+    pub source: SourceFilter,
     #[serde(default)]
     pub limit: Option<u32>,
     #[serde(default)]
@@ -652,6 +712,12 @@ pub enum DiffScope {
 pub struct DiffContextRequest {
     #[serde(default)]
     pub scope: DiffScope,
+    /// Restricts the changed/symbol sections to a source scope (issue #41).
+    /// Changed files are matched path-structurally: files the current graph
+    /// does not index (deleted files, manifests) use deterministic
+    /// path-fallback roles and model unit roots.
+    #[serde(default)]
+    pub source: SourceFilter,
     #[serde(default)]
     pub limit: Option<u32>,
     #[serde(default)]

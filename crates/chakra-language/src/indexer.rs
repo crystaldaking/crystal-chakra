@@ -14,6 +14,7 @@ use chakra_domain::indexing::{
 };
 use chakra_domain::location::RepoRelativePath;
 use chakra_domain::operation::OperationContext;
+use chakra_domain::project::{ProjectModel, ProjectModelImpact, ProjectUnitChangeCounts};
 use chakra_domain::symbol::Language;
 use chakra_engine::{
     ConsistencyError, GraphBuildLimits, GraphBuildReport, GraphError, ProviderInput, SymbolGraph,
@@ -27,8 +28,8 @@ use nix::sys::resource::{UsageWho, getrusage};
 use nix::sys::time::TimeValLike;
 
 use crate::adapter::{
-    AdapterFactCounts, AdapterFrameworkMetrics, AdapterReconcileMetrics, LanguageSources,
-    SyntaxLanguageAdapter, default_adapters, registered_languages,
+    AdapterFactCounts, AdapterFrameworkMetrics, AdapterReconcileMetrics, DependencyEvidence,
+    LanguageSources, SyntaxLanguageAdapter, default_adapters, registered_languages,
 };
 
 const PARALLEL_PARSE_FILE_THRESHOLD: u64 = 32;
@@ -86,6 +87,9 @@ pub struct WorkspaceSourceScan {
     /// Non-source manifests/configuration captured with this exact scan for
     /// revision-scoped provider watched-file synchronization.
     pub provider_inputs: Vec<ProviderInput>,
+    /// Typed Cargo/Composer project model built from this exact scan's
+    /// manifest evidence (issue #41).
+    pub project_model: ProjectModel,
     pub discovered_files: u64,
     pub indexed_files: u64,
     pub source_bytes: u64,
@@ -226,6 +230,59 @@ impl IndexOptions {
     }
 }
 
+/// Typed invalidation picture of one reconciliation's external manifest /
+/// config / project-scope inputs (issue #40). All counters are per
+/// reconciliation; the live index accumulates them for diagnostics.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DependencyImpactMetrics {
+    /// Project units whose own manifest evidence changed.
+    pub impacted_units: u64,
+    /// Unchanged units declaring dependency edges on an impacted unit.
+    pub impacted_dependents: u64,
+    /// Manifests whose recorded probe/parse issue state changed.
+    pub manifest_issue_changes: u64,
+    /// Per-reason unit change counts.
+    pub unit_changes: ProjectUnitChangeCounts,
+}
+
+impl DependencyImpactMetrics {
+    fn from_impact(impact: &ProjectModelImpact) -> Self {
+        Self {
+            impacted_units: impact.changes.len() as u64 + impact.changes_omitted,
+            impacted_dependents: impact.dependents.len() as u64 + impact.dependents_omitted,
+            manifest_issue_changes: impact.manifest_issue_changes.len() as u64
+                + impact.manifest_issue_changes_omitted,
+            unit_changes: impact.counts(),
+        }
+    }
+
+    /// Adds another reconciliation's impact counters into `self`.
+    pub fn accumulate(&mut self, other: &Self) {
+        self.impacted_units = self.impacted_units.saturating_add(other.impacted_units);
+        self.impacted_dependents = self
+            .impacted_dependents
+            .saturating_add(other.impacted_dependents);
+        self.manifest_issue_changes = self
+            .manifest_issue_changes
+            .saturating_add(other.manifest_issue_changes);
+        let (left, right) = (&mut self.unit_changes, &other.unit_changes);
+        left.added = left.added.saturating_add(right.added);
+        left.removed = left.removed.saturating_add(right.removed);
+        left.definition_changed = left
+            .definition_changed
+            .saturating_add(right.definition_changed);
+        left.source_roots_changed = left
+            .source_roots_changed
+            .saturating_add(right.source_roots_changed);
+        left.dependencies_changed = left
+            .dependencies_changed
+            .saturating_add(right.dependencies_changed);
+        left.membership_changed = left
+            .membership_changed
+            .saturating_add(right.membership_changed);
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ReconcileMetrics {
     pub scanned_files: u64,
@@ -235,9 +292,16 @@ pub struct ReconcileMetrics {
     pub modified_files: u64,
     pub deleted_files: u64,
     pub relationship_files_recomputed: u64,
+    /// Retained files whose manifest-derived metadata record was replaced
+    /// without a source reparse (issue #40).
+    pub metadata_files_recomputed: u64,
     pub framework_files_reparsed: u64,
     pub framework_relationship_files_recomputed: u64,
     pub framework_truncated_files: u64,
+    /// Framework-enrichment configuration toggles applied (issue #40).
+    pub framework_config_changes: u64,
+    /// Typed external-input invalidation picture (issue #40).
+    pub dependency_impact: DependencyImpactMetrics,
     pub syntax_error_files: u64,
     pub truncated_call_sites: u64,
     pub publication: IndexPublicationMetrics,
@@ -249,6 +313,13 @@ pub struct ReconcileReport {
     pub metrics: ReconcileMetrics,
     pub next_index: Option<WorkspaceSyntaxIndex>,
     pub indexing: IndexingStatus,
+    /// The scan's typed project model when it differs from the currently
+    /// published one (issue #41). `None` means the model is unchanged.
+    pub project_model: Option<ProjectModel>,
+    /// Typed record of which project units the scan's manifest/config diff
+    /// invalidated, and which units depend on them (issue #40). `None` when
+    /// the project model did not change or the diff is empty.
+    pub dependency_impact: Option<ProjectModelImpact>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -288,6 +359,9 @@ pub struct IndexReport {
     pub metrics: IndexMetrics,
     pub syntax_index: WorkspaceSyntaxIndex,
     pub provider_inputs: Vec<ProviderInput>,
+    /// Typed project model built from the cold scan's manifest evidence
+    /// (issue #41).
+    pub project_model: ProjectModel,
 }
 
 #[derive(Debug, Error)]
@@ -340,6 +414,7 @@ pub struct WorkspaceSyntaxIndex {
     budgets: IndexBudgets,
     indexing: IndexingStatus,
     provider_inputs: Vec<ProviderInput>,
+    project_model: ProjectModel,
 }
 
 impl WorkspaceSyntaxIndex {
@@ -363,6 +438,11 @@ impl WorkspaceSyntaxIndex {
 
     pub fn provider_inputs(&self) -> &[ProviderInput] {
         &self.provider_inputs
+    }
+
+    /// Typed project model captured by this index's latest scan (issue #41).
+    pub fn project_model(&self) -> &ProjectModel {
+        &self.project_model
     }
 
     pub fn scan_repository(
@@ -390,14 +470,29 @@ impl WorkspaceSyntaxIndex {
         let started = PhaseTimer::start();
         check_cancelled(cancellation)?;
         let limits = self.live_graph_limits(&scan.sources);
+        // Typed dependency tracking (issue #40): diff the scan's project
+        // model against the published one before adapters reconcile, so the
+        // invalidation record, framework evidence, and metrics all describe
+        // the same manifest/config change.
+        let project_model_changed = self.project_model != scan.project_model;
+        let dependency_impact = if project_model_changed {
+            let impact = scan.project_model.impact_since(&self.project_model);
+            (!impact.is_empty()).then_some(impact)
+        } else {
+            None
+        };
         let mut reconciled = Vec::with_capacity(self.adapters.len());
         for (state, limits) in self.adapters.iter().zip(limits.iter().copied()) {
             let language = state.adapter.language();
+            let dependencies = DependencyEvidence {
+                framework_detected: (language == Language::Php)
+                    .then(|| chakra_language_php::laravel_detected_from_model(&scan.project_model)),
+            };
             let sources = scan.sources.take(language);
             reconciled.push(
                 state
                     .adapter
-                    .reconcile(sources, limits, cancellation)
+                    .reconcile(sources, limits, dependencies, cancellation)
                     .map_err(|source| WorkspaceIndexError::Adapter {
                         language,
                         source: Box::new(source),
@@ -409,6 +504,9 @@ impl WorkspaceSyntaxIndex {
         metrics.publication.structurally_incremental = true;
         for report in &reconciled {
             accumulate_reconcile_metrics(&mut metrics, report.metrics);
+        }
+        if let Some(impact) = &dependency_impact {
+            metrics.dependency_impact = DependencyImpactMetrics::from_impact(impact);
         }
 
         let graph_builds: Vec<GraphBuildReport> = self
@@ -515,12 +613,15 @@ impl WorkspaceSyntaxIndex {
 
         let indexing_changed = !indexing_semantically_equal(&self.indexing, &indexing);
         let provider_inputs_changed = self.provider_inputs != scan.provider_inputs;
-        if !graph_changed && !indexing_changed && !provider_inputs_changed {
+        if !graph_changed && !indexing_changed && !provider_inputs_changed && !project_model_changed
+        {
             return Ok(ReconcileReport {
                 graph: None,
                 metrics,
                 next_index: None,
                 indexing: self.indexing.clone(),
+                project_model: None,
+                dependency_impact: None,
             });
         }
 
@@ -532,13 +633,16 @@ impl WorkspaceSyntaxIndex {
                 .collect(),
             budgets: self.budgets,
             indexing: indexing.clone(),
-            provider_inputs: scan.provider_inputs,
+            provider_inputs: scan.provider_inputs.clone(),
+            project_model: scan.project_model.clone(),
         };
         Ok(ReconcileReport {
             graph,
             metrics,
             next_index: Some(next),
             indexing,
+            project_model: project_model_changed.then(|| scan.project_model.clone()),
+            dependency_impact,
         })
     }
 
@@ -565,10 +669,12 @@ fn accumulate_reconcile_metrics(combined: &mut ReconcileMetrics, metrics: Adapte
     combined.modified_files += metrics.modified_files;
     combined.deleted_files += metrics.deleted_files;
     combined.relationship_files_recomputed += metrics.relationship_files_recomputed;
+    combined.metadata_files_recomputed += metrics.metadata_files_recomputed;
     combined.framework_files_reparsed += metrics.framework_files_reparsed;
     combined.framework_relationship_files_recomputed +=
         metrics.framework_relationship_files_recomputed;
     combined.framework_truncated_files += metrics.framework_truncated_files;
+    combined.framework_config_changes += metrics.framework_config_changes;
     combined.syntax_error_files += metrics.syntax_error_files;
     combined.truncated_call_sites += metrics.truncated_call_sites;
     accumulate_publication(&mut combined.publication, metrics.publication);
@@ -801,6 +907,7 @@ pub fn index_repository_with_options(
         budgets,
         indexing: indexing.clone(),
         provider_inputs: scan.provider_inputs.clone(),
+        project_model: scan.project_model.clone(),
     };
     let metrics = IndexMetrics {
         discovered_files: scan.discovered_files,
@@ -848,6 +955,7 @@ pub fn index_repository_with_options(
         graph,
         metrics,
         provider_inputs: syntax_index.provider_inputs.clone(),
+        project_model: syntax_index.project_model.clone(),
         syntax_index,
     })
 }
@@ -1140,9 +1248,16 @@ fn scan_discovered_sources_with_inventory_phase(
             PhaseConcurrency::SERIAL,
         ),
     ];
+    let project_model = chakra_git::discover_project_model_with_context(
+        repository_root,
+        &inventory.sources,
+        &inventory.metadata_inputs,
+        operation,
+    )?;
     Ok(WorkspaceSourceScan {
         sources: WorkspaceSources { languages },
         provider_inputs,
+        project_model,
         discovered_files,
         indexed_files,
         source_bytes,

@@ -32,6 +32,9 @@ pub struct ReconcileMetrics {
     pub deleted_files: u64,
     pub reparsed_files: u64,
     pub relationship_files_recomputed: u64,
+    /// Retained files whose manifest-derived metadata record was replaced
+    /// without a source reparse (issue #40).
+    pub metadata_files_recomputed: u64,
     pub syntax_error_files: u64,
     pub truncated_call_sites: u64,
     pub publication: chakra_domain::indexing::IndexPublicationMetrics,

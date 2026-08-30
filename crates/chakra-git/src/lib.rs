@@ -23,6 +23,7 @@ use chakra_engine::{
 };
 
 mod discovery;
+mod project_model;
 mod source_metadata;
 
 pub use discovery::{
@@ -32,6 +33,7 @@ pub use discovery::{
     resolve_git_administrative_paths, resolve_repository_identity, resolve_repository_root,
     resolve_repository_root_with_context, resolve_workspace_identity, source_language,
 };
+pub use project_model::discover_project_model_with_context;
 pub use source_metadata::{
     ClassifiedSource, classify_discovered_sources_with_context, discover_classified_sources,
 };

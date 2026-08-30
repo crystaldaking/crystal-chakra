@@ -22,6 +22,7 @@ use thiserror::Error;
 use crate::diff::WorkspaceDiffProvider;
 use crate::graph::SymbolGraph;
 use crate::precise::{PreciseProvider, ProviderInput, ProviderWorkspace};
+use chakra_domain::project::ProjectModel;
 
 /// One immutable, atomically published workspace state.
 #[derive(Debug)]
@@ -36,6 +37,9 @@ pub struct WorkspaceSnapshot {
     indexing: Arc<IndexingStatus>,
     graph: Arc<SymbolGraph>,
     provider_inputs: Arc<BTreeMap<chakra_domain::location::RepoRelativePath, ProviderInput>>,
+    /// Typed Cargo/Composer project scope model published with the same
+    /// atomic revision as the graph (issue #41).
+    project_model: Arc<ProjectModel>,
 }
 
 impl WorkspaceSnapshot {
@@ -65,6 +69,11 @@ impl WorkspaceSnapshot {
 
     pub fn graph(&self) -> &SymbolGraph {
         self.graph.as_ref()
+    }
+
+    /// The typed project scope model of this exact revision (issue #41).
+    pub fn project_model(&self) -> &ProjectModel {
+        self.project_model.as_ref()
     }
 
     pub(crate) fn graph_arc(&self) -> Arc<SymbolGraph> {
@@ -163,6 +172,7 @@ pub struct UpdateBuilder {
     indexing: Arc<IndexingStatus>,
     graph: Arc<SymbolGraph>,
     provider_inputs: Arc<BTreeMap<chakra_domain::location::RepoRelativePath, ProviderInput>>,
+    project_model: Arc<ProjectModel>,
 }
 
 impl UpdateBuilder {
@@ -232,6 +242,13 @@ impl UpdateBuilder {
                 .collect(),
         );
     }
+
+    /// Attaches the typed project scope model to the same atomic revision as
+    /// the syntax graph (issue #41). Like the graph, a replaced model is only
+    /// `Fresh` once the publisher re-confirms reconciliation.
+    pub fn set_project_model(&mut self, model: ProjectModel) {
+        self.project_model = Arc::new(model);
+    }
 }
 
 /// Owns and atomically publishes workspace revisions.
@@ -260,6 +277,7 @@ impl WorkspaceEngine {
             indexing: Arc::new(IndexingStatus::default()),
             graph: Arc::new(SymbolGraph::new()),
             provider_inputs: Arc::new(BTreeMap::new()),
+            project_model: Arc::new(ProjectModel::default()),
         };
         Self {
             current: ArcSwap::from_pointee(snapshot),
@@ -393,6 +411,7 @@ impl WorkspaceEngine {
             indexing: base.indexing.clone(),
             graph: base.graph.clone(),
             provider_inputs: base.provider_inputs.clone(),
+            project_model: base.project_model.clone(),
         }
     }
 
@@ -417,6 +436,7 @@ impl WorkspaceEngine {
             indexing: update.indexing,
             graph: update.graph,
             provider_inputs: update.provider_inputs,
+            project_model: update.project_model,
         });
         // Compare-and-publish: only swap if the slot still holds the
         // revision we validated. A concurrent winner makes this fail and the

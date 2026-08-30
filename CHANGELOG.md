@@ -31,6 +31,63 @@ version tags prefixed with `v`.
   replace instantaneous process-death and marker-file assertions with
   bounded poll-until-deadline waits.
 
+### Added
+
+- Dependency-aware index invalidation (issue #40). Derived facts now track
+  their external inputs as typed records: a `ProjectModelImpact` diff between
+  the published and the scanned project model records exactly which units
+  changed and why (added/removed packages — covering moves and renames —
+  source-root/autoload edits, dependency-edge edits, workspace membership
+  edits, and manifest probe/parse issue transitions) plus the unchanged units
+  that declare dependency edges targeting them. Manifest/config-driven
+  `SourceMetadata` changes are diffed per retained path inside every language
+  adapter, so a Composer autoload edit, a Cargo membership edit, or a
+  manifest delete re-materializes exactly the affected files' graph records
+  in place (symbol ids, edges, and call sites are preserved) instead of
+  rebuilding the whole language graph; pure per-file syntax facts remain a
+  deterministic function of file content and extractor version and are never
+  reparsed by manifest edits. The Laravel framework opt-in is re-derived from
+  the typed project model on every reconcile, so adding or removing
+  `laravel/framework` toggles framework facts for PHP files only, without
+  touching other languages.
+- New typed metrics prove the invalidation scope: per-reconciliation
+  `metadata_files_recomputed`, `framework_config_changes`, and
+  `DependencyImpactMetrics` (impacted units/dependents and per-reason unit
+  change counts) on `ReconcileReport`, accumulated live on
+  `LiveIndexMetrics`. Full content rereads stay the bounded conservative
+  fallback for missed watcher events and now always record a typed
+  `FullReconciliationReason` (`FullReconciliationReasons` counters plus the
+  last reason), covering cache initialization, watcher errors, dropped
+  events, uncertain hints/epoch gaps, checkpoint intervals, and scan
+  instability.
+- Cargo and Composer packages are now modeled as explicit, typed project
+  scopes (issue #41). A new `ProjectModel` in `chakra-domain` represents
+  workspace/package identity, unit roots, source roots with roles, declared
+  dependency edges (Cargo path dependencies resolve to workspace units;
+  Composer platform packages are not edges), and generated/vendor boundaries
+  as Chakra-owned types built from the existing bounded manifest probing — no
+  Cargo or Composer protocol structures leak into the domain. Sources no
+  Cargo/Composer unit claims group into deterministic path-fallback units;
+  other ecosystems stay on the path fallback by design.
+- The model is built from the same pinned Git inventory during the syntax
+  scan and published in the same atomic snapshot revision as the graph, so
+  metadata-only manifest edits reconcile and republish it without reparsing
+  sources, and fresh queries observe it (read-your-writes).
+- Query surface: `repo_map` gains an opt-in `include_project_scope` summary
+  section (per-unit file/symbol counts, source roots, dependencies, manifest
+  issues, honest ambiguous/unassigned file counts), and `repo_map`,
+  `symbol_search`, `context`, `callers`, and `diff_context` accept a typed
+  `source.project` selector (`unit` id or `package` name). Ambiguous
+  ownership matches no unit selector and is counted honestly; unknown
+  units/packages are typed invalid-request errors, never silent empty
+  filters. Malformed or unprobeable manifests degrade to recorded
+  `ProjectManifestIssue` entries plus path-fallback units; count-, byte-, or
+  deadline-bounded probes are reported distinctly as `probe_omitted` instead
+  of disappearing silently. Project-unit id components escape delimiters to
+  prevent identity collisions, and related-query scopes are applied before
+  response item limits so an out-of-scope prefix cannot hide valid results.
+  The query envelope schema is version 15.
+
 ## [0.1.3] - 2026-08-26
 
 Post-v0.1.2 correctness, query ergonomics, corpus resilience, dependency
