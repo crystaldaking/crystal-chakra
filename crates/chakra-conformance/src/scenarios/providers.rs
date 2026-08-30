@@ -32,6 +32,7 @@ pub(super) fn provider_absent_degradation(manifest: &Manifest) -> Check<Vec<Stri
         )?;
 
         let callers = fixture.engine.callers(CallersRequest {
+            source: Default::default(),
             symbol: Some(SymbolRef::ByName(expectations.callee.clone())),
             ..CallersRequest::default()
         })?;
@@ -48,6 +49,7 @@ pub(super) fn provider_absent_degradation(manifest: &Manifest) -> Check<Vec<Stri
         )?;
 
         let context = fixture.engine.context(ContextRequest {
+            source: Default::default(),
             symbol: Some(SymbolRef::ByName(expectations.caller.clone())),
             ..ContextRequest::default()
         })?;
@@ -82,6 +84,7 @@ pub(super) fn provider_crash_recovery(manifest: &Manifest) -> Check<Vec<String>>
         fixture.engine.install_precise_provider(provider.clone())?;
 
         let degraded = fixture.engine.callers(CallersRequest {
+            source: Default::default(),
             symbol: Some(SymbolRef::ByName(expectations.callee.clone())),
             ..CallersRequest::default()
         })?;
@@ -120,6 +123,7 @@ pub(super) fn provider_crash_recovery(manifest: &Manifest) -> Check<Vec<String>>
             provenance: Provenance::ChakraResolver,
         }]);
         let recovered = fixture.engine.callers(CallersRequest {
+            source: Default::default(),
             symbol: Some(SymbolRef::ByName(expectations.callee.clone())),
             ..CallersRequest::default()
         })?;

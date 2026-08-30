@@ -8,13 +8,16 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use chakra_domain::identity::WorkspaceIdentity;
-use chakra_domain::indexing::{IndexBudgetKind, IndexBudgets, IndexCancellation, IndexPhase};
+use chakra_domain::indexing::{
+    FullReconciliationReason, IndexBudgetKind, IndexBudgets, IndexCancellation, IndexPhase,
+};
 use chakra_domain::location::RepoRelativePath;
 use chakra_domain::operation::OperationContext;
 use chakra_domain::query::{
     ContextRequest, DiffContextRequest, QueryError, QueryService, RepoMapRequest, StatusRequest,
     SymbolRef, SymbolSearchRequest,
 };
+use chakra_domain::scheduling::WorkClass;
 use chakra_domain::source::SourceClassification;
 use chakra_domain::state::{Freshness, FreshnessRequirement, WorkspaceStatus};
 use chakra_domain::symbol::{CallResolution, EdgeKind, Language};
@@ -333,6 +336,7 @@ fn immediate_fresh_read_is_atomic_and_reindexes_only_one_file() -> Result<(), Bo
     );
     assert!(matches!(
         engine.context(ContextRequest {
+            source: Default::default(),
             symbol: Some(SymbolRef::ById {
                 id: unchanged_symbol,
                 revision: old_snapshot.revision(),
@@ -494,6 +498,7 @@ fn declaration_edit_re_resolves_call_sites_without_recomputing_callers()
     let (engine, live) = start(&repository)?;
 
     let initial = engine.context(ContextRequest {
+        source: Default::default(),
         symbol: Some(SymbolRef::ByName("caller::invoke".to_owned())),
         freshness: FreshnessRequirement::RequireFresh,
         ..ContextRequest::default()
@@ -514,6 +519,7 @@ fn declaration_edit_re_resolves_call_sites_without_recomputing_callers()
         "pub fn other_target() {}\n",
     )?;
     let updated = engine.context(ContextRequest {
+        source: Default::default(),
         symbol: Some(SymbolRef::ByName("caller::invoke".to_owned())),
         freshness: FreshnessRequirement::RequireFresh,
         ..ContextRequest::default()
@@ -568,18 +574,116 @@ fn rapid_editor_replacements_converge_to_the_latest_source() -> Result<(), Box<d
         reparsed <= EDITS,
         "coalescing must not invent more parses than materialized edits"
     );
-    assert_eq!(
-        metrics.full_reconciliations - baseline.full_reconciliations,
-        0,
-        "editor replacement temp paths must not force full source rereads"
-    );
+    let full = metrics.full_reconciliations - baseline.full_reconciliations;
+    let dropped = metrics.dropped_watcher_events - baseline.dropped_watcher_events;
+    let watcher_errors = metrics.watcher_errors - baseline.watcher_errors;
+    if dropped == 0 && watcher_errors == 0 {
+        assert_eq!(
+            full, 0,
+            "editor replacement temp paths must not force full source rereads"
+        );
+    } else {
+        // The worker queue is deliberately bounded: a loaded host can drop
+        // watcher signals while a scan is in flight, and the epoch gap then
+        // honestly degrades to a full reconciliation instead of trusting
+        // incomplete hints. Each such reconciliation consumes at least one
+        // observed drop or error, so the count stays bounded by them.
+        assert!(
+            full <= dropped + watcher_errors,
+            "full reconciliations must be bounded by observed watcher drops/errors: \
+             full={full}, dropped={dropped}, watcher_errors={watcher_errors}"
+        );
+    }
     engine.snapshot().graph().validate_consistency()?;
     eprintln!(
-        "live_rapid_replacement: edits={EDITS}, fresh_barrier={fresh_elapsed:?}, reparsed={reparsed}, reconciliations={}, dropped_events={}",
+        "live_rapid_replacement: edits={EDITS}, fresh_barrier={fresh_elapsed:?}, reparsed={reparsed}, full={full}, reconciliations={}, dropped_events={}",
         metrics.reconciliations, metrics.dropped_watcher_events,
     );
 
     live.shutdown()?;
+    Ok(())
+}
+
+/// Issue #44 end-to-end half of the proof: with periodic full rereads split
+/// into queued `Reconciliation`-class work (interval = 1), a one-file edit is
+/// still reconciled targeted and published atomically. Selection order is
+/// proven separately and deterministically in `live::tests` against the
+/// production `WorkerSignal` type.
+#[test]
+fn one_file_edit_stays_targeted_with_separately_scheduled_checkpoints() -> Result<(), Box<dyn Error>>
+{
+    let repository = repository()?;
+    let (engine, live) = start_with_options(
+        &repository,
+        Some(LiveIndexOptions {
+            full_reconcile_interval: 1,
+            ..LiveIndexOptions::default()
+        }),
+    )?;
+    let baseline = live.metrics();
+    let old_snapshot = engine.snapshot();
+
+    write(
+        repository.path(),
+        "src/one.rs",
+        "pub fn alpha_priority_edit() {}\n",
+    )?;
+    assert_eq!(
+        symbols(&engine, "alpha_priority_edit")?,
+        ["one::alpha_priority_edit"]
+    );
+
+    let current = engine.snapshot();
+    assert!(current.revision() > old_snapshot.revision());
+    current.graph().validate_consistency()?;
+    old_snapshot.graph().validate_consistency()?;
+    assert_eq!(old_snapshot.graph().resolve_name("one::alpha").len(), 1);
+    assert!(
+        old_snapshot
+            .graph()
+            .resolve_name("one::alpha_priority_edit")
+            .is_empty(),
+        "the pre-edit revision must stay intact (no partial publication)"
+    );
+
+    let metrics = live.metrics();
+    assert_eq!(
+        metrics.files_reparsed - baseline.files_reparsed,
+        1,
+        "the edit must reconcile targeted even with background work queued"
+    );
+    assert_eq!(
+        metrics.reconciliation_failures - baseline.reconciliation_failures,
+        0
+    );
+    let freshness = metrics.queue.for_class(WorkClass::FreshnessEdit);
+    assert!(
+        freshness.dequeued >= 1,
+        "the edit must have been scheduled through the freshness class"
+    );
+    assert!(
+        freshness.latency.samples >= 1,
+        "freshness queue latency must be measured"
+    );
+
+    let final_metrics = live.shutdown_with_metrics()?;
+    let reconciliation = final_metrics.queue.for_class(WorkClass::Reconciliation);
+    assert!(
+        reconciliation.enqueued >= 1,
+        "interval = 1 must have staged the periodic full reread as background work"
+    );
+    assert!(
+        reconciliation.dequeued + reconciliation.cancelled >= reconciliation.enqueued,
+        "queued background work must run or be cancelled, never leak"
+    );
+    for class in WorkClass::ALL {
+        let metrics = final_metrics.queue.for_class(class);
+        assert_eq!(
+            metrics.enqueued,
+            metrics.dequeued + metrics.cancelled,
+            "every staged {class:?} item must be dequeued or cancelled"
+        );
+    }
     Ok(())
 }
 
@@ -598,6 +702,7 @@ fn create_rename_and_delete_are_visible_without_sleeps() -> Result<(), Box<dyn E
         ["created::appeared"]
     );
     let before_rename = engine.repo_map(RepoMapRequest {
+        include_project_scope: false,
         limit: Some(1),
         ..RepoMapRequest::default()
     })?;
@@ -617,12 +722,14 @@ fn create_rename_and_delete_are_visible_without_sleeps() -> Result<(), Box<dyn E
     assert!(symbols(&engine, "created::appeared")?.is_empty());
     assert!(matches!(
         engine.repo_map(RepoMapRequest {
+            include_project_scope: false,
             cursor: Some(rename_cursor),
             ..RepoMapRequest::default()
         }),
         Err(QueryError::StaleCursor { .. })
     ));
     let before_delete = engine.repo_map(RepoMapRequest {
+        include_project_scope: false,
         limit: Some(1),
         ..RepoMapRequest::default()
     })?;
@@ -635,12 +742,14 @@ fn create_rename_and_delete_are_visible_without_sleeps() -> Result<(), Box<dyn E
     assert!(symbols(&engine, "appeared")?.is_empty());
     assert!(matches!(
         engine.repo_map(RepoMapRequest {
+            include_project_scope: false,
             cursor: Some(delete_cursor),
             ..RepoMapRequest::default()
         }),
         Err(QueryError::StaleCursor { .. })
     ));
     let map = engine.repo_map(RepoMapRequest {
+        include_project_scope: false,
         source: Default::default(),
         limit: None,
         freshness: FreshnessRequirement::RequireFresh,
@@ -1349,6 +1458,7 @@ fn clean_diff_context_uses_two_lightweight_proofs_without_body_scans() -> Result
     let baseline = live.metrics();
 
     let response = engine.diff_context(DiffContextRequest {
+        source: Default::default(),
         limit: None,
         freshness: FreshnessRequirement::RequireFresh,
         ..DiffContextRequest::default()
@@ -1396,6 +1506,19 @@ fn configured_checkpoint_forces_a_bounded_full_reread() -> Result<(), Box<dyn Er
     assert_eq!(metrics.files_read - baseline.files_read, 3);
     assert_eq!(metrics.files_reparsed - baseline.files_reparsed, 0);
     assert_eq!(metrics.last_reconciliation_kind, ReconciliationKind::Full);
+    let diagnostics = live.diagnostics();
+    assert!(
+        diagnostics
+            .last_full_reconciliation_reasons
+            .contains(&FullReconciliationReason::PeriodicCheckpoint)
+    );
+    let scheduled = diagnostics
+        .queue
+        .scheduled_work
+        .for_class(WorkClass::Reconciliation);
+    assert!(scheduled.enqueued >= 1);
+    assert!(scheduled.dequeued >= 1);
+    assert!(scheduled.latency.samples >= 1);
     live.shutdown()?;
     Ok(())
 }
@@ -1475,6 +1598,7 @@ final class Provider {
     write(repository.path(), path, source)?;
     let (engine, live) = start(&repository)?;
     let initial = engine.context(ContextRequest {
+        source: Default::default(),
         symbol: Some(SymbolRef::ByName("App::DatabaseReporter".to_owned())),
         freshness: FreshnessRequirement::RequireFresh,
         ..ContextRequest::default()
@@ -1491,6 +1615,7 @@ final class Provider {
         &source.replace("->bind(", "->singleton("),
     )?;
     let current = engine.context(ContextRequest {
+        source: Default::default(),
         symbol: Some(SymbolRef::ByName("App::DatabaseReporter".to_owned())),
         freshness: FreshnessRequirement::RequireFresh,
         ..ContextRequest::default()

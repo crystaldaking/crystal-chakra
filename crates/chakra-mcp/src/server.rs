@@ -424,7 +424,7 @@ impl ChakraMcpServer {
 
     #[tool(
         name = "status",
-        description = "Chakra workspace status: identity, published revision, index counts, provider state",
+        description = "Chakra workspace status: identity, published revision, index counts, provider state, live indexing diagnostics",
         output_schema = rmcp::handler::server::tool::schema_for_output::<QueryEnvelope<StatusData>>(),
         annotations(
             read_only_hint = true,

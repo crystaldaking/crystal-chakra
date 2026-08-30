@@ -179,7 +179,7 @@
           "mechanism": "chakra-git current-worktree and base-ref diff provider",
           "evidence": [
             "docs/support/conformance/cpp.json",
-            "crates/chakra-git/src/lib.rs"
+            "crates/chakra-git/src/diff.rs"
           ]
         },
         "FRESH-01": {
@@ -463,7 +463,7 @@
           "status": "pass",
           "mechanism": "cooperative cancellation (ADR-0025)",
           "evidence": [
-            "crates/chakra-language-csharp/src/indexer.rs",
+            "crates/chakra-language-csharp/src/indexer/mod.rs",
             "crates/chakra-provider-csharp-ls/tests/lifecycle.rs"
           ]
         },
@@ -665,7 +665,7 @@
           "mechanism": "chakra-git worktree/base-ref diff provider for .go files",
           "evidence": [
             "docs/support/conformance/go.json",
-            "crates/chakra-git/src/lib.rs"
+            "crates/chakra-git/src/diff.rs"
           ]
         },
         "FRESH-01": {
@@ -916,7 +916,7 @@
           "mechanism": "chakra-git worktree/base-ref diff provider for HCL files",
           "evidence": [
             "docs/support/conformance/hcl.json",
-            "crates/chakra-git/src/lib.rs"
+            "crates/chakra-git/src/diff.rs"
           ]
         },
         "FRESH-01": {
@@ -1576,7 +1576,8 @@
           "status": "equivalent",
           "mechanism": "ChakraResolver strict-tier promotion (ADR-0030)",
           "evidence": [
-            "crates/chakra-language-php/src/indexer.rs",
+            "crates/chakra-language-php/src/indexer/catalog.rs",
+            "crates/chakra-language-php/src/indexer/tests.rs",
             "crates/chakra-language-php/tests/fixture_index.rs",
             "docs/adr/0030-php-precise-equivalent-resolver.md"
           ]

@@ -176,6 +176,7 @@ fn malformed_go_keeps_valid_symbols_and_reports_diagnostics() -> Result<(), Box<
 fn callers_and_incremental_reconcile_use_go_function_edges() -> Result<(), Box<dyn Error>> {
     let (repository, engine, _metrics) = indexed_engine()?;
     let callers = engine.callers(CallersRequest {
+        source: Default::default(),
         symbol: Some(SymbolRef::ByName("payments::providerRefund".to_owned())),
         ..CallersRequest::default()
     })?;

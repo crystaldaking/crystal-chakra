@@ -66,5 +66,9 @@ Accepted decisions:
 - ADR-041: gopls workspace enrichment
 - ADR-042: revision-bound provider input deltas
 - ADR-043: pre-1.0 compatibility policy
+- ADR-044: atomically published project model and dependency-scoped invalidation
+- ADR-045: bounded live indexing diagnostics
+- ADR-046: bounded priority scheduling for interactive freshness
+- ADR-047: workspace-bound lazy file facts
 
 Do not pre-create empty ADRs merely to satisfy a list.

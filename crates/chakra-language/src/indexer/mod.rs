@@ -1,19 +1,21 @@
 //! Bounded composition of independently parsed language indexes.
 
-use std::collections::BTreeMap;
-use std::fs;
-use std::io::{self, Read};
+mod resources;
+mod scan;
+mod status;
+
+use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use chakra_domain::indexing::{
-    IndexBudgetError, IndexBudgetKind, IndexBudgets, IndexCancellation, IndexCapability,
-    IndexCapabilityCoverage, IndexCoverage, IndexDegradation, IndexMemoryMetrics, IndexPhase,
-    IndexPhaseMeasurement, IndexPublicationMetrics, IndexSchedulingMetrics, IndexingStatus,
+    IndexBudgetError, IndexBudgets, IndexCancellation, IndexDegradation, IndexMemoryMetrics,
+    IndexPhase, IndexPhaseMeasurement, IndexPublicationMetrics, IndexSchedulingMetrics,
+    IndexingStatus,
 };
 use chakra_domain::location::RepoRelativePath;
 use chakra_domain::operation::OperationContext;
+use chakra_domain::project::{ProjectModel, ProjectModelImpact, ProjectUnitChangeCounts};
 use chakra_domain::symbol::Language;
 use chakra_engine::{
     ConsistencyError, GraphBuildLimits, GraphBuildReport, GraphError, ProviderInput, SymbolGraph,
@@ -21,15 +23,19 @@ use chakra_engine::{
 use thiserror::Error;
 use tracing::{info, warn};
 
-#[cfg(unix)]
-use nix::sys::resource::{UsageWho, getrusage};
-#[cfg(unix)]
-use nix::sys::time::TimeValLike;
-
 use crate::adapter::{
-    AdapterFactCounts, AdapterFrameworkMetrics, AdapterReconcileMetrics, LanguageSources,
-    SyntaxLanguageAdapter, default_adapters, registered_languages,
+    AdapterFrameworkMetrics, AdapterReconcileMetrics, DependencyEvidence, LanguageSources,
+    SyntaxLanguageAdapter, default_adapters,
 };
+
+use resources::{process_cpu_micros, process_peak_rss_bytes, process_rss_bytes};
+use scan::check_cancelled;
+use status::{
+    IndexingParts, LanguageIndexingFacts, build_indexing_status, indexing_semantically_equal,
+};
+
+pub(crate) use scan::{WorkspaceSourceLoader, scan_discovered_sources_with_options};
+pub use scan::{scan_repository_sources, scan_repository_sources_with_options};
 
 const PARALLEL_PARSE_FILE_THRESHOLD: u64 = 32;
 const INDEX_WORKER_MEMORY_RESERVE_BYTES: u64 = 64 * 1024 * 1024;
@@ -86,6 +92,9 @@ pub struct WorkspaceSourceScan {
     /// Non-source manifests/configuration captured with this exact scan for
     /// revision-scoped provider watched-file synchronization.
     pub provider_inputs: Vec<ProviderInput>,
+    /// Typed Cargo/Composer project model built from this exact scan's
+    /// manifest evidence (issue #41).
+    pub project_model: ProjectModel,
     pub discovered_files: u64,
     pub indexed_files: u64,
     pub source_bytes: u64,
@@ -226,6 +235,59 @@ impl IndexOptions {
     }
 }
 
+/// Typed invalidation picture of one reconciliation's external manifest /
+/// config / project-scope inputs (issue #40). All counters are per
+/// reconciliation; the live index accumulates them for diagnostics.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DependencyImpactMetrics {
+    /// Project units whose own manifest evidence changed.
+    pub impacted_units: u64,
+    /// Unchanged units declaring dependency edges on an impacted unit.
+    pub impacted_dependents: u64,
+    /// Manifests whose recorded probe/parse issue state changed.
+    pub manifest_issue_changes: u64,
+    /// Per-reason unit change counts.
+    pub unit_changes: ProjectUnitChangeCounts,
+}
+
+impl DependencyImpactMetrics {
+    fn from_impact(impact: &ProjectModelImpact) -> Self {
+        Self {
+            impacted_units: impact.changes.len() as u64 + impact.changes_omitted,
+            impacted_dependents: impact.dependents.len() as u64 + impact.dependents_omitted,
+            manifest_issue_changes: impact.manifest_issue_changes.len() as u64
+                + impact.manifest_issue_changes_omitted,
+            unit_changes: impact.counts(),
+        }
+    }
+
+    /// Adds another reconciliation's impact counters into `self`.
+    pub fn accumulate(&mut self, other: &Self) {
+        self.impacted_units = self.impacted_units.saturating_add(other.impacted_units);
+        self.impacted_dependents = self
+            .impacted_dependents
+            .saturating_add(other.impacted_dependents);
+        self.manifest_issue_changes = self
+            .manifest_issue_changes
+            .saturating_add(other.manifest_issue_changes);
+        let (left, right) = (&mut self.unit_changes, &other.unit_changes);
+        left.added = left.added.saturating_add(right.added);
+        left.removed = left.removed.saturating_add(right.removed);
+        left.definition_changed = left
+            .definition_changed
+            .saturating_add(right.definition_changed);
+        left.source_roots_changed = left
+            .source_roots_changed
+            .saturating_add(right.source_roots_changed);
+        left.dependencies_changed = left
+            .dependencies_changed
+            .saturating_add(right.dependencies_changed);
+        left.membership_changed = left
+            .membership_changed
+            .saturating_add(right.membership_changed);
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ReconcileMetrics {
     pub scanned_files: u64,
@@ -235,9 +297,16 @@ pub struct ReconcileMetrics {
     pub modified_files: u64,
     pub deleted_files: u64,
     pub relationship_files_recomputed: u64,
+    /// Retained files whose manifest-derived metadata record was replaced
+    /// without a source reparse (issue #40).
+    pub metadata_files_recomputed: u64,
     pub framework_files_reparsed: u64,
     pub framework_relationship_files_recomputed: u64,
     pub framework_truncated_files: u64,
+    /// Framework-enrichment configuration toggles applied (issue #40).
+    pub framework_config_changes: u64,
+    /// Typed external-input invalidation picture (issue #40).
+    pub dependency_impact: DependencyImpactMetrics,
     pub syntax_error_files: u64,
     pub truncated_call_sites: u64,
     pub publication: IndexPublicationMetrics,
@@ -249,6 +318,13 @@ pub struct ReconcileReport {
     pub metrics: ReconcileMetrics,
     pub next_index: Option<WorkspaceSyntaxIndex>,
     pub indexing: IndexingStatus,
+    /// The scan's typed project model when it differs from the currently
+    /// published one (issue #41). `None` means the model is unchanged.
+    pub project_model: Option<ProjectModel>,
+    /// Typed record of which project units the scan's manifest/config diff
+    /// invalidated, and which units depend on them (issue #40). `None` when
+    /// the project model did not change or the diff is empty.
+    pub dependency_impact: Option<ProjectModelImpact>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -288,6 +364,9 @@ pub struct IndexReport {
     pub metrics: IndexMetrics,
     pub syntax_index: WorkspaceSyntaxIndex,
     pub provider_inputs: Vec<ProviderInput>,
+    /// Typed project model built from the cold scan's manifest evidence
+    /// (issue #41).
+    pub project_model: ProjectModel,
 }
 
 #[derive(Debug, Error)]
@@ -340,6 +419,7 @@ pub struct WorkspaceSyntaxIndex {
     budgets: IndexBudgets,
     indexing: IndexingStatus,
     provider_inputs: Vec<ProviderInput>,
+    project_model: ProjectModel,
 }
 
 impl WorkspaceSyntaxIndex {
@@ -363,6 +443,11 @@ impl WorkspaceSyntaxIndex {
 
     pub fn provider_inputs(&self) -> &[ProviderInput] {
         &self.provider_inputs
+    }
+
+    /// Typed project model captured by this index's latest scan (issue #41).
+    pub fn project_model(&self) -> &ProjectModel {
+        &self.project_model
     }
 
     pub fn scan_repository(
@@ -390,14 +475,29 @@ impl WorkspaceSyntaxIndex {
         let started = PhaseTimer::start();
         check_cancelled(cancellation)?;
         let limits = self.live_graph_limits(&scan.sources);
+        // Typed dependency tracking (issue #40): diff the scan's project
+        // model against the published one before adapters reconcile, so the
+        // invalidation record, framework evidence, and metrics all describe
+        // the same manifest/config change.
+        let project_model_changed = self.project_model != scan.project_model;
+        let dependency_impact = if project_model_changed {
+            let impact = scan.project_model.impact_since(&self.project_model);
+            (!impact.is_empty()).then_some(impact)
+        } else {
+            None
+        };
         let mut reconciled = Vec::with_capacity(self.adapters.len());
         for (state, limits) in self.adapters.iter().zip(limits.iter().copied()) {
             let language = state.adapter.language();
+            let dependencies = DependencyEvidence {
+                framework_detected: (language == Language::Php)
+                    .then(|| chakra_language_php::laravel_detected_from_model(&scan.project_model)),
+            };
             let sources = scan.sources.take(language);
             reconciled.push(
                 state
                     .adapter
-                    .reconcile(sources, limits, cancellation)
+                    .reconcile(sources, limits, dependencies, cancellation)
                     .map_err(|source| WorkspaceIndexError::Adapter {
                         language,
                         source: Box::new(source),
@@ -409,6 +509,9 @@ impl WorkspaceSyntaxIndex {
         metrics.publication.structurally_incremental = true;
         for report in &reconciled {
             accumulate_reconcile_metrics(&mut metrics, report.metrics);
+        }
+        if let Some(impact) = &dependency_impact {
+            metrics.dependency_impact = DependencyImpactMetrics::from_impact(impact);
         }
 
         let graph_builds: Vec<GraphBuildReport> = self
@@ -515,12 +618,15 @@ impl WorkspaceSyntaxIndex {
 
         let indexing_changed = !indexing_semantically_equal(&self.indexing, &indexing);
         let provider_inputs_changed = self.provider_inputs != scan.provider_inputs;
-        if !graph_changed && !indexing_changed && !provider_inputs_changed {
+        if !graph_changed && !indexing_changed && !provider_inputs_changed && !project_model_changed
+        {
             return Ok(ReconcileReport {
                 graph: None,
                 metrics,
                 next_index: None,
                 indexing: self.indexing.clone(),
+                project_model: None,
+                dependency_impact: None,
             });
         }
 
@@ -532,13 +638,16 @@ impl WorkspaceSyntaxIndex {
                 .collect(),
             budgets: self.budgets,
             indexing: indexing.clone(),
-            provider_inputs: scan.provider_inputs,
+            provider_inputs: scan.provider_inputs.clone(),
+            project_model: scan.project_model.clone(),
         };
         Ok(ReconcileReport {
             graph,
             metrics,
             next_index: Some(next),
             indexing,
+            project_model: project_model_changed.then(|| scan.project_model.clone()),
+            dependency_impact,
         })
     }
 
@@ -565,10 +674,12 @@ fn accumulate_reconcile_metrics(combined: &mut ReconcileMetrics, metrics: Adapte
     combined.modified_files += metrics.modified_files;
     combined.deleted_files += metrics.deleted_files;
     combined.relationship_files_recomputed += metrics.relationship_files_recomputed;
+    combined.metadata_files_recomputed += metrics.metadata_files_recomputed;
     combined.framework_files_reparsed += metrics.framework_files_reparsed;
     combined.framework_relationship_files_recomputed +=
         metrics.framework_relationship_files_recomputed;
     combined.framework_truncated_files += metrics.framework_truncated_files;
+    combined.framework_config_changes += metrics.framework_config_changes;
     combined.syntax_error_files += metrics.syntax_error_files;
     combined.truncated_call_sites += metrics.truncated_call_sites;
     accumulate_publication(&mut combined.publication, metrics.publication);
@@ -801,6 +912,7 @@ pub fn index_repository_with_options(
         budgets,
         indexing: indexing.clone(),
         provider_inputs: scan.provider_inputs.clone(),
+        project_model: scan.project_model.clone(),
     };
     let metrics = IndexMetrics {
         discovered_files: scan.discovered_files,
@@ -848,308 +960,8 @@ pub fn index_repository_with_options(
         graph,
         metrics,
         provider_inputs: syntax_index.provider_inputs.clone(),
+        project_model: syntax_index.project_model.clone(),
         syntax_index,
-    })
-}
-
-/// Compatibility helper using safe defaults.
-pub fn scan_repository_sources(
-    repository_root: &Path,
-) -> Result<WorkspaceSources, WorkspaceIndexError> {
-    Ok(scan_repository_sources_with_options(repository_root, &IndexOptions::default())?.sources)
-}
-
-pub fn scan_repository_sources_with_options(
-    repository_root: &Path,
-    options: &IndexOptions,
-) -> Result<WorkspaceSourceScan, WorkspaceIndexError> {
-    check_cancelled(&options.cancellation)?;
-    let operation = OperationContext::from_cancellation(options.cancellation.clone());
-    let inventory_started = PhaseTimer::start();
-    let inventory = chakra_git::discover_workspace_inventory_in_worktree_with_context(
-        repository_root,
-        &operation,
-    )?;
-    let inventory_phase = measured_phase(
-        IndexPhase::GitInventory,
-        None,
-        inventory_started,
-        inventory.sources.len() as u64,
-        0,
-        PhaseConcurrency::SERIAL,
-    );
-    scan_discovered_sources_with_inventory_phase(
-        repository_root,
-        options,
-        &inventory,
-        inventory_phase,
-        &mut FilesystemSourceLoader,
-        &operation,
-    )
-}
-
-pub(crate) trait WorkspaceSourceLoader {
-    fn observe(&mut self, path: &RepoRelativePath, metadata: &fs::Metadata);
-
-    fn observe_metadata(&mut self, path: &RepoRelativePath, metadata: &fs::Metadata);
-
-    fn load(
-        &mut self,
-        absolute: &Path,
-        path: &RepoRelativePath,
-        metadata: &fs::Metadata,
-        max_bytes: u64,
-    ) -> Result<Arc<str>, WorkspaceIndexError>;
-}
-
-struct FilesystemSourceLoader;
-
-impl WorkspaceSourceLoader for FilesystemSourceLoader {
-    fn observe(&mut self, _path: &RepoRelativePath, _metadata: &fs::Metadata) {}
-
-    fn observe_metadata(&mut self, _path: &RepoRelativePath, _metadata: &fs::Metadata) {}
-
-    fn load(
-        &mut self,
-        absolute: &Path,
-        path: &RepoRelativePath,
-        _metadata: &fs::Metadata,
-        max_bytes: u64,
-    ) -> Result<Arc<str>, WorkspaceIndexError> {
-        let file = fs::File::open(absolute).map_err(|source| WorkspaceIndexError::Read {
-            path: path.clone(),
-            source,
-        })?;
-        let mut source = String::new();
-        file.take(max_bytes.saturating_add(1))
-            .read_to_string(&mut source)
-            .map_err(|source| WorkspaceIndexError::Read {
-                path: path.clone(),
-                source,
-            })?;
-        Ok(Arc::<str>::from(source))
-    }
-}
-
-pub(crate) fn scan_discovered_sources_with_options(
-    repository_root: &Path,
-    options: &IndexOptions,
-    inventory: &chakra_git::WorkspaceInventory,
-    inventory_elapsed: Duration,
-    loader: &mut impl WorkspaceSourceLoader,
-    operation: &OperationContext,
-) -> Result<WorkspaceSourceScan, WorkspaceIndexError> {
-    scan_discovered_sources_with_inventory_phase(
-        repository_root,
-        options,
-        inventory,
-        phase(
-            IndexPhase::GitInventory,
-            None,
-            inventory_elapsed,
-            inventory.sources.len() as u64,
-            0,
-        ),
-        loader,
-        operation,
-    )
-}
-
-fn scan_discovered_sources_with_inventory_phase(
-    repository_root: &Path,
-    options: &IndexOptions,
-    inventory: &chakra_git::WorkspaceInventory,
-    inventory_phase: IndexPhaseMeasurement,
-    loader: &mut impl WorkspaceSourceLoader,
-    operation: &OperationContext,
-) -> Result<WorkspaceSourceScan, WorkspaceIndexError> {
-    let budgets = options.budgets.validate()?;
-    check_cancelled(&options.cancellation)?;
-    operation
-        .check()
-        .map_err(|_| WorkspaceIndexError::Cancelled)?;
-    let discovered_files = inventory.sources.len() as u64;
-    let read_started = PhaseTimer::start();
-    let mut files_by_language: BTreeMap<Language, BTreeMap<RepoRelativePath, Arc<str>>> =
-        BTreeMap::new();
-    let mut source_bytes = 0_u64;
-    let mut oversized_files = 0_u64;
-    let mut largest_file = 0_u64;
-    let mut workspace_omitted = 0_u64;
-    let mut workspace_observed = 0_u64;
-    let mut unreadable_files = 0_u64;
-    let mut unreadable_paths = Vec::new();
-
-    for (index, path) in inventory.sources.iter().enumerate() {
-        check_cancelled(&options.cancellation)?;
-        if index as u64 >= budgets.max_files {
-            continue;
-        }
-        let absolute = repository_root.join(path.as_str());
-        // A file may vanish or become unreadable between inventory and read;
-        // skip it instead of aborting the whole scan.
-        let metadata = match fs::metadata(&absolute) {
-            Ok(metadata) => metadata,
-            Err(source) => {
-                let error = WorkspaceIndexError::Read {
-                    path: path.clone(),
-                    source,
-                };
-                warn!(error = %error, "skipping source file that cannot be inspected");
-                unreadable_files = unreadable_files.saturating_add(1);
-                unreadable_paths.push(path.clone());
-                continue;
-            }
-        };
-        loader.observe(path, &metadata);
-        let measured_len = metadata.len();
-        if measured_len > budgets.max_source_file_bytes {
-            oversized_files = oversized_files.saturating_add(1);
-            largest_file = largest_file.max(measured_len);
-            continue;
-        }
-        if source_bytes.saturating_add(measured_len) > budgets.max_workspace_source_bytes {
-            workspace_omitted = workspace_omitted.saturating_add(1);
-            workspace_observed = workspace_observed.max(source_bytes.saturating_add(measured_len));
-            continue;
-        }
-        let source = match loader.load(&absolute, path, &metadata, budgets.max_source_file_bytes) {
-            Ok(source) => source,
-            Err(error @ WorkspaceIndexError::Read { .. }) => {
-                warn!(error = %error, "skipping source file that cannot be read");
-                unreadable_files = unreadable_files.saturating_add(1);
-                unreadable_paths.push(path.clone());
-                continue;
-            }
-            Err(error) => return Err(error),
-        };
-        let actual_len = source.len() as u64;
-        if actual_len > budgets.max_source_file_bytes {
-            oversized_files = oversized_files.saturating_add(1);
-            largest_file = largest_file.max(actual_len);
-            continue;
-        }
-        if source_bytes.saturating_add(actual_len) > budgets.max_workspace_source_bytes {
-            workspace_omitted = workspace_omitted.saturating_add(1);
-            workspace_observed = workspace_observed.max(source_bytes.saturating_add(actual_len));
-            continue;
-        }
-        source_bytes = source_bytes.saturating_add(actual_len);
-        if let Some(language) = chakra_git::source_language(path.as_str()) {
-            files_by_language
-                .entry(language)
-                .or_default()
-                .insert(path.clone(), source);
-        }
-    }
-
-    let mut provider_inputs = Vec::new();
-    for path in &inventory.metadata_inputs {
-        operation
-            .check()
-            .map_err(|_| WorkspaceIndexError::Cancelled)?;
-        let absolute = repository_root.join(path.as_str());
-        let metadata = match fs::metadata(&absolute) {
-            Ok(metadata) => metadata,
-            Err(source) => {
-                let error = WorkspaceIndexError::Read {
-                    path: path.clone(),
-                    source,
-                };
-                warn!(error = %error, "skipping metadata input that cannot be inspected");
-                unreadable_files = unreadable_files.saturating_add(1);
-                unreadable_paths.push(path.clone());
-                continue;
-            }
-        };
-        if let Some(input) = ProviderInput::from_metadata(
-            path.clone(),
-            chakra_git::metadata_languages(path.as_str())
-                .iter()
-                .copied(),
-            &metadata,
-        ) {
-            provider_inputs.push(input);
-        }
-        loader.observe_metadata(path, &metadata);
-    }
-
-    let mut languages = Vec::new();
-    let mut indexed_files = 0_u64;
-    for language in registered_languages() {
-        let files = files_by_language.remove(&language).unwrap_or_default();
-        let metadata = chakra_git::classify_discovered_sources_with_context(
-            repository_root,
-            &inventory.sources,
-            &inventory.metadata_inputs,
-            language,
-            operation,
-        )?
-        .into_iter()
-        .filter(|source| files.contains_key(&source.path))
-        .map(|source| (source.path, source.metadata))
-        .collect();
-        indexed_files = indexed_files.saturating_add(files.len() as u64);
-        languages.push(WorkspaceLanguageSources {
-            language,
-            sources: LanguageSources { files, metadata },
-        });
-    }
-    let mut degradations = Vec::new();
-    if discovered_files > budgets.max_files {
-        degradations.push(IndexDegradation {
-            phase: IndexPhase::GitInventory,
-            language: None,
-            cause: IndexBudgetKind::Files,
-            affected_capabilities: all_index_capabilities(),
-            limit: budgets.max_files,
-            observed: discovered_files,
-            omitted: discovered_files.saturating_sub(budgets.max_files),
-        });
-    }
-    if oversized_files > 0 {
-        degradations.push(IndexDegradation {
-            phase: IndexPhase::SourceRead,
-            language: None,
-            cause: IndexBudgetKind::SourceFileBytes,
-            affected_capabilities: all_index_capabilities(),
-            limit: budgets.max_source_file_bytes,
-            observed: largest_file,
-            omitted: oversized_files,
-        });
-    }
-    if workspace_omitted > 0 {
-        degradations.push(IndexDegradation {
-            phase: IndexPhase::SourceRead,
-            language: None,
-            cause: IndexBudgetKind::WorkspaceSourceBytes,
-            affected_capabilities: all_index_capabilities(),
-            limit: budgets.max_workspace_source_bytes,
-            observed: workspace_observed,
-            omitted: workspace_omitted,
-        });
-    }
-    let phases = vec![
-        inventory_phase,
-        measured_phase(
-            IndexPhase::SourceRead,
-            None,
-            read_started,
-            indexed_files,
-            source_bytes,
-            PhaseConcurrency::SERIAL,
-        ),
-    ];
-    Ok(WorkspaceSourceScan {
-        sources: WorkspaceSources { languages },
-        provider_inputs,
-        discovered_files,
-        indexed_files,
-        source_bytes,
-        unreadable_files,
-        unreadable_paths,
-        degradations,
-        phases,
     })
 }
 
@@ -1191,279 +1003,6 @@ fn split_graph_limits(budgets: IndexBudgets, file_counts: &[u64]) -> Vec<GraphBu
             },
         )
         .collect()
-}
-
-/// One language's facts, graph report, and limits for the indexing status, in
-/// registry order.
-struct LanguageIndexingFacts {
-    language: Language,
-    facts: AdapterFactCounts,
-    graph: GraphBuildReport,
-    limits: GraphBuildLimits,
-}
-
-struct IndexingParts {
-    languages: Vec<LanguageIndexingFacts>,
-    phases: Vec<IndexPhaseMeasurement>,
-    memory: IndexMemoryMetrics,
-    publication: IndexPublicationMetrics,
-}
-
-fn build_indexing_status(
-    budgets: IndexBudgets,
-    scan: &WorkspaceSourceScan,
-    parts: IndexingParts,
-) -> IndexingStatus {
-    let IndexingParts {
-        languages,
-        phases,
-        mut memory,
-        publication,
-    } = parts;
-    let mut extracted_symbols = 0_u64;
-    let mut extracted_call_sites = 0_u64;
-    let mut extracted_relationship_edges = 0_u64;
-    let mut parsed_files = 0_u64;
-    let mut syntax_error_files = 0_u64;
-    let mut retained_symbols = 0_u64;
-    let mut retained_edges = 0_u64;
-    let mut omitted_edges = 0_u64;
-    let mut retained_call_sites = 0_u64;
-    let mut omitted_call_sites = 0_u64;
-    let mut unknown_relationship_omissions = 0_u64;
-    for language in &languages {
-        extracted_symbols = extracted_symbols.saturating_add(language.facts.symbols);
-        extracted_call_sites = extracted_call_sites.saturating_add(language.facts.call_sites);
-        extracted_relationship_edges =
-            extracted_relationship_edges.saturating_add(language.facts.relationship_edges);
-        parsed_files = parsed_files.saturating_add(language.facts.files);
-        syntax_error_files = syntax_error_files.saturating_add(language.facts.syntax_error_files);
-        retained_symbols = retained_symbols.saturating_add(language.graph.retained_symbols);
-        retained_edges = retained_edges.saturating_add(language.graph.retained_edges);
-        omitted_edges = omitted_edges.saturating_add(language.graph.omitted_edges);
-        retained_call_sites =
-            retained_call_sites.saturating_add(language.graph.retained_call_sites);
-        omitted_call_sites = omitted_call_sites.saturating_add(language.graph.omitted_call_sites);
-        unknown_relationship_omissions = unknown_relationship_omissions
-            .saturating_add(language.graph.call_sites_omitted_by_symbol_budget);
-    }
-    let skipped_files = scan.discovered_files.saturating_sub(scan.indexed_files);
-    let coverage = IndexCoverage {
-        discovered_files: scan.discovered_files,
-        indexed_files: scan.indexed_files,
-        skipped_files,
-        unreadable_files: scan.unreadable_files,
-        source_bytes: scan.source_bytes,
-        parsed_files,
-        syntax_error_files,
-        extracted_symbols,
-        retained_symbols,
-        retained_edges,
-        omitted_edges,
-        extracted_call_sites,
-        retained_call_sites,
-        omitted_call_sites,
-    };
-    let mut degradations = scan.degradations.clone();
-    for language in &languages {
-        append_graph_degradations(
-            &mut degradations,
-            language.language,
-            language.limits,
-            language.graph,
-        );
-    }
-    let capabilities = vec![
-        capability(
-            IndexCapability::FileInventory,
-            scan.indexed_files,
-            skipped_files,
-            true,
-        ),
-        capability(
-            IndexCapability::TextSearch,
-            scan.indexed_files,
-            skipped_files,
-            true,
-        ),
-        capability(
-            IndexCapability::Declarations,
-            retained_symbols,
-            extracted_symbols.saturating_sub(retained_symbols),
-            skipped_files == 0,
-        ),
-        capability(
-            IndexCapability::Relationships,
-            retained_edges,
-            omitted_edges,
-            skipped_files == 0 && unknown_relationship_omissions == 0,
-        ),
-        capability(
-            IndexCapability::CallSites,
-            retained_call_sites,
-            omitted_call_sites,
-            skipped_files == 0,
-        ),
-    ];
-    memory.retained_source_bytes = scan.source_bytes;
-    memory.retained_parsed_symbols = extracted_symbols;
-    memory.retained_parsed_relationship_edges = extracted_relationship_edges;
-    memory.retained_parsed_call_sites = extracted_call_sites;
-    memory.retained_graph_symbols = retained_symbols;
-    memory.retained_graph_edges = retained_edges;
-    memory.retained_graph_call_sites = retained_call_sites;
-    let scheduling = WorkerPolicy::from_budgets(budgets).scheduling(&phases);
-    IndexingStatus {
-        budgets,
-        coverage,
-        capabilities,
-        degradations,
-        phases,
-        scheduling,
-        memory,
-        publication,
-    }
-}
-
-fn capability(
-    capability: IndexCapability,
-    retained: u64,
-    omitted: u64,
-    corpus_complete: bool,
-) -> IndexCapabilityCoverage {
-    IndexCapabilityCoverage {
-        capability,
-        retained,
-        omitted,
-        complete: corpus_complete && omitted == 0,
-    }
-}
-
-fn append_graph_degradations(
-    degradations: &mut Vec<IndexDegradation>,
-    language: Language,
-    limits: GraphBuildLimits,
-    report: GraphBuildReport,
-) {
-    let mut record = |cause, affected_capabilities, limit, observed, omitted| {
-        if omitted != 0 {
-            degradations.push(IndexDegradation {
-                phase: IndexPhase::GraphMaterialization,
-                language: Some(language),
-                cause,
-                affected_capabilities,
-                limit,
-                observed,
-                omitted,
-            });
-        }
-    };
-    let observed_symbols = report
-        .retained_symbols
-        .saturating_add(report.omitted_symbols);
-    let observed_edges = report
-        .retained_edges
-        .saturating_add(report.edges_omitted_by_edge_budget);
-    let observed_call_sites = report
-        .retained_call_sites
-        .saturating_add(report.call_sites_omitted_by_call_site_budget);
-    record(
-        IndexBudgetKind::Symbols,
-        vec![IndexCapability::Declarations],
-        limits.max_symbols,
-        observed_symbols,
-        report.omitted_symbols,
-    );
-    record(
-        IndexBudgetKind::Symbols,
-        vec![IndexCapability::Relationships],
-        limits.max_symbols,
-        observed_symbols,
-        report.edges_omitted_by_symbol_budget,
-    );
-    record(
-        IndexBudgetKind::Symbols,
-        vec![IndexCapability::Relationships, IndexCapability::CallSites],
-        limits.max_symbols,
-        observed_symbols,
-        report.call_sites_omitted_by_symbol_budget,
-    );
-    record(
-        IndexBudgetKind::Edges,
-        vec![IndexCapability::Relationships],
-        limits.max_edges,
-        observed_edges,
-        report.edges_omitted_by_edge_budget,
-    );
-    record(
-        IndexBudgetKind::Edges,
-        vec![IndexCapability::CallSites],
-        limits.max_edges,
-        observed_edges,
-        report.call_sites_omitted_by_edge_budget,
-    );
-    record(
-        IndexBudgetKind::CallSites,
-        vec![IndexCapability::Relationships],
-        limits.max_call_sites,
-        observed_call_sites,
-        report.edges_omitted_by_call_site_budget,
-    );
-    record(
-        IndexBudgetKind::CallSites,
-        vec![IndexCapability::CallSites],
-        limits.max_call_sites,
-        observed_call_sites,
-        report.call_sites_omitted_by_call_site_budget,
-    );
-}
-
-fn indexing_semantically_equal(left: &IndexingStatus, right: &IndexingStatus) -> bool {
-    left.budgets == right.budgets
-        && left.coverage == right.coverage
-        && left.capabilities == right.capabilities
-        && left.degradations == right.degradations
-}
-
-fn all_index_capabilities() -> Vec<IndexCapability> {
-    vec![
-        IndexCapability::FileInventory,
-        IndexCapability::TextSearch,
-        IndexCapability::Declarations,
-        IndexCapability::Relationships,
-        IndexCapability::CallSites,
-    ]
-}
-
-fn check_cancelled(cancellation: &IndexCancellation) -> Result<(), WorkspaceIndexError> {
-    if cancellation.is_cancelled() {
-        Err(WorkspaceIndexError::Cancelled)
-    } else {
-        Ok(())
-    }
-}
-
-fn phase(
-    phase: IndexPhase,
-    language: Option<Language>,
-    elapsed: Duration,
-    work_items: u64,
-    bytes: u64,
-) -> IndexPhaseMeasurement {
-    IndexPhaseMeasurement {
-        phase,
-        language,
-        elapsed_micros: elapsed.as_micros().min(u128::from(u64::MAX)) as u64,
-        cpu_micros: None,
-        cpu_utilization_per_mille: None,
-        work_items,
-        bytes,
-        effective_workers: u64::from(work_items > 0),
-        peak_active_workers: u64::from(work_items > 0),
-        peak_queue_depth: 0,
-        rss_bytes: None,
-        peak_rss_bytes: process_peak_rss_bytes(),
-    }
 }
 
 fn measured_phase(
@@ -1510,39 +1049,6 @@ fn measured_phase(
     }
 }
 
-#[cfg(unix)]
-fn process_cpu_micros() -> Option<u64> {
-    let usage = getrusage(UsageWho::RUSAGE_SELF).ok()?;
-    let total = usage
-        .user_time()
-        .num_microseconds()
-        .checked_add(usage.system_time().num_microseconds())?;
-    u64::try_from(total).ok()
-}
-
-#[cfg(not(unix))]
-fn process_cpu_micros() -> Option<u64> {
-    None
-}
-
-#[cfg(unix)]
-fn process_peak_rss_bytes() -> Option<u64> {
-    let rss = u64::try_from(getrusage(UsageWho::RUSAGE_SELF).ok()?.max_rss()).ok()?;
-    #[cfg(target_vendor = "apple")]
-    {
-        Some(rss)
-    }
-    #[cfg(not(target_vendor = "apple"))]
-    {
-        rss.checked_mul(1024)
-    }
-}
-
-#[cfg(not(unix))]
-fn process_peak_rss_bytes() -> Option<u64> {
-    None
-}
-
 fn max_option(left: Option<u64>, right: Option<u64>) -> Option<u64> {
     match (left, right) {
         (Some(left), Some(right)) => Some(left.max(right)),
@@ -1550,45 +1056,13 @@ fn max_option(left: Option<u64>, right: Option<u64>) -> Option<u64> {
     }
 }
 
-#[cfg(target_os = "linux")]
-fn process_rss_bytes() -> Option<u64> {
-    let status = fs::read_to_string("/proc/self/status").ok()?;
-    let line = status.lines().find(|line| line.starts_with("VmRSS:"))?;
-    line.split_whitespace()
-        .nth(1)?
-        .parse::<u64>()
-        .ok()?
-        .checked_mul(1024)
-}
-
-#[cfg(all(unix, not(target_os = "linux")))]
-fn process_rss_bytes() -> Option<u64> {
-    let output = std::process::Command::new("ps")
-        .args(["-o", "rss=", "-p"])
-        .arg(std::process::id().to_string())
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    std::str::from_utf8(&output.stdout)
-        .ok()?
-        .trim()
-        .parse::<u64>()
-        .ok()?
-        .checked_mul(1024)
-}
-
-#[cfg(not(unix))]
-fn process_rss_bytes() -> Option<u64> {
-    None
-}
-
 #[cfg(test)]
 mod tests {
     use std::error::Error;
+    use std::fs;
     use std::process::Command;
 
+    use chakra_domain::indexing::{IndexBudgetKind, IndexCapability};
     use chakra_domain::query::{QueryService, RepoMapRequest, SearchRequest, SymbolSearchRequest};
     use chakra_domain::state::{Freshness, WorkspaceStatus};
     use tempfile::TempDir;
@@ -1632,6 +1106,35 @@ mod tests {
         assert!(!report.metrics.indexing.is_degraded());
         assert_eq!(report.metrics.indexing.scheduling.peak_active_workers, 1);
         assert_eq!(report.metrics.indexing.scheduling.parallel_parse_files, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn phase_measurements_carry_the_language_of_their_adapter() -> Result<(), Box<dyn Error>> {
+        let repository = repository()?;
+        fs::write(
+            repository.path().join("main.go"),
+            "package main\n\nfunc main() {}\n",
+        )?;
+        fs::write(repository.path().join("tool.py"), "def tool():\n    pass\n")?;
+
+        let report = index_repository(repository.path())?;
+        let parse_languages: Vec<_> = report
+            .metrics
+            .indexing
+            .phases
+            .iter()
+            .filter(|phase| phase.phase == IndexPhase::ParseExtraction)
+            .map(|phase| phase.language)
+            .collect();
+        assert!(
+            parse_languages.contains(&Some(Language::Go)),
+            "Go parse phase missing or misattributed: {parse_languages:?}"
+        );
+        assert!(
+            parse_languages.contains(&Some(Language::Python)),
+            "Python parse phase missing or misattributed: {parse_languages:?}"
+        );
         Ok(())
     }
 
@@ -1912,121 +1415,6 @@ mod tests {
                 RepoRelativePath::new("legacy.rs")?,
             ]
         );
-        Ok(())
-    }
-
-    #[test]
-    fn sources_vanishing_between_inventory_and_read_are_skipped() -> Result<(), Box<dyn Error>> {
-        let repository = repository()?;
-        fs::write(repository.path().join("lib.rs"), "pub fn retained() {}\n")?;
-        let inventory = chakra_git::WorkspaceInventory {
-            sources: vec![
-                RepoRelativePath::new("lib.rs")?,
-                RepoRelativePath::new("vanished.rs")?,
-            ],
-            metadata_inputs: vec![RepoRelativePath::new("missing/Cargo.toml")?],
-        };
-        let operation = OperationContext::from_cancellation(IndexCancellation::default());
-        let scan = scan_discovered_sources_with_options(
-            repository.path(),
-            &IndexOptions::default(),
-            &inventory,
-            Duration::ZERO,
-            &mut FilesystemSourceLoader,
-            &operation,
-        )?;
-        assert_eq!(scan.discovered_files, 2);
-        assert_eq!(scan.indexed_files, 1);
-        assert_eq!(scan.unreadable_files, 2);
-        assert_eq!(
-            scan.unreadable_paths,
-            vec![
-                RepoRelativePath::new("vanished.rs")?,
-                RepoRelativePath::new("missing/Cargo.toml")?,
-            ]
-        );
-        assert_eq!(scan.sources.file_count(Language::Rust), 1);
-        Ok(())
-    }
-
-    #[test]
-    fn per_file_read_failures_skip_but_other_loader_errors_abort() -> Result<(), Box<dyn Error>> {
-        struct FlakyLoader {
-            failing: RepoRelativePath,
-            error: fn(&RepoRelativePath) -> WorkspaceIndexError,
-        }
-
-        impl WorkspaceSourceLoader for FlakyLoader {
-            fn observe(&mut self, _path: &RepoRelativePath, _metadata: &fs::Metadata) {}
-
-            fn observe_metadata(&mut self, _path: &RepoRelativePath, _metadata: &fs::Metadata) {}
-
-            fn load(
-                &mut self,
-                absolute: &Path,
-                path: &RepoRelativePath,
-                metadata: &fs::Metadata,
-                max_bytes: u64,
-            ) -> Result<Arc<str>, WorkspaceIndexError> {
-                if *path == self.failing {
-                    return Err((self.error)(path));
-                }
-                FilesystemSourceLoader.load(absolute, path, metadata, max_bytes)
-            }
-        }
-
-        let repository = repository()?;
-        fs::write(repository.path().join("lib.rs"), "pub fn retained() {}\n")?;
-        fs::write(repository.path().join("broken.rs"), "pub fn lost() {}\n")?;
-        let inventory = chakra_git::WorkspaceInventory {
-            sources: vec![
-                RepoRelativePath::new("broken.rs")?,
-                RepoRelativePath::new("lib.rs")?,
-            ],
-            metadata_inputs: Vec::new(),
-        };
-
-        let mut read_failure = FlakyLoader {
-            failing: RepoRelativePath::new("broken.rs")?,
-            error: |path| WorkspaceIndexError::Read {
-                path: path.clone(),
-                source: io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "stream did not contain valid UTF-8",
-                ),
-            },
-        };
-        let operation = OperationContext::from_cancellation(IndexCancellation::default());
-        let scan = scan_discovered_sources_with_options(
-            repository.path(),
-            &IndexOptions::default(),
-            &inventory,
-            Duration::ZERO,
-            &mut read_failure,
-            &operation,
-        )?;
-        assert_eq!(scan.indexed_files, 1);
-        assert_eq!(scan.unreadable_files, 1);
-        assert_eq!(
-            scan.unreadable_paths,
-            vec![RepoRelativePath::new("broken.rs")?]
-        );
-
-        let mut update_failure = FlakyLoader {
-            failing: RepoRelativePath::new("broken.rs")?,
-            error: |path| {
-                WorkspaceIndexError::Update(format!("source `{path}` changed while reading"))
-            },
-        };
-        let result = scan_discovered_sources_with_options(
-            repository.path(),
-            &IndexOptions::default(),
-            &inventory,
-            Duration::ZERO,
-            &mut update_failure,
-            &operation,
-        );
-        assert!(matches!(result, Err(WorkspaceIndexError::Update(_))));
         Ok(())
     }
 }

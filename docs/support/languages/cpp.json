@@ -157,7 +157,7 @@
       "mechanism": "chakra-git current-worktree and base-ref diff provider",
       "evidence": [
         "docs/support/conformance/cpp.json",
-        "crates/chakra-git/src/lib.rs"
+        "crates/chakra-git/src/diff.rs"
       ]
     },
     "FRESH-01": {

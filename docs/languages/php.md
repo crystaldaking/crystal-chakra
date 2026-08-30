@@ -80,7 +80,8 @@ follow-up (ADR-0029).
 - Conformance: `docs/support/conformance/php.json` (14/14 scenarios).
 - Corpus: `docs/support/corpus/results/php-laravel__framework.json`,
   `docs/support/corpus/results/php-symfony__symfony.json`.
-- Strict-tier promotion: `crates/chakra-language-php/src/indexer.rs`
+- Strict-tier promotion: `crates/chakra-language-php/src/indexer/catalog.rs`
+  with focused tests in `crates/chakra-language-php/src/indexer/tests.rs`
   (`strict_tier_receiver_calls_promote_to_chakra_resolver_precise`,
   `non_strict_receiver_calls_stay_heuristic`,
   `ambiguous_inherited_candidates_stay_heuristic`) and

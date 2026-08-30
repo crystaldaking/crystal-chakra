@@ -165,7 +165,7 @@
       "mechanism": "chakra-git worktree/base-ref diff provider for HCL files",
       "evidence": [
         "docs/support/conformance/hcl.json",
-        "crates/chakra-git/src/lib.rs"
+        "crates/chakra-git/src/diff.rs"
       ]
     },
     "FRESH-01": {

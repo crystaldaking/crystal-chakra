@@ -46,6 +46,7 @@ fn require_fresh_is_rejected_until_first_reconciliation() -> Result<(), Box<dyn 
     assert_eq!(
         engine
             .context(ContextRequest {
+                source: Default::default(),
                 symbol: Some(SymbolRef::ByName("refund".to_owned())),
                 ..ContextRequest::default()
             })
@@ -55,6 +56,7 @@ fn require_fresh_is_rejected_until_first_reconciliation() -> Result<(), Box<dyn 
     assert_eq!(
         engine
             .callers(CallersRequest {
+                source: Default::default(),
                 symbol: Some(SymbolRef::ByName("refund".to_owned())),
                 ..CallersRequest::default()
             })
@@ -68,6 +70,7 @@ fn require_fresh_is_rejected_until_first_reconciliation() -> Result<(), Box<dyn 
 fn allow_stale_is_served_with_a_stale_envelope() -> Result<(), Box<dyn Error>> {
     let engine = unindexed_engine()?;
     let envelope = engine.repo_map(RepoMapRequest {
+        include_project_scope: false,
         freshness: FreshnessRequirement::AllowStale,
         ..RepoMapRequest::default()
     })?;
@@ -138,6 +141,7 @@ fn freshness_is_revoked_when_the_worktree_changes() -> Result<(), Box<dyn Error>
 
     let revision = engine.snapshot().revision();
     let rejected = engine.callers(CallersRequest {
+        source: Default::default(),
         symbol: Some(SymbolRef::ById {
             id: ids.provider_refund,
             revision,

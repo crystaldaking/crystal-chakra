@@ -89,6 +89,7 @@ fn callers_stop_at_the_edge_budget_and_keep_deterministic_top_results() -> Resul
     let engine = publish(graph)?;
     let revision = engine.snapshot().revision();
     let request = CallersRequest {
+        source: Default::default(),
         symbol: Some(SymbolRef::ById {
             id: target,
             revision,
@@ -144,6 +145,7 @@ fn repeated_ambiguous_sites_aggregate_without_scanning_the_whole_degree()
     let engine = publish(graph)?;
     let revision = engine.snapshot().revision();
     let result = engine.callers(CallersRequest {
+        source: Default::default(),
         symbol: Some(SymbolRef::ById {
             id: target_a,
             revision,
@@ -197,6 +199,7 @@ fn incoming_candidates_stop_before_exceeding_the_intermediate_budget() -> Result
     let engine = publish(graph)?;
     let revision = engine.snapshot().revision();
     let result = engine.callers(CallersRequest {
+        source: Default::default(),
         symbol: Some(SymbolRef::ById {
             id: target_a,
             revision,
@@ -228,6 +231,7 @@ fn repo_map_streams_a_sorted_prefix_without_materializing_every_summary()
     }
     let engine = publish(graph)?;
     let result = engine.repo_map(RepoMapRequest {
+        include_project_scope: false,
         limit: Some(20),
         ..RepoMapRequest::default()
     })?;
@@ -268,11 +272,13 @@ fn repo_map_pages_composite_language_partitions_in_global_path_order() -> Result
 
     let engine = publish(SymbolGraph::merge([rust, php])?)?;
     let first = engine.repo_map(RepoMapRequest {
+        include_project_scope: false,
         limit: Some(1),
         ..RepoMapRequest::default()
     })?;
     assert_eq!(first.data.files[0].path.as_str(), "a-first.php");
     let second = engine.repo_map(RepoMapRequest {
+        include_project_scope: false,
         cursor: first.data.next_cursor,
         limit: Some(1),
         ..RepoMapRequest::default()
@@ -329,10 +335,12 @@ fn diff_context_stops_symbol_collection_at_the_examined_budget() -> Result<(), B
     engine.install_diff_provider(Arc::new(OneFileDiff { path }))?;
 
     let first = engine.diff_context(DiffContextRequest {
+        source: Default::default(),
         limit: Some(20),
         ..DiffContextRequest::default()
     })?;
     let second = engine.diff_context(DiffContextRequest {
+        source: Default::default(),
         limit: Some(20),
         ..DiffContextRequest::default()
     })?;

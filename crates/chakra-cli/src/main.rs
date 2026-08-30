@@ -304,6 +304,7 @@ async fn serve(args: ServeArgs) -> ExitCode {
     }
     let mut update = engine.begin_update();
     update.set_provider_inputs(report.provider_inputs.clone());
+    update.set_project_model(report.project_model.clone());
     update.replace_graph(report.graph);
     update.set_indexing(report.metrics.indexing.clone());
     update.set_status(WorkspaceStatus::Indexing);

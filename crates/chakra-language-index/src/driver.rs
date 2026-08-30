@@ -258,12 +258,11 @@ impl<H: LanguageHooks> LanguageSyntaxIndex<H> {
         });
         let parse_phase = measured_phase(
             IndexPhase::ParseExtraction,
+            H::language(),
             parse_started,
             files.len() as u64,
             parsed_source_bytes,
-            parse_schedule.effective_workers,
-            parse_schedule.peak_active_workers,
-            parse_schedule.peak_queue_depth,
+            parse_schedule,
         );
         check_cancelled(cancellation)?;
         let mut files = files;
@@ -272,12 +271,15 @@ impl<H: LanguageHooks> LanguageSyntaxIndex<H> {
         let catalog = SymbolCatalog::new(&files);
         let catalog_phase = measured_phase(
             IndexPhase::SymbolCatalog,
+            H::language(),
             catalog_started,
             files.values().map(|file| file.symbols.len() as u64).sum(),
             0,
-            1,
-            1,
-            0,
+            ParseSchedule {
+                effective_workers: 1,
+                peak_active_workers: 1,
+                peak_queue_depth: 0,
+            },
         );
         let relationships_started = PhaseTimer::start();
         let relationships =
@@ -289,12 +291,15 @@ impl<H: LanguageHooks> LanguageSyntaxIndex<H> {
         });
         let relationships_phase = measured_phase(
             IndexPhase::Relationships,
+            H::language(),
             relationships_started,
             relationship_items,
             0,
-            1,
-            1,
-            0,
+            ParseSchedule {
+                effective_workers: 1,
+                peak_active_workers: 1,
+                peak_queue_depth: 0,
+            },
         );
         let mut index = Self {
             files,
@@ -312,15 +317,18 @@ impl<H: LanguageHooks> LanguageSyntaxIndex<H> {
         index.graph_report = graph_report;
         let materialize_phase = measured_phase(
             IndexPhase::GraphMaterialization,
+            H::language(),
             materialize_started,
             graph_report
                 .retained_symbols
                 .saturating_add(graph_report.retained_edges)
                 .saturating_add(graph_report.retained_call_sites),
             0,
-            1,
-            1,
-            0,
+            ParseSchedule {
+                effective_workers: 1,
+                peak_active_workers: 1,
+                peak_queue_depth: 0,
+            },
         );
         let phases = vec![
             parse_phase,
@@ -431,8 +439,17 @@ impl<H: LanguageHooks> LanguageSyntaxIndex<H> {
                 changed_paths.insert(path.clone());
             }
         }
-        let metadata_changed = self.metadata != metadata;
-        if changed_paths.is_empty() && !limits_changed && !metadata_changed {
+        // Manifest-derived metadata is tracked per retained path so an
+        // external manifest/config edit invalidates exactly the files whose
+        // derived metadata changed instead of the whole language (issue #40).
+        let metadata_changed_paths: BTreeSet<RepoRelativePath> = sources
+            .keys()
+            .filter(|path| self.files.contains_key(*path))
+            .filter(|path| self.metadata.get(*path) != metadata.get(*path))
+            .cloned()
+            .collect();
+        metrics.metadata_files_recomputed = metadata_changed_paths.len() as u64;
+        if changed_paths.is_empty() && !limits_changed && metadata_changed_paths.is_empty() {
             metrics.syntax_error_files = self.syntax_error_files();
             metrics.truncated_call_sites = self.truncated_call_sites();
             metrics.publication = self.reuse_all_publication();
@@ -605,12 +622,12 @@ impl<H: LanguageHooks> LanguageSyntaxIndex<H> {
             && self.graph_report.omitted_call_sites == 0;
         let delta_fits = next_facts.symbols <= graph_limits.max_symbols
             && next_facts.call_sites <= graph_limits.max_call_sites;
-        let delta_candidate =
-            !limits_changed && !metadata_changed && complete_previous && delta_fits;
+        let delta_candidate = !limits_changed && complete_previous && delta_fits;
         let delta = if delta_candidate {
             next.materialize_graph_delta(
                 &self.graph,
                 &structural_changed_paths,
+                &metadata_changed_paths,
                 &affected_owners,
                 &affected_call_owners,
                 &stable_symbol_paths,
@@ -647,6 +664,7 @@ impl<H: LanguageHooks> LanguageSyntaxIndex<H> {
             phases: vec![
                 phase(
                     IndexPhase::ParseExtraction,
+                    H::language(),
                     parse_elapsed,
                     metrics.reparsed_files,
                     changed_paths
@@ -655,15 +673,23 @@ impl<H: LanguageHooks> LanguageSyntaxIndex<H> {
                         .map(|file| file.source.len() as u64)
                         .sum(),
                 ),
-                phase(IndexPhase::SymbolCatalog, catalog_elapsed, facts.symbols, 0),
+                phase(
+                    IndexPhase::SymbolCatalog,
+                    H::language(),
+                    catalog_elapsed,
+                    facts.symbols,
+                    0,
+                ),
                 phase(
                     IndexPhase::Relationships,
+                    H::language(),
                     relationships_elapsed,
                     metrics.relationship_files_recomputed,
                     0,
                 ),
                 phase(
                     IndexPhase::GraphMaterialization,
+                    H::language(),
                     materialize_started.elapsed(),
                     if metrics.publication.structurally_incremental {
                         metrics
@@ -832,10 +858,12 @@ impl<H: LanguageHooks> LanguageSyntaxIndex<H> {
         Ok((graph, report))
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn materialize_graph_delta(
         &self,
         previous: &SymbolGraph,
         changed_paths: &BTreeSet<RepoRelativePath>,
+        metadata_changed_paths: &BTreeSet<RepoRelativePath>,
         relationship_owners: &BTreeSet<RepoRelativePath>,
         call_owners: &BTreeSet<RepoRelativePath>,
         stable_symbol_paths: &BTreeSet<RepoRelativePath>,
@@ -908,6 +936,22 @@ impl<H: LanguageHooks> LanguageSyntaxIndex<H> {
                     Precision::Syntax,
                 )?;
             }
+        }
+        // Manifest/config-driven metadata changes update exactly the affected
+        // file records in place: symbol ids, edges, and call sites are
+        // preserved because metadata never participates in identity.
+        for path in metadata_changed_paths {
+            check_cancelled(cancellation)?;
+            let Some(metadata) = self.metadata.get(path) else {
+                continue;
+            };
+            if graph
+                .file_metadata(path)
+                .is_some_and(|current| current == metadata)
+            {
+                continue;
+            }
+            graph.replace_file_metadata(path, metadata.clone())?;
         }
         for owner in relationship_owners {
             check_cancelled(cancellation)?;
@@ -1289,13 +1333,14 @@ fn check_cancelled(cancellation: &IndexCancellation) -> Result<(), LanguageIndex
 
 fn phase(
     phase: IndexPhase,
+    language: Language,
     elapsed: Duration,
     work_items: u64,
     bytes: u64,
 ) -> IndexPhaseMeasurement {
     IndexPhaseMeasurement {
         phase,
-        language: Some(Language::Go),
+        language: Some(language),
         elapsed_micros: elapsed.as_micros().min(u128::from(u64::MAX)) as u64,
         cpu_micros: None,
         cpu_utilization_per_mille: None,
@@ -1311,12 +1356,11 @@ fn phase(
 
 fn measured_phase(
     phase: IndexPhase,
+    language: Language,
     started: PhaseTimer,
     work_items: u64,
     bytes: u64,
-    effective_workers: u64,
-    peak_active_workers: u64,
-    peak_queue_depth: u64,
+    scheduling: ParseSchedule,
 ) -> IndexPhaseMeasurement {
     let elapsed_micros = started.wall.elapsed().as_micros().min(u128::from(u64::MAX)) as u64;
     let cpu_micros = process_cpu_micros()
@@ -1329,7 +1373,7 @@ fn measured_phase(
     });
     IndexPhaseMeasurement {
         phase,
-        language: Some(Language::Go),
+        language: Some(language),
         elapsed_micros,
         cpu_micros,
         cpu_utilization_per_mille,
@@ -1338,14 +1382,14 @@ fn measured_phase(
         effective_workers: if work_items == 0 {
             0
         } else {
-            effective_workers
+            scheduling.effective_workers
         },
         peak_active_workers: if work_items == 0 {
             0
         } else {
-            peak_active_workers
+            scheduling.peak_active_workers
         },
-        peak_queue_depth,
+        peak_queue_depth: scheduling.peak_queue_depth,
         rss_bytes: (work_items >= PHASE_RESOURCE_SAMPLE_THRESHOLD)
             .then(process_rss_bytes)
             .flatten(),

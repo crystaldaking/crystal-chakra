@@ -36,6 +36,10 @@ impl LanguageHooks for HclHooks {
 
     const WORKER_NAME: &'static str = "hcl";
 
+    fn language() -> chakra_domain::symbol::Language {
+        chakra_domain::symbol::Language::Hcl
+    }
+
     fn new_parser() -> Result<Self::Parser, HclIndexError> {
         HclParser::new().map_err(|error| HclIndexError::Parse(error.to_string()))
     }

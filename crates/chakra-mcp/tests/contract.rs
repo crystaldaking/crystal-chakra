@@ -11,12 +11,17 @@ use std::time::Instant;
 
 use chakra_domain::envelope::QueryEnvelope;
 use chakra_domain::identity::WorkspaceIdentity;
+use chakra_domain::indexing::{
+    CacheHealth, FileInvalidation, FileInvalidationReason, IndexingDiagnostics, LiveQueueState,
+    SYNTAX_FACT_CACHE_DISABLED_REASON,
+};
 use chakra_domain::operation::OperationContext;
 use chakra_domain::query::{
     CallersRequest, ContextRequest, DiffContextRequest, IndexCounts, QueryError, QueryService,
     RepoMapRequest, SearchRequest, StatusData, StatusRequest, SymbolSearchRequest,
 };
 use chakra_domain::revision::Revision;
+use chakra_domain::scheduling::{WorkClass, WorkQueueMetrics};
 use chakra_domain::source::SourceMetadataCoverage;
 use chakra_domain::state::{Freshness, ProviderState, WorkspaceStatus};
 use chakra_engine::WorkspaceEngine;
@@ -78,6 +83,30 @@ impl QueryService for StubService {
                     path_fallback_files: 1,
                 },
                 syntax_diagnostics: Default::default(),
+                index_diagnostics: Some(IndexingDiagnostics {
+                    cache: CacheHealth::Disabled {
+                        reason: SYNTAX_FACT_CACHE_DISABLED_REASON.to_owned(),
+                    },
+                    counters: Default::default(),
+                    queue: LiveQueueState {
+                        scheduled_work: {
+                            let mut metrics = WorkQueueMetrics::default();
+                            metrics.for_class_mut(WorkClass::FreshnessEdit).enqueued = 1;
+                            metrics
+                        },
+                        ..LiveQueueState::default()
+                    },
+                    project_invalidations: Default::default(),
+                    last_reconciliation_kind: Default::default(),
+                    full_reconciliation_reasons: Default::default(),
+                    last_full_reconciliation_reasons: Vec::new(),
+                    recent_file_invalidations: vec![FileInvalidation {
+                        path: chakra_domain::location::RepoRelativePath::new("src/lib.rs")
+                            .map_err(|_| QueryError::Invalid("stub path".to_owned()))?,
+                        reason: FileInvalidationReason::ContentChanged,
+                    }],
+                    file_invalidation_records: 1,
+                }),
             },
         ))
     }
@@ -239,6 +268,19 @@ async fn status_tool_is_listed_and_callable() -> Result<(), Box<dyn Error + Send
     assert_eq!(structured["data"]["counts"]["symbols"], 2);
     assert_eq!(structured["data"]["query_execution"]["queued"], 0);
     assert_eq!(structured["data"]["query_execution"]["running"], 0);
+    // Live indexing diagnostics serialize as typed domain data (issue #43).
+    assert_eq!(
+        structured["data"]["index_diagnostics"]["cache"]["state"],
+        "disabled"
+    );
+    assert_eq!(
+        structured["data"]["index_diagnostics"]["recent_file_invalidations"][0]["reason"],
+        "content_changed"
+    );
+    assert_eq!(
+        structured["data"]["index_diagnostics"]["queue"]["scheduled_work"]["freshness_edit"]["enqueued"],
+        1
+    );
     assert_eq!(
         structured["data"]["syntax_diagnostics"]["total_diagnostics"],
         0
@@ -1682,6 +1724,154 @@ final class PaymentServiceTest {
         related_tests[0]["relation"]["representative_call_sites"][0]["receiver_type_source"],
         "local_new"
     );
+
+    client.cancel().await?;
+    let running = server_task
+        .await
+        .map_err(|error| std::io::Error::other(format!("server task join: {error}")))?
+        .map_err(|error| std::io::Error::other(format!("server serve: {error}")))?;
+    running.cancel().await?;
+    Ok(())
+}
+
+fn indexed_cargo_workspace_engine()
+-> Result<(TempDir, WorkspaceEngine), Box<dyn Error + Send + Sync>> {
+    let repository = TempDir::new()?;
+    let root = repository.path();
+    git(root, &["init", "--quiet"])?;
+    git(root, &["config", "user.email", "tests@example.invalid"])?;
+    git(root, &["config", "user.name", "Chakra Tests"])?;
+    let write = |path: &str, contents: &str| -> Result<(), Box<dyn Error + Send + Sync>> {
+        let absolute = root.join(path);
+        if let Some(parent) = absolute.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(absolute, contents)?;
+        Ok(())
+    };
+    write(
+        "Cargo.toml",
+        "[workspace]\nmembers = [\"crates/core\", \"crates/cli\"]\nresolver = \"3\"\n",
+    )?;
+    write(
+        "crates/core/Cargo.toml",
+        "[package]\nname = \"core\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+    )?;
+    write(
+        "crates/cli/Cargo.toml",
+        "[package]\nname = \"cli\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[dependencies]\ncore = { path = \"../core\" }\n",
+    )?;
+    write("crates/core/src/lib.rs", "pub fn shared_helper() {}\n")?;
+    write(
+        "crates/cli/src/main.rs",
+        "fn main() { core::shared_helper(); }\n",
+    )?;
+    let status = Command::new("cargo")
+        .current_dir(root)
+        .args(["generate-lockfile", "--offline"])
+        .status()?;
+    if !status.success() {
+        return Err("cargo generate-lockfile failed".into());
+    }
+    git(root, &["add", "."])?;
+    git(root, &["commit", "--quiet", "-m", "base"])?;
+    let report = index_repository(root)?;
+    let identity = WorkspaceIdentity::for_primary_worktree(&report.repository_root)?;
+    let engine = WorkspaceEngine::new(identity);
+    let mut update = engine.begin_update();
+    update.set_project_model(report.project_model.clone());
+    update.replace_graph(report.graph);
+    update.set_indexing(report.metrics.indexing);
+    update.set_status(WorkspaceStatus::Ready);
+    update.set_freshness(Freshness::Fresh);
+    engine.publish(update)?;
+    Ok((repository, engine))
+}
+
+#[tokio::test]
+async fn cargo_workspace_project_scope_is_exposed_through_mcp_tools()
+-> Result<(), Box<dyn Error + Send + Sync>> {
+    let (_repository, engine) = indexed_cargo_workspace_engine()?;
+    let server = ChakraMcpServer::new(Arc::new(engine));
+    let (server_transport, client_transport) = tokio::io::duplex(64 * 1024);
+    let server_task = tokio::spawn(async move { server.serve(server_transport).await });
+    let client = ().serve(client_transport).await?;
+
+    let repo_map = client
+        .call_tool(
+            CallToolRequestParams::new("repo_map").with_arguments(serde_json::from_value(
+                serde_json::json!({ "include_project_scope": true, "limit": 20 }),
+            )?),
+        )
+        .await?
+        .structured_content
+        .ok_or("repo_map response missing")?;
+    let units = repo_map["data"]["project_scope"]["units"]
+        .as_array()
+        .ok_or("project scope units missing")?;
+    let core = units
+        .iter()
+        .find(|unit| unit["name"] == "core")
+        .ok_or("core unit missing")?;
+    assert_eq!(core["kind"], "cargo_package");
+    assert_eq!(core["id"], "cargo:crates/core:core");
+    assert_eq!(core["file_count"], 1);
+    assert_eq!(core["symbol_count"], 1);
+    let cli = units
+        .iter()
+        .find(|unit| unit["name"] == "cli")
+        .ok_or("cli unit missing")?;
+    assert_eq!(
+        cli["dependencies"][0]["target"],
+        serde_json::json!("cargo:crates/core:core"),
+        "the path dependency must resolve to the workspace unit"
+    );
+    assert_eq!(
+        repo_map["data"]["project_scope"]["ambiguous_files"],
+        serde_json::json!(0)
+    );
+
+    // Typed unit scoping by package name over the same wire contract.
+    let scoped = client
+        .call_tool(CallToolRequestParams::new("symbol_search").with_arguments(
+            serde_json::from_value(serde_json::json!({
+                "query": "shared_helper",
+                "source": { "project": { "package": "core" } }
+            }))?,
+        ))
+        .await?
+        .structured_content
+        .ok_or("scoped symbol_search response missing")?;
+    assert_eq!(
+        scoped["data"]["candidates"].as_array().map(Vec::len),
+        Some(1)
+    );
+    let out_of_scope = client
+        .call_tool(CallToolRequestParams::new("symbol_search").with_arguments(
+            serde_json::from_value(serde_json::json!({
+                "query": "shared_helper",
+                "source": { "project": { "package": "cli" } }
+            }))?,
+        ))
+        .await?
+        .structured_content
+        .ok_or("out-of-scope symbol_search response missing")?;
+    assert_eq!(
+        out_of_scope["data"]["candidates"].as_array().map(Vec::len),
+        Some(0)
+    );
+
+    // An unknown package is a typed invalid-params error, never an empty
+    // silent filter.
+    let unknown =
+        client
+            .call_tool(CallToolRequestParams::new("repo_map").with_arguments(
+                serde_json::from_value(serde_json::json!({
+                    "source": { "project": { "package": "missing" } }
+                }))?,
+            ))
+            .await;
+    assert!(unknown.is_err(), "unknown project package must fail typed");
 
     client.cancel().await?;
     let running = server_task

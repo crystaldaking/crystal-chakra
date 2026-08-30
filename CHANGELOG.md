@@ -5,6 +5,166 @@ version tags prefixed with `v`.
 
 ## [Unreleased]
 
+### Evaluation
+
+- Incremental Tree-sitter parsing (`Tree::edit` + reparse with the retained
+  tree) was benchmarked against full reparse across rust, php, go, python,
+  and typescript with a new benchmark-only harness in `chakra-conformance`
+  (hermetic generated sources for CI plus opt-in pinned-corpus runs; issue
+  #45). Verdict: **no-go**. Incremental parses are fact-exact (zero
+  structural divergences in ~2,970 comparisons, including randomized edit
+  fuzz) and 13–363× faster on small and large-file edits, but retained trees
+  cost 22.6–36.0 bytes per source byte (budget was 5×) and whole-file
+  replacement regresses 1.3–2.5× for rust/php/go. Evidence and thresholds:
+  `docs/evaluation/v0.2.0-incremental-tree-sitter.md`. Production indexing
+  is unchanged.
+
+### Changed
+
+- Oversized Git diff, shared indexing/live-indexing, PHP indexing, and C#
+  indexing modules were split into focused internal modules (issues #124–127).
+  Public crate APIs, query contracts, and indexing semantics are unchanged;
+  support-matrix evidence now follows the relocated implementation and tests.
+- Interactive indexing is prioritized over background work (issue #44).
+  `chakra-domain` defines the typed bounded priority classes (`WorkClass`:
+  freshness edits, provider sync, reconciliation, cache warmup, maintenance)
+  plus per-class queue instrumentation (`WorkQueueMetrics`: enqueued,
+  dequeued, cancelled, superseded, rejected, and histogram-lite latency per
+  class). The live syntax worker now stages watcher/barrier signals in a
+  bounded priority queue with aging fairness, and the periodic full content
+  reread (the reconciliation checkpoint interval) is scheduled as queued
+  `Reconciliation`-class background work instead of silently inflating the
+  next freshness reconcile, so a one-file edit overtakes it. A full reconcile
+  — however triggered — cancels queued checkpoints as obsolete work, and
+  shutdown cancels everything left staged. Provider-pool admission gained
+  bounded aging and per-priority queue latency in
+  `ProviderOrchestrationMetrics::queue_latency_by_priority`.
+
+### Tooling
+
+- A reproducible `linux/amd64` container test environment now pins the Rust
+  toolchain and all nine supported language-server executables (issue #123).
+  `tools/run_lsp_tests.sh` builds the checksum-verified image, keeps Cargo and
+  target caches in named volumes, runs the default workspace suite plus every
+  existing real-provider smoke test, and supports selective provider runs
+  without requiring language servers on the host.
+- New `chakra-conformance persistence` benchmark (issue #38): measures cold
+  rebuild, model-cache write, warm restore, cache validation, and one-file
+  refresh for small fixtures and the pinned Rust/PHP corpus repositories,
+  recording machine context, corpus fingerprint, index configuration, wall
+  time, CPU, peak RSS, bytes read/written, and hit ratio into
+  schema-versioned artifacts under `target/persistence/`. The synthetic
+  per-file cache is explicitly a model — it does not implement graph
+  restoration. The acceptance decision and go/no-go budgets for issue #39 are
+  recorded in `docs/evaluation/v0.2.0-persistence-acceptance.md`.
+
+### Fixed
+
+- Indexing phase measurements from the shared language driver are now
+  attributed to the language whose adapter produced them instead of being
+  hardcoded to Go, so `status` reports per-language parse/catalog/
+  relationships/materialization phases correctly for all eight
+  shared-driver languages (issue #122).
+- Transport spawn now retries a transiently busy executable (ETXTBSY on a
+  loaded host when exec'ing a freshly written binary) within a bounded
+  10-second budget instead of failing provider startup permanently and
+  degrading the provider (issue #145). Provider lifecycle test harnesses
+  replace instantaneous process-death and marker-file assertions with
+  bounded poll-until-deadline waits.
+
+### Added
+
+- Lazy revision-scoped file facts (issue #42): a typed `LazyFactProducer`
+  contract in `chakra-engine` declares inputs (file content plus pinned
+  workspace revision), producer/format version, cost budget (wall time and
+  per-fact retained bytes), and provenance/precision; a bounded, typed
+  workspace-bound `LazyFactStore` per producer caches facts by typed
+  (path, content hash, revision) invalidation keys with count/byte LRU bounds
+  and diagnostic counters, coalesces concurrent duplicate requests into one
+  computation, applies strict in-flight backpressure, and never retains
+  failed, cancelled, or late results. `FileOutlineDigestProducer` is the first
+  producer (Tree-sitter/Syntax-tier per-file outline digest). A measured
+  lazy-vs-eager harness lives in
+  `chakra-conformance/tests/lazy_file_facts.rs` (hermetic synthetic corpus in
+  CI, opt-in real worktree via `CHAKRA_LAZY_FACTS_WORKTREE`); numbers are
+  recorded in `docs/evaluation/v0.2.0-lazy-file-facts.md`.
+- Dependency-aware index invalidation (issue #40). Derived facts now track
+  their external inputs as typed records: a `ProjectModelImpact` diff between
+  the published and the scanned project model records exactly which units
+  changed and why (added/removed packages — covering moves and renames —
+  source-root/autoload edits, dependency-edge edits, workspace membership
+  edits, and manifest probe/parse issue transitions) plus the unchanged units
+  that declare dependency edges targeting them. Manifest/config-driven
+  `SourceMetadata` changes are diffed per retained path inside every language
+  adapter, so a Composer autoload edit, a Cargo membership edit, or a
+  manifest delete re-materializes exactly the affected files' graph records
+  in place (symbol ids, edges, and call sites are preserved) instead of
+  rebuilding the whole language graph; pure per-file syntax facts remain a
+  deterministic function of file content and extractor version and are never
+  reparsed by manifest edits. The Laravel framework opt-in is re-derived from
+  the typed project model on every reconcile, so adding or removing
+  `laravel/framework` toggles framework facts for PHP files only, without
+  touching other languages.
+- New typed metrics prove the invalidation scope: per-reconciliation
+  `metadata_files_recomputed`, `framework_config_changes`, and
+  `DependencyImpactMetrics` (impacted units/dependents and per-reason unit
+  change counts) on `ReconcileReport`, accumulated live on
+  `LiveIndexMetrics`. Full content rereads stay the bounded conservative
+  fallback for missed watcher events and now always record a typed
+  `FullReconciliationReason` (`FullReconciliationReasons` counters plus the
+  last reason), covering cache initialization, watcher errors, dropped
+  events, uncertain hints/epoch gaps, checkpoint intervals, and scan
+  instability.
+- Cargo and Composer packages are now modeled as explicit, typed project
+  scopes (issue #41). A new `ProjectModel` in `chakra-domain` represents
+  workspace/package identity, unit roots, source roots with roles, declared
+  dependency edges (Cargo path dependencies resolve to workspace units;
+  Composer platform packages are not edges), and generated/vendor boundaries
+  as Chakra-owned types built from the existing bounded manifest probing — no
+  Cargo or Composer protocol structures leak into the domain. Sources no
+  Cargo/Composer unit claims group into deterministic path-fallback units;
+  other ecosystems stay on the path fallback by design.
+- The model is built from the same pinned Git inventory during the syntax
+  scan and published in the same atomic snapshot revision as the graph, so
+  metadata-only manifest edits reconcile and republish it without reparsing
+  sources, and fresh queries observe it (read-your-writes).
+- Query surface: `repo_map` gains an opt-in `include_project_scope` summary
+  section (per-unit file/symbol counts, source roots, dependencies, manifest
+  issues, honest ambiguous/unassigned file counts), and `repo_map`,
+  `symbol_search`, `context`, `callers`, and `diff_context` accept a typed
+  `source.project` selector (`unit` id or `package` name). Ambiguous
+  ownership matches no unit selector and is counted honestly; unknown
+  units/packages are typed invalid-request errors, never silent empty
+  filters. Malformed or unprobeable manifests degrade to recorded
+  `ProjectManifestIssue` entries plus path-fallback units; count-, byte-, or
+  deadline-bounded probes are reported distinctly as `probe_omitted` instead
+  of disappearing silently. Project-unit id components escape delimiters to
+  prevent identity collisions, and related-query scopes are applied before
+  response item limits so an out-of-scope prefix cannot hide valid results.
+  The query envelope schema is version 15.
+- Machine-readable indexing diagnostics (issue #43): the `status` query now
+  carries an additive typed `index_diagnostics` section when a live indexing
+  owner is installed. It reports reconcile counters (engine-observed cold
+  builds, warm no-op/targeted/full reconciliations, one-file edits, failures,
+  published revisions), cumulative and last full-reconciliation causes
+  (cold start, watcher error, missed watcher events, uncertain event
+  hints/epoch gaps, periodic checkpoint), a bounded newest-last window of
+  per-file invalidation records (path plus added/content-changed/
+  metadata-changed/removed reason, capped at 32 with a cumulative total),
+  cumulative project-scope impact counters plus the latest bounded typed
+  impact (changed unit ids/reasons, affected dependents, and manifest-issue
+  transitions),
+  live queue state (barrier generations, watcher counters, bounded event
+  queue capacity), and honest cache health. Phase timings, coverage, resource
+  samples, and degraded capabilities remain revision-scoped in the query
+  envelope's `indexing` status. Diagnostics are bounded, typed, and free of
+  source contents; MCP serializes the domain types without protocol leakage.
+- Cache health is reported as a typed `CacheHealth::Disabled` state: the
+  per-file syntax fact cache from issue #39 was rejected by the persistence
+  acceptance benchmarks (B1 restore 1.1–1.3× instead of ≥5×) and not shipped,
+  so cache version/compatibility, hit/miss/rebuild, and corruption-fallback
+  counters are honestly absent rather than fabricated.
+
 ## [0.1.3] - 2026-08-26
 
 Post-v0.1.2 correctness, query ergonomics, corpus resilience, dependency
