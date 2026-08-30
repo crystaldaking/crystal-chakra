@@ -178,6 +178,12 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "tree-sitter",
+ "tree-sitter-go",
+ "tree-sitter-php",
+ "tree-sitter-python",
+ "tree-sitter-rust",
+ "tree-sitter-typescript",
 ]
 
 [[package]]
