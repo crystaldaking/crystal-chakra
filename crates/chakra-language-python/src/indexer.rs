@@ -36,6 +36,10 @@ impl LanguageHooks for PythonHooks {
 
     const WORKER_NAME: &'static str = "python";
 
+    fn language() -> chakra_domain::symbol::Language {
+        chakra_domain::symbol::Language::Python
+    }
+
     fn new_parser() -> Result<Self::Parser, PythonIndexError> {
         PythonParser::new().map_err(|error| PythonIndexError::Parse(error.to_string()))
     }

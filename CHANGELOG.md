@@ -5,6 +5,14 @@ version tags prefixed with `v`.
 
 ## [Unreleased]
 
+### Fixed
+
+- Indexing phase measurements from the shared language driver are now
+  attributed to the language whose adapter produced them instead of being
+  hardcoded to Go, so `status` reports per-language parse/catalog/
+  relationships/materialization phases correctly for all eight
+  shared-driver languages (issue #122).
+
 ## [0.1.3] - 2026-08-26
 
 Post-v0.1.2 correctness, query ergonomics, corpus resilience, dependency

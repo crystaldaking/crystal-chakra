@@ -9,6 +9,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use chakra_domain::location::RepoRelativePath;
+use chakra_domain::symbol::Language;
 use chakra_git::ClassifiedSource;
 
 use crate::error::LanguageIndexError;
@@ -30,6 +31,10 @@ pub trait LanguageHooks: Send + Sync + 'static {
     /// Short name used for worker threads, spans, and diagnostics
     /// (for example `"go"`).
     const WORKER_NAME: &'static str;
+
+    /// Language whose work this adapter measures; phase metrics are
+    /// attributed to it.
+    fn language() -> Language;
 
     fn new_parser() -> Result<Self::Parser, LanguageIndexError>;
 

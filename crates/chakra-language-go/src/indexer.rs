@@ -37,6 +37,10 @@ impl LanguageHooks for GoHooks {
 
     const WORKER_NAME: &'static str = "go";
 
+    fn language() -> chakra_domain::symbol::Language {
+        chakra_domain::symbol::Language::Go
+    }
+
     fn new_parser() -> Result<Self::Parser, GoIndexError> {
         GoParser::new().map_err(|error| GoIndexError::Parse(error.to_string()))
     }

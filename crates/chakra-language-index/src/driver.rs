@@ -258,12 +258,11 @@ impl<H: LanguageHooks> LanguageSyntaxIndex<H> {
         });
         let parse_phase = measured_phase(
             IndexPhase::ParseExtraction,
+            H::language(),
             parse_started,
             files.len() as u64,
             parsed_source_bytes,
-            parse_schedule.effective_workers,
-            parse_schedule.peak_active_workers,
-            parse_schedule.peak_queue_depth,
+            parse_schedule,
         );
         check_cancelled(cancellation)?;
         let mut files = files;
@@ -272,12 +271,15 @@ impl<H: LanguageHooks> LanguageSyntaxIndex<H> {
         let catalog = SymbolCatalog::new(&files);
         let catalog_phase = measured_phase(
             IndexPhase::SymbolCatalog,
+            H::language(),
             catalog_started,
             files.values().map(|file| file.symbols.len() as u64).sum(),
             0,
-            1,
-            1,
-            0,
+            ParseSchedule {
+                effective_workers: 1,
+                peak_active_workers: 1,
+                peak_queue_depth: 0,
+            },
         );
         let relationships_started = PhaseTimer::start();
         let relationships =
@@ -289,12 +291,15 @@ impl<H: LanguageHooks> LanguageSyntaxIndex<H> {
         });
         let relationships_phase = measured_phase(
             IndexPhase::Relationships,
+            H::language(),
             relationships_started,
             relationship_items,
             0,
-            1,
-            1,
-            0,
+            ParseSchedule {
+                effective_workers: 1,
+                peak_active_workers: 1,
+                peak_queue_depth: 0,
+            },
         );
         let mut index = Self {
             files,
@@ -312,15 +317,18 @@ impl<H: LanguageHooks> LanguageSyntaxIndex<H> {
         index.graph_report = graph_report;
         let materialize_phase = measured_phase(
             IndexPhase::GraphMaterialization,
+            H::language(),
             materialize_started,
             graph_report
                 .retained_symbols
                 .saturating_add(graph_report.retained_edges)
                 .saturating_add(graph_report.retained_call_sites),
             0,
-            1,
-            1,
-            0,
+            ParseSchedule {
+                effective_workers: 1,
+                peak_active_workers: 1,
+                peak_queue_depth: 0,
+            },
         );
         let phases = vec![
             parse_phase,
@@ -647,6 +655,7 @@ impl<H: LanguageHooks> LanguageSyntaxIndex<H> {
             phases: vec![
                 phase(
                     IndexPhase::ParseExtraction,
+                    H::language(),
                     parse_elapsed,
                     metrics.reparsed_files,
                     changed_paths
@@ -655,15 +664,23 @@ impl<H: LanguageHooks> LanguageSyntaxIndex<H> {
                         .map(|file| file.source.len() as u64)
                         .sum(),
                 ),
-                phase(IndexPhase::SymbolCatalog, catalog_elapsed, facts.symbols, 0),
+                phase(
+                    IndexPhase::SymbolCatalog,
+                    H::language(),
+                    catalog_elapsed,
+                    facts.symbols,
+                    0,
+                ),
                 phase(
                     IndexPhase::Relationships,
+                    H::language(),
                     relationships_elapsed,
                     metrics.relationship_files_recomputed,
                     0,
                 ),
                 phase(
                     IndexPhase::GraphMaterialization,
+                    H::language(),
                     materialize_started.elapsed(),
                     if metrics.publication.structurally_incremental {
                         metrics
@@ -1289,13 +1306,14 @@ fn check_cancelled(cancellation: &IndexCancellation) -> Result<(), LanguageIndex
 
 fn phase(
     phase: IndexPhase,
+    language: Language,
     elapsed: Duration,
     work_items: u64,
     bytes: u64,
 ) -> IndexPhaseMeasurement {
     IndexPhaseMeasurement {
         phase,
-        language: Some(Language::Go),
+        language: Some(language),
         elapsed_micros: elapsed.as_micros().min(u128::from(u64::MAX)) as u64,
         cpu_micros: None,
         cpu_utilization_per_mille: None,
@@ -1311,12 +1329,11 @@ fn phase(
 
 fn measured_phase(
     phase: IndexPhase,
+    language: Language,
     started: PhaseTimer,
     work_items: u64,
     bytes: u64,
-    effective_workers: u64,
-    peak_active_workers: u64,
-    peak_queue_depth: u64,
+    scheduling: ParseSchedule,
 ) -> IndexPhaseMeasurement {
     let elapsed_micros = started.wall.elapsed().as_micros().min(u128::from(u64::MAX)) as u64;
     let cpu_micros = process_cpu_micros()
@@ -1329,7 +1346,7 @@ fn measured_phase(
     });
     IndexPhaseMeasurement {
         phase,
-        language: Some(Language::Go),
+        language: Some(language),
         elapsed_micros,
         cpu_micros,
         cpu_utilization_per_mille,
@@ -1338,14 +1355,14 @@ fn measured_phase(
         effective_workers: if work_items == 0 {
             0
         } else {
-            effective_workers
+            scheduling.effective_workers
         },
         peak_active_workers: if work_items == 0 {
             0
         } else {
-            peak_active_workers
+            scheduling.peak_active_workers
         },
-        peak_queue_depth,
+        peak_queue_depth: scheduling.peak_queue_depth,
         rss_bytes: (work_items >= PHASE_RESOURCE_SAMPLE_THRESHOLD)
             .then(process_rss_bytes)
             .flatten(),
