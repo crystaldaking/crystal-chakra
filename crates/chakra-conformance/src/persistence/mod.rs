@@ -14,7 +14,7 @@
 //! runner it writes its artifacts under `target/persistence/` (git-ignored);
 //! nothing in `docs/support/corpus/results/` is touched.
 //!
-//! The `--real` mode (issue #39, [`real`]) measures the same phases against
+//! The `--real` mode (issue #39, `real`) measures the same phases against
 //! the production per-file syntax fact cache in `chakra-language::cache`,
 //! including real graph reassembly, and evaluates the B1–B6 budgets; see
 //! `docs/evaluation/v0.2.0-syntax-fact-cache.md`.
