@@ -50,6 +50,20 @@ version tags prefixed with `v`.
 
 ### Added
 
+- Lazy revision-scoped file facts (issue #42): a typed `LazyFactProducer`
+  contract in `chakra-engine` declares inputs (file content plus pinned
+  workspace revision), producer/format version, cost budget (wall time and
+  per-fact retained bytes), and provenance/precision; a bounded, typed
+  workspace-bound `LazyFactStore` per producer caches facts by typed
+  (path, content hash, revision) invalidation keys with count/byte LRU bounds
+  and diagnostic counters, coalesces concurrent duplicate requests into one
+  computation, applies strict in-flight backpressure, and never retains
+  failed, cancelled, or late results. `FileOutlineDigestProducer` is the first
+  producer (Tree-sitter/Syntax-tier per-file outline digest). A measured
+  lazy-vs-eager harness lives in
+  `chakra-conformance/tests/lazy_file_facts.rs` (hermetic synthetic corpus in
+  CI, opt-in real worktree via `CHAKRA_LAZY_FACTS_WORKTREE`); numbers are
+  recorded in `docs/evaluation/v0.2.0-lazy-file-facts.md`.
 - Dependency-aware index invalidation (issue #40). Derived facts now track
   their external inputs as typed records: a `ProjectModelImpact` diff between
   the published and the scanned project model records exactly which units

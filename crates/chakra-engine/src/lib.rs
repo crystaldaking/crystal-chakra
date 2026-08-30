@@ -8,6 +8,7 @@
 mod diff;
 mod engine;
 mod graph;
+mod lazy;
 mod precise;
 mod query;
 
@@ -22,6 +23,11 @@ pub use engine::{
 pub use graph::{
     BoundedGraphBuilder, CallSiteInput, ConsistencyAudit, ConsistencyError, GraphBuildLimits,
     GraphBuildReport, GraphDiagnosticSummary, GraphError, GraphFileSummary, SymbolGraph,
+};
+pub use lazy::{
+    ContentHash, FactBudget, FactOrigin, FactStoreBounds, FileFactInput, FileFactInvalidation,
+    FileOutlineDigest, FileOutlineDigestProducer, LazyFact, LazyFactError, LazyFactOutcome,
+    LazyFactProducer, LazyFactStats, LazyFactStore, ProducerIdentity,
 };
 pub use precise::{
     CallHierarchyDirections, PreciseProvider, PreciseQueryRequest, PreciseQueryResult,
