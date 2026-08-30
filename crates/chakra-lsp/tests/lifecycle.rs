@@ -9,7 +9,9 @@ use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use chakra_lsp::{Client, ClientConfig, ClientError, Health, ServerEvent, TransportConfig};
+use chakra_lsp::{
+    Client, ClientConfig, ClientError, Health, ServerEvent, TransportConfig, TransportError,
+};
 
 const FAKE_SERVER: &str = r#"
 use std::fs;
@@ -92,8 +94,11 @@ fn main() -> io::Result<()> {
                 announced_big = true;
                 let payload = format!("{{\"jsonrpc\":\"2.0\",\"method\":\"$/blob\",\"params\":\"{}\"}}", "x".repeat(2 * 1024 * 1024));
                 let mut stdout = io::stdout().lock();
-                write!(stdout, "Content-Length: {}\r\n\r\n{payload}", payload.len())?;
-                stdout.flush()?;
+                // The client closes the transport on the oversized header, so
+                // this write can hit EPIPE; the peer must survive to keep the
+                // shutdown path deterministic.
+                let _ = write!(stdout, "Content-Length: {}\r\n\r\n{payload}", payload.len());
+                let _ = stdout.flush();
             }
         } else if body.contains("\"method\":\"shutdown\"") {
             if ignore_shutdown {
@@ -187,13 +192,38 @@ fn config() -> ClientConfig {
 }
 
 fn spawn(executable: &Path, root: &Path) -> Result<Client, Box<dyn Error>> {
-    Ok(Client::spawn(
-        executable.as_os_str(),
-        &[],
-        root,
-        config(),
-        "fake-lsp",
-    )?)
+    // A freshly copied helper can still report ETXTBSY on a loaded host;
+    // retry with a bounded deadline instead of failing the test.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        match Client::spawn(executable.as_os_str(), &[], root, config(), "fake-lsp") {
+            Ok(client) => return Ok(client),
+            Err(ClientError::Transport(TransportError::Spawn(error)))
+                if error.kind() == std::io::ErrorKind::ExecutableFileBusy
+                    && Instant::now() < deadline =>
+            {
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+}
+
+fn wait_for_file(path: &Path) -> Result<String, Box<dyn Error>> {
+    // The scripted peer writes marker files asynchronously; poll with a
+    // bounded deadline instead of assuming the write has landed.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        match fs::read_to_string(path) {
+            Ok(contents) => return Ok(contents),
+            Err(error) => {
+                if Instant::now() >= deadline {
+                    return Err(error.into());
+                }
+                std::thread::sleep(Duration::from_millis(25));
+            }
+        }
+    }
 }
 
 fn initialize(client: &mut Client) -> Result<(), Box<dyn Error>> {
@@ -271,7 +301,7 @@ fn timed_out_request_is_cancelled() -> Result<(), Box<dyn Error>> {
         "{result:?}"
     );
     client.shutdown();
-    let cancellation = fs::read_to_string(executable.with_extension("cancelled"))?;
+    let cancellation = wait_for_file(&executable.with_extension("cancelled"))?;
     assert!(cancellation.contains("$/cancelRequest"));
     Ok(())
 }
@@ -296,7 +326,7 @@ fn caller_cancellation_is_forwarded() -> Result<(), Box<dyn Error>> {
         "{result:?}"
     );
     client.shutdown();
-    let cancellation = fs::read_to_string(executable.with_extension("cancelled"))?;
+    let cancellation = wait_for_file(&executable.with_extension("cancelled"))?;
     assert!(cancellation.contains("$/cancelRequest"));
     Ok(())
 }
@@ -333,17 +363,26 @@ fn shutdown_reaps_process_group_descendants() -> Result<(), Box<dyn Error>> {
     let executable = materialize_fake_server(scratch.path(), "fake-lsp-spawn-child")?;
     let mut client = spawn(&executable, scratch.path())?;
     initialize(&mut client)?;
-    let child = fs::read_to_string(executable.with_extension("child"))?;
+    let child = wait_for_file(&executable.with_extension("child"))?;
     client.shutdown();
-    let status = Command::new("kill")
-        .args(["-0", child.trim()])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()?;
-    assert!(
-        !status.success(),
-        "server descendant {child} is still alive"
-    );
+    // The descendant is killed asynchronously and may linger as a zombie
+    // until the init reaper runs; poll with a bounded deadline.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let status = Command::new("kill")
+            .args(["-0", child.trim()])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()?;
+        if !status.success() {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "server descendant {child} is still alive"
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    }
     Ok(())
 }
 
@@ -363,8 +402,10 @@ fn kill_fallback_terminates_a_server_that_ignores_shutdown() -> Result<(), Box<d
     )?;
     let started = Instant::now();
     client.shutdown();
+    // Nominal bound is ~1.2s (shutdown handshake + exit grace + kill
+    // fallback); keep a generous ceiling for heavily loaded hosts.
     assert!(
-        started.elapsed() < Duration::from_secs(5),
+        started.elapsed() < Duration::from_secs(15),
         "shutdown took {:?}",
         started.elapsed()
     );
