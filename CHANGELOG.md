@@ -5,6 +5,14 @@ version tags prefixed with `v`.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-08-30
+
+Chakra v0.2.0 adds explicit Cargo/Composer project scopes, dependency-scoped
+invalidation, bounded live-index diagnostics and priority scheduling, plus a
+workspace-bound lazy-fact foundation. Persistence and incremental Tree-sitter
+production paths remain deliberately disabled after their release benchmarks
+failed the recorded memory or speed acceptance budgets.
+
 ### Evaluation
 
 - Incremental Tree-sitter parsing (`Tree::edit` + reparse with the retained
@@ -517,7 +525,8 @@ record every pre-1.0 compatibility break explicitly (ADR-0043).
 - All development after this release follows the Gitflow policy in
   `CONTRIBUTING.md` and `AGENTS.md`.
 
-[Unreleased]: https://github.com/crystaldaking/crystal-chakra/compare/v0.1.3...develop
+[Unreleased]: https://github.com/crystaldaking/crystal-chakra/compare/v0.2.0...develop
+[0.2.0]: https://github.com/crystaldaking/crystal-chakra/compare/v0.1.3...v0.2.0
 [0.1.3]: https://github.com/crystaldaking/crystal-chakra/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/crystaldaking/crystal-chakra/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/crystaldaking/crystal-chakra/compare/v0.1.0...v0.1.1
