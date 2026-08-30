@@ -814,6 +814,7 @@ fn run_provider_lifecycle_scenario(
         .install_precise_provider(provider.clone())?;
     let failure_started = Instant::now();
     let degraded = workspace.engine.callers(CallersRequest {
+        source: Default::default(),
         symbol: Some(SymbolRef::ByName(target.to_owned())),
         freshness: FreshnessRequirement::RequireFresh,
         ..CallersRequest::default()
@@ -854,6 +855,7 @@ fn run_provider_lifecycle_scenario(
     }]);
     let recovered_request = || {
         workspace.engine.callers(CallersRequest {
+            source: Default::default(),
             symbol: Some(SymbolRef::ByName(target.to_owned())),
             freshness: FreshnessRequirement::RequireFresh,
             ..CallersRequest::default()
@@ -1178,6 +1180,7 @@ fn run_query_scenario(
     let started = Instant::now();
     let callers_response = workspace.engine.callers(CallersRequest {
         symbol: Some(SymbolRef::ByName(simple.to_owned())),
+        source: chakra_domain::query::SourceFilter::default(),
         limit: Some(5),
         freshness: FreshnessRequirement::AllowStale,
     })?;
@@ -1211,6 +1214,7 @@ fn run_query_scenario(
     if *callers > 1 {
         let paged = workspace.engine.callers(CallersRequest {
             symbol: Some(SymbolRef::ByName(simple.to_owned())),
+            source: chakra_domain::query::SourceFilter::default(),
             limit: Some(1),
             freshness: FreshnessRequirement::AllowStale,
         })?;
@@ -1230,6 +1234,7 @@ fn run_query_scenario(
     let started = Instant::now();
     let context = workspace.engine.context(ContextRequest {
         symbol: Some(SymbolRef::ByName(simple.to_owned())),
+        source: chakra_domain::query::SourceFilter::default(),
         limit: Some(5),
         freshness: FreshnessRequirement::AllowStale,
     })?;

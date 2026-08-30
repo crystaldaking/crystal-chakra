@@ -23,6 +23,11 @@ use std::os::unix::process::CommandExt;
 
 const PUMP_POLL: Duration = Duration::from_millis(50);
 const HEADER_LIMIT: usize = 8 * 1024;
+/// exec of a freshly written or just-replaced executable can transiently
+/// fail with ETXTBSY on a loaded host; retries stay bounded so a permanently
+/// busy binary still fails within a predictable budget.
+const SPAWN_BUSY_RETRY: Duration = Duration::from_secs(10);
+const SPAWN_BUSY_POLL: Duration = Duration::from_millis(25);
 
 /// Bounded transport settings. All capacities are message counts; message
 /// bodies are additionally capped by `max_message_bytes`.
@@ -118,7 +123,19 @@ impl Transport {
             .stderr(Stdio::piped());
         #[cfg(unix)]
         command.process_group(0);
-        let mut child = command.spawn().map_err(TransportError::Spawn)?;
+        let spawn_deadline = Instant::now() + SPAWN_BUSY_RETRY;
+        let mut child = loop {
+            match command.spawn() {
+                Ok(child) => break child,
+                Err(error)
+                    if error.kind() == std::io::ErrorKind::ExecutableFileBusy
+                        && Instant::now() < spawn_deadline =>
+                {
+                    thread::sleep(SPAWN_BUSY_POLL);
+                }
+                Err(error) => return Err(TransportError::Spawn(error)),
+            }
+        };
         let Some(stdin) = child.stdin.take() else {
             terminate_owned_process_tree(&mut child);
             return Err(TransportError::MissingStdin);
@@ -476,6 +493,31 @@ mod tests {
         let mut slice = &input[..];
         let message = read_bounded(&mut slice, 1024)?.ok_or("message missing")?;
         assert!(matches!(message, Message::Notification(_)));
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn spawn_retries_a_transiently_busy_executable() -> Result<(), Box<dyn std::error::Error>> {
+        let scratch = tempfile::tempdir()?;
+        let executable = scratch.path().join("busy-server");
+        std::fs::copy(std::env::current_exe()?, &executable)?;
+        // An open writer makes execve fail with ETXTBSY until it is released.
+        let writer = std::fs::OpenOptions::new().write(true).open(&executable)?;
+        let root = scratch.path().to_owned();
+        let spawn = thread::spawn(move || {
+            Transport::spawn(
+                executable.as_os_str(),
+                &[OsStr::new("--list")],
+                &root,
+                &TransportConfig::default(),
+                "fake-busy",
+            )
+        });
+        thread::sleep(Duration::from_millis(150));
+        drop(writer);
+        let mut transport = spawn.join().map_err(|_| "spawn thread panicked")??;
+        transport.terminate();
         Ok(())
     }
 }

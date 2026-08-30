@@ -11,5 +11,5 @@ mod parser;
 pub use indexer::{
     IndexMetrics, IndexReport, LanguageBuildMetrics, PhpIndexError, PhpSources, PhpSyntaxIndex,
     ReconcileMetrics, ReconcileReport, SyntaxFactCounts, detect_laravel, index_repository,
-    scan_repository_sources,
+    laravel_detected_from_model, scan_repository_sources,
 };

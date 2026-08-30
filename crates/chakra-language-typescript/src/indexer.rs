@@ -36,6 +36,10 @@ impl LanguageHooks for TypeScriptHooks {
 
     const WORKER_NAME: &'static str = "typescript";
 
+    fn language() -> chakra_domain::symbol::Language {
+        chakra_domain::symbol::Language::TypeScript
+    }
+
     fn new_parser() -> Result<Self::Parser, TypeScriptIndexError> {
         TypeScriptParser::new().map_err(|error| TypeScriptIndexError::Parse(error.to_string()))
     }

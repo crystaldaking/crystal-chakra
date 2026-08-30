@@ -77,6 +77,7 @@ pub(super) fn diff_context_scopes(manifest: &Manifest) -> Check<Vec<String>> {
         )?;
 
         let base_ref = fixture.engine.diff_context(DiffContextRequest {
+            source: Default::default(),
             scope: DiffScope::BaseRef {
                 reference: base.clone(),
             },

@@ -349,6 +349,190 @@ impl IndexingStatus {
     }
 }
 
+// --- Machine-readable live indexing diagnostics (issue #43) ---
+
+/// Maximum number of retained per-file invalidation records. Older records
+/// are dropped; `IndexingDiagnostics::file_invalidation_records` keeps the
+/// cumulative total so the bound is observable.
+pub const MAX_FILE_INVALIDATION_RECORDS: usize = 32;
+
+/// Why the syntax fact cache reports no activity.
+///
+/// The per-file syntax fact cache built for issue #39 did not meet its
+/// persistence acceptance benchmarks and was deliberately not shipped, so
+/// there are no hit/miss/rebuild or corruption-fallback counters to report.
+pub const SYNTAX_FACT_CACHE_DISABLED_REASON: &str =
+    "rejected by persistence acceptance benchmarks (docs/evaluation/v0.2.0-syntax-fact-cache.md)";
+
+/// How one reconciliation pass classified its work.
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize, schemars::JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum ReconciliationKind {
+    /// No reconciliation has completed yet.
+    #[default]
+    None,
+    /// Freshness was re-proven without rereading any source body.
+    Noop,
+    /// Only changed/added/removed files were reprocessed.
+    Targeted,
+    /// Every retained source body was reread.
+    Full,
+}
+
+/// Why one file was reindexed, as far as the reconciliation paths can
+/// actually distinguish. Content bytes never appear in diagnostics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum FileInvalidationReason {
+    /// The file entered the Git-discovered source/metadata inventory.
+    Added,
+    /// The file identity changed and its source bytes differ from the
+    /// retained snapshot.
+    ContentChanged,
+    /// The file identity changed without a content change (for example a
+    /// timestamp-only rewrite), or a manifest/metadata input such as
+    /// `Cargo.toml` or `composer.json` changed.
+    MetadataChanged,
+    /// The file left the Git-discovered source/metadata inventory.
+    Removed,
+}
+
+/// One bounded per-file invalidation record: path and reason only.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct FileInvalidation {
+    pub path: crate::location::RepoRelativePath,
+    pub reason: FileInvalidationReason,
+}
+
+/// Why a workspace reconciliation was forced to reread every retained
+/// source body.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum FullReconciliationReason {
+    /// First reconciliation after startup: no retained source snapshot.
+    ColdStart,
+    /// The filesystem watcher reported a new error.
+    WatcherError,
+    /// Watcher events were dropped from the bounded event queue.
+    WatcherEventMissed,
+    /// Event hints were missing, overflowed, or arrived with an epoch gap.
+    UncertainEventHints,
+    /// The configured periodic full-reread checkpoint was reached.
+    PeriodicCheckpoint,
+    /// A stable-scan attempt observed the inventory or file identities
+    /// changing underneath it and escalated its retry to a full reread.
+    ScanInstability,
+}
+
+/// Cumulative full-reconciliation causes observed by the live owner.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct FullReconciliationReasonCounts {
+    pub cold_start: u64,
+    pub watcher_error: u64,
+    pub watcher_event_missed: u64,
+    pub uncertain_event_hints: u64,
+    pub periodic_checkpoint: u64,
+    pub scan_instability: u64,
+}
+
+/// Health of the persistent syntax fact cache.
+///
+/// The cache is currently disabled (see
+/// [`SYNTAX_FACT_CACHE_DISABLED_REASON`]), so no hit/miss/rebuild or
+/// corruption-fallback counters exist; reporting fabricated zeros would be
+/// dishonest. Cold restore, warm hit, metadata invalidation, and corruption
+/// fallback counters are deferred together with the cache itself.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case", tag = "state")]
+pub enum CacheHealth {
+    Disabled { reason: String },
+}
+
+/// Cumulative rebuild/reconcile counters owned by the indexing pipeline.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct ReconciliationCounters {
+    /// Published revisions whose graph was fully rebuilt instead of
+    /// structurally reused (initial cold builds), counted by the engine at
+    /// publication time.
+    pub cold_builds: u64,
+    pub no_op_reconciliations: u64,
+    pub targeted_reconciliations: u64,
+    pub full_reconciliations: u64,
+    /// Reconciliations caused by exactly one modified file and no
+    /// additions/removals.
+    pub one_file_edits: u64,
+    pub reconciliation_failures: u64,
+    pub published_revisions: u64,
+}
+
+/// Live freshness-owner queue state. All values are counters or bounded
+/// capacities; the std sync-channel depth is not observable, so the durable
+/// barrier generations are reported instead.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct LiveQueueState {
+    /// Highest freshness-barrier generation waiters have requested.
+    pub requested_barrier_generation: u64,
+    /// Highest freshness-barrier generation completed by the worker.
+    pub completed_barrier_generation: u64,
+    pub barrier_requests: u64,
+    pub barrier_waiters_coalesced: u64,
+    pub watcher_events: u64,
+    pub dropped_watcher_events: u64,
+    pub watcher_errors: u64,
+    pub watched_directories: u64,
+    pub watcher_event_queue_capacity: u64,
+    /// Worker-side scheduled work, keyed by self-describing priority class.
+    #[serde(default)]
+    pub scheduled_work: crate::scheduling::WorkQueueMetrics,
+}
+
+/// Cumulative and latest typed project-scope invalidation evidence.
+///
+/// Aggregate counters describe all successful live reconciliations. The
+/// detailed impact is already bounded by the project model contract and
+/// identifies the latest changed units, their typed reasons, affected
+/// dependents, and manifest-issue transitions.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct ProjectInvalidationDiagnostics {
+    pub impacted_units: u64,
+    pub impacted_dependents: u64,
+    pub manifest_issue_changes: u64,
+    pub unit_changes: crate::project::ProjectUnitChangeCounts,
+    pub last_impact: Option<crate::project::ProjectModelImpact>,
+}
+
+/// Bounded, typed, source-content-free live indexing diagnostics (issue #43).
+///
+/// Phase timings, coverage, resource samples, degraded capabilities, and
+/// graph publication facts are revision-scoped and already travel in the
+/// query envelope's [`IndexingStatus`]; this struct carries the cross-revision
+/// operational picture owned by the live indexing pipeline.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct IndexingDiagnostics {
+    pub cache: CacheHealth,
+    pub counters: ReconciliationCounters,
+    pub queue: LiveQueueState,
+    /// Why manifest/config inputs most recently invalidated project scopes,
+    /// plus cumulative impact counters.
+    #[serde(default)]
+    pub project_invalidations: ProjectInvalidationDiagnostics,
+    pub last_reconciliation_kind: ReconciliationKind,
+    /// Cumulative causes of full (project-scope) reconciliations.
+    pub full_reconciliation_reasons: FullReconciliationReasonCounts,
+    /// Causes that forced the most recent full reconciliation. Empty when no
+    /// full reconciliation has run; stable-scan retries report
+    /// `scan_instability` explicitly.
+    pub last_full_reconciliation_reasons: Vec<FullReconciliationReason>,
+    /// Newest-last per-file invalidation records, capped at
+    /// [`MAX_FILE_INVALIDATION_RECORDS`].
+    pub recent_file_invalidations: Vec<FileInvalidation>,
+    /// Cumulative per-file invalidation records produced, including those
+    /// dropped from the bounded `recent_file_invalidations` window.
+    pub file_invalidation_records: u64,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -441,5 +625,63 @@ mod tests {
         assert_eq!(summary.degradations, status.degradations);
         assert_eq!(summary.coverage, status.coverage);
         assert_eq!(summary.publication, status.publication);
+    }
+
+    #[test]
+    fn diagnostics_serialize_typed_bounded_and_source_free()
+    -> Result<(), Box<dyn std::error::Error>> {
+        const SOURCE_MARKER: &str = "fn secret_internal_payload() { leak() }";
+        let diagnostics = IndexingDiagnostics {
+            cache: CacheHealth::Disabled {
+                reason: SYNTAX_FACT_CACHE_DISABLED_REASON.to_owned(),
+            },
+            counters: ReconciliationCounters {
+                cold_builds: 1,
+                no_op_reconciliations: 2,
+                targeted_reconciliations: 3,
+                full_reconciliations: 1,
+                one_file_edits: 3,
+                reconciliation_failures: 0,
+                published_revisions: 4,
+            },
+            queue: LiveQueueState {
+                requested_barrier_generation: 6,
+                completed_barrier_generation: 6,
+                watcher_event_queue_capacity: 256,
+                ..LiveQueueState::default()
+            },
+            project_invalidations: ProjectInvalidationDiagnostics::default(),
+            last_reconciliation_kind: ReconciliationKind::Targeted,
+            full_reconciliation_reasons: FullReconciliationReasonCounts {
+                cold_start: 1,
+                ..FullReconciliationReasonCounts::default()
+            },
+            last_full_reconciliation_reasons: vec![FullReconciliationReason::ColdStart],
+            recent_file_invalidations: vec![FileInvalidation {
+                path: crate::location::RepoRelativePath::new("src/secret.rs")?,
+                reason: FileInvalidationReason::ContentChanged,
+            }],
+            file_invalidation_records: 1,
+        };
+
+        let json = serde_json::to_string(&diagnostics)?;
+        assert!(json.contains("\"cache\":{\"state\":\"disabled\""));
+        assert!(json.contains("\"reason\":\"content_changed\""));
+        assert!(json.contains("\"last_reconciliation_kind\":\"targeted\""));
+        assert!(json.contains("\"cold_start\""));
+        // Diagnostics carry paths and counters only, never source contents.
+        assert!(!json.contains(SOURCE_MARKER));
+        assert!(json.contains("src/secret.rs"));
+
+        let roundtrip: IndexingDiagnostics = serde_json::from_str(&json)?;
+        assert_eq!(roundtrip, diagnostics);
+        Ok(())
+    }
+
+    #[test]
+    fn diagnostics_window_bound_is_explicit() {
+        // The retention bound is a published constant so consumers can rely
+        // on it; the cumulative counter makes dropped records observable.
+        assert_eq!(MAX_FILE_INVALIDATION_RECORDS, 32);
     }
 }

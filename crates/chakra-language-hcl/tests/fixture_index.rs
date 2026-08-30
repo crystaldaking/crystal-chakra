@@ -190,6 +190,7 @@ fn malformed_hcl_keeps_valid_symbols_and_reports_diagnostics() -> Result<(), Box
 fn callers_and_incremental_reconcile_use_hcl_reference_edges() -> Result<(), Box<dyn Error>> {
     let (repository, engine, _metrics) = indexed_engine()?;
     let callers = engine.callers(CallersRequest {
+        source: Default::default(),
         symbol: Some(SymbolRef::ByName(
             "resource::null_resource::provider".to_owned(),
         )),

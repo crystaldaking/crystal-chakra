@@ -8,7 +8,7 @@
 //! [`QueryError::FreshnessNotMet`] instead of silently serving stale data.
 
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, BinaryHeap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, BinaryHeap, HashMap};
 use std::io::{self, Write};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -19,17 +19,19 @@ use chakra_domain::envelope::{
 };
 use chakra_domain::location::{RepoRelativePath, SourceRange, TextPosition};
 use chakra_domain::operation::OperationContext;
+use chakra_domain::project::{ProjectModel, ProjectOwnership, ProjectScopeSelector, ProjectUnitId};
 use chakra_domain::provenance::{Precision, Provenance};
 use chakra_domain::query::{
     CallSiteEvidence, CallSiteView, CallersData, CallersRequest, ChangedFile, ChangedSymbol,
     ChangedSymbolBasis, ContextData, ContextRequest, DEFAULT_QUERY_LIMIT, DiffCallSite,
     DiffContextData, DiffContextRequest, DiffDirectedRelatedSymbol, DiffRelatedSymbol, DiffScope,
     DirectedRelatedSymbol, FileSummary, IndexCounts, MAX_QUERY_LIMIT, MAX_STATUS_DIAGNOSTICS,
-    ProviderCapability, ProviderFallbackCause, ProviderInfo, ProviderQueryInfo, QueryError,
-    QueryService, RelatedSymbol, RelationDirection, RepoMapCursor, RepoMapData, RepoMapGroup,
-    RepoMapGroupKind, RepoMapRequest, RepoMapScope, SearchData, SearchRequest, SourceFilter,
-    SourceSnippet, StatusData, StatusRequest, SymbolMatchMode, SymbolRef, SymbolSearchData,
-    SymbolSearchRequest, SymbolView, SyntaxDiagnosticSummary, TextMatch,
+    ProjectScopeData, ProjectUnitSummary, ProviderCapability, ProviderFallbackCause, ProviderInfo,
+    ProviderQueryInfo, QueryError, QueryService, RelatedSymbol, RelationDirection, RepoMapCursor,
+    RepoMapData, RepoMapGroup, RepoMapGroupKind, RepoMapRequest, RepoMapScope, SearchData,
+    SearchRequest, SourceFilter, SourceSnippet, StatusData, StatusRequest, SymbolMatchMode,
+    SymbolRef, SymbolSearchData, SymbolSearchRequest, SymbolView, SyntaxDiagnosticSummary,
+    TextMatch,
 };
 use chakra_domain::revision::Revision;
 use chakra_domain::source::{SourceClassification, SourceMetadata, SourceRole};
@@ -84,6 +86,7 @@ const STATUS_PROVIDERS_BYTES: usize = 16 * 1024;
 const STATUS_DIAGNOSTICS_BYTES: usize = 128 * 1024;
 const REPO_MAP_FILES_BYTES: usize = 256 * 1024;
 const REPO_MAP_OVERVIEW_BYTES: usize = 64 * 1024;
+const REPO_MAP_PROJECT_SCOPE_BYTES: usize = 64 * 1024;
 const SEARCH_MATCHES_BYTES: usize = 256 * 1024;
 const SYMBOL_SEARCH_CANDIDATES_BYTES: usize = 128 * 1024;
 const CONTEXT_SOURCE_BYTES: usize = 16 * 1024;
@@ -641,8 +644,10 @@ fn edge_kind_rank(kind: EdgeKind) -> u8 {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn related_from_edges(
     graph: &SymbolGraph,
+    scope: Option<&RelatedSourceScope<'_>>,
     edges: &[Edge],
     kinds: &[EdgeKind],
     endpoint: RelatedEndpoint,
@@ -669,6 +674,9 @@ fn related_from_edges(
         let Some(symbol) = graph.symbol(other) else {
             continue;
         };
+        if scope.is_some_and(|scope| !scope.matches_view(&symbol_view(graph, symbol))) {
+            continue;
+        }
         let evidence = relation_evidence(graph, edge);
         let key = (
             symbol.key.qualified_name.as_str(),
@@ -736,6 +744,7 @@ struct PreparedSourceFilter {
     path_prefix: Option<chakra_domain::location::RepoRelativePath>,
     include_roles: Vec<SourceRole>,
     exclude_roles: Vec<SourceRole>,
+    project: Option<ProjectScopeSelector>,
 }
 
 impl PreparedSourceFilter {
@@ -764,6 +773,38 @@ impl PreparedSourceFilter {
                 Ok(package.to_owned())
             })
             .transpose()?;
+        let project = filter
+            .project
+            .map(|selector| {
+                if let Some(unit) = &selector.unit
+                    && unit.as_str().chars().count() > MAX_NAMESPACE_FILTER_CHARS
+                {
+                    return Err(QueryError::Invalid(format!(
+                        "project unit filter exceeds {MAX_NAMESPACE_FILTER_CHARS} characters"
+                    )));
+                }
+                if let Some(package) = &selector.package {
+                    let package = package.trim();
+                    if package.is_empty() {
+                        return Err(QueryError::Invalid(
+                            "project package filter must be non-empty".to_owned(),
+                        ));
+                    }
+                    if package.chars().count() > MAX_PACKAGE_FILTER_CHARS {
+                        return Err(QueryError::Invalid(format!(
+                            "project package filter exceeds {MAX_PACKAGE_FILTER_CHARS} characters"
+                        )));
+                    }
+                }
+                if selector.unit.is_some() == selector.package.is_some() {
+                    return Err(QueryError::Invalid(
+                        "project scope selector must set exactly one of `unit` or `package`"
+                            .to_owned(),
+                    ));
+                }
+                Ok(selector)
+            })
+            .transpose()?;
         let path_prefix = filter
             .path_prefix
             .map(|prefix| {
@@ -788,7 +829,25 @@ impl PreparedSourceFilter {
             path_prefix,
             include_roles,
             exclude_roles,
+            project,
         })
+    }
+
+    /// Resolves the optional project-unit selector against the published
+    /// model. Unknown units/packages are typed invalid-request errors, never
+    /// silent empty filters.
+    fn resolve_project_units(
+        &self,
+        model: &ProjectModel,
+    ) -> Result<Option<BTreeSet<ProjectUnitId>>, QueryError> {
+        self.project
+            .as_ref()
+            .map(|selector| {
+                model
+                    .resolve_selector(selector)
+                    .map_err(|error| QueryError::Invalid(error.to_string()))
+            })
+            .transpose()
     }
 
     fn matches(
@@ -816,6 +875,23 @@ impl PreparedSourceFilter {
             && !self.exclude_roles.contains(&metadata.role)
     }
 
+    /// Structural project-unit membership. Files with ambiguous ownership
+    /// honestly match no unit selector (issue #41).
+    fn matches_project(
+        model: &ProjectModel,
+        units: Option<&BTreeSet<ProjectUnitId>>,
+        path: &RepoRelativePath,
+        language: Language,
+    ) -> bool {
+        let Some(units) = units else {
+            return true;
+        };
+        match model.ownership(path, language) {
+            ProjectOwnership::Owned(unit) => units.contains(&unit),
+            ProjectOwnership::Ambiguous { .. } | ProjectOwnership::Unassigned => false,
+        }
+    }
+
     fn normalized(&self) -> SourceFilter {
         SourceFilter {
             package: self.package.clone(),
@@ -825,6 +901,7 @@ impl PreparedSourceFilter {
                 .map(|path| path.as_str().to_owned()),
             include_roles: self.include_roles.clone(),
             exclude_roles: self.exclude_roles.clone(),
+            project: self.project.clone(),
         }
     }
 }
@@ -860,12 +937,15 @@ impl PreparedRepoMapScope {
 
     fn matches(
         &self,
+        model: &ProjectModel,
+        project_units: Option<&BTreeSet<ProjectUnitId>>,
         path: &RepoRelativePath,
         language: Language,
         metadata: &SourceMetadata,
     ) -> bool {
         (self.include_languages.is_empty() || self.include_languages.contains(&language))
             && self.source.matches(path, metadata)
+            && PreparedSourceFilter::matches_project(model, project_units, path, language)
     }
 }
 
@@ -918,8 +998,20 @@ impl PreparedSymbolFilter {
         })
     }
 
-    fn matches(&self, symbol: &Symbol, metadata: &SourceMetadata) -> bool {
+    fn matches(
+        &self,
+        model: &ProjectModel,
+        project_units: Option<&BTreeSet<ProjectUnitId>>,
+        symbol: &Symbol,
+        metadata: &SourceMetadata,
+    ) -> bool {
         if !self.source.matches(&symbol.key.path, metadata)
+            || !PreparedSourceFilter::matches_project(
+                model,
+                project_units,
+                &symbol.key.path,
+                symbol.key.language,
+            )
             || (!self.include_languages.is_empty()
                 && !self.include_languages.contains(&symbol.key.language))
             || (!self.include_kinds.is_empty() && !self.include_kinds.contains(&symbol.key.kind))
@@ -1187,8 +1279,133 @@ fn repo_map_overview(files: &[(GraphFileSummary, Language)]) -> Vec<RepoMapGroup
     groups
 }
 
+/// Summarizes the typed project model against one filtered `repo_map` file
+/// set (issue #41). Ownership is structural: ambiguous files are counted
+/// honestly instead of being assigned to a unit.
+fn repo_map_project_scope(
+    model: &ProjectModel,
+    files: &[(GraphFileSummary, Language)],
+) -> ProjectScopeData {
+    let mut counts: BTreeMap<ProjectUnitId, (u64, u64)> = BTreeMap::new();
+    let mut ambiguous_files = 0_u64;
+    let mut unassigned_files = 0_u64;
+    for (file, language) in files {
+        match model.ownership(&file.path, *language) {
+            ProjectOwnership::Owned(unit) => {
+                let entry = counts.entry(unit).or_default();
+                entry.0 = entry.0.saturating_add(1);
+                entry.1 = entry.1.saturating_add(file.symbol_count);
+            }
+            ProjectOwnership::Ambiguous { .. } => {
+                ambiguous_files = ambiguous_files.saturating_add(1);
+            }
+            ProjectOwnership::Unassigned => {
+                unassigned_files = unassigned_files.saturating_add(1);
+            }
+        }
+    }
+    let units = counts
+        .into_iter()
+        .filter_map(|(id, (file_count, symbol_count))| {
+            let unit = model.unit(&id)?;
+            Some(ProjectUnitSummary {
+                id,
+                kind: unit.kind,
+                name: unit.name.clone(),
+                root: unit.root.clone(),
+                manifest: unit.manifest.clone(),
+                source_roots: unit.source_roots.clone(),
+                dependencies: unit.dependencies.clone(),
+                file_count,
+                symbol_count,
+            })
+        })
+        .collect();
+    ProjectScopeData {
+        units,
+        ambiguous_files,
+        unassigned_files,
+        issues: model.issues.clone(),
+    }
+}
+
+/// A validated source scope applied to the related sections of
+/// context/callers/diff_context (issue #41). The anchor symbol itself is
+/// never filtered.
+#[derive(Debug)]
+struct RelatedSourceScope<'a> {
+    filter: PreparedSourceFilter,
+    project_units: Option<BTreeSet<ProjectUnitId>>,
+    model: &'a ProjectModel,
+}
+
+impl<'a> RelatedSourceScope<'a> {
+    /// Returns `None` for the default (unscoped) filter so hot paths keep
+    /// their historical behavior and response shapes.
+    fn new(filter: SourceFilter, model: &'a ProjectModel) -> Result<Option<Self>, QueryError> {
+        if filter == SourceFilter::default() {
+            return Ok(None);
+        }
+        let filter = PreparedSourceFilter::new(filter)?;
+        let project_units = filter.resolve_project_units(model)?;
+        Ok(Some(Self {
+            filter,
+            project_units,
+            model,
+        }))
+    }
+
+    fn matches_view(&self, view: &SymbolView) -> bool {
+        let metadata = SourceMetadata {
+            role: view.source_role,
+            classification: view.source_classification,
+            package: view.package.clone(),
+        };
+        self.filter.matches(view.location.file(), &metadata)
+            && PreparedSourceFilter::matches_project(
+                self.model,
+                self.project_units.as_ref(),
+                view.location.file(),
+                view.language,
+            )
+    }
+
+    fn matches_related(&self, related: &RelatedSymbol) -> bool {
+        self.matches_view(&related.symbol)
+    }
+
+    fn matches_call_site(&self, call_site: &CallSiteView) -> bool {
+        self.matches_view(&call_site.caller)
+    }
+
+    /// Path-structural match for diff changed files, including files the
+    /// current graph does not index (deleted files, manifests): those use
+    /// deterministic path-fallback roles and the model's unit roots.
+    fn matches_diff_path(&self, graph: &SymbolGraph, path: &RepoRelativePath) -> bool {
+        let metadata = graph
+            .file_metadata(path)
+            .cloned()
+            .unwrap_or_else(|| SourceMetadata::path_fallback(path));
+        if !self.filter.matches(path, &metadata) {
+            return false;
+        }
+        match (&self.project_units, file_language(path)) {
+            (None, _) => true,
+            (Some(units), Some(language)) => {
+                PreparedSourceFilter::matches_project(self.model, Some(units), path, language)
+            }
+            // A project selector cannot honestly claim a path whose language
+            // is unknown.
+            (Some(_), None) => false,
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn ranked_symbol_matches(
     graph: &SymbolGraph,
+    model: &ProjectModel,
+    project_units: Option<&BTreeSet<ProjectUnitId>>,
     query: &str,
     filter: &PreparedSymbolFilter,
     limit: usize,
@@ -1210,6 +1427,8 @@ fn ranked_symbol_matches(
             let match_rank = match_rank(symbol, &query_lower);
             if !consider_ranked_symbol(
                 graph,
+                model,
+                project_units,
                 symbol,
                 match_rank,
                 filter,
@@ -1239,6 +1458,8 @@ fn ranked_symbol_matches(
             }
             if !consider_ranked_symbol(
                 graph,
+                model,
+                project_units,
                 symbol,
                 match_rank,
                 filter,
@@ -1267,6 +1488,8 @@ fn ranked_symbol_matches(
 #[allow(clippy::too_many_arguments)]
 fn consider_ranked_symbol<'a>(
     graph: &'a SymbolGraph,
+    model: &ProjectModel,
+    project_units: Option<&BTreeSet<ProjectUnitId>>,
     symbol: &'a Symbol,
     match_rank: Option<u8>,
     filter: &PreparedSymbolFilter,
@@ -1284,7 +1507,7 @@ fn consider_ranked_symbol<'a>(
     let Some(metadata) = graph.file_metadata(&symbol.key.path) else {
         return Ok(true);
     };
-    if !filter.matches(symbol, metadata) {
+    if !filter.matches(model, project_units, symbol, metadata) {
         return Ok(true);
     }
     let Some(match_rank) = match_rank else {
@@ -2331,6 +2554,7 @@ impl QueryService for WorkspaceEngine {
             provider_pool,
             query_execution: None,
             source_metadata: snapshot.graph().source_metadata_coverage(),
+            index_diagnostics: self.index_diagnostics(),
             syntax_diagnostics: SyntaxDiagnosticSummary {
                 files_with_diagnostics: graph_diagnostics.files_with_diagnostics,
                 total_diagnostics: graph_diagnostics.total_diagnostics,
@@ -2371,6 +2595,7 @@ impl QueryService for WorkspaceEngine {
                 "repo_map limit must be greater than zero".to_owned(),
             ));
         }
+        let include_project_scope = request.include_project_scope;
         let first_page = request.cursor.is_none();
         let (scope, cursor_workspace, cursor_revision, after) = if let Some(cursor) = request.cursor
         {
@@ -2414,6 +2639,9 @@ impl QueryService for WorkspaceEngine {
             });
         }
         let limit = clamp_limit(request.limit);
+        let project_units = scope
+            .source
+            .resolve_project_units(snapshot.project_model())?;
         let known_total_matching = (first_page && scope.normalized() == RepoMapScope::default())
             .then(|| usize::try_from(snapshot.graph().file_count()).unwrap_or(usize::MAX));
         let mut work = SectionWorkBudget::new(limit);
@@ -2430,7 +2658,13 @@ impl QueryService for WorkspaceEngine {
             let Some(language) = file_language(&summary.path) else {
                 continue;
             };
-            if !scope.matches(&summary.path, language, &summary.metadata) {
+            if !scope.matches(
+                snapshot.project_model(),
+                project_units.as_ref(),
+                &summary.path,
+                language,
+                &summary.metadata,
+            ) {
                 continue;
             }
             if !work.record_examined(ExaminedKind::File) || !work.retain_intermediate() {
@@ -2450,6 +2684,23 @@ impl QueryService for WorkspaceEngine {
             REPO_MAP_OVERVIEW_BYTES,
             TruncationSection::RepoMapOverview,
         )?;
+        let project_scope = if first_page && include_project_scope {
+            let section = repo_map_project_scope(snapshot.project_model(), &filtered);
+            let bounded = bounded_section(
+                section.units,
+                limit,
+                REPO_MAP_PROJECT_SCOPE_BYTES,
+                TruncationSection::RepoMapProjectScope,
+            )?;
+            Some((
+                bounded,
+                section.ambiguous_files,
+                section.unassigned_files,
+                section.issues,
+            ))
+        } else {
+            None
+        };
         let files = filtered
             .into_iter()
             .map(|(summary, language)| FileSummary {
@@ -2488,13 +2739,30 @@ impl QueryService for WorkspaceEngine {
             })
             .flatten();
         operation.check()?;
+        let (project_scope, project_scope_bytes, project_scope_truncation) = match project_scope {
+            Some((bounded, ambiguous_files, unassigned_files, issues)) => (
+                Some(ProjectScopeData {
+                    units: bounded.items,
+                    ambiguous_files,
+                    unassigned_files,
+                    issues,
+                }),
+                bounded.retained_bytes,
+                bounded.truncation,
+            ),
+            None => (None, 0, Vec::new()),
+        };
         let mut truncation = overview.truncation.clone();
         truncation.extend(files.truncation.iter().cloned());
+        truncation.extend(project_scope_truncation);
         truncation.extend(work.truncation(TruncationSection::RepoMapFiles));
         if first_page {
             truncation.extend(work.truncation(TruncationSection::RepoMapOverview));
         }
-        let retained_bytes = overview.retained_bytes.saturating_add(files.retained_bytes);
+        let retained_bytes = overview
+            .retained_bytes
+            .saturating_add(files.retained_bytes)
+            .saturating_add(project_scope_bytes);
         let overview_truncated = !overview.truncation.is_empty() || work.stopped.is_some();
         let mut work_stats = QueryWorkStats::default();
         work.add_to_stats(&mut work_stats);
@@ -2514,6 +2782,7 @@ impl QueryService for WorkspaceEngine {
                 files: files.items,
                 next_cursor,
                 source_metadata: snapshot.graph().source_metadata_coverage(),
+                project_scope,
             },
         ))
     }
@@ -2653,10 +2922,15 @@ impl QueryService for WorkspaceEngine {
         }
         let filter = PreparedSymbolFilter::new(&mut request)?;
         let snapshot = query_snapshot(self, request.freshness, operation)?;
+        let project_units = filter
+            .source
+            .resolve_project_units(snapshot.project_model())?;
         let limit = clamp_limit(request.limit);
         let mut work = SectionWorkBudget::new(limit);
         let (matches, truncated) = ranked_symbol_matches(
             snapshot.graph(),
+            snapshot.project_model(),
+            project_units.as_ref(),
             &query,
             &filter,
             limit,
@@ -2721,6 +2995,7 @@ impl QueryService for WorkspaceEngine {
         let snapshot = query_snapshot(self, request.freshness, operation)?;
         let graph = snapshot.graph();
         let symbol = resolve(graph, reference, snapshot.revision(), operation)?;
+        let related_scope = RelatedSourceScope::new(request.source, snapshot.project_model())?;
         let limit = clamp_limit(request.limit);
         let mut work_stats = QueryWorkStats::default();
 
@@ -2730,6 +3005,7 @@ impl QueryService for WorkspaceEngine {
             item_truncated: callers_item_truncated,
         } = related_from_edges(
             graph,
+            related_scope.as_ref(),
             graph.incoming_edges(symbol.id),
             &[EdgeKind::Calls],
             RelatedEndpoint::From,
@@ -2745,6 +3021,7 @@ impl QueryService for WorkspaceEngine {
             item_truncated: callees_item_truncated,
         } = related_from_edges(
             graph,
+            related_scope.as_ref(),
             graph.outgoing_edges(symbol.id),
             &[EdgeKind::Calls],
             RelatedEndpoint::To,
@@ -2809,6 +3086,10 @@ impl QueryService for WorkspaceEngine {
         }
         sort_related(&mut callers);
         sort_related(&mut callees);
+        if let Some(scope) = &related_scope {
+            callers.retain(|item| scope.matches_related(item));
+            callees.retain(|item| scope.matches_related(item));
+        }
         let resolved_caller_ids: std::collections::HashSet<_> =
             callers.iter().map(|caller| caller.symbol.id).collect();
         let resolved_callee_ids: std::collections::HashSet<_> =
@@ -2846,6 +3127,7 @@ impl QueryService for WorkspaceEngine {
             item_truncated: implementations_item_truncated,
         } = related_from_edges(
             graph,
+            related_scope.as_ref(),
             graph.incoming_edges(symbol.id),
             &[EdgeKind::Implements],
             RelatedEndpoint::From,
@@ -2855,6 +3137,9 @@ impl QueryService for WorkspaceEngine {
         )?;
         implementations_work.add_to_stats(&mut work_stats);
         sort_related(&mut implementations);
+        if let Some(scope) = &related_scope {
+            implementations.retain(|item| scope.matches_related(item));
+        }
         let BoundedSection {
             items: implementations,
             truncation: implementations_truncation,
@@ -2875,6 +3160,7 @@ impl QueryService for WorkspaceEngine {
             item_truncated: tests_item_truncated,
         } = related_from_edges(
             graph,
+            related_scope.as_ref(),
             graph.incoming_edges(symbol.id),
             &[EdgeKind::Tests],
             RelatedEndpoint::From,
@@ -2884,6 +3170,9 @@ impl QueryService for WorkspaceEngine {
         )?;
         tests_work.add_to_stats(&mut work_stats);
         sort_tests(&mut tests);
+        if let Some(scope) = &related_scope {
+            tests.retain(|item| scope.matches_related(item));
+        }
         let BoundedSection {
             items: tests,
             truncation: tests_truncation,
@@ -2901,6 +3190,7 @@ impl QueryService for WorkspaceEngine {
         let mut relations_work = SectionWorkBudget::new(limit);
         let incoming_relations = related_from_edges(
             graph,
+            related_scope.as_ref(),
             graph.incoming_edges(symbol.id),
             CONTEXT_RELATION_KINDS,
             RelatedEndpoint::From,
@@ -2910,6 +3200,7 @@ impl QueryService for WorkspaceEngine {
         )?;
         let outgoing_relations = related_from_edges(
             graph,
+            related_scope.as_ref(),
             graph.outgoing_edges(symbol.id),
             CONTEXT_RELATION_KINDS,
             RelatedEndpoint::To,
@@ -2935,6 +3226,9 @@ impl QueryService for WorkspaceEngine {
         }));
         relations_work.add_to_stats(&mut work_stats);
         sort_directed_related(&mut related_relations);
+        if let Some(scope) = &related_scope {
+            related_relations.retain(|item| scope.matches_related(&item.relation));
+        }
         let BoundedSection {
             items: related_relations,
             truncation: related_relations_truncation,
@@ -2972,6 +3266,9 @@ impl QueryService for WorkspaceEngine {
                 !resolved_caller_ids.contains(&candidate.caller.id)
             }
         });
+        if let Some(scope) = &related_scope {
+            syntax_call_candidates.retain(|candidate| scope.matches_call_site(candidate));
+        }
         sort_call_sites(&mut syntax_call_candidates);
         let BoundedSection {
             items: syntax_call_candidates,
@@ -3163,6 +3460,7 @@ impl QueryService for WorkspaceEngine {
         let snapshot = query_snapshot(self, request.freshness, operation)?;
         let graph = snapshot.graph();
         let target = resolve(graph, reference, snapshot.revision(), operation)?;
+        let related_scope = RelatedSourceScope::new(request.source, snapshot.project_model())?;
         let limit = clamp_limit(request.limit);
         let mut work_stats = QueryWorkStats::default();
         let mut callers_work = SectionWorkBudget::new(limit);
@@ -3171,6 +3469,7 @@ impl QueryService for WorkspaceEngine {
             item_truncated: callers_item_truncated,
         } = related_from_edges(
             graph,
+            related_scope.as_ref(),
             graph.incoming_edges(target.id),
             &[EdgeKind::Calls],
             RelatedEndpoint::From,
@@ -3239,6 +3538,10 @@ impl QueryService for WorkspaceEngine {
             callers.iter().map(|caller| caller.symbol.id).collect();
         syntax_candidates.retain(|candidate| !resolved_caller_ids.contains(&candidate.caller.id));
         sort_related(&mut callers);
+        if let Some(scope) = &related_scope {
+            callers.retain(|item| scope.matches_related(item));
+            syntax_candidates.retain(|candidate| scope.matches_call_site(candidate));
+        }
         let BoundedSection {
             items: callers,
             truncation: callers_truncation,
@@ -3339,16 +3642,25 @@ impl QueryService for WorkspaceEngine {
         work_stats.diff_wait_micros =
             u64::try_from(diff_started.elapsed().as_micros()).unwrap_or(u64::MAX);
         let graph = snapshot.graph();
+        let related_scope = RelatedSourceScope::new(request.source, snapshot.project_model())?;
         let limit = clamp_limit(request.limit);
         let diff_inventory_truncation = diff.truncation;
         let total_diff_files = diff.files.len();
         let mut files_work = SectionWorkBudget::new(limit);
+        let mut files_budget_exhausted = false;
         let mut changed_files = Vec::with_capacity(total_diff_files.min(files_work.examined_limit));
         for change in diff.files {
             if !files_work.record_examined(ExaminedKind::File) {
+                files_budget_exhausted = true;
                 break;
             }
+            if let Some(scope) = &related_scope
+                && !scope.matches_diff_path(graph, &change.path)
+            {
+                continue;
+            }
             if !files_work.retain_intermediate() {
+                files_budget_exhausted = true;
                 break;
             }
             changed_files.push(ChangedFile {
@@ -3359,7 +3671,7 @@ impl QueryService for WorkspaceEngine {
                 precision: change.precision,
             });
         }
-        if changed_files.len() < total_diff_files {
+        if files_budget_exhausted {
             files_work.mark_examined_exhausted();
         }
         changed_files.sort_by(|a, b| a.path.cmp(&b.path));
@@ -3450,6 +3762,7 @@ impl QueryService for WorkspaceEngine {
             }
             let call_relations = related_from_edges(
                 graph,
+                related_scope.as_ref(),
                 graph.incoming_edges(*id),
                 &[EdgeKind::Calls],
                 RelatedEndpoint::From,
@@ -3475,6 +3788,7 @@ impl QueryService for WorkspaceEngine {
             }
             let test_relations = related_from_edges(
                 graph,
+                related_scope.as_ref(),
                 graph.incoming_edges(*id),
                 &[EdgeKind::Tests],
                 RelatedEndpoint::From,
@@ -3512,6 +3826,7 @@ impl QueryService for WorkspaceEngine {
             ] {
                 let related = related_from_edges(
                     graph,
+                    related_scope.as_ref(),
                     edges,
                     CONTEXT_RELATION_KINDS,
                     endpoint,
@@ -3547,6 +3862,10 @@ impl QueryService for WorkspaceEngine {
         let mut related_tests: Vec<_> = tests.into_values().collect();
         sort_diff_related(&mut related_callers);
         sort_diff_related(&mut related_tests);
+        if let Some(scope) = &related_scope {
+            related_callers.retain(|item| scope.matches_related(&item.relation));
+            related_tests.retain(|item| scope.matches_related(&item.relation));
+        }
         let BoundedSection {
             items: related_callers,
             truncation: callers_truncation,
@@ -3574,6 +3893,9 @@ impl QueryService for WorkspaceEngine {
             .iter()
             .any(|detail| detail.cause == TruncationCause::ItemLimit);
         sort_diff_directed_related(&mut relations);
+        if let Some(scope) = &related_scope {
+            relations.retain(|item| scope.matches_related(&item.relation.relation));
+        }
         let BoundedSection {
             items: related_relations,
             truncation: relations_truncation,
@@ -3587,6 +3909,9 @@ impl QueryService for WorkspaceEngine {
         let relations_response_item_truncated = relations_truncation
             .iter()
             .any(|detail| detail.cause == TruncationCause::ItemLimit);
+        if let Some(scope) = &related_scope {
+            call_candidates.retain(|item| scope.matches_call_site(&item.call_site));
+        }
         call_candidates.sort_by(|a, b| {
             a.changed_symbol_id
                 .cmp(&b.changed_symbol_id)

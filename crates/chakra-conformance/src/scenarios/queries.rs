@@ -93,6 +93,7 @@ pub(super) fn source_roles(manifest: &Manifest) -> Check<Vec<String>> {
     with_live(&fixtures_root().join(&manifest.language), |fixture| {
         let expectations = &manifest.expectations;
         let map = fixture.engine.repo_map(RepoMapRequest {
+            include_project_scope: false,
             limit: Some(MAX_QUERY_LIMIT),
             ..RepoMapRequest::default()
         })?;
@@ -167,6 +168,7 @@ pub(super) fn ambiguity(manifest: &Manifest) -> Check<Vec<String>> {
                 fixture
                     .engine
                     .context(ContextRequest {
+                        source: Default::default(),
                         symbol: Some(SymbolRef::ByName(expectations.ambiguous_name.clone())),
                         ..ContextRequest::default()
                     })
@@ -177,6 +179,7 @@ pub(super) fn ambiguity(manifest: &Manifest) -> Check<Vec<String>> {
                 fixture
                     .engine
                     .callers(CallersRequest {
+                        source: Default::default(),
                         symbol: Some(SymbolRef::ByName(expectations.ambiguous_name.clone())),
                         ..CallersRequest::default()
                     })
@@ -217,6 +220,7 @@ pub(super) fn syntax_callers(manifest: &Manifest) -> Check<Vec<String>> {
     with_live(&fixtures_root().join(&manifest.language), |fixture| {
         let expectations = &manifest.expectations;
         let callers = fixture.engine.callers(CallersRequest {
+            source: Default::default(),
             symbol: Some(SymbolRef::ByName(expectations.callee.clone())),
             limit: None,
             ..CallersRequest::default()
@@ -254,6 +258,7 @@ pub(super) fn syntax_callers(manifest: &Manifest) -> Check<Vec<String>> {
             ),
         )?;
         let context = fixture.engine.context(ContextRequest {
+            source: Default::default(),
             symbol: Some(SymbolRef::ByName(expectations.caller.clone())),
             ..ContextRequest::default()
         })?;
@@ -293,6 +298,7 @@ pub(super) fn syntax_callers(manifest: &Manifest) -> Check<Vec<String>> {
                 ),
             )?;
             let callers = fixture.engine.callers(CallersRequest {
+                source: Default::default(),
                 symbol: Some(SymbolRef::ByName(simple_name(&json.target).to_owned())),
                 limit: None,
                 ..CallersRequest::default()
@@ -427,6 +433,7 @@ pub(super) fn high_degree_callers(manifest: &Manifest) -> Check<Vec<String>> {
     with_live(&fixtures_root().join(&manifest.language), |fixture| {
         let expectations = &manifest.expectations;
         let full = fixture.engine.callers(CallersRequest {
+            source: Default::default(),
             symbol: Some(SymbolRef::ByName(expectations.fan_in_target.clone())),
             limit: Some(MAX_QUERY_LIMIT),
             ..CallersRequest::default()
@@ -466,6 +473,7 @@ pub(super) fn high_degree_callers(manifest: &Manifest) -> Check<Vec<String>> {
         ensure(!full.truncated, "full callers response must not truncate")?;
 
         let paged = fixture.engine.callers(CallersRequest {
+            source: Default::default(),
             symbol: Some(SymbolRef::ByName(expectations.fan_in_target.clone())),
             limit: None,
             ..CallersRequest::default()

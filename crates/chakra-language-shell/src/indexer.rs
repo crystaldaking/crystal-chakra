@@ -36,6 +36,10 @@ impl LanguageHooks for ShellHooks {
 
     const WORKER_NAME: &'static str = "shell";
 
+    fn language() -> chakra_domain::symbol::Language {
+        chakra_domain::symbol::Language::Shell
+    }
+
     fn new_parser() -> Result<Self::Parser, ShellIndexError> {
         ShellParser::new().map_err(|error| ShellIndexError::Parse(error.to_string()))
     }

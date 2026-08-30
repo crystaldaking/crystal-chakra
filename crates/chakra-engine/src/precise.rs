@@ -556,6 +556,19 @@ pub enum ProviderRequestPriority {
     Interactive,
 }
 
+impl ProviderRequestPriority {
+    pub const COUNT: usize = 3;
+
+    /// Internal provider-pool latency-array index.
+    pub fn index(self) -> usize {
+        match self {
+            Self::Background => 0,
+            Self::Normal => 1,
+            Self::Interactive => 2,
+        }
+    }
+}
+
 /// One provider-confirmed relationship endpoint and optional call site.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PreciseRelation {

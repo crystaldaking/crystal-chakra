@@ -55,7 +55,7 @@ Requirements:
 ```sh
 git clone https://github.com/crystaldaking/crystal-chakra.git
 cd crystal-chakra
-git checkout v0.1.3
+git checkout v0.2.0
 cargo install --locked --path crates/chakra-cli
 chakra --version
 ```

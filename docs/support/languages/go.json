@@ -152,7 +152,7 @@
       "mechanism": "chakra-git worktree/base-ref diff provider for .go files",
       "evidence": [
         "docs/support/conformance/go.json",
-        "crates/chakra-git/src/lib.rs"
+        "crates/chakra-git/src/diff.rs"
       ]
     },
     "FRESH-01": {

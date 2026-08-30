@@ -568,6 +568,7 @@ async fn generated_multi_language_release_gate() -> GateResult<()> {
     let live = start_live_index(repository.clone(), cold.syntax_index, engine.clone())?;
 
     engine.repo_map(RepoMapRequest {
+        include_project_scope: false,
         limit: Some(20),
         freshness: FreshnessRequirement::RequireFresh,
         ..RepoMapRequest::default()
@@ -675,6 +676,7 @@ async fn generated_multi_language_release_gate() -> GateResult<()> {
     require(
         matches!(
             engine.context(ContextRequest {
+                source: Default::default(),
                 symbol: Some(SymbolRef::ByName("run".to_owned())),
                 freshness: FreshnessRequirement::AllowStale,
                 ..ContextRequest::default()
@@ -685,6 +687,7 @@ async fn generated_multi_language_release_gate() -> GateResult<()> {
     )?;
 
     let callers = engine.callers(CallersRequest {
+        source: Default::default(),
         symbol: Some(SymbolRef::ByName("hot".to_owned())),
         limit: Some(20),
         freshness: FreshnessRequirement::AllowStale,
@@ -711,6 +714,7 @@ async fn generated_multi_language_release_gate() -> GateResult<()> {
 
     let provider_started = Instant::now();
     let degraded_context = engine.context(ContextRequest {
+        source: Default::default(),
         symbol: Some(SymbolRef::ByName("hot".to_owned())),
         limit: Some(20),
         freshness: FreshnessRequirement::RequireFresh,
@@ -805,6 +809,7 @@ async fn generated_multi_language_release_gate() -> GateResult<()> {
     fs::rename(&replacement, &edit_target)?;
     let rename_started = Instant::now();
     engine.repo_map(RepoMapRequest {
+        include_project_scope: false,
         limit: Some(20),
         freshness: FreshnessRequirement::RequireFresh,
         ..RepoMapRequest::default()

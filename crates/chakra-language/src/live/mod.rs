@@ -1,20 +1,30 @@
 //! Bounded filesystem notifications plus deterministic multi-language freshness.
 
-use std::collections::{BTreeMap, BTreeSet};
+mod barrier;
+mod metrics;
+mod source_cache;
+
+use std::collections::BTreeSet;
 use std::fs;
-use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(test)]
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
 use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-#[cfg(unix)]
-use std::os::unix::fs::MetadataExt;
-
+#[cfg(test)]
+use chakra_domain::indexing::MAX_FILE_INVALIDATION_RECORDS;
+use chakra_domain::indexing::{
+    CacheHealth, FileInvalidation, FileInvalidationReason, FullReconciliationReason,
+    IndexingDiagnostics, LiveQueueState, ReconciliationCounters, ReconciliationKind,
+    SYNTAX_FACT_CACHE_DISABLED_REASON,
+};
 use chakra_domain::location::RepoRelativePath;
 use chakra_domain::operation::OperationContext;
+use chakra_domain::scheduling::WorkClass;
 use chakra_domain::state::{Freshness, WorkspaceStatus};
 use chakra_engine::{FreshnessBarrier, FreshnessBarrierError, SymbolGraph, WorkspaceEngine};
 use notify::event::{AccessKind, AccessMode};
@@ -23,30 +33,37 @@ use thiserror::Error;
 use tracing::{error, info, warn};
 
 use crate::indexer::{
-    IndexOptions, ReconcileMetrics, ReconcileReport, WorkspaceIndexError, WorkspaceSourceLoader,
-    WorkspaceSourceScan, WorkspaceSyntaxIndex, scan_discovered_sources_with_options,
+    IndexOptions, ReconcileReport, WorkspaceIndexError, WorkspaceSourceScan, WorkspaceSyntaxIndex,
+    scan_discovered_sources_with_options,
 };
+use crate::scheduler::{PriorityWorkQueue, QueueFull};
+
+use barrier::{BarrierShared, BarrierState, LiveFreshnessBarrier};
+use metrics::{FileInvalidationBatch, MetricsState};
+use source_cache::{CachedSourceLoader, FileIdentity, SourceSnapshotCache};
+
+pub use metrics::LiveIndexMetrics;
 
 const EVENT_QUEUE_CAPACITY: usize = 256;
 const DEBOUNCE_QUIET: Duration = Duration::from_millis(50);
 const DEBOUNCE_MAX: Duration = Duration::from_millis(250);
-const FRESHNESS_TIMEOUT: Duration = Duration::from_secs(30);
-const FRESHNESS_CANCELLATION_POLL: Duration = Duration::from_millis(10);
+pub(crate) const FRESHNESS_TIMEOUT: Duration = Duration::from_secs(30);
+pub(crate) const FRESHNESS_CANCELLATION_POLL: Duration = Duration::from_millis(10);
 const MAX_STABLE_SCAN_ATTEMPTS: usize = 3;
 const MAX_WATCHED_DIRECTORIES: usize = 4_096;
 const MAX_PUBLISH_ATTEMPTS: usize = 3;
 const MAX_EVENT_HINT_PATHS: usize = 32;
 const DEFAULT_FULL_RECONCILE_INTERVAL: u64 = 256;
 const DEFAULT_STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum ReconciliationKind {
-    #[default]
-    None,
-    Noop,
-    Targeted,
-    Full,
-}
+/// Staged entries of one class never exceed the bounded transport channel.
+const QUEUE_PER_CLASS_CAPACITY: usize = EVENT_QUEUE_CAPACITY;
+/// A scheduling pass stages at most one transport-channel capacity before
+/// selecting work. A continuously replenished channel therefore cannot keep
+/// already staged work from reaching the aging scheduler.
+const MAX_TRANSPORT_DRAIN_PER_PASS: usize = EVENT_QUEUE_CAPACITY;
+/// One aging interval: queued background work is promoted one class per
+/// interval until it competes with freshness work FIFO (issue #44).
+const QUEUE_AGING_AFTER: Duration = Duration::from_secs(1);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LiveIndexOptions {
@@ -63,250 +80,6 @@ impl Default for LiveIndexOptions {
             full_reconcile_interval: DEFAULT_FULL_RECONCILE_INTERVAL,
             startup_timeout: DEFAULT_STARTUP_TIMEOUT,
         }
-    }
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct LiveIndexMetrics {
-    pub barrier_requests: u64,
-    pub barrier_generations_completed: u64,
-    pub barrier_waiters_coalesced: u64,
-    pub reconciliations: u64,
-    pub reconciliation_failures: u64,
-    pub published_revisions: u64,
-    pub files_scanned: u64,
-    pub files_reparsed: u64,
-    pub relationship_files_recomputed: u64,
-    pub framework_files_reparsed: u64,
-    pub framework_relationship_files_recomputed: u64,
-    pub framework_truncated_files: u64,
-    pub unchanged_files: u64,
-    pub created_files: u64,
-    pub modified_files: u64,
-    pub deleted_files: u64,
-    pub syntax_error_files: u64,
-    pub graph_files_reused: u64,
-    pub graph_files_rebuilt: u64,
-    pub graph_source_bytes_reused: u64,
-    pub graph_source_bytes_rebuilt: u64,
-    pub graph_source_bytes_copied: u64,
-    pub graph_symbols_reused: u64,
-    pub graph_symbols_rebuilt: u64,
-    pub graph_symbols_copied: u64,
-    pub graph_edges_reused: u64,
-    pub graph_edges_rebuilt: u64,
-    pub graph_edges_copied: u64,
-    pub graph_call_sites_reused: u64,
-    pub graph_call_sites_rebuilt: u64,
-    pub graph_call_sites_copied: u64,
-    pub watcher_events: u64,
-    pub dropped_watcher_events: u64,
-    pub watcher_errors: u64,
-    pub watched_directories: u64,
-    pub watcher_hint_paths: u64,
-    pub git_subprocesses: u64,
-    pub files_inspected: u64,
-    pub source_bytes_inspected: u64,
-    pub metadata_files_inspected: u64,
-    pub metadata_bytes_inspected: u64,
-    pub files_read: u64,
-    pub source_bytes_read: u64,
-    pub no_op_reconciliations: u64,
-    pub targeted_reconciliations: u64,
-    pub full_reconciliations: u64,
-    pub watch_set_recomputations: u64,
-    pub last_reconciliation_kind: ReconciliationKind,
-}
-
-#[derive(Debug, Default)]
-struct MetricsState {
-    barrier_requests: AtomicU64,
-    barrier_generations_completed: AtomicU64,
-    barrier_waiters_coalesced: AtomicU64,
-    reconciliations: AtomicU64,
-    reconciliation_failures: AtomicU64,
-    published_revisions: AtomicU64,
-    files_scanned: AtomicU64,
-    files_reparsed: AtomicU64,
-    relationship_files_recomputed: AtomicU64,
-    framework_files_reparsed: AtomicU64,
-    framework_relationship_files_recomputed: AtomicU64,
-    framework_truncated_files: AtomicU64,
-    unchanged_files: AtomicU64,
-    created_files: AtomicU64,
-    modified_files: AtomicU64,
-    deleted_files: AtomicU64,
-    syntax_error_files: AtomicU64,
-    graph_files_reused: AtomicU64,
-    graph_files_rebuilt: AtomicU64,
-    graph_source_bytes_reused: AtomicU64,
-    graph_source_bytes_rebuilt: AtomicU64,
-    graph_source_bytes_copied: AtomicU64,
-    graph_symbols_reused: AtomicU64,
-    graph_symbols_rebuilt: AtomicU64,
-    graph_symbols_copied: AtomicU64,
-    graph_edges_reused: AtomicU64,
-    graph_edges_rebuilt: AtomicU64,
-    graph_edges_copied: AtomicU64,
-    graph_call_sites_reused: AtomicU64,
-    graph_call_sites_rebuilt: AtomicU64,
-    graph_call_sites_copied: AtomicU64,
-    watcher_events: AtomicU64,
-    dropped_watcher_events: AtomicU64,
-    watcher_errors: AtomicU64,
-    watched_directories: AtomicU64,
-    watcher_hint_paths: AtomicU64,
-    git_subprocesses: AtomicU64,
-    files_inspected: AtomicU64,
-    source_bytes_inspected: AtomicU64,
-    metadata_files_inspected: AtomicU64,
-    metadata_bytes_inspected: AtomicU64,
-    files_read: AtomicU64,
-    source_bytes_read: AtomicU64,
-    no_op_reconciliations: AtomicU64,
-    targeted_reconciliations: AtomicU64,
-    full_reconciliations: AtomicU64,
-    watch_set_recomputations: AtomicU64,
-    last_reconciliation_kind: AtomicU64,
-    event_epoch: AtomicU64,
-}
-
-impl MetricsState {
-    fn snapshot(&self) -> LiveIndexMetrics {
-        let load = |value: &AtomicU64| value.load(Ordering::Relaxed);
-        LiveIndexMetrics {
-            barrier_requests: load(&self.barrier_requests),
-            barrier_generations_completed: load(&self.barrier_generations_completed),
-            barrier_waiters_coalesced: load(&self.barrier_waiters_coalesced),
-            reconciliations: load(&self.reconciliations),
-            reconciliation_failures: load(&self.reconciliation_failures),
-            published_revisions: load(&self.published_revisions),
-            files_scanned: load(&self.files_scanned),
-            files_reparsed: load(&self.files_reparsed),
-            relationship_files_recomputed: load(&self.relationship_files_recomputed),
-            framework_files_reparsed: load(&self.framework_files_reparsed),
-            framework_relationship_files_recomputed: load(
-                &self.framework_relationship_files_recomputed,
-            ),
-            framework_truncated_files: load(&self.framework_truncated_files),
-            unchanged_files: load(&self.unchanged_files),
-            created_files: load(&self.created_files),
-            modified_files: load(&self.modified_files),
-            deleted_files: load(&self.deleted_files),
-            syntax_error_files: load(&self.syntax_error_files),
-            graph_files_reused: load(&self.graph_files_reused),
-            graph_files_rebuilt: load(&self.graph_files_rebuilt),
-            graph_source_bytes_reused: load(&self.graph_source_bytes_reused),
-            graph_source_bytes_rebuilt: load(&self.graph_source_bytes_rebuilt),
-            graph_source_bytes_copied: load(&self.graph_source_bytes_copied),
-            graph_symbols_reused: load(&self.graph_symbols_reused),
-            graph_symbols_rebuilt: load(&self.graph_symbols_rebuilt),
-            graph_symbols_copied: load(&self.graph_symbols_copied),
-            graph_edges_reused: load(&self.graph_edges_reused),
-            graph_edges_rebuilt: load(&self.graph_edges_rebuilt),
-            graph_edges_copied: load(&self.graph_edges_copied),
-            graph_call_sites_reused: load(&self.graph_call_sites_reused),
-            graph_call_sites_rebuilt: load(&self.graph_call_sites_rebuilt),
-            graph_call_sites_copied: load(&self.graph_call_sites_copied),
-            watcher_events: load(&self.watcher_events),
-            dropped_watcher_events: load(&self.dropped_watcher_events),
-            watcher_errors: load(&self.watcher_errors),
-            watched_directories: load(&self.watched_directories),
-            watcher_hint_paths: load(&self.watcher_hint_paths),
-            git_subprocesses: load(&self.git_subprocesses),
-            files_inspected: load(&self.files_inspected),
-            source_bytes_inspected: load(&self.source_bytes_inspected),
-            metadata_files_inspected: load(&self.metadata_files_inspected),
-            metadata_bytes_inspected: load(&self.metadata_bytes_inspected),
-            files_read: load(&self.files_read),
-            source_bytes_read: load(&self.source_bytes_read),
-            no_op_reconciliations: load(&self.no_op_reconciliations),
-            targeted_reconciliations: load(&self.targeted_reconciliations),
-            full_reconciliations: load(&self.full_reconciliations),
-            watch_set_recomputations: load(&self.watch_set_recomputations),
-            last_reconciliation_kind: match load(&self.last_reconciliation_kind) {
-                1 => ReconciliationKind::Noop,
-                2 => ReconciliationKind::Targeted,
-                3 => ReconciliationKind::Full,
-                _ => ReconciliationKind::None,
-            },
-        }
-    }
-
-    fn record_reconciliation_kind(&self, kind: ReconciliationKind) {
-        let (counter, raw) = match kind {
-            ReconciliationKind::None => return,
-            ReconciliationKind::Noop => (&self.no_op_reconciliations, 1),
-            ReconciliationKind::Targeted => (&self.targeted_reconciliations, 2),
-            ReconciliationKind::Full => (&self.full_reconciliations, 3),
-        };
-        counter.fetch_add(1, Ordering::Relaxed);
-        self.last_reconciliation_kind.store(raw, Ordering::Relaxed);
-    }
-
-    fn record_barrier_completion(&self, covered: u64, completed_before: u64) {
-        let completed = covered.saturating_sub(completed_before);
-        self.barrier_generations_completed
-            .fetch_add(completed, Ordering::Relaxed);
-        self.barrier_waiters_coalesced
-            .fetch_add(completed.saturating_sub(1), Ordering::Relaxed);
-    }
-
-    fn record_reconcile(&self, metrics: ReconcileMetrics) {
-        self.reconciliations.fetch_add(1, Ordering::Relaxed);
-        self.files_scanned
-            .fetch_add(metrics.scanned_files, Ordering::Relaxed);
-        self.files_reparsed
-            .fetch_add(metrics.reparsed_files, Ordering::Relaxed);
-        self.relationship_files_recomputed
-            .fetch_add(metrics.relationship_files_recomputed, Ordering::Relaxed);
-        self.framework_files_reparsed
-            .fetch_add(metrics.framework_files_reparsed, Ordering::Relaxed);
-        self.framework_relationship_files_recomputed.fetch_add(
-            metrics.framework_relationship_files_recomputed,
-            Ordering::Relaxed,
-        );
-        self.framework_truncated_files
-            .store(metrics.framework_truncated_files, Ordering::Relaxed);
-        self.unchanged_files
-            .fetch_add(metrics.unchanged_files, Ordering::Relaxed);
-        self.created_files
-            .fetch_add(metrics.created_files, Ordering::Relaxed);
-        self.modified_files
-            .fetch_add(metrics.modified_files, Ordering::Relaxed);
-        self.deleted_files
-            .fetch_add(metrics.deleted_files, Ordering::Relaxed);
-        self.syntax_error_files
-            .store(metrics.syntax_error_files, Ordering::Relaxed);
-        let publication = metrics.publication;
-        self.graph_files_reused
-            .fetch_add(publication.reused_files, Ordering::Relaxed);
-        self.graph_files_rebuilt
-            .fetch_add(publication.rebuilt_files, Ordering::Relaxed);
-        self.graph_source_bytes_reused
-            .fetch_add(publication.reused_source_bytes, Ordering::Relaxed);
-        self.graph_source_bytes_rebuilt
-            .fetch_add(publication.rebuilt_source_bytes, Ordering::Relaxed);
-        self.graph_source_bytes_copied
-            .fetch_add(publication.copied_source_bytes, Ordering::Relaxed);
-        self.graph_symbols_reused
-            .fetch_add(publication.reused_symbols, Ordering::Relaxed);
-        self.graph_symbols_rebuilt
-            .fetch_add(publication.rebuilt_symbols, Ordering::Relaxed);
-        self.graph_symbols_copied
-            .fetch_add(publication.copied_symbols, Ordering::Relaxed);
-        self.graph_edges_reused
-            .fetch_add(publication.reused_edges, Ordering::Relaxed);
-        self.graph_edges_rebuilt
-            .fetch_add(publication.rebuilt_edges, Ordering::Relaxed);
-        self.graph_edges_copied
-            .fetch_add(publication.copied_edges, Ordering::Relaxed);
-        self.graph_call_sites_reused
-            .fetch_add(publication.reused_call_sites, Ordering::Relaxed);
-        self.graph_call_sites_rebuilt
-            .fetch_add(publication.rebuilt_call_sites, Ordering::Relaxed);
-        self.graph_call_sites_copied
-            .fetch_add(publication.copied_call_sites, Ordering::Relaxed);
     }
 }
 
@@ -338,408 +111,93 @@ enum WorkerSignal {
         epoch: u64,
         hints: Vec<chakra_domain::location::RepoRelativePath>,
         uncertain: bool,
+        enqueued: Instant,
     },
-    Barrier,
+    /// Deferred periodic full reread: background `Reconciliation`-class work
+    /// that must never delay a freshness edit (issue #44).
+    Checkpoint {
+        enqueued: Instant,
+    },
+    Barrier {
+        enqueued: Instant,
+    },
     Shutdown,
 }
 
-#[derive(Debug, Default)]
-struct BarrierState {
-    requested: u64,
-    completed: u64,
-    waiters: BTreeMap<u64, OperationContext>,
-    outcomes: BTreeMap<u64, Result<(), String>>,
-    worker_operation: Option<OperationContext>,
-    shutdown: bool,
+impl WorkerSignal {
+    fn class(&self) -> WorkClass {
+        match self {
+            // Shutdown bypasses the queue entirely; the class only guards
+            // against future callers staging it.
+            Self::Filesystem { .. } | Self::Barrier { .. } | Self::Shutdown => {
+                WorkClass::FreshnessEdit
+            }
+            Self::Checkpoint { .. } => WorkClass::Reconciliation,
+        }
+    }
+
+    fn enqueued(&self) -> Instant {
+        match self {
+            Self::Filesystem { enqueued, .. }
+            | Self::Checkpoint { enqueued }
+            | Self::Barrier { enqueued } => *enqueued,
+            Self::Shutdown => Instant::now(),
+        }
+    }
 }
 
+/// Live diagnostics owner installed on the engine (issue #43).
+///
+/// Reports the cross-revision operational picture: reconcile counters,
+/// full-reconciliation causes, bounded per-file invalidation records, queue
+/// state, and honest cache health. `counters.cold_builds` stays zero here;
+/// the engine merges its own publication-observed count when serving
+/// `status`.
 #[derive(Debug)]
-struct BarrierShared {
-    state: Mutex<BarrierState>,
-    completed: Condvar,
-}
-
-impl BarrierShared {
-    fn is_stopped(&self) -> bool {
-        self.state.lock().map_or(true, |state| state.shutdown)
-    }
-
-    fn pending_generation(&self) -> Result<(u64, u64), String> {
-        let state = self
-            .state
-            .lock()
-            .map_err(|_| "freshness state lock is poisoned".to_owned())?;
-        let requested = state
-            .waiters
-            .keys()
-            .next_back()
-            .copied()
-            .unwrap_or(state.completed);
-        Ok((requested, state.completed))
-    }
-
-    fn register(&self, operation: OperationContext) -> Result<u64, FreshnessBarrierError> {
-        let mut state = self
-            .state
-            .lock()
-            .map_err(|_| FreshnessBarrierError::new("freshness state lock is poisoned"))?;
-        if state.shutdown {
-            return Err(FreshnessBarrierError::new("live index worker is stopped"));
-        }
-        state.requested = state
-            .requested
-            .checked_add(1)
-            .ok_or_else(|| FreshnessBarrierError::new("freshness generation overflow"))?;
-        let target = state.requested;
-        state.waiters.insert(target, operation);
-        Ok(target)
-    }
-
-    fn begin_barrier_reconciliation(&self) -> Result<(u64, u64, OperationContext), String> {
-        let mut state = self
-            .state
-            .lock()
-            .map_err(|_| "freshness state lock is poisoned".to_owned())?;
-        let generation = state
-            .waiters
-            .keys()
-            .next_back()
-            .copied()
-            .unwrap_or(state.completed);
-        let operation = OperationContext::unbounded();
-        if !state
-            .waiters
-            .range((state.completed.saturating_add(1))..=generation)
-            .any(|(_, waiter)| waiter.check().is_ok())
-        {
-            operation.cancel();
-        }
-        state.worker_operation = Some(operation.clone());
-        Ok((generation, state.completed, operation))
-    }
-
-    fn complete(&self, generation: u64, result: Result<(), String>) {
-        let Ok(mut state) = self.state.lock() else {
-            return;
-        };
-        let outcome = result;
-        let targets: Vec<_> = state
-            .waiters
-            .range(..=generation)
-            .map(|(target, _)| *target)
-            .collect();
-        for target in targets {
-            state
-                .outcomes
-                .entry(target)
-                .or_insert_with(|| outcome.clone());
-        }
-        state.completed = state.completed.max(generation);
-        state.worker_operation = None;
-        self.completed.notify_all();
-    }
-
-    fn finish_waiter(&self, target: u64) {
-        let Ok(mut state) = self.state.lock() else {
-            return;
-        };
-        state.waiters.remove(&target);
-        state.outcomes.remove(&target);
-        let has_active = state.waiters.iter().any(|(generation, operation)| {
-            *generation > state.completed && operation.check().is_ok()
-        });
-        if !has_active && let Some(operation) = &state.worker_operation {
-            operation.cancel();
-        }
-        self.completed.notify_all();
-    }
-
-    fn abandon_worker(&self) {
-        let Ok(mut state) = self.state.lock() else {
-            return;
-        };
-        state.worker_operation = None;
-        self.completed.notify_all();
-    }
-
-    fn stop(&self) {
-        let Ok(mut state) = self.state.lock() else {
-            return;
-        };
-        state.shutdown = true;
-        self.completed.notify_all();
-    }
-}
-
-#[derive(Debug)]
-struct LiveFreshnessBarrier {
-    shared: Arc<BarrierShared>,
-    sender: SyncSender<WorkerSignal>,
+struct LiveIndexDiagnostics {
     metrics: Arc<MetricsState>,
+    shared: Arc<BarrierShared>,
 }
 
-impl FreshnessBarrier for LiveFreshnessBarrier {
-    fn require_fresh(&self) -> Result<(), FreshnessBarrierError> {
-        self.require_fresh_with_context(&OperationContext::with_timeout(FRESHNESS_TIMEOUT))
-    }
-
-    fn require_fresh_with_context(
-        &self,
-        operation: &OperationContext,
-    ) -> Result<(), FreshnessBarrierError> {
-        self.metrics
-            .barrier_requests
-            .fetch_add(1, Ordering::Relaxed);
-        let operation = operation.bounded_by(FRESHNESS_TIMEOUT);
-        operation
-            .check()
-            .map_err(|error| FreshnessBarrierError::new(error.to_string()))?;
-        let target = self.shared.register(operation.clone())?;
-        match self.sender.try_send(WorkerSignal::Barrier) {
-            Ok(()) | Err(TrySendError::Full(_)) => {}
-            Err(TrySendError::Disconnected(_)) => {
-                self.shared.stop();
-                self.shared.finish_waiter(target);
-                return Err(FreshnessBarrierError::new("live index worker disconnected"));
-            }
-        }
-
-        let result = (|| {
-            let mut state = self
-                .shared
-                .state
-                .lock()
-                .map_err(|_| FreshnessBarrierError::new("freshness state lock is poisoned"))?;
-            loop {
-                operation
-                    .check()
-                    .map_err(|error| FreshnessBarrierError::new(error.to_string()))?;
-                if let Some(outcome) = state.outcomes.get(&target) {
-                    return outcome.as_ref().map_or_else(
-                        |message| Err(FreshnessBarrierError::new(message.clone())),
-                        |_| Ok(()),
-                    );
-                }
-                if state.shutdown {
-                    return Err(FreshnessBarrierError::new("live index worker stopped"));
-                }
-                let wait = operation
-                    .poll_timeout(FRESHNESS_CANCELLATION_POLL)
-                    .map_err(|error| FreshnessBarrierError::new(error.to_string()))?;
-                let (next, _) = self
-                    .shared
-                    .completed
-                    .wait_timeout(state, wait)
-                    .map_err(|_| FreshnessBarrierError::new("freshness state lock is poisoned"))?;
-                state = next;
-            }
-        })();
-        self.shared.finish_waiter(target);
-        result
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct FileIdentity {
-    len: u64,
-    modified: Option<std::time::SystemTime>,
-    created: Option<std::time::SystemTime>,
-    #[cfg(unix)]
-    device: u64,
-    #[cfg(unix)]
-    inode: u64,
-    #[cfg(unix)]
-    mode: u32,
-    #[cfg(unix)]
-    modified_seconds: i64,
-    #[cfg(unix)]
-    modified_nanoseconds: i64,
-    #[cfg(unix)]
-    changed_seconds: i64,
-    #[cfg(unix)]
-    changed_nanoseconds: i64,
-}
-
-impl FileIdentity {
-    fn from_metadata(metadata: &fs::Metadata) -> Self {
-        Self {
-            len: metadata.len(),
-            modified: metadata.modified().ok(),
-            created: metadata.created().ok(),
-            #[cfg(unix)]
-            device: metadata.dev(),
-            #[cfg(unix)]
-            inode: metadata.ino(),
-            #[cfg(unix)]
-            mode: metadata.mode(),
-            #[cfg(unix)]
-            modified_seconds: metadata.mtime(),
-            #[cfg(unix)]
-            modified_nanoseconds: metadata.mtime_nsec(),
-            #[cfg(unix)]
-            changed_seconds: metadata.ctime(),
-            #[cfg(unix)]
-            changed_nanoseconds: metadata.ctime_nsec(),
-        }
-    }
-
-    fn trustworthy_for_reuse(&self) -> bool {
-        cfg!(unix)
-    }
-}
-
-#[derive(Debug, Clone)]
-struct CachedSource {
-    identity: FileIdentity,
-    source: Arc<str>,
-}
-
-#[derive(Debug, Clone, Default)]
-struct SourceSnapshotCache {
-    initialized: bool,
-    inventory: chakra_git::WorkspaceInventory,
-    entries: BTreeMap<chakra_domain::location::RepoRelativePath, CachedSource>,
-}
-
-struct CachedSourceLoader<'a> {
-    previous: &'a SourceSnapshotCache,
-    next: BTreeMap<chakra_domain::location::RepoRelativePath, CachedSource>,
-    observed: BTreeMap<chakra_domain::location::RepoRelativePath, FileIdentity>,
-    metadata_paths: BTreeSet<chakra_domain::location::RepoRelativePath>,
-    force_full: bool,
-    files_read: u64,
-    metrics: &'a MetricsState,
-    operation: &'a OperationContext,
-}
-
-impl<'a> CachedSourceLoader<'a> {
-    fn new(
-        previous: &'a SourceSnapshotCache,
-        force_full: bool,
-        metrics: &'a MetricsState,
-        operation: &'a OperationContext,
-    ) -> Self {
-        Self {
-            previous,
-            next: BTreeMap::new(),
-            observed: BTreeMap::new(),
-            metadata_paths: BTreeSet::new(),
-            force_full,
-            files_read: 0,
-            metrics,
-            operation,
-        }
-    }
-
-    fn inspect(&self, metadata: &fs::Metadata) {
-        self.metrics.files_inspected.fetch_add(1, Ordering::Relaxed);
-        self.metrics
-            .source_bytes_inspected
-            .fetch_add(metadata.len(), Ordering::Relaxed);
-    }
-}
-
-impl WorkspaceSourceLoader for CachedSourceLoader<'_> {
-    fn observe(
-        &mut self,
-        path: &chakra_domain::location::RepoRelativePath,
-        metadata: &fs::Metadata,
-    ) {
-        self.inspect(metadata);
-        self.observed
-            .insert(path.clone(), FileIdentity::from_metadata(metadata));
-    }
-
-    fn observe_metadata(
-        &mut self,
-        path: &chakra_domain::location::RepoRelativePath,
-        metadata: &fs::Metadata,
-    ) {
-        self.metrics
-            .metadata_files_inspected
-            .fetch_add(1, Ordering::Relaxed);
-        self.metrics
-            .metadata_bytes_inspected
-            .fetch_add(metadata.len(), Ordering::Relaxed);
-        self.observed
-            .insert(path.clone(), FileIdentity::from_metadata(metadata));
-        self.metadata_paths.insert(path.clone());
-    }
-
-    fn load(
-        &mut self,
-        absolute: &Path,
-        path: &chakra_domain::location::RepoRelativePath,
-        metadata: &fs::Metadata,
-        max_bytes: u64,
-    ) -> Result<Arc<str>, WorkspaceIndexError> {
-        self.operation
-            .check()
-            .map_err(|_| WorkspaceIndexError::Cancelled)?;
-        let before = FileIdentity::from_metadata(metadata);
-        let reused = !self.force_full
-            && before.trustworthy_for_reuse()
-            && self
-                .previous
-                .entries
-                .get(path)
-                .is_some_and(|cached| cached.identity == before);
-        let source = if reused {
-            self.previous
-                .entries
-                .get(path)
-                .map(|cached| cached.source.clone())
-                .ok_or_else(|| {
-                    WorkspaceIndexError::Update(format!(
-                        "source cache entry disappeared for `{path}`"
-                    ))
-                })?
-        } else {
-            let file = fs::File::open(absolute).map_err(|source| WorkspaceIndexError::Read {
-                path: path.clone(),
-                source,
-            })?;
-            let mut source = String::new();
-            file.take(max_bytes.saturating_add(1))
-                .read_to_string(&mut source)
-                .map_err(|source| WorkspaceIndexError::Read {
-                    path: path.clone(),
-                    source,
-                })?;
-            self.files_read = self.files_read.saturating_add(1);
-            self.metrics.files_read.fetch_add(1, Ordering::Relaxed);
-            self.metrics
-                .source_bytes_read
-                .fetch_add(source.len() as u64, Ordering::Relaxed);
-            Arc::<str>::from(source)
-        };
-        self.operation
-            .check()
-            .map_err(|_| WorkspaceIndexError::Cancelled)?;
-        let after = if reused {
-            before.clone()
-        } else {
-            let after_metadata =
-                fs::metadata(absolute).map_err(|source| WorkspaceIndexError::Read {
-                    path: path.clone(),
-                    source,
-                })?;
-            self.inspect(&after_metadata);
-            FileIdentity::from_metadata(&after_metadata)
-        };
-        if before != after {
-            return Err(WorkspaceIndexError::Update(format!(
-                "source `{path}` changed while its freshness snapshot was read"
-            )));
-        }
-        self.next.insert(
-            path.clone(),
-            CachedSource {
-                identity: after,
-                source: source.clone(),
+impl LiveIndexDiagnostics {
+    fn index_diagnostics(&self) -> IndexingDiagnostics {
+        let metrics = self.metrics.snapshot();
+        let (requested, completed) = self.shared.pending_generation().unwrap_or((0, 0));
+        IndexingDiagnostics {
+            cache: CacheHealth::Disabled {
+                reason: SYNTAX_FACT_CACHE_DISABLED_REASON.to_owned(),
             },
-        );
-        Ok(source)
+            counters: ReconciliationCounters {
+                cold_builds: 0,
+                no_op_reconciliations: metrics.no_op_reconciliations,
+                targeted_reconciliations: metrics.targeted_reconciliations,
+                full_reconciliations: metrics.full_reconciliations,
+                one_file_edits: self.metrics.one_file_edits.load(Ordering::Relaxed),
+                reconciliation_failures: metrics.reconciliation_failures,
+                published_revisions: metrics.published_revisions,
+            },
+            queue: LiveQueueState {
+                requested_barrier_generation: requested,
+                completed_barrier_generation: completed,
+                barrier_requests: metrics.barrier_requests,
+                barrier_waiters_coalesced: metrics.barrier_waiters_coalesced,
+                watcher_events: metrics.watcher_events,
+                dropped_watcher_events: metrics.dropped_watcher_events,
+                watcher_errors: metrics.watcher_errors,
+                watched_directories: metrics.watched_directories,
+                watcher_event_queue_capacity: EVENT_QUEUE_CAPACITY as u64,
+                scheduled_work: metrics.queue,
+            },
+            project_invalidations: self.metrics.project_invalidation_diagnostics(),
+            last_reconciliation_kind: metrics.last_reconciliation_kind,
+            full_reconciliation_reasons: self.metrics.full_reconciliation_reason_counts(),
+            last_full_reconciliation_reasons: self.metrics.last_full_reconciliation_reasons(),
+            recent_file_invalidations: self.metrics.recent_file_invalidations(),
+            file_invalidation_records: self
+                .metrics
+                .file_invalidation_records
+                .load(Ordering::Relaxed),
+        }
     }
 }
 
@@ -749,12 +207,20 @@ pub struct LiveIndex {
     sender: SyncSender<WorkerSignal>,
     shared: Arc<BarrierShared>,
     metrics: Arc<MetricsState>,
+    diagnostics: Arc<LiveIndexDiagnostics>,
     worker: Option<JoinHandle<()>>,
 }
 
 impl LiveIndex {
     pub fn metrics(&self) -> LiveIndexMetrics {
         self.metrics.snapshot()
+    }
+
+    /// Bounded, typed, source-content-free live indexing diagnostics
+    /// (issue #43). `counters.cold_builds` is engine-observed and therefore
+    /// zero in this direct snapshot; the `status` query merges it.
+    pub fn diagnostics(&self) -> IndexingDiagnostics {
+        self.diagnostics.index_diagnostics()
     }
 
     pub fn shutdown(mut self) -> Result<(), LiveIndexError> {
@@ -874,10 +340,15 @@ pub fn start_live_index_with_options(
         options.startup_timeout,
     )?;
 
+    let diagnostics = Arc::new(LiveIndexDiagnostics {
+        metrics: metrics.clone(),
+        shared: shared.clone(),
+    });
     let barrier = Arc::new(LiveFreshnessBarrier {
         shared: shared.clone(),
         sender: sender.clone(),
         metrics: metrics.clone(),
+        diagnostics: diagnostics.clone(),
     });
     let engine_barrier: Arc<dyn FreshnessBarrier> = barrier.clone();
     if engine.install_freshness_barrier(engine_barrier).is_err() {
@@ -885,6 +356,7 @@ pub fn start_live_index_with_options(
             sender,
             shared,
             metrics,
+            diagnostics,
             worker: Some(worker),
         };
         let _ = live.stop_and_join();
@@ -895,6 +367,7 @@ pub fn start_live_index_with_options(
             sender,
             shared,
             metrics,
+            diagnostics,
             worker: Some(worker),
         };
         let _ = live.stop_and_join();
@@ -904,6 +377,7 @@ pub fn start_live_index_with_options(
         sender,
         shared,
         metrics,
+        diagnostics,
         worker: Some(worker),
     })
 }
@@ -985,6 +459,7 @@ fn run_worker(
             epoch,
             hints,
             uncertain,
+            enqueued: Instant::now(),
         }) {
             Ok(()) => {}
             Err(TrySendError::Full(_)) => {
@@ -1035,15 +510,45 @@ fn run_worker(
     let mut reconciled_watcher_errors = 0_u64;
     let mut reconciled_dropped_events = 0_u64;
     let mut indexed_paths = initial_paths;
-    while let Ok(signal) = receiver.recv() {
+    let mut queue = PriorityWorkQueue::new(QUEUE_PER_CLASS_CAPACITY, QUEUE_AGING_AFTER);
+    let mut checkpoint_pending = false;
+    'outer: loop {
+        // Block only when no staged work remains: a queued background
+        // checkpoint must run even while the transport channel stays silent.
+        if queue.is_empty() {
+            let Ok(signal) = receiver.recv() else {
+                break;
+            };
+            if matches!(signal, WorkerSignal::Shutdown) {
+                break;
+            }
+            stage_signal(&mut queue, signal, &metrics);
+        }
+        for _ in 0..MAX_TRANSPORT_DRAIN_PER_PASS {
+            let Ok(signal) = receiver.try_recv() else {
+                break;
+            };
+            if matches!(signal, WorkerSignal::Shutdown) {
+                break 'outer;
+            }
+            stage_signal(&mut queue, signal, &metrics);
+        }
+        let Some(signal) = queue.pop() else {
+            continue;
+        };
+        // Publish selection before executing it. A freshness reconciliation
+        // may wake its waiter from inside `reconcile`, so the query observing
+        // that fresh revision must also be able to observe its dequeue and
+        // queue-latency sample.
+        metrics.publish_queue_metrics(queue.metrics());
         match signal {
             WorkerSignal::Shutdown => break,
-            WorkerSignal::Barrier => {
+            WorkerSignal::Barrier { .. } => {
                 if shared
                     .pending_generation()
                     .is_ok_and(|(requested, completed)| requested > completed)
                 {
-                    reconcile(
+                    let kind = reconcile(
                         &repository_root,
                         &mut syntax_index,
                         &engine,
@@ -1059,74 +564,26 @@ fn run_worker(
                         &mut reconciled_watcher_errors,
                         &mut reconciled_dropped_events,
                         &mut indexed_paths,
-                        &options,
                         &BTreeSet::new(),
+                        false,
                         false,
                         true,
                     );
+                    track_reconcile_outcome(
+                        kind,
+                        &mut queue,
+                        reconciliations_since_full,
+                        &options,
+                        &mut checkpoint_pending,
+                    );
+                } else {
+                    // The generation counter already completed this demand.
+                    queue.note_superseded(WorkClass::FreshnessEdit);
                 }
             }
-            WorkerSignal::Filesystem {
-                epoch,
-                hints,
-                uncertain,
-            } => {
-                if epoch <= reconciled_event_epoch {
-                    continue;
-                }
-                mark_stale(&engine);
-                let mut window = DebounceWindow::new(Instant::now());
-                let mut shutdown = false;
-                let mut hints: BTreeSet<_> = hints.into_iter().collect();
-                let mut latest_signal_epoch = epoch;
-                let mut uncertain = uncertain || epoch != reconciled_event_epoch.saturating_add(1);
-                loop {
-                    let deadline = window.deadline();
-                    let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
-                        break;
-                    };
-                    match receiver.recv_timeout(remaining) {
-                        Ok(WorkerSignal::Filesystem {
-                            epoch: observed_epoch,
-                            hints: observed,
-                            uncertain: observed_uncertain,
-                        }) => {
-                            window.observe(Instant::now());
-                            let non_contiguous = event_epoch_is_non_contiguous(
-                                &mut latest_signal_epoch,
-                                observed_epoch,
-                            );
-                            uncertain |= observed_uncertain || non_contiguous;
-                            for hint in observed {
-                                if hints.len() >= MAX_EVENT_HINT_PATHS {
-                                    uncertain = true;
-                                    break;
-                                }
-                                hints.insert(hint);
-                            }
-                        }
-                        // The generation counter already records the waiter.
-                        // Keep the bounded quiet window open so an editor's
-                        // write/metadata/rename burst is reconciled as one
-                        // stable state instead of publishing an avoidable
-                        // intermediate revision merely because a caller asked
-                        // for freshness immediately.
-                        Ok(WorkerSignal::Barrier) => {}
-                        Ok(WorkerSignal::Shutdown) => {
-                            shutdown = true;
-                            break;
-                        }
-                        Err(mpsc::RecvTimeoutError::Timeout) => break,
-                        Err(mpsc::RecvTimeoutError::Disconnected) => {
-                            shutdown = true;
-                            break;
-                        }
-                    }
-                }
-                if shutdown {
-                    break;
-                }
-                reconcile(
+            WorkerSignal::Checkpoint { .. } => {
+                checkpoint_pending = false;
+                let kind = reconcile(
                     &repository_root,
                     &mut syntax_index,
                     &engine,
@@ -1142,10 +599,136 @@ fn run_worker(
                     &mut reconciled_watcher_errors,
                     &mut reconciled_dropped_events,
                     &mut indexed_paths,
+                    &BTreeSet::new(),
+                    false,
+                    true,
+                    false,
+                );
+                track_reconcile_outcome(
+                    kind,
+                    &mut queue,
+                    reconciliations_since_full,
                     &options,
+                    &mut checkpoint_pending,
+                );
+            }
+            WorkerSignal::Filesystem {
+                epoch,
+                hints,
+                uncertain,
+                ..
+            } => {
+                if epoch <= reconciled_event_epoch {
+                    // A newer reconcile already covered this epoch: the
+                    // staged signal is obsolete freshness work.
+                    queue.note_superseded(WorkClass::FreshnessEdit);
+                    continue;
+                }
+                mark_stale(&engine);
+                let mut window = DebounceWindow::new(Instant::now());
+                let mut shutdown = false;
+                let mut hints: BTreeSet<_> = hints.into_iter().collect();
+                let mut latest_signal_epoch = epoch;
+                let mut uncertain = uncertain || epoch != reconciled_event_epoch.saturating_add(1);
+                loop {
+                    let deadline = window.deadline();
+                    let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+                        break;
+                    };
+                    match receiver.recv_timeout(remaining) {
+                        Ok(signal) => {
+                            if matches!(signal, WorkerSignal::Shutdown) {
+                                shutdown = true;
+                            } else {
+                                stage_signal(&mut queue, signal, &metrics);
+                                for _ in 0..MAX_TRANSPORT_DRAIN_PER_PASS {
+                                    let Ok(signal) = receiver.try_recv() else {
+                                        break;
+                                    };
+                                    if matches!(signal, WorkerSignal::Shutdown) {
+                                        shutdown = true;
+                                        break;
+                                    }
+                                    stage_signal(&mut queue, signal, &metrics);
+                                }
+                            }
+                            // Keep the bounded quiet window open so an
+                            // editor's write/metadata/rename burst is
+                            // reconciled as one stable state. Checkpoint
+                            // signals stay staged: background work must not
+                            // extend or interrupt the freshness window.
+                            while let Some(signal) = queue.pop_where(|staged| {
+                                !matches!(staged, WorkerSignal::Checkpoint { .. })
+                            }) {
+                                match signal {
+                                    WorkerSignal::Filesystem {
+                                        epoch: observed_epoch,
+                                        hints: observed,
+                                        uncertain: observed_uncertain,
+                                        ..
+                                    } => {
+                                        window.observe(Instant::now());
+                                        let non_contiguous = event_epoch_is_non_contiguous(
+                                            &mut latest_signal_epoch,
+                                            observed_epoch,
+                                        );
+                                        uncertain |= observed_uncertain || non_contiguous;
+                                        for hint in observed {
+                                            if hints.len() >= MAX_EVENT_HINT_PATHS {
+                                                uncertain = true;
+                                                break;
+                                            }
+                                            hints.insert(hint);
+                                        }
+                                    }
+                                    // The generation counter already records
+                                    // the waiter; the barrier fires after the
+                                    // debounced reconcile below.
+                                    WorkerSignal::Barrier { .. } => {}
+                                    WorkerSignal::Checkpoint { .. } | WorkerSignal::Shutdown => {}
+                                }
+                            }
+                            if shutdown {
+                                break;
+                            }
+                        }
+                        Err(mpsc::RecvTimeoutError::Timeout) => break,
+                        Err(mpsc::RecvTimeoutError::Disconnected) => {
+                            shutdown = true;
+                            break;
+                        }
+                    }
+                }
+                if shutdown {
+                    break;
+                }
+                let kind = reconcile(
+                    &repository_root,
+                    &mut syntax_index,
+                    &engine,
+                    &mut watcher,
+                    &mut watched,
+                    &metrics,
+                    &shared,
+                    &mut watcher_degraded,
+                    &mut reconciled_event_epoch,
+                    &publication_gate,
+                    &mut source_cache,
+                    &mut reconciliations_since_full,
+                    &mut reconciled_watcher_errors,
+                    &mut reconciled_dropped_events,
+                    &mut indexed_paths,
                     &hints,
                     uncertain,
                     false,
+                    false,
+                );
+                track_reconcile_outcome(
+                    kind,
+                    &mut queue,
+                    reconciliations_since_full,
+                    &options,
+                    &mut checkpoint_pending,
                 );
             }
         }
@@ -1156,7 +739,7 @@ fn run_worker(
             .pending_generation()
             .is_ok_and(|(requested, completed)| requested > completed)
         {
-            reconcile(
+            let kind = reconcile(
                 &repository_root,
                 &mut syntax_index,
                 &engine,
@@ -1172,15 +755,85 @@ fn run_worker(
                 &mut reconciled_watcher_errors,
                 &mut reconciled_dropped_events,
                 &mut indexed_paths,
-                &options,
                 &BTreeSet::new(),
+                false,
                 false,
                 true,
             );
+            track_reconcile_outcome(
+                kind,
+                &mut queue,
+                reconciliations_since_full,
+                &options,
+                &mut checkpoint_pending,
+            );
         }
+        metrics.publish_queue_metrics(queue.metrics());
     }
+    // Shutdown cancels every staged item so queued work never leaks
+    // unaccounted when the owner stops.
+    let _ = queue.retain(|_| false);
+    metrics.publish_queue_metrics(queue.metrics());
     shared.stop();
     info!("live syntax index worker stopped");
+}
+
+/// Stages one transported signal into the priority queue. Shutdown bypasses
+/// the queue at the call sites so it can never sit behind staged work.
+///
+/// Backpressure: a full freshness class rejects with `QueueFull`. Rejected
+/// barrier demand survives in the durable generation counter; rejected
+/// filesystem evidence is lost, so the dropped-event counter advances and the
+/// next reconciliation distrusts retained bodies — the same honest
+/// degradation as a full transport channel.
+fn stage_signal(
+    queue: &mut PriorityWorkQueue<WorkerSignal>,
+    signal: WorkerSignal,
+    metrics: &MetricsState,
+) {
+    let is_filesystem = matches!(signal, WorkerSignal::Filesystem { .. });
+    let class = signal.class();
+    let enqueued = signal.enqueued();
+    if let Err(QueueFull { .. }) = queue.push(class, signal, enqueued)
+        && is_filesystem
+    {
+        metrics
+            .dropped_watcher_events
+            .fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// Checkpoint bookkeeping after one reconcile. A full reread — however it
+/// was triggered — makes every queued checkpoint obsolete, so it is cancelled
+/// out of the queue. When the interval expires, the periodic full reread is
+/// staged as `Reconciliation`-class background work that freshness edits
+/// overtake, instead of inflating the next freshness reconcile. A failed
+/// reconcile does not re-stage the checkpoint immediately: the next event
+/// retries it, mirroring the pre-checkpoint behavior and avoiding a hot
+/// retry loop on a persistent failure.
+fn track_reconcile_outcome(
+    kind: Option<ReconciliationKind>,
+    queue: &mut PriorityWorkQueue<WorkerSignal>,
+    reconciliations_since_full: u64,
+    options: &LiveIndexOptions,
+    checkpoint_pending: &mut bool,
+) {
+    if kind == Some(ReconciliationKind::Full) {
+        queue.retain(|signal| !matches!(signal, WorkerSignal::Checkpoint { .. }));
+        *checkpoint_pending = false;
+    }
+    if kind.is_some()
+        && !*checkpoint_pending
+        && reconciliations_since_full >= options.full_reconcile_interval
+    {
+        let now = Instant::now();
+        let staged = queue.push(
+            WorkClass::Reconciliation,
+            WorkerSignal::Checkpoint { enqueued: now },
+            now,
+        );
+        *checkpoint_pending = staged.is_ok();
+    }
 }
 
 fn event_may_change_workspace(event: &Event, administrative_paths: &[PathBuf]) -> bool {
@@ -1277,15 +930,15 @@ fn reconcile(
     reconciled_watcher_errors: &mut u64,
     reconciled_dropped_events: &mut u64,
     indexed_paths: &mut Vec<RepoRelativePath>,
-    options: &LiveIndexOptions,
     hints: &BTreeSet<RepoRelativePath>,
     uncertain_hint: bool,
+    checkpoint: bool,
     cancel_when_unobserved: bool,
-) {
+) -> Option<ReconciliationKind> {
     let pending = shared.pending_generation().unwrap_or((0, 0));
     let (generation, completed_before, operation) = if cancel_when_unobserved {
         let Ok(reconciliation) = shared.begin_barrier_reconciliation() else {
-            return;
+            return None;
         };
         reconciliation
     } else {
@@ -1295,15 +948,20 @@ fn reconcile(
     let dropped_events = metrics.dropped_watcher_events.load(Ordering::Acquire);
     let watcher_error_advanced = watcher_errors > *reconciled_watcher_errors;
     let dropped_event_advanced = dropped_events > *reconciled_dropped_events;
-    let force_full = requires_full_reconciliation(ReconciliationPolicy {
+    let mut full_reasons = full_reconciliation_reasons(ReconciliationPolicy {
         cache_initialized: source_cache.initialized,
         watcher_health_degraded: *watcher_degraded,
         watcher_error_advanced,
         dropped_event_advanced,
         uncertain_hint,
-        reconciliations_since_full: *reconciliations_since_full,
-        full_reconcile_interval: options.full_reconcile_interval,
     });
+    // A checkpoint is explicit background `Reconciliation`-class work: it
+    // rereads every body on its own schedule instead of silently inflating a
+    // freshness-triggered reconcile when the interval expires (issue #44).
+    if checkpoint {
+        full_reasons.push(FullReconciliationReason::PeriodicCheckpoint);
+    }
+    let force_full = !full_reasons.is_empty();
     // A stable partial watch set (for example after the 4,096-directory cap)
     // degrades notification coverage, not authoritative reconciliation.
     // RequireFresh still verifies the complete Git inventory and every file
@@ -1320,6 +978,7 @@ fn reconcile(
                 shared,
                 source_cache,
                 force_full,
+                full_reasons.clone(),
                 &operation,
             )?;
             let ReconcileReport {
@@ -1327,6 +986,8 @@ fn reconcile(
                 metrics: reconcile_metrics,
                 next_index,
                 indexing,
+                project_model,
+                dependency_impact,
             } = syntax_index
                 .reconcile_sources_with_cancellation(stable.scan, &operation.cancellation())?;
             let next_paths: Vec<_> = stable.cache.entries.keys().cloned().collect();
@@ -1370,12 +1031,19 @@ fn reconcile(
                 || syntax_index.provider_inputs(),
                 |next| next.provider_inputs(),
             );
-            let published =
-                publish_fresh(engine, graph.as_ref(), status, &indexing, provider_inputs)
-                    .map_err(WorkspaceIndexError::Update)?;
+            let published = publish_fresh(
+                engine,
+                graph.as_ref(),
+                status,
+                &indexing,
+                provider_inputs,
+                project_model.as_ref(),
+            )
+            .map_err(WorkspaceIndexError::Update)?;
             if let Some(next_index) = next_index {
                 *syntax_index = next_index;
             }
+            let invalidations = diff_file_invalidations(source_cache, &stable.cache);
             *source_cache = stable.cache;
             *indexed_paths = next_paths;
             watch_set_dirty = false;
@@ -1391,6 +1059,11 @@ fn reconcile(
             *reconciled_dropped_events = dropped_events;
             metrics.record_reconcile(reconcile_metrics);
             metrics.record_reconciliation_kind(stable.kind);
+            metrics.record_file_invalidations(invalidations);
+            metrics.record_project_impact(dependency_impact.as_ref());
+            if stable.kind == ReconciliationKind::Full {
+                metrics.record_full_reconciliation_reasons(&stable.full_reasons);
+            }
             if published {
                 metrics.published_revisions.fetch_add(1, Ordering::Relaxed);
             }
@@ -1400,11 +1073,15 @@ fn reconcile(
                 kind = ?stable.kind,
                 hinted_paths = hints.len(),
                 force_full,
+                full_reasons = ?stable.full_reasons,
                 files_read = stable.files_read,
                 covered_generation = stable.covered_generation,
+                dependency_impacted_units = dependency_impact
+                    .as_ref()
+                    .map_or(0, |impact| impact.changes.len() as u64 + impact.changes_omitted),
                 "freshness reconciliation completed"
             );
-            return Ok(stable.covered_generation);
+            return Ok((stable.covered_generation, stable.kind));
         }
         Err(WorkspaceIndexError::Update(
             "worktree changed before fresh revision publication".to_owned(),
@@ -1414,10 +1091,14 @@ fn reconcile(
         *watcher_degraded = true;
     }
     match result {
-        Ok(completed_generation) => shared.complete(completed_generation, Ok(())),
+        Ok((completed_generation, kind)) => {
+            shared.complete(completed_generation, Ok(()));
+            Some(kind)
+        }
         Err(WorkspaceIndexError::Cancelled) => {
             shared.abandon_worker();
             info!("freshness reconciliation cancelled before publication");
+            None
         }
         Err(error) => {
             metrics
@@ -1427,6 +1108,7 @@ fn reconcile(
             let message = error.to_string();
             error!(%error, "live syntax reconciliation failed");
             shared.complete(generation, Err(message));
+            None
         }
     }
 }
@@ -1441,17 +1123,95 @@ struct ReconciliationPolicy {
     watcher_error_advanced: bool,
     dropped_event_advanced: bool,
     uncertain_hint: bool,
-    reconciliations_since_full: u64,
-    full_reconcile_interval: u64,
 }
 
-fn requires_full_reconciliation(policy: ReconciliationPolicy) -> bool {
+/// Returns every typed entry-point reason a reconciliation must escalate to
+/// a full content reread. An empty vector means targeted/identity-verified
+/// reconciliation remains trustworthy (issues #40 and #43).
+fn full_reconciliation_reasons(policy: ReconciliationPolicy) -> Vec<FullReconciliationReason> {
     let _watcher_health_degraded = policy.watcher_health_degraded;
-    !policy.cache_initialized
-        || policy.watcher_error_advanced
-        || policy.dropped_event_advanced
-        || policy.uncertain_hint
-        || policy.reconciliations_since_full >= policy.full_reconcile_interval
+    let mut reasons = Vec::new();
+    if !policy.cache_initialized {
+        reasons.push(FullReconciliationReason::ColdStart);
+    }
+    if policy.watcher_error_advanced {
+        reasons.push(FullReconciliationReason::WatcherError);
+    }
+    if policy.dropped_event_advanced {
+        reasons.push(FullReconciliationReason::WatcherEventMissed);
+    }
+    if policy.uncertain_hint {
+        reasons.push(FullReconciliationReason::UncertainEventHints);
+    }
+    reasons
+}
+
+/// Per-file invalidation records between two retained source snapshots.
+///
+/// Returns nothing before the first initialized snapshot: the cold-start
+/// reconciliation would otherwise flood the bounded window with one `Added`
+/// record per discovered file. Content bytes are compared only to classify a
+/// changed identity and never leave the worker. The intermediate batch keeps
+/// only the newest records so diagnostics cannot allocate once per repository
+/// file during a broad invalidation.
+fn diff_file_invalidations(
+    previous: &SourceSnapshotCache,
+    next: &SourceSnapshotCache,
+) -> FileInvalidationBatch {
+    if !previous.initialized {
+        return FileInvalidationBatch::default();
+    }
+    let mut invalidations = FileInvalidationBatch::default();
+    for (path, cached) in &next.entries {
+        match previous.entries.get(path) {
+            None => invalidations.push(FileInvalidation {
+                path: path.clone(),
+                reason: FileInvalidationReason::Added,
+            }),
+            Some(before) if before.identity != cached.identity => {
+                let reason = if before.source == cached.source {
+                    FileInvalidationReason::MetadataChanged
+                } else {
+                    FileInvalidationReason::ContentChanged
+                };
+                invalidations.push(FileInvalidation {
+                    path: path.clone(),
+                    reason,
+                });
+            }
+            Some(_) => {}
+        }
+    }
+    for path in previous.entries.keys() {
+        if !next.entries.contains_key(path) {
+            invalidations.push(FileInvalidation {
+                path: path.clone(),
+                reason: FileInvalidationReason::Removed,
+            });
+        }
+    }
+    for (path, identity) in &next.metadata {
+        match previous.metadata.get(path) {
+            None => invalidations.push(FileInvalidation {
+                path: path.clone(),
+                reason: FileInvalidationReason::Added,
+            }),
+            Some(before) if before != identity => invalidations.push(FileInvalidation {
+                path: path.clone(),
+                reason: FileInvalidationReason::MetadataChanged,
+            }),
+            Some(_) => {}
+        }
+    }
+    for path in previous.metadata.keys() {
+        if !next.metadata.contains_key(path) {
+            invalidations.push(FileInvalidation {
+                path: path.clone(),
+                reason: FileInvalidationReason::Removed,
+            });
+        }
+    }
+    invalidations
 }
 
 struct StableSourceSnapshot {
@@ -1460,9 +1220,12 @@ struct StableSourceSnapshot {
     covered_generation: u64,
     cache: SourceSnapshotCache,
     kind: ReconciliationKind,
+    /// Typed causes when `kind` is `Full` (issues #40 and #43).
+    full_reasons: Vec<FullReconciliationReason>,
     files_read: u64,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn stable_scan(
     repository_root: &Path,
     syntax_index: &WorkspaceSyntaxIndex,
@@ -1470,11 +1233,13 @@ fn stable_scan(
     shared: &BarrierShared,
     previous: &SourceSnapshotCache,
     force_full: bool,
+    full_reasons: Vec<FullReconciliationReason>,
     operation: &OperationContext,
 ) -> Result<StableSourceSnapshot, WorkspaceIndexError> {
     let mut last_error = None;
     let mut attempt_force_full = force_full;
     let mut full_performed = force_full;
+    let mut full_reasons = full_reasons;
     let mut retry_cache = None;
     let mut files_read = 0_u64;
     let initial_watcher_errors = metrics.watcher_errors.load(Ordering::Acquire);
@@ -1495,6 +1260,10 @@ fn stable_scan(
                 last_error = Some(WorkspaceIndexError::Discovery(error));
                 attempt_force_full = true;
                 full_performed = true;
+                push_full_reconciliation_reason(
+                    &mut full_reasons,
+                    FullReconciliationReason::ScanInstability,
+                );
                 continue;
             }
         };
@@ -1518,6 +1287,10 @@ fn stable_scan(
                 last_error = Some(error);
                 attempt_force_full = true;
                 full_performed = true;
+                push_full_reconciliation_reason(
+                    &mut full_reasons,
+                    FullReconciliationReason::ScanInstability,
+                );
                 continue;
             }
         };
@@ -1536,6 +1309,10 @@ fn stable_scan(
                     last_error = Some(WorkspaceIndexError::Discovery(error));
                     attempt_force_full = true;
                     full_performed = true;
+                    push_full_reconciliation_reason(
+                        &mut full_reasons,
+                        FullReconciliationReason::ScanInstability,
+                    );
                     continue;
                 }
             };
@@ -1545,6 +1322,10 @@ fn stable_scan(
             ));
             attempt_force_full = true;
             full_performed = true;
+            push_full_reconciliation_reason(
+                &mut full_reasons,
+                FullReconciliationReason::ScanInstability,
+            );
             continue;
         }
 
@@ -1600,14 +1381,20 @@ fn stable_scan(
             if new_watcher_uncertainty {
                 attempt_force_full = true;
                 full_performed = true;
+                push_full_reconciliation_reason(
+                    &mut full_reasons,
+                    FullReconciliationReason::ScanInstability,
+                );
                 retry_cache = None;
             } else {
                 let entries = std::mem::take(&mut loader.next);
+                let metadata = loader.metadata_identities();
                 drop(loader);
                 retry_cache = Some(SourceSnapshotCache {
                     initialized: true,
                     inventory,
                     entries,
+                    metadata,
                 });
                 attempt_force_full = false;
             }
@@ -1620,6 +1407,7 @@ fn stable_scan(
         } else {
             ReconciliationKind::Noop
         };
+        let metadata = loader.metadata_identities();
         return Ok(StableSourceSnapshot {
             scan,
             event_epoch: epoch,
@@ -1628,8 +1416,10 @@ fn stable_scan(
                 initialized: true,
                 inventory,
                 entries: loader.next,
+                metadata,
             },
             kind,
+            full_reasons,
             files_read,
         });
     }
@@ -1638,6 +1428,15 @@ fn stable_scan(
             "worktree kept changing during freshness reconciliation".to_owned(),
         )
     }))
+}
+
+fn push_full_reconciliation_reason(
+    reasons: &mut Vec<FullReconciliationReason>,
+    reason: FullReconciliationReason,
+) {
+    if !reasons.contains(&reason) {
+        reasons.push(reason);
+    }
 }
 
 fn desired_watch_directories(
@@ -1734,10 +1533,12 @@ fn publish_fresh(
     status: WorkspaceStatus,
     indexing: &chakra_domain::indexing::IndexingStatus,
     provider_inputs: &[chakra_engine::ProviderInput],
+    project_model: Option<&chakra_domain::project::ProjectModel>,
 ) -> Result<bool, String> {
     let started = Instant::now();
     let current = engine.snapshot();
     if graph.is_none()
+        && project_model.is_none()
         && current.freshness() == Freshness::Fresh
         && current.status() == status
         && current.indexing() == indexing
@@ -1749,6 +1550,9 @@ fn publish_fresh(
         let mut update = engine.begin_update();
         if let Some(graph) = graph {
             update.replace_graph(graph.clone());
+        }
+        if let Some(model) = project_model {
+            update.set_project_model(model.clone());
         }
         update.set_indexing(indexing.clone());
         update.set_provider_inputs(provider_inputs.iter().cloned());
@@ -1915,41 +1719,194 @@ mod tests {
     }
 
     #[test]
-    fn full_reconciliation_policy_covers_uncertainty_and_checkpoints() {
+    fn full_reconciliation_policy_covers_uncertainty() {
         let baseline = ReconciliationPolicy {
             cache_initialized: true,
             watcher_health_degraded: false,
             watcher_error_advanced: false,
             dropped_event_advanced: false,
             uncertain_hint: false,
-            reconciliations_since_full: 1,
-            full_reconcile_interval: 256,
         };
-        assert!(!requires_full_reconciliation(baseline));
-        assert!(requires_full_reconciliation(ReconciliationPolicy {
-            cache_initialized: false,
-            ..baseline
-        }));
-        assert!(!requires_full_reconciliation(ReconciliationPolicy {
-            watcher_health_degraded: true,
-            ..baseline
-        }));
-        assert!(requires_full_reconciliation(ReconciliationPolicy {
-            watcher_error_advanced: true,
-            ..baseline
-        }));
-        assert!(requires_full_reconciliation(ReconciliationPolicy {
-            dropped_event_advanced: true,
-            ..baseline
-        }));
-        assert!(requires_full_reconciliation(ReconciliationPolicy {
-            uncertain_hint: true,
-            ..baseline
-        }));
-        assert!(requires_full_reconciliation(ReconciliationPolicy {
-            reconciliations_since_full: 256,
-            ..baseline
-        }));
+        assert!(full_reconciliation_reasons(baseline).is_empty());
+        assert_eq!(
+            full_reconciliation_reasons(ReconciliationPolicy {
+                cache_initialized: false,
+                ..baseline
+            }),
+            vec![FullReconciliationReason::ColdStart]
+        );
+        assert!(
+            full_reconciliation_reasons(ReconciliationPolicy {
+                watcher_health_degraded: true,
+                ..baseline
+            })
+            .is_empty()
+        );
+        assert_eq!(
+            full_reconciliation_reasons(ReconciliationPolicy {
+                watcher_error_advanced: true,
+                ..baseline
+            }),
+            vec![FullReconciliationReason::WatcherError]
+        );
+        assert_eq!(
+            full_reconciliation_reasons(ReconciliationPolicy {
+                dropped_event_advanced: true,
+                ..baseline
+            }),
+            vec![FullReconciliationReason::WatcherEventMissed]
+        );
+        assert_eq!(
+            full_reconciliation_reasons(ReconciliationPolicy {
+                uncertain_hint: true,
+                ..baseline
+            }),
+            vec![FullReconciliationReason::UncertainEventHints]
+        );
+        assert_eq!(
+            full_reconciliation_reasons(ReconciliationPolicy {
+                watcher_error_advanced: true,
+                dropped_event_advanced: true,
+                ..baseline
+            }),
+            vec![
+                FullReconciliationReason::WatcherError,
+                FullReconciliationReason::WatcherEventMissed,
+            ],
+            "simultaneous causes must not be collapsed to one priority reason"
+        );
+    }
+
+    #[test]
+    fn staged_freshness_edit_overtakes_an_older_queued_checkpoint()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut queue = PriorityWorkQueue::new(QUEUE_PER_CLASS_CAPACITY, QUEUE_AGING_AFTER);
+        let checkpoint_enqueued = Instant::now();
+        queue.push(
+            WorkClass::Reconciliation,
+            WorkerSignal::Checkpoint {
+                enqueued: checkpoint_enqueued,
+            },
+            checkpoint_enqueued,
+        )?;
+        let edit_enqueued = Instant::now();
+        queue.push(
+            WorkClass::FreshnessEdit,
+            WorkerSignal::Filesystem {
+                epoch: 7,
+                hints: Vec::new(),
+                uncertain: false,
+                enqueued: edit_enqueued,
+            },
+            edit_enqueued,
+        )?;
+
+        assert!(matches!(
+            queue.pop(),
+            Some(WorkerSignal::Filesystem { epoch: 7, .. })
+        ));
+        assert!(matches!(queue.pop(), Some(WorkerSignal::Checkpoint { .. })));
+        let metrics = queue.metrics();
+        assert_eq!(metrics.for_class(WorkClass::FreshnessEdit).dequeued, 1);
+        assert_eq!(metrics.for_class(WorkClass::Reconciliation).dequeued, 1);
+        assert_eq!(
+            metrics.for_class(WorkClass::FreshnessEdit).latency.samples,
+            1
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn interval_expiry_stages_one_checkpoint_and_full_reconcile_cancels_it() {
+        let options = LiveIndexOptions {
+            full_reconcile_interval: 2,
+            ..LiveIndexOptions::default()
+        };
+        let mut queue = PriorityWorkQueue::new(QUEUE_PER_CLASS_CAPACITY, QUEUE_AGING_AFTER);
+        let mut checkpoint_pending = false;
+
+        // Below the interval a targeted reconcile stages nothing.
+        track_reconcile_outcome(
+            Some(ReconciliationKind::Targeted),
+            &mut queue,
+            1,
+            &options,
+            &mut checkpoint_pending,
+        );
+        assert!(!checkpoint_pending);
+        assert!(queue.is_empty());
+
+        // At the interval a targeted reconcile stages background work once.
+        track_reconcile_outcome(
+            Some(ReconciliationKind::Targeted),
+            &mut queue,
+            2,
+            &options,
+            &mut checkpoint_pending,
+        );
+        assert!(checkpoint_pending);
+        track_reconcile_outcome(
+            Some(ReconciliationKind::Targeted),
+            &mut queue,
+            3,
+            &options,
+            &mut checkpoint_pending,
+        );
+        assert_eq!(queue.len(), 1, "checkpoint staging must deduplicate");
+
+        // A full reconcile — however triggered — cancels the staged
+        // checkpoint instead of letting it reread every body again.
+        track_reconcile_outcome(
+            Some(ReconciliationKind::Full),
+            &mut queue,
+            0,
+            &options,
+            &mut checkpoint_pending,
+        );
+        assert!(!checkpoint_pending);
+        assert!(queue.is_empty());
+        assert_eq!(
+            queue
+                .metrics()
+                .for_class(WorkClass::Reconciliation)
+                .cancelled,
+            1
+        );
+    }
+
+    #[test]
+    fn invalidation_batch_bounds_intermediate_storage_while_counting_all_records()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut batch = FileInvalidationBatch::default();
+        let records = MAX_FILE_INVALIDATION_RECORDS as u64 + 4;
+        for index in 0..records {
+            batch.push(FileInvalidation {
+                path: RepoRelativePath::new(format!("src/file-{index}.rs"))?,
+                reason: FileInvalidationReason::ContentChanged,
+            });
+        }
+
+        assert_eq!(batch.records, records);
+        assert_eq!(batch.recent.len(), MAX_FILE_INVALIDATION_RECORDS);
+        assert_eq!(
+            batch.recent.front().map(|record| record.path.as_str()),
+            Some("src/file-4.rs")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn failed_reconcile_does_not_restage_a_checkpoint() {
+        let options = LiveIndexOptions {
+            full_reconcile_interval: 1,
+            ..LiveIndexOptions::default()
+        };
+        let mut queue = PriorityWorkQueue::new(QUEUE_PER_CLASS_CAPACITY, QUEUE_AGING_AFTER);
+        let mut checkpoint_pending = false;
+
+        track_reconcile_outcome(None, &mut queue, 5, &options, &mut checkpoint_pending);
+        assert!(!checkpoint_pending);
+        assert!(queue.is_empty());
     }
 
     #[test]
@@ -1997,91 +1954,6 @@ mod tests {
             ])
         );
         assert!(!truncated);
-        Ok(())
-    }
-
-    #[test]
-    fn one_completed_generation_releases_all_covered_waiters()
-    -> Result<(), Box<dyn std::error::Error>> {
-        const WAITERS: u64 = 4;
-        let (sender, receiver) = mpsc::sync_channel(WAITERS as usize);
-        let shared = Arc::new(BarrierShared {
-            state: Mutex::new(BarrierState::default()),
-            completed: Condvar::new(),
-        });
-        let metrics = Arc::new(MetricsState::default());
-        let barrier = Arc::new(LiveFreshnessBarrier {
-            shared: shared.clone(),
-            sender,
-            metrics: metrics.clone(),
-        });
-        let waiters: Vec<_> = (0..WAITERS)
-            .map(|_| {
-                let barrier = barrier.clone();
-                thread::spawn(move || barrier.require_fresh())
-            })
-            .collect();
-
-        for _ in 0..WAITERS {
-            assert!(matches!(receiver.recv()?, WorkerSignal::Barrier));
-        }
-        assert_eq!(shared.pending_generation()?, (WAITERS, 0));
-        shared.complete(WAITERS, Ok(()));
-        metrics.record_barrier_completion(WAITERS, 0);
-        for waiter in waiters {
-            waiter.join().map_err(|_| "waiter panicked")??;
-        }
-        assert_eq!(metrics.barrier_requests.load(Ordering::Relaxed), WAITERS);
-        assert_eq!(
-            metrics
-                .barrier_generations_completed
-                .load(Ordering::Relaxed),
-            WAITERS
-        );
-        assert_eq!(
-            metrics.barrier_waiters_coalesced.load(Ordering::Relaxed),
-            WAITERS - 1
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn later_success_does_not_overwrite_an_earlier_generation_error()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let shared = BarrierShared {
-            state: Mutex::new(BarrierState::default()),
-            completed: Condvar::new(),
-        };
-        let first = shared.register(OperationContext::unbounded())?;
-        let second = shared.register(OperationContext::unbounded())?;
-        shared.complete(first, Err("first failed".to_owned()));
-        shared.complete(second, Ok(()));
-
-        let state = shared.state.lock().map_err(|_| "barrier lock poisoned")?;
-        assert_eq!(
-            state.outcomes.get(&first),
-            Some(&Err("first failed".to_owned()))
-        );
-        assert_eq!(state.outcomes.get(&second), Some(&Ok(())));
-        Ok(())
-    }
-
-    #[test]
-    fn cancelling_the_last_waiter_cancels_barrier_only_reconciliation()
-    -> Result<(), Box<dyn std::error::Error>> {
-        let shared = BarrierShared {
-            state: Mutex::new(BarrierState::default()),
-            completed: Condvar::new(),
-        };
-        let waiter = OperationContext::unbounded();
-        let target = shared.register(waiter.clone())?;
-        let (_, _, worker) = shared.begin_barrier_reconciliation()?;
-        assert!(worker.check().is_ok());
-
-        waiter.cancel();
-        shared.finish_waiter(target);
-        assert!(worker.check().is_err());
-        assert_eq!(shared.pending_generation()?, (0, 0));
         Ok(())
     }
 }

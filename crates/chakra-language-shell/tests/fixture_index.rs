@@ -184,6 +184,7 @@ fn malformed_shell_keeps_valid_symbols_and_reports_diagnostics() -> Result<(), B
 fn callers_and_incremental_reconcile_use_shell_function_edges() -> Result<(), Box<dyn Error>> {
     let (repository, engine, _metrics) = indexed_engine()?;
     let callers = engine.callers(CallersRequest {
+        source: Default::default(),
         symbol: Some(SymbolRef::ByName(
             "src::payment_provider::refund_provider".to_owned(),
         )),

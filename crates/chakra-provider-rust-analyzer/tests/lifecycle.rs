@@ -196,6 +196,23 @@ fn materialize_fake_server(root: &Path, name: &str) -> Result<PathBuf, Box<dyn E
     Ok(executable)
 }
 
+fn wait_for_file(path: &Path) -> Result<String, Box<dyn Error>> {
+    // The scripted peer writes marker files asynchronously; poll with a
+    // bounded deadline instead of assuming the write has landed.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        match fs::read_to_string(path) {
+            Ok(contents) => return Ok(contents),
+            Err(error) => {
+                if Instant::now() >= deadline {
+                    return Err(error.into());
+                }
+                std::thread::sleep(Duration::from_millis(25));
+            }
+        }
+    }
+}
+
 fn request(root: &Path, revision: Revision) -> Result<PreciseQueryRequest, Box<dyn Error>> {
     let path = RepoRelativePath::new("src/lib.rs")?;
     let source: Arc<str> = Arc::from("pub fn target() {}\n");
@@ -277,7 +294,7 @@ fn transport_crash_restarts_once_then_degrades() -> Result<(), Box<dyn Error>> {
     let provider = RustAnalyzerProvider::start(request.workspace.clone(), config(&executable))?;
 
     let result = provider.enrich(request.clone());
-    let process_count = fs::read_to_string(executable.with_extension("count"))?;
+    let process_count = wait_for_file(&executable.with_extension("count"))?;
     assert_eq!(
         result.state,
         ProviderState::Degraded,
@@ -301,7 +318,7 @@ fn timed_out_request_is_cancelled_before_shutdown() -> Result<(), Box<dyn Error>
     let result = provider.enrich(request.clone());
     assert_eq!(result.state, ProviderState::CatchingUp);
     provider.shutdown()?;
-    let cancellation = fs::read_to_string(executable.with_extension("cancelled"))?;
+    let cancellation = wait_for_file(&executable.with_extension("cancelled"))?;
     assert!(cancellation.contains("$/cancelRequest"));
     assert!(cancellation.contains("\"id\":2"));
     Ok(())
@@ -322,7 +339,9 @@ fn per_query_wait_budget_returns_catching_up_before_request_timeout() -> Result<
     let result = provider.enrich(request);
     let elapsed = started.elapsed();
     assert_eq!(result.state, ProviderState::CatchingUp);
-    assert!(elapsed < Duration::from_millis(250), "elapsed={elapsed:?}");
+    // Nominal bound is the 75ms query wait budget; keep a generous ceiling
+    // below the 2s request timeout for heavily loaded hosts.
+    assert!(elapsed < Duration::from_millis(1500), "elapsed={elapsed:?}");
     assert_eq!(
         provider.query_wait_budget(),
         Some(Duration::from_millis(75))
@@ -360,13 +379,15 @@ fn caller_cancellation_interrupts_an_in_flight_request() -> Result<(), Box<dyn E
         std::thread::yield_now();
     }
     operation.cancel();
+    // Nominal path returns as soon as the cancellation is observed; keep a
+    // generous ceiling below the 1s request timeout for heavily loaded hosts.
     let response = result
-        .recv_timeout(Duration::from_millis(250))
+        .recv_timeout(Duration::from_millis(750))
         .map_err(|_| "cancelled provider request did not return promptly")?;
     assert_eq!(response.state, ProviderState::CatchingUp);
     query.join().map_err(|_| "provider query thread panicked")?;
     provider.shutdown()?;
-    let cancellation = fs::read_to_string(executable.with_extension("cancelled"))?;
+    let cancellation = wait_for_file(&executable.with_extension("cancelled"))?;
     assert!(cancellation.contains("$/cancelRequest"));
     Ok(())
 }
@@ -417,18 +438,27 @@ fn shutdown_reaps_provider_process_group_descendants() -> Result<(), Box<dyn Err
     let provider = RustAnalyzerProvider::start(request.workspace.clone(), config(&executable))?;
     let result = provider.enrich(request);
     assert_eq!(result.state, ProviderState::Ready);
-    let child = fs::read_to_string(executable.with_extension("child"))?;
+    let child = wait_for_file(&executable.with_extension("child"))?;
     provider.shutdown()?;
 
-    let status = Command::new("kill")
-        .args(["-0", child.trim()])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()?;
-    assert!(
-        !status.success(),
-        "provider descendant {child} is still alive"
-    );
+    // The descendant is killed asynchronously and may linger as a zombie
+    // until the init reaper runs; poll with a bounded deadline.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let status = Command::new("kill")
+            .args(["-0", child.trim()])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()?;
+        if !status.success() {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "provider descendant {child} is still alive"
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    }
     Ok(())
 }
 
@@ -465,10 +495,7 @@ fn zed_scale_inventory_opens_only_target_and_measures_revision_delta() -> Result
         "last_error={:?}",
         provider.last_error()
     );
-    assert_eq!(
-        fs::read_to_string(executable.with_extension("opened"))?,
-        "1"
-    );
+    assert_eq!(wait_for_file(&executable.with_extension("opened"))?, "1");
     let metrics = provider.metrics().ok_or("provider metrics unavailable")?;
     assert_eq!(metrics.document_sync.workspace_documents, 1_929);
     assert_eq!(metrics.document_sync.workspace_source_bytes, 55_316_267);

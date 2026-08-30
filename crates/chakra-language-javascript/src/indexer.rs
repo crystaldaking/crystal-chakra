@@ -36,6 +36,10 @@ impl LanguageHooks for JavaScriptHooks {
 
     const WORKER_NAME: &'static str = "javascript";
 
+    fn language() -> chakra_domain::symbol::Language {
+        chakra_domain::symbol::Language::JavaScript
+    }
+
     fn new_parser() -> Result<Self::Parser, JavaScriptIndexError> {
         JavaScriptParser::new().map_err(|error| JavaScriptIndexError::Parse(error.to_string()))
     }
