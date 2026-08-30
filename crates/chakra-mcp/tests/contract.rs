@@ -11,6 +11,10 @@ use std::time::Instant;
 
 use chakra_domain::envelope::QueryEnvelope;
 use chakra_domain::identity::WorkspaceIdentity;
+use chakra_domain::indexing::{
+    CacheHealth, FileInvalidation, FileInvalidationReason, IndexingDiagnostics,
+    SYNTAX_FACT_CACHE_DISABLED_REASON,
+};
 use chakra_domain::operation::OperationContext;
 use chakra_domain::query::{
     CallersRequest, ContextRequest, DiffContextRequest, IndexCounts, QueryError, QueryService,
@@ -78,6 +82,23 @@ impl QueryService for StubService {
                     path_fallback_files: 1,
                 },
                 syntax_diagnostics: Default::default(),
+                index_diagnostics: Some(IndexingDiagnostics {
+                    cache: CacheHealth::Disabled {
+                        reason: SYNTAX_FACT_CACHE_DISABLED_REASON.to_owned(),
+                    },
+                    counters: Default::default(),
+                    queue: Default::default(),
+                    project_invalidations: Default::default(),
+                    last_reconciliation_kind: Default::default(),
+                    full_reconciliation_reasons: Default::default(),
+                    last_full_reconciliation_reasons: Vec::new(),
+                    recent_file_invalidations: vec![FileInvalidation {
+                        path: chakra_domain::location::RepoRelativePath::new("src/lib.rs")
+                            .map_err(|_| QueryError::Invalid("stub path".to_owned()))?,
+                        reason: FileInvalidationReason::ContentChanged,
+                    }],
+                    file_invalidation_records: 1,
+                }),
             },
         ))
     }
@@ -239,6 +260,15 @@ async fn status_tool_is_listed_and_callable() -> Result<(), Box<dyn Error + Send
     assert_eq!(structured["data"]["counts"]["symbols"], 2);
     assert_eq!(structured["data"]["query_execution"]["queued"], 0);
     assert_eq!(structured["data"]["query_execution"]["running"], 0);
+    // Live indexing diagnostics serialize as typed domain data (issue #43).
+    assert_eq!(
+        structured["data"]["index_diagnostics"]["cache"]["state"],
+        "disabled"
+    );
+    assert_eq!(
+        structured["data"]["index_diagnostics"]["recent_file_invalidations"][0]["reason"],
+        "content_changed"
+    );
     assert_eq!(
         structured["data"]["syntax_diagnostics"]["total_diagnostics"],
         0

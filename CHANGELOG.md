@@ -87,6 +87,28 @@ version tags prefixed with `v`.
   prevent identity collisions, and related-query scopes are applied before
   response item limits so an out-of-scope prefix cannot hide valid results.
   The query envelope schema is version 15.
+- Machine-readable indexing diagnostics (issue #43): the `status` query now
+  carries an additive typed `index_diagnostics` section when a live indexing
+  owner is installed. It reports reconcile counters (engine-observed cold
+  builds, warm no-op/targeted/full reconciliations, one-file edits, failures,
+  published revisions), cumulative and last full-reconciliation causes
+  (cold start, watcher error, missed watcher events, uncertain event
+  hints/epoch gaps, periodic checkpoint), a bounded newest-last window of
+  per-file invalidation records (path plus added/content-changed/
+  metadata-changed/removed reason, capped at 32 with a cumulative total),
+  cumulative project-scope impact counters plus the latest bounded typed
+  impact (changed unit ids/reasons, affected dependents, and manifest-issue
+  transitions),
+  live queue state (barrier generations, watcher counters, bounded event
+  queue capacity), and honest cache health. Phase timings, coverage, resource
+  samples, and degraded capabilities remain revision-scoped in the query
+  envelope's `indexing` status. Diagnostics are bounded, typed, and free of
+  source contents; MCP serializes the domain types without protocol leakage.
+- Cache health is reported as a typed `CacheHealth::Disabled` state: the
+  per-file syntax fact cache from issue #39 was rejected by the persistence
+  acceptance benchmarks (B1 restore 1.1–1.3× instead of ≥5×) and not shipped,
+  so cache version/compatibility, hit/miss/rebuild, and corruption-fallback
+  counters are honestly absent rather than fabricated.
 
 ## [0.1.3] - 2026-08-26
 

@@ -2554,6 +2554,7 @@ impl QueryService for WorkspaceEngine {
             provider_pool,
             query_execution: None,
             source_metadata: snapshot.graph().source_metadata_coverage(),
+            index_diagnostics: self.index_diagnostics(),
             syntax_diagnostics: SyntaxDiagnosticSummary {
                 files_with_diagnostics: graph_diagnostics.files_with_diagnostics,
                 total_diagnostics: graph_diagnostics.total_diagnostics,

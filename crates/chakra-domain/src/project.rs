@@ -328,7 +328,7 @@ pub enum ProjectUnitChangeKind {
 
 /// One unit whose external manifest/config inputs changed, with every
 /// reason that applies.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ProjectUnitChange {
     pub unit: ProjectUnitId,
     /// Sorted, deduplicated reasons for the change.
@@ -336,7 +336,9 @@ pub struct ProjectUnitChange {
 }
 
 /// Aggregated per-reason unit change counts of one impact diff.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
+)]
 pub struct ProjectUnitChangeCounts {
     pub added: u64,
     pub removed: u64,
@@ -355,7 +357,7 @@ pub struct ProjectUnitChangeCounts {
 /// [`ProjectUnitChangeKind::MembershipChanged`], and dependency-edge edits
 /// as [`ProjectUnitChangeKind::DependenciesChanged`]. All collections are
 /// bounded; cuts are counted in the matching `*_omitted` field.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ProjectModelImpact {
     /// Units whose own manifest evidence changed, sorted by unit id.
     pub changes: Vec<ProjectUnitChange>,

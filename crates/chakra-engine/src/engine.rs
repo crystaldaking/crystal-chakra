@@ -7,11 +7,12 @@
 //! never overwrite a newer revision.
 
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock, RwLock};
 
 use arc_swap::ArcSwap;
 use chakra_domain::identity::WorkspaceIdentity;
-use chakra_domain::indexing::IndexingStatus;
+use chakra_domain::indexing::{IndexingDiagnostics, IndexingStatus};
 use chakra_domain::location::RepoRelativePath;
 use chakra_domain::operation::OperationContext;
 use chakra_domain::revision::Revision;
@@ -131,6 +132,14 @@ pub trait FreshnessBarrier: std::fmt::Debug + Send + Sync {
         &self,
         operation: &OperationContext,
     ) -> Result<(), FreshnessBarrierError>;
+
+    /// Optional bounded operational diagnostics from the same live owner.
+    /// Keeping this on the freshness owner makes installation atomic: the
+    /// engine cannot retain diagnostics for a stopped worker after a second
+    /// owner-install step fails.
+    fn index_diagnostics(&self) -> Option<IndexingDiagnostics> {
+        None
+    }
 }
 
 /// A workspace has exactly one owner for freshness reconciliation.
@@ -258,6 +267,7 @@ pub struct WorkspaceEngine {
     freshness_barrier: OnceLock<Arc<dyn FreshnessBarrier>>,
     precise_providers: RwLock<Vec<Arc<dyn PreciseProvider>>>,
     diff_provider: OnceLock<Arc<dyn WorkspaceDiffProvider>>,
+    cold_builds: AtomicU64,
 }
 
 impl WorkspaceEngine {
@@ -284,6 +294,7 @@ impl WorkspaceEngine {
             freshness_barrier: OnceLock::new(),
             precise_providers: RwLock::new(Vec::new()),
             diff_provider: OnceLock::new(),
+            cold_builds: AtomicU64::new(0),
         }
     }
 
@@ -337,6 +348,25 @@ impl WorkspaceEngine {
         self.diff_provider
             .set(provider)
             .map_err(|_| DiffProviderAlreadyInstalled)
+    }
+
+    /// Published revisions whose graph was fully rebuilt instead of
+    /// structurally reused (initial cold builds), observed at publication.
+    pub fn cold_builds(&self) -> u64 {
+        self.cold_builds.load(Ordering::Relaxed)
+    }
+
+    /// Snapshots the installed live diagnostics owner, if any, with the
+    /// engine-observed cold-build counter merged in.
+    pub(crate) fn index_diagnostics(&self) -> Option<IndexingDiagnostics> {
+        let diagnostics = self
+            .freshness_barrier
+            .get()
+            .and_then(|barrier| barrier.index_diagnostics());
+        diagnostics.map(|mut diagnostics| {
+            diagnostics.counters.cold_builds = self.cold_builds();
+            diagnostics
+        })
     }
 
     /// Captures the current immutable syntax input for provider startup.
@@ -427,6 +457,7 @@ impl WorkspaceEngine {
                 current: current.revision,
             });
         }
+        let graph_replaced = !Arc::ptr_eq(&current.graph, &update.graph);
         let next = Arc::new(WorkspaceSnapshot {
             identity: update.identity,
             revision: update.base_revision.next(),
@@ -447,6 +478,14 @@ impl WorkspaceEngine {
                 base: update.base_revision,
                 current: previous.revision,
             });
+        }
+        // A publication that reports every retained file as rebuilt is an
+        // initial/full (cold) build; structurally incremental revisions reuse
+        // payloads instead (issue #43).
+        let publication = &next.indexing.publication;
+        if graph_replaced && !publication.structurally_incremental && publication.rebuilt_files > 0
+        {
+            self.cold_builds.fetch_add(1, Ordering::Relaxed);
         }
         Ok(next)
     }
@@ -697,6 +736,26 @@ mod tests {
         assert_eq!(before.indexing(), &IndexingStatus::default());
         assert_eq!(after.indexing(), &indexing);
         assert_eq!(engine.snapshot().indexing(), &indexing);
+        Ok(())
+    }
+
+    #[test]
+    fn freshness_only_publication_does_not_double_count_a_cold_build()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let engine = engine()?;
+        let mut indexing = IndexingStatus::default();
+        indexing.publication.rebuilt_files = 1;
+
+        let mut cold = engine.begin_update();
+        cold.replace_graph(SymbolGraph::new());
+        cold.set_indexing(indexing);
+        engine.publish(cold)?;
+        assert_eq!(engine.cold_builds(), 1);
+
+        let mut freshness_only = engine.begin_update();
+        freshness_only.set_freshness(Freshness::Fresh);
+        engine.publish(freshness_only)?;
+        assert_eq!(engine.cold_builds(), 1);
         Ok(())
     }
 }
