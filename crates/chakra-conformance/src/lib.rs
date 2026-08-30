@@ -41,6 +41,7 @@
 
 pub mod corpus;
 mod fixture;
+pub mod incremental;
 mod manifest;
 mod provider;
 mod report;

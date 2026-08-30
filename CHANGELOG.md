@@ -5,6 +5,20 @@ version tags prefixed with `v`.
 
 ## [Unreleased]
 
+### Evaluation
+
+- Incremental Tree-sitter parsing (`Tree::edit` + reparse with the retained
+  tree) was benchmarked against full reparse across rust, php, go, python,
+  and typescript with a new benchmark-only harness in `chakra-conformance`
+  (hermetic generated sources for CI plus opt-in pinned-corpus runs; issue
+  #45). Verdict: **no-go**. Incremental parses are fact-exact (zero
+  structural divergences in ~2,970 comparisons, including randomized edit
+  fuzz) and 13–363× faster on small and large-file edits, but retained trees
+  cost 22.7–36.8 bytes per source byte (budget was 5×) and whole-file
+  replacement regresses 1.3–2.5× for rust/php/go. Evidence and thresholds:
+  `docs/evaluation/v0.2.0-incremental-tree-sitter.md`. Production indexing
+  is unchanged.
+
 ## [0.1.3] - 2026-08-26
 
 Post-v0.1.2 correctness, query ergonomics, corpus resilience, dependency
