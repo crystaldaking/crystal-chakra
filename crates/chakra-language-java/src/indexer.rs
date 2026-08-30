@@ -36,6 +36,10 @@ impl LanguageHooks for JavaHooks {
 
     const WORKER_NAME: &'static str = "java";
 
+    fn language() -> chakra_domain::symbol::Language {
+        chakra_domain::symbol::Language::Java
+    }
+
     fn new_parser() -> Result<Self::Parser, JavaIndexError> {
         JavaParser::new().map_err(|error| JavaIndexError::Parse(error.to_string()))
     }

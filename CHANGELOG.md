@@ -5,6 +5,20 @@ version tags prefixed with `v`.
 
 ## [Unreleased]
 
+### Fixed
+
+- Indexing phase measurements from the shared language driver are now
+  attributed to the language whose adapter produced them instead of being
+  hardcoded to Go, so `status` reports per-language parse/catalog/
+  relationships/materialization phases correctly for all eight
+  shared-driver languages (issue #122).
+- Transport spawn now retries a transiently busy executable (ETXTBSY on a
+  loaded host when exec'ing a freshly written binary) within a bounded
+  10-second budget instead of failing provider startup permanently and
+  degrading the provider (issue #145). Provider lifecycle test harnesses
+  replace instantaneous process-death and marker-file assertions with
+  bounded poll-until-deadline waits.
+
 ## [0.1.3] - 2026-08-26
 
 Post-v0.1.2 correctness, query ergonomics, corpus resilience, dependency

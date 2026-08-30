@@ -41,6 +41,10 @@ impl LanguageHooks for CppHooks {
 
     const WORKER_NAME: &'static str = "cpp";
 
+    fn language() -> chakra_domain::symbol::Language {
+        chakra_domain::symbol::Language::Cpp
+    }
+
     fn new_parser() -> Result<Self::Parser, CppIndexError> {
         CppParser::new().map_err(|error| CppIndexError::Parse(error.to_string()))
     }

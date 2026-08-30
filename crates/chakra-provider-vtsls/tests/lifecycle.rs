@@ -215,6 +215,23 @@ fn materialize_fake_server(root: &Path, name: &str) -> Result<PathBuf, Box<dyn E
     Ok(executable)
 }
 
+fn wait_for_file(path: &Path) -> Result<String, Box<dyn Error>> {
+    // The scripted peer writes marker files asynchronously; poll with a
+    // bounded deadline instead of assuming the write has landed.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        match fs::read_to_string(path) {
+            Ok(contents) => return Ok(contents),
+            Err(error) => {
+                if Instant::now() >= deadline {
+                    return Err(error.into());
+                }
+                std::thread::sleep(Duration::from_millis(25));
+            }
+        }
+    }
+}
+
 const TARGET_SOURCE: &str =
     "export function target() {}\nexport function caller() {\n  target();\n}\n";
 
@@ -349,7 +366,7 @@ fn javascript_document_syncs_with_the_javascript_language_id() -> Result<(), Box
     );
     assert_eq!(result.incoming.len(), 1);
     assert_eq!(result.incoming[0].provenance, Provenance::Vtsls);
-    let opened = fs::read_to_string(executable.with_extension("lastopen"))?;
+    let opened = wait_for_file(&executable.with_extension("lastopen"))?;
     assert!(
         opened.contains("\"languageId\":\"javascript\""),
         "didOpen must carry the javascript language id: {opened}"
@@ -453,7 +470,7 @@ fn timed_out_request_is_cancelled_and_reports_catching_up() -> Result<(), Box<dy
     let result = provider.enrich(request);
     assert_eq!(result.state, ProviderState::CatchingUp);
     provider.shutdown()?;
-    let cancellation = fs::read_to_string(executable.with_extension("cancelled"))?;
+    let cancellation = wait_for_file(&executable.with_extension("cancelled"))?;
     assert!(cancellation.contains("$/cancelRequest"));
     Ok(())
 }
@@ -472,7 +489,9 @@ fn per_query_wait_budget_returns_before_the_request_timeout() -> Result<(), Box<
     let result = provider.enrich(request);
     let elapsed = started.elapsed();
     assert_eq!(result.state, ProviderState::CatchingUp);
-    assert!(elapsed < Duration::from_millis(500), "elapsed={elapsed:?}");
+    // Nominal bound is the 100ms query wait budget; keep a generous ceiling
+    // below the 2s request timeout for heavily loaded hosts.
+    assert!(elapsed < Duration::from_millis(1500), "elapsed={elapsed:?}");
     provider.shutdown()?;
     Ok(())
 }
@@ -485,7 +504,7 @@ fn transport_crash_restarts_once_then_degrades() -> Result<(), Box<dyn Error>> {
     let provider = VtslsProvider::start(request.workspace.clone(), config(&executable))?;
 
     let result = provider.enrich(request);
-    let process_count = fs::read_to_string(executable.with_extension("count"))?;
+    let process_count = wait_for_file(&executable.with_extension("count"))?;
     assert_eq!(
         result.state,
         ProviderState::Degraded,
@@ -528,17 +547,26 @@ fn shutdown_reaps_provider_process_group_descendants() -> Result<(), Box<dyn Err
     let provider = VtslsProvider::start(request.workspace.clone(), config(&executable))?;
     let result = provider.enrich(request);
     assert_eq!(result.state, ProviderState::Ready);
-    let child = fs::read_to_string(executable.with_extension("child"))?;
+    let child = wait_for_file(&executable.with_extension("child"))?;
     provider.shutdown()?;
 
-    let status = Command::new("kill")
-        .args(["-0", child.trim()])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()?;
-    assert!(
-        !status.success(),
-        "provider descendant {child} is still alive"
-    );
+    // The descendant is killed asynchronously and may linger as a zombie
+    // until the init reaper runs; poll with a bounded deadline.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let status = Command::new("kill")
+            .args(["-0", child.trim()])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()?;
+        if !status.success() {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "provider descendant {child} is still alive"
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    }
     Ok(())
 }

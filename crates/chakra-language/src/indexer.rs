@@ -1636,6 +1636,35 @@ mod tests {
     }
 
     #[test]
+    fn phase_measurements_carry_the_language_of_their_adapter() -> Result<(), Box<dyn Error>> {
+        let repository = repository()?;
+        fs::write(
+            repository.path().join("main.go"),
+            "package main\n\nfunc main() {}\n",
+        )?;
+        fs::write(repository.path().join("tool.py"), "def tool():\n    pass\n")?;
+
+        let report = index_repository(repository.path())?;
+        let parse_languages: Vec<_> = report
+            .metrics
+            .indexing
+            .phases
+            .iter()
+            .filter(|phase| phase.phase == IndexPhase::ParseExtraction)
+            .map(|phase| phase.language)
+            .collect();
+        assert!(
+            parse_languages.contains(&Some(Language::Go)),
+            "Go parse phase missing or misattributed: {parse_languages:?}"
+        );
+        assert!(
+            parse_languages.contains(&Some(Language::Python)),
+            "Python parse phase missing or misattributed: {parse_languages:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn shared_worker_policy_bounds_both_language_adapters() -> Result<(), Box<dyn Error>> {
         let repository = repository()?;
         for index in 0..40 {
