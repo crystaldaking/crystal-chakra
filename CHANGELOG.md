@@ -38,6 +38,12 @@ version tags prefixed with `v`.
 
 ### Tooling
 
+- A reproducible `linux/amd64` container test environment now pins the Rust
+  toolchain and all nine supported language-server executables (issue #123).
+  `tools/run_lsp_tests.sh` builds the checksum-verified image, keeps Cargo and
+  target caches in named volumes, runs the default workspace suite plus every
+  existing real-provider smoke test, and supports selective provider runs
+  without requiring language servers on the host.
 - New `chakra-conformance persistence` benchmark (issue #38): measures cold
   rebuild, model-cache write, warm restore, cache validation, and one-file
   refresh for small fixtures and the pinned Rust/PHP corpus repositories,
