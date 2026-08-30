@@ -286,6 +286,11 @@ pub struct ProviderOrchestrationMetrics {
     pub saturated_queries: u64,
     pub queue_timeouts: u64,
     pub cancelled_queries: u64,
+    /// Admission queue wait per priority, indexed by
+    /// `ProviderRequestPriority::index` (0 = background, 1 = normal,
+    /// 2 = interactive). Issue #44.
+    #[serde(default)]
+    pub queue_latency_by_priority: [crate::scheduling::QueueLatencyStats; 3],
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]

@@ -14,6 +14,7 @@ pub mod operation;
 pub mod provenance;
 pub mod query;
 pub mod revision;
+pub mod scheduling;
 pub mod source;
 pub mod state;
 pub mod symbol;

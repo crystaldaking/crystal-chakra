@@ -15,6 +15,7 @@ use chakra_domain::query::{
     ContextRequest, DiffContextRequest, QueryError, QueryService, RepoMapRequest, StatusRequest,
     SymbolRef, SymbolSearchRequest,
 };
+use chakra_domain::scheduling::WorkClass;
 use chakra_domain::source::SourceClassification;
 use chakra_domain::state::{Freshness, FreshnessRequirement, WorkspaceStatus};
 use chakra_domain::symbol::{CallResolution, EdgeKind, Language};
@@ -580,6 +581,89 @@ fn rapid_editor_replacements_converge_to_the_latest_source() -> Result<(), Box<d
     );
 
     live.shutdown()?;
+    Ok(())
+}
+
+/// Issue #44 proof: with the periodic full reread scheduled as queued
+/// `Reconciliation`-class background work (interval = 1), a one-file edit is
+/// reconciled targeted, published atomically, and never waits behind the
+/// queued checkpoint. Selection order itself is proven deterministically in
+/// `live::tests` against the production `WorkerSignal` type; this test proves
+/// the end-to-end freshness and atomicity under that background pressure.
+#[test]
+fn one_file_edit_overtakes_queued_reconciliation_checkpoints() -> Result<(), Box<dyn Error>> {
+    let repository = repository()?;
+    let (engine, live) = start_with_options(
+        &repository,
+        Some(LiveIndexOptions {
+            full_reconcile_interval: 1,
+            ..LiveIndexOptions::default()
+        }),
+    )?;
+    let baseline = live.metrics();
+    let old_snapshot = engine.snapshot();
+
+    write(
+        repository.path(),
+        "src/one.rs",
+        "pub fn alpha_priority_edit() {}\n",
+    )?;
+    assert_eq!(
+        symbols(&engine, "alpha_priority_edit")?,
+        ["one::alpha_priority_edit"]
+    );
+
+    let current = engine.snapshot();
+    assert!(current.revision() > old_snapshot.revision());
+    current.graph().validate_consistency()?;
+    old_snapshot.graph().validate_consistency()?;
+    assert_eq!(old_snapshot.graph().resolve_name("one::alpha").len(), 1);
+    assert!(
+        old_snapshot
+            .graph()
+            .resolve_name("one::alpha_priority_edit")
+            .is_empty(),
+        "the pre-edit revision must stay intact (no partial publication)"
+    );
+
+    let metrics = live.metrics();
+    assert_eq!(
+        metrics.files_reparsed - baseline.files_reparsed,
+        1,
+        "the edit must reconcile targeted even with background work queued"
+    );
+    assert_eq!(
+        metrics.reconciliation_failures - baseline.reconciliation_failures,
+        0
+    );
+    let freshness = metrics.queue.for_class(WorkClass::FreshnessEdit);
+    assert!(
+        freshness.dequeued >= 1,
+        "the edit must have been scheduled through the freshness class"
+    );
+    assert!(
+        freshness.latency.samples >= 1,
+        "freshness queue latency must be measured"
+    );
+
+    let final_metrics = live.shutdown_with_metrics()?;
+    let reconciliation = final_metrics.queue.for_class(WorkClass::Reconciliation);
+    assert!(
+        reconciliation.enqueued >= 1,
+        "interval = 1 must have staged the periodic full reread as background work"
+    );
+    assert!(
+        reconciliation.dequeued + reconciliation.cancelled >= reconciliation.enqueued,
+        "queued background work must run or be cancelled, never leak"
+    );
+    for class in WorkClass::ALL {
+        let metrics = final_metrics.queue.for_class(class);
+        assert_eq!(
+            metrics.enqueued,
+            metrics.dequeued + metrics.cancelled,
+            "every staged {class:?} item must be dequeued or cancelled"
+        );
+    }
     Ok(())
 }
 

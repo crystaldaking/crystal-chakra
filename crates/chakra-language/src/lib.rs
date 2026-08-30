@@ -7,6 +7,7 @@
 mod adapter;
 mod indexer;
 mod live;
+mod scheduler;
 
 pub use adapter::{
     AdapterBuildMetrics, AdapterColdBuild, AdapterFactCounts, AdapterFrameworkMetrics,

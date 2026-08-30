@@ -556,6 +556,20 @@ pub enum ProviderRequestPriority {
     Interactive,
 }
 
+impl ProviderRequestPriority {
+    pub const COUNT: usize = 3;
+
+    /// Metrics-array index into
+    /// `ProviderOrchestrationMetrics::queue_latency_by_priority`.
+    pub fn index(self) -> usize {
+        match self {
+            Self::Background => 0,
+            Self::Normal => 1,
+            Self::Interactive => 2,
+        }
+    }
+}
+
 /// One provider-confirmed relationship endpoint and optional call site.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PreciseRelation {

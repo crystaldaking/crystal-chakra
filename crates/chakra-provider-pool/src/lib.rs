@@ -22,6 +22,7 @@ use chakra_domain::query::{
     ProviderFallbackCause, ProviderMetrics, ProviderOrchestrationMetrics, ProviderProgress,
 };
 use chakra_domain::revision::Revision;
+use chakra_domain::scheduling::QueueLatencyStats;
 use chakra_domain::state::ProviderState;
 use chakra_domain::symbol::Language;
 use chakra_engine::{
@@ -200,12 +201,29 @@ struct PoolState {
     saturated_queries: u64,
     queue_timeouts: u64,
     cancelled_queries: u64,
+    queue_latency: [QueueLatencyStats; ProviderRequestPriority::COUNT],
 }
 
 #[derive(Debug, Clone, Copy)]
 struct Waiter {
     sequence: u64,
     priority: ProviderRequestPriority,
+    enqueued: Instant,
+    /// Admission-based aging: every admission while this waiter is queued
+    /// raises it one level, capped at `Interactive` (issue #44 fairness). The
+    /// cap is what converges: already-top waiters cannot rise further, so an
+    /// aged lower-priority waiter eventually ties the top class and wins by
+    /// its older sequence. A `Background` waiter is therefore admitted after
+    /// at most two other admissions.
+    boost: u8,
+}
+
+impl Waiter {
+    fn effective_rank(&self) -> u8 {
+        (self.priority.index() as u8)
+            .saturating_add(self.boost)
+            .min((ProviderRequestPriority::COUNT - 1) as u8)
+    }
 }
 
 struct ProviderSlot {
@@ -498,7 +516,12 @@ impl PoolInner {
         }
         let sequence = state.next_sequence;
         state.next_sequence = state.next_sequence.saturating_add(1);
-        state.waiters.push(Waiter { sequence, priority });
+        state.waiters.push(Waiter {
+            sequence,
+            priority,
+            enqueued: Instant::now(),
+            boost: 0,
+        });
         loop {
             if self.stopped.load(Ordering::Acquire) {
                 remove_waiter(&mut state.waiters, sequence);
@@ -521,7 +544,11 @@ impl PoolInner {
             }
             let is_next = best_waiter(&state.waiters).is_some_and(|waiter| waiter == sequence);
             if is_next && state.running_queries < self.config.max_concurrent_queries {
-                remove_waiter(&mut state.waiters, sequence);
+                if let Some(admitted) = remove_waiter(&mut state.waiters, sequence) {
+                    state.queue_latency[admitted.priority.index()]
+                        .record(admitted.enqueued.elapsed());
+                }
+                age_waiters(&mut state.waiters);
                 state.running_queries += 1;
                 return Ok(QueryPermit {
                     inner: self.clone(),
@@ -859,6 +886,7 @@ impl PoolInner {
             saturated_queries: state.saturated_queries,
             queue_timeouts: state.queue_timeouts,
             cancelled_queries: state.cancelled_queries,
+            queue_latency_by_priority: state.queue_latency,
         }
     }
 }
@@ -998,20 +1026,24 @@ fn best_waiter(waiters: &[Waiter]) -> Option<u64> {
     waiters
         .iter()
         .max_by(|left, right| {
-            left.priority
-                .cmp(&right.priority)
+            left.effective_rank()
+                .cmp(&right.effective_rank())
                 .then_with(|| right.sequence.cmp(&left.sequence))
         })
         .map(|waiter| waiter.sequence)
 }
 
-fn remove_waiter(waiters: &mut Vec<Waiter>, sequence: u64) {
-    if let Some(index) = waiters
-        .iter()
-        .position(|waiter| waiter.sequence == sequence)
-    {
-        waiters.swap_remove(index);
+fn age_waiters(waiters: &mut [Waiter]) {
+    for waiter in waiters {
+        waiter.boost = waiter.boost.saturating_add(1);
     }
+}
+
+fn remove_waiter(waiters: &mut Vec<Waiter>, sequence: u64) -> Option<Waiter> {
+    let index = waiters
+        .iter()
+        .position(|waiter| waiter.sequence == sequence)?;
+    Some(waiters.swap_remove(index))
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -1462,8 +1494,67 @@ mod tests {
             ["hold", "interactive", "background"]
         );
         assert_eq!(pool.metrics().saturated_queries, 1);
+        let latency = pool.metrics().queue_latency_by_priority;
+        assert_eq!(
+            latency[ProviderRequestPriority::Interactive.index()].samples,
+            1
+        );
+        assert_eq!(
+            latency[ProviderRequestPriority::Background.index()].samples,
+            1
+        );
+        assert_eq!(latency[ProviderRequestPriority::Normal.index()].samples, 0);
         pool.shutdown()?;
         Ok(())
+    }
+
+    #[test]
+    fn admission_aging_bounds_background_wait_to_two_admissions() {
+        let enqueued = Instant::now();
+        let background = Waiter {
+            sequence: 0,
+            priority: ProviderRequestPriority::Background,
+            enqueued,
+            boost: 0,
+        };
+        let mut waiters = vec![background];
+
+        // First interactive arrival still wins: no aging has accrued yet.
+        waiters.push(Waiter {
+            sequence: 1,
+            ..waiter_with(ProviderRequestPriority::Interactive)
+        });
+        assert_eq!(best_waiter(&waiters), Some(1));
+        remove_waiter(&mut waiters, 1);
+        age_waiters(&mut waiters);
+
+        // After one admission the background waiter is effectively Normal and
+        // still yields to a fresh interactive request.
+        waiters.push(Waiter {
+            sequence: 2,
+            ..waiter_with(ProviderRequestPriority::Interactive)
+        });
+        assert_eq!(best_waiter(&waiters), Some(2));
+        remove_waiter(&mut waiters, 2);
+        age_waiters(&mut waiters);
+
+        // After two admissions it ties the top class and its older sequence
+        // wins over a freshly queued interactive request: starvation is
+        // bounded by two admissions regardless of interactive load.
+        waiters.push(Waiter {
+            sequence: 3,
+            ..waiter_with(ProviderRequestPriority::Interactive)
+        });
+        assert_eq!(best_waiter(&waiters), Some(0));
+    }
+
+    fn waiter_with(priority: ProviderRequestPriority) -> Waiter {
+        Waiter {
+            sequence: 0,
+            priority,
+            enqueued: Instant::now(),
+            boost: 0,
+        }
     }
 
     #[test]
