@@ -568,14 +568,29 @@ fn rapid_editor_replacements_converge_to_the_latest_source() -> Result<(), Box<d
         reparsed <= EDITS,
         "coalescing must not invent more parses than materialized edits"
     );
-    assert_eq!(
-        metrics.full_reconciliations - baseline.full_reconciliations,
-        0,
-        "editor replacement temp paths must not force full source rereads"
-    );
+    let full = metrics.full_reconciliations - baseline.full_reconciliations;
+    let dropped = metrics.dropped_watcher_events - baseline.dropped_watcher_events;
+    let watcher_errors = metrics.watcher_errors - baseline.watcher_errors;
+    if dropped == 0 && watcher_errors == 0 {
+        assert_eq!(
+            full, 0,
+            "editor replacement temp paths must not force full source rereads"
+        );
+    } else {
+        // The worker queue is deliberately bounded: a loaded host can drop
+        // watcher signals while a scan is in flight, and the epoch gap then
+        // honestly degrades to a full reconciliation instead of trusting
+        // incomplete hints. Each such reconciliation consumes at least one
+        // observed drop or error, so the count stays bounded by them.
+        assert!(
+            full <= dropped + watcher_errors,
+            "full reconciliations must be bounded by observed watcher drops/errors: \
+             full={full}, dropped={dropped}, watcher_errors={watcher_errors}"
+        );
+    }
     engine.snapshot().graph().validate_consistency()?;
     eprintln!(
-        "live_rapid_replacement: edits={EDITS}, fresh_barrier={fresh_elapsed:?}, reparsed={reparsed}, reconciliations={}, dropped_events={}",
+        "live_rapid_replacement: edits={EDITS}, fresh_barrier={fresh_elapsed:?}, reparsed={reparsed}, full={full}, reconciliations={}, dropped_events={}",
         metrics.reconciliations, metrics.dropped_watcher_events,
     );
 
