@@ -43,6 +43,8 @@ become detached from freshness reconciliation.
   for the most recent full reconciliation. Simultaneous watcher causes are not
   collapsed by priority, and stable-scan retry escalation is reported as
   `scan_instability`.
+- Queue diagnostics include the named per-class scheduled-work counters and
+  latency from ADR-0046 in addition to watcher and freshness-barrier state.
 - Engine-observed cold builds count only successful publications that replace
   the graph with non-incremental rebuilt-file evidence. Freshness-only
   publications inheriting the same indexing status do not increment it.

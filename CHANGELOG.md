@@ -5,6 +5,23 @@ version tags prefixed with `v`.
 
 ## [Unreleased]
 
+### Changed
+
+- Interactive indexing is prioritized over background work (issue #44).
+  `chakra-domain` defines the typed bounded priority classes (`WorkClass`:
+  freshness edits, provider sync, reconciliation, cache warmup, maintenance)
+  plus per-class queue instrumentation (`WorkQueueMetrics`: enqueued,
+  dequeued, cancelled, superseded, rejected, and histogram-lite latency per
+  class). The live syntax worker now stages watcher/barrier signals in a
+  bounded priority queue with aging fairness, and the periodic full content
+  reread (the reconciliation checkpoint interval) is scheduled as queued
+  `Reconciliation`-class background work instead of silently inflating the
+  next freshness reconcile, so a one-file edit overtakes it. A full reconcile
+  — however triggered — cancels queued checkpoints as obsolete work, and
+  shutdown cancels everything left staged. Provider-pool admission gained
+  bounded aging and per-priority queue latency in
+  `ProviderOrchestrationMetrics::queue_latency_by_priority`.
+
 ### Tooling
 
 - New `chakra-conformance persistence` benchmark (issue #38): measures cold

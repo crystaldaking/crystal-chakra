@@ -268,6 +268,17 @@ pub struct ProviderMetrics {
     pub document_sync: ProviderDocumentSyncMetrics,
 }
 
+/// Provider admission latency with self-describing priority names on the
+/// transport-neutral status contract.
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
+)]
+pub struct ProviderQueueLatencyByPriority {
+    pub background: crate::scheduling::QueueLatencyStats,
+    pub normal: crate::scheduling::QueueLatencyStats,
+    pub interactive: crate::scheduling::QueueLatencyStats,
+}
+
 /// Provider-pool lifecycle and admission counters. Reservations are
 /// deterministic configuration bounds, not process RSS measurements.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -290,6 +301,9 @@ pub struct ProviderOrchestrationMetrics {
     pub saturated_queries: u64,
     pub queue_timeouts: u64,
     pub cancelled_queries: u64,
+    /// Admission queue wait per self-describing provider priority (issue #44).
+    #[serde(default)]
+    pub queue_latency_by_priority: ProviderQueueLatencyByPriority,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -984,6 +998,25 @@ mod tests {
     fn request_defaults_require_fresh() {
         let request = SymbolSearchRequest::default();
         assert_eq!(request.freshness, FreshnessRequirement::RequireFresh);
+    }
+
+    #[test]
+    fn provider_queue_latency_serializes_with_named_priorities()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let metrics = ProviderQueueLatencyByPriority {
+            interactive: crate::scheduling::QueueLatencyStats {
+                samples: 1,
+                total_micros: 7,
+                max_micros: 7,
+            },
+            ..ProviderQueueLatencyByPriority::default()
+        };
+
+        let json = serde_json::to_value(metrics)?;
+        assert_eq!(json["interactive"]["samples"], 1);
+        assert!(json.get("normal").is_some());
+        assert!(json.get("background").is_some());
+        Ok(())
     }
 
     #[test]

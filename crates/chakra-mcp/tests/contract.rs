@@ -12,7 +12,7 @@ use std::time::Instant;
 use chakra_domain::envelope::QueryEnvelope;
 use chakra_domain::identity::WorkspaceIdentity;
 use chakra_domain::indexing::{
-    CacheHealth, FileInvalidation, FileInvalidationReason, IndexingDiagnostics,
+    CacheHealth, FileInvalidation, FileInvalidationReason, IndexingDiagnostics, LiveQueueState,
     SYNTAX_FACT_CACHE_DISABLED_REASON,
 };
 use chakra_domain::operation::OperationContext;
@@ -21,6 +21,7 @@ use chakra_domain::query::{
     RepoMapRequest, SearchRequest, StatusData, StatusRequest, SymbolSearchRequest,
 };
 use chakra_domain::revision::Revision;
+use chakra_domain::scheduling::{WorkClass, WorkQueueMetrics};
 use chakra_domain::source::SourceMetadataCoverage;
 use chakra_domain::state::{Freshness, ProviderState, WorkspaceStatus};
 use chakra_engine::WorkspaceEngine;
@@ -87,7 +88,14 @@ impl QueryService for StubService {
                         reason: SYNTAX_FACT_CACHE_DISABLED_REASON.to_owned(),
                     },
                     counters: Default::default(),
-                    queue: Default::default(),
+                    queue: LiveQueueState {
+                        scheduled_work: {
+                            let mut metrics = WorkQueueMetrics::default();
+                            metrics.for_class_mut(WorkClass::FreshnessEdit).enqueued = 1;
+                            metrics
+                        },
+                        ..LiveQueueState::default()
+                    },
                     project_invalidations: Default::default(),
                     last_reconciliation_kind: Default::default(),
                     full_reconciliation_reasons: Default::default(),
@@ -268,6 +276,10 @@ async fn status_tool_is_listed_and_callable() -> Result<(), Box<dyn Error + Send
     assert_eq!(
         structured["data"]["index_diagnostics"]["recent_file_invalidations"][0]["reason"],
         "content_changed"
+    );
+    assert_eq!(
+        structured["data"]["index_diagnostics"]["queue"]["scheduled_work"]["freshness_edit"]["enqueued"],
+        1
     );
     assert_eq!(
         structured["data"]["syntax_diagnostics"]["total_diagnostics"],

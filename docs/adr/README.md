@@ -68,5 +68,6 @@ Accepted decisions:
 - ADR-043: pre-1.0 compatibility policy
 - ADR-044: atomically published project model and dependency-scoped invalidation
 - ADR-045: bounded live indexing diagnostics
+- ADR-046: bounded priority scheduling for interactive freshness
 
 Do not pre-create empty ADRs merely to satisfy a list.

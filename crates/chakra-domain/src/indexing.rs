@@ -483,6 +483,9 @@ pub struct LiveQueueState {
     pub watcher_errors: u64,
     pub watched_directories: u64,
     pub watcher_event_queue_capacity: u64,
+    /// Worker-side scheduled work, keyed by self-describing priority class.
+    #[serde(default)]
+    pub scheduled_work: crate::scheduling::WorkQueueMetrics,
 }
 
 /// Cumulative and latest typed project-scope invalidation evidence.

@@ -22,6 +22,7 @@ use chakra_domain::indexing::{
 use chakra_domain::location::RepoRelativePath;
 use chakra_domain::operation::OperationContext;
 use chakra_domain::project::ProjectModelImpact;
+use chakra_domain::scheduling::{WorkClass, WorkQueueMetrics};
 use chakra_domain::state::{Freshness, WorkspaceStatus};
 use chakra_engine::{FreshnessBarrier, FreshnessBarrierError, SymbolGraph, WorkspaceEngine};
 use notify::event::{AccessKind, AccessMode};
@@ -34,6 +35,7 @@ use crate::indexer::{
     WorkspaceSourceLoader, WorkspaceSourceScan, WorkspaceSyntaxIndex,
     scan_discovered_sources_with_options,
 };
+use crate::scheduler::{PriorityWorkQueue, QueueFull};
 
 const EVENT_QUEUE_CAPACITY: usize = 256;
 const DEBOUNCE_QUIET: Duration = Duration::from_millis(50);
@@ -46,6 +48,15 @@ const MAX_PUBLISH_ATTEMPTS: usize = 3;
 const MAX_EVENT_HINT_PATHS: usize = 32;
 const DEFAULT_FULL_RECONCILE_INTERVAL: u64 = 256;
 const DEFAULT_STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
+/// Staged entries of one class never exceed the bounded transport channel.
+const QUEUE_PER_CLASS_CAPACITY: usize = EVENT_QUEUE_CAPACITY;
+/// A scheduling pass stages at most one transport-channel capacity before
+/// selecting work. A continuously replenished channel therefore cannot keep
+/// already staged work from reaching the aging scheduler.
+const MAX_TRANSPORT_DRAIN_PER_PASS: usize = EVENT_QUEUE_CAPACITY;
+/// One aging interval: queued background work is promoted one class per
+/// interval until it competes with freshness work FIFO (issue #44).
+const QUEUE_AGING_AFTER: Duration = Duration::from_secs(1);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LiveIndexOptions {
@@ -122,6 +133,9 @@ pub struct LiveIndexMetrics {
     pub dependency_impact: DependencyImpactMetrics,
     pub watch_set_recomputations: u64,
     pub last_reconciliation_kind: ReconciliationKind,
+    /// Per-class staging queue instrumentation: queue latency and typed
+    /// drop/cancellation counters for scheduled work (issue #44).
+    pub queue: WorkQueueMetrics,
 }
 
 #[derive(Debug, Default)]
@@ -201,6 +215,7 @@ struct MetricsState {
     watch_set_recomputations: AtomicU64,
     last_reconciliation_kind: AtomicU64,
     event_epoch: AtomicU64,
+    queue: Mutex<WorkQueueMetrics>,
 }
 
 #[derive(Debug, Default)]
@@ -293,7 +308,23 @@ impl MetricsState {
                 3 => ReconciliationKind::Full,
                 _ => ReconciliationKind::None,
             },
+            queue: self
+                .queue
+                .lock()
+                .map(|queue| *queue)
+                .unwrap_or_else(|poisoned| *poisoned.into_inner()),
         }
+    }
+
+    /// Publishes the worker-owned staging queue instrumentation. The queue
+    /// itself lives on the worker thread; readers see the last published
+    /// snapshot.
+    fn publish_queue_metrics(&self, queue: WorkQueueMetrics) {
+        let mut slot = match self.queue.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        *slot = queue;
     }
 
     fn record_reconciliation_kind(&self, kind: ReconciliationKind) {
@@ -550,9 +581,39 @@ enum WorkerSignal {
         epoch: u64,
         hints: Vec<chakra_domain::location::RepoRelativePath>,
         uncertain: bool,
+        enqueued: Instant,
     },
-    Barrier,
+    /// Deferred periodic full reread: background `Reconciliation`-class work
+    /// that must never delay a freshness edit (issue #44).
+    Checkpoint {
+        enqueued: Instant,
+    },
+    Barrier {
+        enqueued: Instant,
+    },
     Shutdown,
+}
+
+impl WorkerSignal {
+    fn class(&self) -> WorkClass {
+        match self {
+            // Shutdown bypasses the queue entirely; the class only guards
+            // against future callers staging it.
+            Self::Filesystem { .. } | Self::Barrier { .. } | Self::Shutdown => {
+                WorkClass::FreshnessEdit
+            }
+            Self::Checkpoint { .. } => WorkClass::Reconciliation,
+        }
+    }
+
+    fn enqueued(&self) -> Instant {
+        match self {
+            Self::Filesystem { enqueued, .. }
+            | Self::Checkpoint { enqueued }
+            | Self::Barrier { enqueued } => *enqueued,
+            Self::Shutdown => Instant::now(),
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -708,7 +769,9 @@ impl FreshnessBarrier for LiveFreshnessBarrier {
             .check()
             .map_err(|error| FreshnessBarrierError::new(error.to_string()))?;
         let target = self.shared.register(operation.clone())?;
-        match self.sender.try_send(WorkerSignal::Barrier) {
+        match self.sender.try_send(WorkerSignal::Barrier {
+            enqueued: Instant::now(),
+        }) {
             Ok(()) | Err(TrySendError::Full(_)) => {}
             Err(TrySendError::Disconnected(_)) => {
                 self.shared.stop();
@@ -1017,6 +1080,7 @@ impl LiveIndexDiagnostics {
                 watcher_errors: metrics.watcher_errors,
                 watched_directories: metrics.watched_directories,
                 watcher_event_queue_capacity: EVENT_QUEUE_CAPACITY as u64,
+                scheduled_work: metrics.queue,
             },
             project_invalidations: self.metrics.project_invalidation_diagnostics(),
             last_reconciliation_kind: metrics.last_reconciliation_kind,
@@ -1289,6 +1353,7 @@ fn run_worker(
             epoch,
             hints,
             uncertain,
+            enqueued: Instant::now(),
         }) {
             Ok(()) => {}
             Err(TrySendError::Full(_)) => {
@@ -1339,15 +1404,45 @@ fn run_worker(
     let mut reconciled_watcher_errors = 0_u64;
     let mut reconciled_dropped_events = 0_u64;
     let mut indexed_paths = initial_paths;
-    while let Ok(signal) = receiver.recv() {
+    let mut queue = PriorityWorkQueue::new(QUEUE_PER_CLASS_CAPACITY, QUEUE_AGING_AFTER);
+    let mut checkpoint_pending = false;
+    'outer: loop {
+        // Block only when no staged work remains: a queued background
+        // checkpoint must run even while the transport channel stays silent.
+        if queue.is_empty() {
+            let Ok(signal) = receiver.recv() else {
+                break;
+            };
+            if matches!(signal, WorkerSignal::Shutdown) {
+                break;
+            }
+            stage_signal(&mut queue, signal, &metrics);
+        }
+        for _ in 0..MAX_TRANSPORT_DRAIN_PER_PASS {
+            let Ok(signal) = receiver.try_recv() else {
+                break;
+            };
+            if matches!(signal, WorkerSignal::Shutdown) {
+                break 'outer;
+            }
+            stage_signal(&mut queue, signal, &metrics);
+        }
+        let Some(signal) = queue.pop() else {
+            continue;
+        };
+        // Publish selection before executing it. A freshness reconciliation
+        // may wake its waiter from inside `reconcile`, so the query observing
+        // that fresh revision must also be able to observe its dequeue and
+        // queue-latency sample.
+        metrics.publish_queue_metrics(queue.metrics());
         match signal {
             WorkerSignal::Shutdown => break,
-            WorkerSignal::Barrier => {
+            WorkerSignal::Barrier { .. } => {
                 if shared
                     .pending_generation()
                     .is_ok_and(|(requested, completed)| requested > completed)
                 {
-                    reconcile(
+                    let kind = reconcile(
                         &repository_root,
                         &mut syntax_index,
                         &engine,
@@ -1363,74 +1458,26 @@ fn run_worker(
                         &mut reconciled_watcher_errors,
                         &mut reconciled_dropped_events,
                         &mut indexed_paths,
-                        &options,
                         &BTreeSet::new(),
+                        false,
                         false,
                         true,
                     );
+                    track_reconcile_outcome(
+                        kind,
+                        &mut queue,
+                        reconciliations_since_full,
+                        &options,
+                        &mut checkpoint_pending,
+                    );
+                } else {
+                    // The generation counter already completed this demand.
+                    queue.note_superseded(WorkClass::FreshnessEdit);
                 }
             }
-            WorkerSignal::Filesystem {
-                epoch,
-                hints,
-                uncertain,
-            } => {
-                if epoch <= reconciled_event_epoch {
-                    continue;
-                }
-                mark_stale(&engine);
-                let mut window = DebounceWindow::new(Instant::now());
-                let mut shutdown = false;
-                let mut hints: BTreeSet<_> = hints.into_iter().collect();
-                let mut latest_signal_epoch = epoch;
-                let mut uncertain = uncertain || epoch != reconciled_event_epoch.saturating_add(1);
-                loop {
-                    let deadline = window.deadline();
-                    let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
-                        break;
-                    };
-                    match receiver.recv_timeout(remaining) {
-                        Ok(WorkerSignal::Filesystem {
-                            epoch: observed_epoch,
-                            hints: observed,
-                            uncertain: observed_uncertain,
-                        }) => {
-                            window.observe(Instant::now());
-                            let non_contiguous = event_epoch_is_non_contiguous(
-                                &mut latest_signal_epoch,
-                                observed_epoch,
-                            );
-                            uncertain |= observed_uncertain || non_contiguous;
-                            for hint in observed {
-                                if hints.len() >= MAX_EVENT_HINT_PATHS {
-                                    uncertain = true;
-                                    break;
-                                }
-                                hints.insert(hint);
-                            }
-                        }
-                        // The generation counter already records the waiter.
-                        // Keep the bounded quiet window open so an editor's
-                        // write/metadata/rename burst is reconciled as one
-                        // stable state instead of publishing an avoidable
-                        // intermediate revision merely because a caller asked
-                        // for freshness immediately.
-                        Ok(WorkerSignal::Barrier) => {}
-                        Ok(WorkerSignal::Shutdown) => {
-                            shutdown = true;
-                            break;
-                        }
-                        Err(mpsc::RecvTimeoutError::Timeout) => break,
-                        Err(mpsc::RecvTimeoutError::Disconnected) => {
-                            shutdown = true;
-                            break;
-                        }
-                    }
-                }
-                if shutdown {
-                    break;
-                }
-                reconcile(
+            WorkerSignal::Checkpoint { .. } => {
+                checkpoint_pending = false;
+                let kind = reconcile(
                     &repository_root,
                     &mut syntax_index,
                     &engine,
@@ -1446,10 +1493,136 @@ fn run_worker(
                     &mut reconciled_watcher_errors,
                     &mut reconciled_dropped_events,
                     &mut indexed_paths,
+                    &BTreeSet::new(),
+                    false,
+                    true,
+                    false,
+                );
+                track_reconcile_outcome(
+                    kind,
+                    &mut queue,
+                    reconciliations_since_full,
                     &options,
+                    &mut checkpoint_pending,
+                );
+            }
+            WorkerSignal::Filesystem {
+                epoch,
+                hints,
+                uncertain,
+                ..
+            } => {
+                if epoch <= reconciled_event_epoch {
+                    // A newer reconcile already covered this epoch: the
+                    // staged signal is obsolete freshness work.
+                    queue.note_superseded(WorkClass::FreshnessEdit);
+                    continue;
+                }
+                mark_stale(&engine);
+                let mut window = DebounceWindow::new(Instant::now());
+                let mut shutdown = false;
+                let mut hints: BTreeSet<_> = hints.into_iter().collect();
+                let mut latest_signal_epoch = epoch;
+                let mut uncertain = uncertain || epoch != reconciled_event_epoch.saturating_add(1);
+                loop {
+                    let deadline = window.deadline();
+                    let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+                        break;
+                    };
+                    match receiver.recv_timeout(remaining) {
+                        Ok(signal) => {
+                            if matches!(signal, WorkerSignal::Shutdown) {
+                                shutdown = true;
+                            } else {
+                                stage_signal(&mut queue, signal, &metrics);
+                                for _ in 0..MAX_TRANSPORT_DRAIN_PER_PASS {
+                                    let Ok(signal) = receiver.try_recv() else {
+                                        break;
+                                    };
+                                    if matches!(signal, WorkerSignal::Shutdown) {
+                                        shutdown = true;
+                                        break;
+                                    }
+                                    stage_signal(&mut queue, signal, &metrics);
+                                }
+                            }
+                            // Keep the bounded quiet window open so an
+                            // editor's write/metadata/rename burst is
+                            // reconciled as one stable state. Checkpoint
+                            // signals stay staged: background work must not
+                            // extend or interrupt the freshness window.
+                            while let Some(signal) = queue.pop_where(|staged| {
+                                !matches!(staged, WorkerSignal::Checkpoint { .. })
+                            }) {
+                                match signal {
+                                    WorkerSignal::Filesystem {
+                                        epoch: observed_epoch,
+                                        hints: observed,
+                                        uncertain: observed_uncertain,
+                                        ..
+                                    } => {
+                                        window.observe(Instant::now());
+                                        let non_contiguous = event_epoch_is_non_contiguous(
+                                            &mut latest_signal_epoch,
+                                            observed_epoch,
+                                        );
+                                        uncertain |= observed_uncertain || non_contiguous;
+                                        for hint in observed {
+                                            if hints.len() >= MAX_EVENT_HINT_PATHS {
+                                                uncertain = true;
+                                                break;
+                                            }
+                                            hints.insert(hint);
+                                        }
+                                    }
+                                    // The generation counter already records
+                                    // the waiter; the barrier fires after the
+                                    // debounced reconcile below.
+                                    WorkerSignal::Barrier { .. } => {}
+                                    WorkerSignal::Checkpoint { .. } | WorkerSignal::Shutdown => {}
+                                }
+                            }
+                            if shutdown {
+                                break;
+                            }
+                        }
+                        Err(mpsc::RecvTimeoutError::Timeout) => break,
+                        Err(mpsc::RecvTimeoutError::Disconnected) => {
+                            shutdown = true;
+                            break;
+                        }
+                    }
+                }
+                if shutdown {
+                    break;
+                }
+                let kind = reconcile(
+                    &repository_root,
+                    &mut syntax_index,
+                    &engine,
+                    &mut watcher,
+                    &mut watched,
+                    &metrics,
+                    &shared,
+                    &mut watcher_degraded,
+                    &mut reconciled_event_epoch,
+                    &publication_gate,
+                    &mut source_cache,
+                    &mut reconciliations_since_full,
+                    &mut reconciled_watcher_errors,
+                    &mut reconciled_dropped_events,
+                    &mut indexed_paths,
                     &hints,
                     uncertain,
                     false,
+                    false,
+                );
+                track_reconcile_outcome(
+                    kind,
+                    &mut queue,
+                    reconciliations_since_full,
+                    &options,
+                    &mut checkpoint_pending,
                 );
             }
         }
@@ -1460,7 +1633,7 @@ fn run_worker(
             .pending_generation()
             .is_ok_and(|(requested, completed)| requested > completed)
         {
-            reconcile(
+            let kind = reconcile(
                 &repository_root,
                 &mut syntax_index,
                 &engine,
@@ -1476,15 +1649,85 @@ fn run_worker(
                 &mut reconciled_watcher_errors,
                 &mut reconciled_dropped_events,
                 &mut indexed_paths,
-                &options,
                 &BTreeSet::new(),
+                false,
                 false,
                 true,
             );
+            track_reconcile_outcome(
+                kind,
+                &mut queue,
+                reconciliations_since_full,
+                &options,
+                &mut checkpoint_pending,
+            );
         }
+        metrics.publish_queue_metrics(queue.metrics());
     }
+    // Shutdown cancels every staged item so queued work never leaks
+    // unaccounted when the owner stops.
+    let _ = queue.retain(|_| false);
+    metrics.publish_queue_metrics(queue.metrics());
     shared.stop();
     info!("live syntax index worker stopped");
+}
+
+/// Stages one transported signal into the priority queue. Shutdown bypasses
+/// the queue at the call sites so it can never sit behind staged work.
+///
+/// Backpressure: a full freshness class rejects with `QueueFull`. Rejected
+/// barrier demand survives in the durable generation counter; rejected
+/// filesystem evidence is lost, so the dropped-event counter advances and the
+/// next reconciliation distrusts retained bodies — the same honest
+/// degradation as a full transport channel.
+fn stage_signal(
+    queue: &mut PriorityWorkQueue<WorkerSignal>,
+    signal: WorkerSignal,
+    metrics: &MetricsState,
+) {
+    let is_filesystem = matches!(signal, WorkerSignal::Filesystem { .. });
+    let class = signal.class();
+    let enqueued = signal.enqueued();
+    if let Err(QueueFull { .. }) = queue.push(class, signal, enqueued)
+        && is_filesystem
+    {
+        metrics
+            .dropped_watcher_events
+            .fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// Checkpoint bookkeeping after one reconcile. A full reread — however it
+/// was triggered — makes every queued checkpoint obsolete, so it is cancelled
+/// out of the queue. When the interval expires, the periodic full reread is
+/// staged as `Reconciliation`-class background work that freshness edits
+/// overtake, instead of inflating the next freshness reconcile. A failed
+/// reconcile does not re-stage the checkpoint immediately: the next event
+/// retries it, mirroring the pre-checkpoint behavior and avoiding a hot
+/// retry loop on a persistent failure.
+fn track_reconcile_outcome(
+    kind: Option<ReconciliationKind>,
+    queue: &mut PriorityWorkQueue<WorkerSignal>,
+    reconciliations_since_full: u64,
+    options: &LiveIndexOptions,
+    checkpoint_pending: &mut bool,
+) {
+    if kind == Some(ReconciliationKind::Full) {
+        queue.retain(|signal| !matches!(signal, WorkerSignal::Checkpoint { .. }));
+        *checkpoint_pending = false;
+    }
+    if kind.is_some()
+        && !*checkpoint_pending
+        && reconciliations_since_full >= options.full_reconcile_interval
+    {
+        let now = Instant::now();
+        let staged = queue.push(
+            WorkClass::Reconciliation,
+            WorkerSignal::Checkpoint { enqueued: now },
+            now,
+        );
+        *checkpoint_pending = staged.is_ok();
+    }
 }
 
 fn event_may_change_workspace(event: &Event, administrative_paths: &[PathBuf]) -> bool {
@@ -1581,15 +1824,15 @@ fn reconcile(
     reconciled_watcher_errors: &mut u64,
     reconciled_dropped_events: &mut u64,
     indexed_paths: &mut Vec<RepoRelativePath>,
-    options: &LiveIndexOptions,
     hints: &BTreeSet<RepoRelativePath>,
     uncertain_hint: bool,
+    checkpoint: bool,
     cancel_when_unobserved: bool,
-) {
+) -> Option<ReconciliationKind> {
     let pending = shared.pending_generation().unwrap_or((0, 0));
     let (generation, completed_before, operation) = if cancel_when_unobserved {
         let Ok(reconciliation) = shared.begin_barrier_reconciliation() else {
-            return;
+            return None;
         };
         reconciliation
     } else {
@@ -1599,15 +1842,19 @@ fn reconcile(
     let dropped_events = metrics.dropped_watcher_events.load(Ordering::Acquire);
     let watcher_error_advanced = watcher_errors > *reconciled_watcher_errors;
     let dropped_event_advanced = dropped_events > *reconciled_dropped_events;
-    let full_reasons = full_reconciliation_reasons(ReconciliationPolicy {
+    let mut full_reasons = full_reconciliation_reasons(ReconciliationPolicy {
         cache_initialized: source_cache.initialized,
         watcher_health_degraded: *watcher_degraded,
         watcher_error_advanced,
         dropped_event_advanced,
         uncertain_hint,
-        reconciliations_since_full: *reconciliations_since_full,
-        full_reconcile_interval: options.full_reconcile_interval,
     });
+    // A checkpoint is explicit background `Reconciliation`-class work: it
+    // rereads every body on its own schedule instead of silently inflating a
+    // freshness-triggered reconcile when the interval expires (issue #44).
+    if checkpoint {
+        full_reasons.push(FullReconciliationReason::PeriodicCheckpoint);
+    }
     let force_full = !full_reasons.is_empty();
     // A stable partial watch set (for example after the 4,096-directory cap)
     // degrades notification coverage, not authoritative reconciliation.
@@ -1728,7 +1975,7 @@ fn reconcile(
                     .map_or(0, |impact| impact.changes.len() as u64 + impact.changes_omitted),
                 "freshness reconciliation completed"
             );
-            return Ok(stable.covered_generation);
+            return Ok((stable.covered_generation, stable.kind));
         }
         Err(WorkspaceIndexError::Update(
             "worktree changed before fresh revision publication".to_owned(),
@@ -1738,10 +1985,14 @@ fn reconcile(
         *watcher_degraded = true;
     }
     match result {
-        Ok(completed_generation) => shared.complete(completed_generation, Ok(())),
+        Ok((completed_generation, kind)) => {
+            shared.complete(completed_generation, Ok(()));
+            Some(kind)
+        }
         Err(WorkspaceIndexError::Cancelled) => {
             shared.abandon_worker();
             info!("freshness reconciliation cancelled before publication");
+            None
         }
         Err(error) => {
             metrics
@@ -1751,6 +2002,7 @@ fn reconcile(
             let message = error.to_string();
             error!(%error, "live syntax reconciliation failed");
             shared.complete(generation, Err(message));
+            None
         }
     }
 }
@@ -1765,8 +2017,6 @@ struct ReconciliationPolicy {
     watcher_error_advanced: bool,
     dropped_event_advanced: bool,
     uncertain_hint: bool,
-    reconciliations_since_full: u64,
-    full_reconcile_interval: u64,
 }
 
 /// Returns every typed entry-point reason a reconciliation must escalate to
@@ -1786,9 +2036,6 @@ fn full_reconciliation_reasons(policy: ReconciliationPolicy) -> Vec<FullReconcil
     }
     if policy.uncertain_hint {
         reasons.push(FullReconciliationReason::UncertainEventHints);
-    }
-    if policy.reconciliations_since_full >= policy.full_reconcile_interval {
-        reasons.push(FullReconciliationReason::PeriodicCheckpoint);
     }
     reasons
 }
@@ -2366,15 +2613,13 @@ mod tests {
     }
 
     #[test]
-    fn full_reconciliation_policy_covers_uncertainty_and_checkpoints() {
+    fn full_reconciliation_policy_covers_uncertainty() {
         let baseline = ReconciliationPolicy {
             cache_initialized: true,
             watcher_health_degraded: false,
             watcher_error_advanced: false,
             dropped_event_advanced: false,
             uncertain_hint: false,
-            reconciliations_since_full: 1,
-            full_reconcile_interval: 256,
         };
         assert!(full_reconciliation_reasons(baseline).is_empty());
         assert_eq!(
@@ -2414,13 +2659,6 @@ mod tests {
         );
         assert_eq!(
             full_reconciliation_reasons(ReconciliationPolicy {
-                reconciliations_since_full: 256,
-                ..baseline
-            }),
-            vec![FullReconciliationReason::PeriodicCheckpoint]
-        );
-        assert_eq!(
-            full_reconciliation_reasons(ReconciliationPolicy {
                 watcher_error_advanced: true,
                 dropped_event_advanced: true,
                 ..baseline
@@ -2430,6 +2668,103 @@ mod tests {
                 FullReconciliationReason::WatcherEventMissed,
             ],
             "simultaneous causes must not be collapsed to one priority reason"
+        );
+    }
+
+    #[test]
+    fn staged_freshness_edit_overtakes_an_older_queued_checkpoint()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut queue = PriorityWorkQueue::new(QUEUE_PER_CLASS_CAPACITY, QUEUE_AGING_AFTER);
+        let checkpoint_enqueued = Instant::now();
+        queue.push(
+            WorkClass::Reconciliation,
+            WorkerSignal::Checkpoint {
+                enqueued: checkpoint_enqueued,
+            },
+            checkpoint_enqueued,
+        )?;
+        let edit_enqueued = Instant::now();
+        queue.push(
+            WorkClass::FreshnessEdit,
+            WorkerSignal::Filesystem {
+                epoch: 7,
+                hints: Vec::new(),
+                uncertain: false,
+                enqueued: edit_enqueued,
+            },
+            edit_enqueued,
+        )?;
+
+        assert!(matches!(
+            queue.pop(),
+            Some(WorkerSignal::Filesystem { epoch: 7, .. })
+        ));
+        assert!(matches!(queue.pop(), Some(WorkerSignal::Checkpoint { .. })));
+        let metrics = queue.metrics();
+        assert_eq!(metrics.for_class(WorkClass::FreshnessEdit).dequeued, 1);
+        assert_eq!(metrics.for_class(WorkClass::Reconciliation).dequeued, 1);
+        assert_eq!(
+            metrics.for_class(WorkClass::FreshnessEdit).latency.samples,
+            1
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn interval_expiry_stages_one_checkpoint_and_full_reconcile_cancels_it() {
+        let options = LiveIndexOptions {
+            full_reconcile_interval: 2,
+            ..LiveIndexOptions::default()
+        };
+        let mut queue = PriorityWorkQueue::new(QUEUE_PER_CLASS_CAPACITY, QUEUE_AGING_AFTER);
+        let mut checkpoint_pending = false;
+
+        // Below the interval a targeted reconcile stages nothing.
+        track_reconcile_outcome(
+            Some(ReconciliationKind::Targeted),
+            &mut queue,
+            1,
+            &options,
+            &mut checkpoint_pending,
+        );
+        assert!(!checkpoint_pending);
+        assert!(queue.is_empty());
+
+        // At the interval a targeted reconcile stages background work once.
+        track_reconcile_outcome(
+            Some(ReconciliationKind::Targeted),
+            &mut queue,
+            2,
+            &options,
+            &mut checkpoint_pending,
+        );
+        assert!(checkpoint_pending);
+        track_reconcile_outcome(
+            Some(ReconciliationKind::Targeted),
+            &mut queue,
+            3,
+            &options,
+            &mut checkpoint_pending,
+        );
+        assert_eq!(queue.len(), 1, "checkpoint staging must deduplicate");
+
+        // A full reconcile — however triggered — cancels the staged
+        // checkpoint instead of letting it reread every body again.
+        track_reconcile_outcome(
+            Some(ReconciliationKind::Full),
+            &mut queue,
+            0,
+            &options,
+            &mut checkpoint_pending,
+        );
+        assert!(!checkpoint_pending);
+        assert!(queue.is_empty());
+        assert_eq!(
+            queue
+                .metrics()
+                .for_class(WorkClass::Reconciliation)
+                .cancelled,
+            1
         );
     }
 
@@ -2452,6 +2787,20 @@ mod tests {
             Some("src/file-4.rs")
         );
         Ok(())
+    }
+
+    #[test]
+    fn failed_reconcile_does_not_restage_a_checkpoint() {
+        let options = LiveIndexOptions {
+            full_reconcile_interval: 1,
+            ..LiveIndexOptions::default()
+        };
+        let mut queue = PriorityWorkQueue::new(QUEUE_PER_CLASS_CAPACITY, QUEUE_AGING_AFTER);
+        let mut checkpoint_pending = false;
+
+        track_reconcile_outcome(None, &mut queue, 5, &options, &mut checkpoint_pending);
+        assert!(!checkpoint_pending);
+        assert!(queue.is_empty());
     }
 
     #[test]
@@ -2530,7 +2879,7 @@ mod tests {
             .collect();
 
         for _ in 0..WAITERS {
-            assert!(matches!(receiver.recv()?, WorkerSignal::Barrier));
+            assert!(matches!(receiver.recv()?, WorkerSignal::Barrier { .. }));
         }
         assert_eq!(shared.pending_generation()?, (WAITERS, 0));
         shared.complete(WAITERS, Ok(()));
