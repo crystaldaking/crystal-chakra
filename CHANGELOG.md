@@ -5,6 +5,22 @@ version tags prefixed with `v`.
 
 ## [Unreleased]
 
+### Added
+
+- Lazy revision-scoped file facts (issue #42): a typed `LazyFactProducer`
+  contract in `chakra-engine` declares inputs (file content plus pinned
+  workspace revision), producer/format version, cost budget (wall time and
+  per-fact retained bytes), and provenance/precision; a bounded, typed
+  `LazyFactStore` per producer caches facts by (content hash, revision) with
+  count/byte LRU bounds and diagnostic counters, coalesces concurrent
+  duplicate requests into one computation, and never retains failed or
+  cancelled results. `FileOutlineDigestProducer` is the first producer
+  (Tree-sitter/Syntax-tier per-file outline digest). A measured
+  lazy-vs-eager harness lives in
+  `chakra-conformance/tests/lazy_file_facts.rs` (hermetic synthetic corpus in
+  CI, opt-in real worktree via `CHAKRA_LAZY_FACTS_WORKTREE`); numbers are
+  recorded in `docs/evaluation/v0.2.0-lazy-file-facts.md`.
+
 ## [0.1.3] - 2026-08-26
 
 Post-v0.1.2 correctness, query ergonomics, corpus resilience, dependency
