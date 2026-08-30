@@ -38,7 +38,7 @@
     "PROV-01": {"status": "pass", "mechanism": "domain provenance model", "evidence": ["crates/chakra-language-csharp/tests/fixture_index.rs"]},
     "AMBIG-01": {"status": "pass", "mechanism": "query-layer ambiguity reporting", "evidence": ["docs/support/conformance/csharp.json"]},
     "BUDGET-01": {"status": "pass", "mechanism": "query work budgets (ADR-0025)", "evidence": ["docs/support/conformance/csharp.json"]},
-    "CANCEL-01": {"status": "pass", "mechanism": "cooperative cancellation (ADR-0025)", "evidence": ["crates/chakra-language-csharp/src/indexer.rs", "crates/chakra-provider-csharp-ls/tests/lifecycle.rs"]},
+    "CANCEL-01": {"status": "pass", "mechanism": "cooperative cancellation (ADR-0025)", "evidence": ["crates/chakra-language-csharp/src/indexer/mod.rs", "crates/chakra-provider-csharp-ls/tests/lifecycle.rs"]},
     "DEGRADE-01": {"status": "pass", "mechanism": "bounded degradation (ADR-0011)", "evidence": ["docs/support/conformance/csharp.json"]},
     "CONFORM-01": {"status": "pass", "mechanism": "chakra-conformance harness", "evidence": ["docs/support/conformance/csharp.json"]},
     "CORPUS-01": {"status": "pass", "mechanism": "pinned public corpus evaluation (ADR-0029)", "evidence": ["docs/support/corpus/results/csharp-dotnet__runtime.json"]},

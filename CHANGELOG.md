@@ -21,6 +21,10 @@ version tags prefixed with `v`.
 
 ### Changed
 
+- Oversized Git diff, shared indexing/live-indexing, PHP indexing, and C#
+  indexing modules were split into focused internal modules (issues #124–127).
+  Public crate APIs, query contracts, and indexing semantics are unchanged;
+  support-matrix evidence now follows the relocated implementation and tests.
 - Interactive indexing is prioritized over background work (issue #44).
   `chakra-domain` defines the typed bounded priority classes (`WorkClass`:
   freshness edits, provider sync, reconciliation, cache warmup, maintenance)

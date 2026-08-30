@@ -44,7 +44,8 @@ for non-Rust precise facts (recorded as a limitation in ADR-0028).
   receivers, missing or ambiguous candidates, and Laravel framework-magic
   relations (ADR-0017). Precision is never upgraded silently (PROV-01); the
   promotion rule is stated in code at the promotion point
-  (`strict_call_site_tier` in `crates/chakra-language-php/src/indexer.rs`).
+  (`strict_call_site_tier` in
+  `crates/chakra-language-php/src/indexer/catalog.rs`).
 - The shared graph derives the `CALLS`/`TESTS` relation tier from the call
   site's own precision, so a promoted call site materializes
   `chakra_resolver`/`precise` edges that survive `callers`, `context`,

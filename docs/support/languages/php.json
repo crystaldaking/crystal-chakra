@@ -25,7 +25,7 @@
     "SYNTAX-07": {"status": "pass", "mechanism": "tree-sitter diagnostics (ADR-0022)", "evidence": ["crates/chakra-language-php/tests/fixture_index.rs"]},
     "SYNTAX-08": {"status": "pass", "mechanism": "receiver-aware syntax call resolution (ADR-0015)", "evidence": ["crates/chakra-language-php/tests/fixture_index.rs"]},
     "PRECISE-01": {"status": "pass", "mechanism": "recorded deferral with shipped equivalent", "evidence": ["docs/adr/0018-php-precise-provider-evaluation.md", "docs/adr/0030-php-precise-equivalent-resolver.md", "docs/evaluation/php-provider-v0.1.1.md"]},
-    "PRECISE-02": {"status": "equivalent", "mechanism": "ChakraResolver strict-tier promotion (ADR-0030)", "evidence": ["crates/chakra-language-php/src/indexer.rs", "crates/chakra-language-php/tests/fixture_index.rs", "docs/adr/0030-php-precise-equivalent-resolver.md"]},
+    "PRECISE-02": {"status": "equivalent", "mechanism": "ChakraResolver strict-tier promotion (ADR-0030)", "evidence": ["crates/chakra-language-php/src/indexer/catalog.rs", "crates/chakra-language-php/src/indexer/tests.rs", "crates/chakra-language-php/tests/fixture_index.rs", "docs/adr/0030-php-precise-equivalent-resolver.md"]},
     "PRECISE-03": {"status": "not-applicable", "note": "No provider integrated."},
     "PRECISE-04": {"status": "not-applicable", "note": "No provider integrated."},
     "PRECISE-05": {"status": "not-applicable", "note": "No provider integrated."},
