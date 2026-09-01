@@ -284,8 +284,19 @@ pub struct ProviderQueueLatencyByPriority {
 /// Provider-pool lifecycle and admission counters. Reservations are
 /// deterministic configuration bounds, not process RSS measurements.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct WorkspaceProviderOrchestrationMetrics {
+    pub active_providers: u64,
+    pub max_active_providers: u64,
+    pub reserved_memory_bytes: u64,
+    pub max_reserved_memory_bytes: u64,
+}
+
+/// Process-global provider-pool counters plus the selected worktree's local
+/// resource envelope when observed through a workspace-bound provider.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ProviderOrchestrationMetrics {
     pub configured_providers: u64,
+    pub configured_workspaces: u64,
     pub active_providers: u64,
     pub max_active_providers: u64,
     pub reserved_memory_bytes: u64,
@@ -306,6 +317,8 @@ pub struct ProviderOrchestrationMetrics {
     /// Admission queue wait per self-describing provider priority (issue #44).
     #[serde(default)]
     pub queue_latency_by_priority: ProviderQueueLatencyByPriority,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<WorkspaceProviderOrchestrationMetrics>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -374,8 +387,9 @@ pub struct StatusData {
     pub workspace: WorkspaceIdentity,
     pub counts: IndexCounts,
     pub providers: Vec<ProviderInfo>,
-    /// Workspace-global provider-pool lifecycle/admission counters, reported
-    /// once for the whole pool instead of repeated per provider (issue #61).
+    /// Process-global provider-pool lifecycle/admission counters plus the
+    /// selected worktree's local resource envelope, reported once instead of
+    /// repeated per provider (issues #47 and #61).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_pool: Option<ProviderOrchestrationMetrics>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1041,6 +1055,42 @@ mod tests {
         assert_eq!(json["interactive"]["samples"], 1);
         assert!(json.get("normal").is_some());
         assert!(json.get("background").is_some());
+        Ok(())
+    }
+
+    #[test]
+    fn provider_pool_metrics_serialize_global_and_workspace_envelopes()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let metrics = ProviderOrchestrationMetrics {
+            configured_providers: 2,
+            configured_workspaces: 3,
+            active_providers: 2,
+            max_active_providers: 4,
+            reserved_memory_bytes: 20,
+            max_reserved_memory_bytes: 40,
+            workspace: Some(WorkspaceProviderOrchestrationMetrics {
+                active_providers: 1,
+                max_active_providers: 2,
+                reserved_memory_bytes: 10,
+                max_reserved_memory_bytes: 20,
+            }),
+            ..ProviderOrchestrationMetrics::default()
+        };
+
+        let json = serde_json::to_value(metrics)?;
+        assert_eq!(json["configured_providers"], 2);
+        assert_eq!(json["configured_workspaces"], 3);
+        assert_eq!(json["active_providers"], 2);
+        assert_eq!(json["max_active_providers"], 4);
+        assert_eq!(json["reserved_memory_bytes"], 20);
+        assert_eq!(json["max_reserved_memory_bytes"], 40);
+        assert_eq!(json["workspace"]["active_providers"], 1);
+        assert_eq!(json["workspace"]["max_active_providers"], 2);
+        assert_eq!(json["workspace"]["reserved_memory_bytes"], 10);
+        assert_eq!(json["workspace"]["max_reserved_memory_bytes"], 20);
+
+        let without_workspace = serde_json::to_value(ProviderOrchestrationMetrics::default())?;
+        assert!(without_workspace.get("workspace").is_none());
         Ok(())
     }
 

@@ -71,5 +71,6 @@ Accepted decisions:
 - ADR-046: bounded priority scheduling for interactive freshness
 - ADR-047: workspace-bound lazy file facts
 - ADR-048: bounded multi-worktree registry and query routing
+- ADR-049: worktree-bound instances in a global provider pool
 
 Do not pre-create empty ADRs merely to satisfy a list.

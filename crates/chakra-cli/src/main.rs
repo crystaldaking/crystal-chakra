@@ -39,9 +39,13 @@ enum Commands {
 
 #[derive(Debug, Args)]
 struct ServeArgs {
-    /// Materialized Git worktree to serve.
+    /// Materialized Git worktree to serve; repeat for linked worktrees.
     #[arg(long, value_name = "PATH", default_value = ".")]
-    repo: PathBuf,
+    repo: Vec<PathBuf>,
+
+    /// Maximum linked worktrees admitted to this process.
+    #[arg(long, default_value_t = 4)]
+    max_workspaces: usize,
 
     /// Maximum watcher construction and initial registration time, in milliseconds.
     #[arg(long, default_value_t = 30_000)]
@@ -127,9 +131,17 @@ struct ServeArgs {
     #[arg(long, default_value_t = 3)]
     max_active_providers: usize,
 
+    /// Maximum simultaneously active precise providers in one worktree.
+    #[arg(long, default_value_t = 3)]
+    max_active_providers_per_workspace: usize,
+
     /// Maximum deterministic memory reservations for active providers.
     #[arg(long, default_value_t = 2 * 1024 * 1024 * 1024_u64)]
     max_provider_reserved_memory_bytes: u64,
+
+    /// Maximum deterministic provider-memory reservations in one worktree.
+    #[arg(long, default_value_t = 2 * 1024 * 1024 * 1024_u64)]
+    max_provider_reserved_memory_bytes_per_workspace: u64,
 
     /// Maximum precise-provider queries admitted concurrently.
     #[arg(long, default_value_t = 4)]
@@ -219,6 +231,7 @@ async fn serve(args: ServeArgs) -> ExitCode {
     // on Tokio's owned blocking pool instead of a runtime worker.
     let ServeArgs {
         repo,
+        max_workspaces,
         live_index_startup_timeout_millis,
         no_rust_analyzer,
         rust_analyzer_path,
@@ -240,7 +253,9 @@ async fn serve(args: ServeArgs) -> ExitCode {
         no_gopls,
         gopls_path,
         max_active_providers,
+        max_active_providers_per_workspace,
         max_provider_reserved_memory_bytes,
+        max_provider_reserved_memory_bytes_per_workspace,
         max_concurrent_provider_queries,
         max_queued_provider_queries,
         provider_queue_timeout_millis,
@@ -273,64 +288,69 @@ async fn serve(args: ServeArgs) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let registry = match WorkspaceRegistry::new(WorkspaceRegistryConfig { max_workspaces: 1 }) {
+    let registry = match WorkspaceRegistry::new(WorkspaceRegistryConfig { max_workspaces }) {
         Ok(registry) => Arc::new(registry),
         Err(error) => {
             eprintln!("chakra: invalid workspace registry configuration: {error}");
             return ExitCode::FAILURE;
         }
     };
-    let start_registry = registry.clone();
-    let registered = match tokio::task::spawn_blocking(move || {
-        start_registry.register(
-            &repo,
-            WorkspaceStartOptions {
-                index: options,
-                live: chakra_language::LiveIndexOptions {
-                    startup_timeout: Duration::from_millis(live_index_startup_timeout_millis),
-                    ..chakra_language::LiveIndexOptions::default()
-                },
+    let mut registered_workspaces = Vec::with_capacity(repo.len());
+    for root in repo {
+        let start_registry = registry.clone();
+        let workspace_options = WorkspaceStartOptions {
+            index: options.clone(),
+            live: chakra_language::LiveIndexOptions {
+                startup_timeout: Duration::from_millis(live_index_startup_timeout_millis),
+                ..chakra_language::LiveIndexOptions::default()
             },
-        )
-    })
-    .await
-    {
-        Ok(Ok(registered)) => registered,
-        Ok(Err(error)) => {
-            eprintln!("chakra: {error}");
-            return ExitCode::FAILURE;
-        }
-        Err(error) => {
-            eprintln!("chakra: workspace startup task failed: {error}");
-            return ExitCode::FAILURE;
-        }
-    };
-    let engine = registered.engine();
-    let initial_metrics = registered.initial_metrics();
-    tracing::info!(
-        files = initial_metrics.parsed_files,
-        rust_files = initial_metrics.rust_files,
-        php_files = initial_metrics.php_files,
-        cpp_files = initial_metrics.cpp_files,
-        laravel_detected = initial_metrics.laravel_detected,
-        framework_symbols = initial_metrics.framework_symbols,
-        framework_edges = initial_metrics.framework_edges,
-        framework_truncated_files = initial_metrics.framework_truncated_files,
-        syntax_error_files = initial_metrics.syntax_error_files,
-        truncated_call_sites = initial_metrics.truncated_call_sites,
-        symbols = initial_metrics.symbols,
-        edges = initial_metrics.edges,
-        call_sites = initial_metrics.call_sites,
-        indexing_degraded = initial_metrics.indexing.is_degraded(),
-        source_bytes = initial_metrics.indexing.coverage.source_bytes,
-        configured_index_workers = initial_metrics.indexing.scheduling.configured_max_workers,
-        effective_index_workers = initial_metrics.indexing.scheduling.effective_worker_limit,
-        peak_active_index_workers = initial_metrics.indexing.scheduling.peak_active_workers,
-        current_rss_bytes = ?initial_metrics.indexing.memory.current_rss_bytes,
-        observed_phase_peak_rss_bytes = ?initial_metrics.indexing.memory.observed_phase_peak_rss_bytes,
-        elapsed_micros = initial_metrics.elapsed.as_micros(),
-        "initial syntax revision published as stale pending live reconciliation"
-    );
+        };
+        let registered = match tokio::task::spawn_blocking(move || {
+            start_registry.register(&root, workspace_options)
+        })
+        .await
+        {
+            Ok(Ok(registered)) => registered,
+            Ok(Err(error)) => {
+                eprintln!("chakra: {error}");
+                let _ = tokio::task::spawn_blocking(move || registry.shutdown()).await;
+                return ExitCode::FAILURE;
+            }
+            Err(error) => {
+                eprintln!("chakra: workspace startup task failed: {error}");
+                let _ = tokio::task::spawn_blocking(move || registry.shutdown()).await;
+                return ExitCode::FAILURE;
+            }
+        };
+        let initial_metrics = registered.initial_metrics();
+        tracing::info!(
+            workspace = %registered.identity().workspace,
+            root = %registered.identity().root.display(),
+            files = initial_metrics.parsed_files,
+            rust_files = initial_metrics.rust_files,
+            php_files = initial_metrics.php_files,
+            cpp_files = initial_metrics.cpp_files,
+            laravel_detected = initial_metrics.laravel_detected,
+            framework_symbols = initial_metrics.framework_symbols,
+            framework_edges = initial_metrics.framework_edges,
+            framework_truncated_files = initial_metrics.framework_truncated_files,
+            syntax_error_files = initial_metrics.syntax_error_files,
+            truncated_call_sites = initial_metrics.truncated_call_sites,
+            symbols = initial_metrics.symbols,
+            edges = initial_metrics.edges,
+            call_sites = initial_metrics.call_sites,
+            indexing_degraded = initial_metrics.indexing.is_degraded(),
+            source_bytes = initial_metrics.indexing.coverage.source_bytes,
+            configured_index_workers = initial_metrics.indexing.scheduling.configured_max_workers,
+            effective_index_workers = initial_metrics.indexing.scheduling.effective_worker_limit,
+            peak_active_index_workers = initial_metrics.indexing.scheduling.peak_active_workers,
+            current_rss_bytes = ?initial_metrics.indexing.memory.current_rss_bytes,
+            observed_phase_peak_rss_bytes = ?initial_metrics.indexing.memory.observed_phase_peak_rss_bytes,
+            elapsed_micros = initial_metrics.elapsed.as_micros(),
+            "initial syntax revision published as stale pending live reconciliation"
+        );
+        registered_workspaces.push(registered);
+    }
     let mut registrations = Vec::new();
     if should_register_provider(no_rust_analyzer) {
         let query_wait_budget = chakra_provider_rust_analyzer::DEFAULT_QUERY_WAIT_TIMEOUT;
@@ -439,7 +459,6 @@ async fn serve(args: ServeArgs) -> ExitCode {
         tracing::info!("pyright precise enrichment is disabled");
     }
     if should_register_provider(no_jdtls) {
-        let command: OnceLock<chakra_provider_jdtls::JdtlsCommand> = OnceLock::new();
         let query_wait_budget = chakra_provider_jdtls::DEFAULT_QUERY_WAIT_TIMEOUT;
         registrations.push(
             ProviderRegistration::new(
@@ -449,18 +468,14 @@ async fn serve(args: ServeArgs) -> ExitCode {
                 move |workspace,
                       operation|
                       -> Result<Arc<dyn PreciseProvider>, ProviderStartError> {
-                    let resolved_command = if let Some(command) = command.get() {
-                        command.clone()
-                    } else {
-                        let resolved = chakra_provider_jdtls::resolve_command_with_context(
-                            jdtls_path.as_deref(),
-                            &workspace.repository_root,
-                            operation,
-                        )
-                        .map_err(ProviderStartError::from)?;
-                        let _ = command.set(resolved.clone());
-                        resolved
-                    };
+                    // The mandatory jdtls `-data` directory is derived from
+                    // this worktree and must never be cached across roots.
+                    let resolved_command = chakra_provider_jdtls::resolve_command_with_context(
+                        jdtls_path.as_deref(),
+                        &workspace.repository_root,
+                        operation,
+                    )
+                    .map_err(ProviderStartError::from)?;
                     let config = chakra_provider_jdtls::JdtlsConfig {
                         command: resolved_command,
                         readiness_timeout: Duration::from_millis(jdtls_readiness_timeout_millis),
@@ -664,7 +679,10 @@ async fn serve(args: ServeArgs) -> ExitCode {
     let provider_pool = match ProviderPool::start(
         ProviderPoolConfig {
             max_active_providers,
+            max_active_providers_per_workspace,
             max_reserved_memory_bytes: max_provider_reserved_memory_bytes,
+            max_reserved_memory_bytes_per_workspace:
+                max_provider_reserved_memory_bytes_per_workspace,
             max_concurrent_queries: max_concurrent_provider_queries,
             max_queued_queries: max_queued_provider_queries,
             query_queue_timeout: Duration::from_millis(provider_queue_timeout_millis),
@@ -680,12 +698,24 @@ async fn serve(args: ServeArgs) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    for provider in provider_pool.providers() {
-        if let Err(error) = engine.install_precise_provider(provider) {
-            eprintln!("chakra: failed to install precise provider: {error}");
-            let _ = tokio::task::spawn_blocking(move || provider_pool.shutdown()).await;
-            let _ = tokio::task::spawn_blocking(move || registry.shutdown()).await;
-            return ExitCode::FAILURE;
+    for registered in &registered_workspaces {
+        let providers = match provider_pool.providers_for(registered.identity()) {
+            Ok(providers) => providers,
+            Err(error) => {
+                eprintln!("chakra: failed to bind precise providers: {error}");
+                let _ = tokio::task::spawn_blocking(move || provider_pool.shutdown()).await;
+                let _ = tokio::task::spawn_blocking(move || registry.shutdown()).await;
+                return ExitCode::FAILURE;
+            }
+        };
+        let engine = registered.engine();
+        for provider in providers {
+            if let Err(error) = engine.install_precise_provider(provider) {
+                eprintln!("chakra: failed to install precise provider: {error}");
+                let _ = tokio::task::spawn_blocking(move || provider_pool.shutdown()).await;
+                let _ = tokio::task::spawn_blocking(move || registry.shutdown()).await;
+                return ExitCode::FAILURE;
+            }
         }
     }
     let serve_result = chakra_mcp::serve_stdio_router(registry.clone()).await;
@@ -720,8 +750,6 @@ async fn serve(args: ServeArgs) -> ExitCode {
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
-
     use super::*;
 
     #[test]
@@ -756,7 +784,8 @@ mod tests {
             cli,
             Ok(Cli {
                 command: Some(Commands::Serve(ref args)),
-            }) if args.repo == Path::new("/tmp/example")
+            }) if args.repo == [PathBuf::from("/tmp/example")]
+                && args.max_workspaces == 4
                 && args.live_index_startup_timeout_millis == 30_000
                 && !args.no_rust_analyzer
                 && args.rust_analyzer_path == "rust-analyzer"
@@ -778,9 +807,51 @@ mod tests {
                 && !args.no_gopls
                 && args.gopls_path.is_none()
                 && args.max_active_providers == 3
+                && args.max_active_providers_per_workspace == 3
                 && args.max_index_files == DEFAULT_MAX_INDEX_FILES
                 && args.max_index_symbols == DEFAULT_MAX_INDEX_SYMBOLS
                 && args.max_index_workers == DEFAULT_MAX_INDEX_WORKERS
+        ));
+    }
+
+    #[test]
+    fn serve_without_repo_keeps_the_current_directory_default() {
+        let cli = Cli::try_parse_from(["chakra", "serve"]);
+        assert!(matches!(
+            cli,
+            Ok(Cli {
+                command: Some(Commands::Serve(ref args)),
+            }) if args.repo == [PathBuf::from(".")]
+        ));
+    }
+
+    #[test]
+    fn serve_accepts_repeated_worktrees_and_distinct_provider_limits() {
+        let cli = Cli::try_parse_from([
+            "chakra",
+            "serve",
+            "--repo",
+            "/tmp/first",
+            "--repo",
+            "/tmp/second",
+            "--max-workspaces",
+            "2",
+            "--max-active-providers",
+            "4",
+            "--max-active-providers-per-workspace",
+            "2",
+            "--max-provider-reserved-memory-bytes-per-workspace",
+            "1048576",
+        ]);
+        assert!(matches!(
+            cli,
+            Ok(Cli {
+                command: Some(Commands::Serve(ref args)),
+            }) if args.repo == [PathBuf::from("/tmp/first"), PathBuf::from("/tmp/second")]
+                && args.max_workspaces == 2
+                && args.max_active_providers == 4
+                && args.max_active_providers_per_workspace == 2
+                && args.max_provider_reserved_memory_bytes_per_workspace == 1_048_576
         ));
     }
 
