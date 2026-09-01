@@ -27,10 +27,12 @@ use chakra_domain::operation::OperationContext;
 use chakra_domain::scheduling::WorkClass;
 use chakra_domain::state::{Freshness, WorkspaceStatus};
 use chakra_engine::{FreshnessBarrier, FreshnessBarrierError, SymbolGraph, WorkspaceEngine};
+#[cfg(not(target_os = "macos"))]
+use notify::RecommendedWatcher;
 use notify::event::{AccessKind, AccessMode};
-use notify::{
-    ErrorKind as NotifyErrorKind, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher,
-};
+#[cfg(target_os = "macos")]
+use notify::{Config as NotifyConfig, PollWatcher};
+use notify::{ErrorKind as NotifyErrorKind, Event, EventKind, RecursiveMode, Watcher};
 use thiserror::Error;
 use tracing::{error, info, warn};
 
@@ -66,6 +68,30 @@ const MAX_TRANSPORT_DRAIN_PER_PASS: usize = EVENT_QUEUE_CAPACITY;
 /// One aging interval: queued background work is promoted one class per
 /// interval until it competes with freshness work FIFO (issue #44).
 const QUEUE_AGING_AFTER: Duration = Duration::from_secs(1);
+#[cfg(target_os = "macos")]
+const WATCHER_POLL_INTERVAL: Duration = Duration::from_secs(2);
+
+#[cfg(not(target_os = "macos"))]
+type WorkspaceWatcher = RecommendedWatcher;
+#[cfg(target_os = "macos")]
+type WorkspaceWatcher = PollWatcher;
+
+#[cfg(not(target_os = "macos"))]
+fn new_workspace_watcher(
+    event_handler: impl notify::EventHandler,
+) -> notify::Result<WorkspaceWatcher> {
+    notify::recommended_watcher(event_handler)
+}
+
+#[cfg(target_os = "macos")]
+fn new_workspace_watcher(
+    event_handler: impl notify::EventHandler,
+) -> notify::Result<WorkspaceWatcher> {
+    PollWatcher::new(
+        event_handler,
+        NotifyConfig::default().with_poll_interval(WATCHER_POLL_INTERVAL),
+    )
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LiveIndexOptions {
@@ -430,7 +456,7 @@ fn run_worker(
     let callback_engine = engine.clone();
     let callback_publication_gate = publication_gate.clone();
     let callback_root = repository_root.clone();
-    let watcher = notify::recommended_watcher(move |event: notify::Result<Event>| {
+    let event_handler = move |event: notify::Result<Event>| {
         let (hints, uncertain) = match event {
             Ok(event) => {
                 callback_metrics
@@ -471,7 +497,8 @@ fn run_worker(
             }
             Err(TrySendError::Disconnected(_)) => {}
         }
-    });
+    };
+    let watcher = new_workspace_watcher(event_handler);
     let mut watcher = match watcher {
         Ok(watcher) => watcher,
         Err(error) => {
@@ -920,7 +947,7 @@ fn reconcile(
     repository_root: &Path,
     syntax_index: &mut WorkspaceSyntaxIndex,
     engine: &WorkspaceEngine,
-    watcher: &mut RecommendedWatcher,
+    watcher: &mut WorkspaceWatcher,
     watched: &mut BTreeSet<PathBuf>,
     metrics: &MetricsState,
     shared: &BarrierShared,
@@ -1471,7 +1498,7 @@ fn desired_watch_directories(
 }
 
 fn refresh_watches(
-    watcher: &mut RecommendedWatcher,
+    watcher: &mut WorkspaceWatcher,
     repository_root: &Path,
     indexed_paths: &[RepoRelativePath],
     watched: &mut BTreeSet<PathBuf>,
@@ -1947,13 +1974,49 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn macos_recommended_watcher_is_kqueue() {
-        assert_eq!(RecommendedWatcher::kind(), notify::WatcherKind::Kqueue);
+    fn macos_workspace_watcher_is_polling() {
+        assert_eq!(WorkspaceWatcher::kind(), notify::WatcherKind::PollWatcher);
     }
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn kqueue_uses_bounded_non_recursive_source_directories()
+    fn macos_root_churn_does_not_recursively_retain_ignored_file_descriptors()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let workspace = tempfile::tempdir()?;
+        let ignored = workspace.path().join("target/corpus/deep");
+        std::fs::create_dir_all(&ignored)?;
+        for index in 0..256 {
+            std::fs::write(ignored.join(format!("ignored-{index}.txt")), b"ignored")?;
+        }
+
+        let (event_sender, event_receiver) = mpsc::sync_channel(8);
+        let mut watcher = new_workspace_watcher(move |event: notify::Result<Event>| {
+            if event.is_ok() {
+                let _ = event_sender.try_send(());
+            }
+        })?;
+        watcher.watch(workspace.path(), RecursiveMode::NonRecursive)?;
+        let descriptors_before = std::fs::read_dir("/dev/fd")?.count();
+
+        std::fs::create_dir(workspace.path().join("branch-switch"))?;
+        event_receiver.recv_timeout(WATCHER_POLL_INTERVAL + Duration::from_secs(2))?;
+        let observation_deadline = Instant::now() + Duration::from_millis(500);
+        let mut maximum_descriptors = descriptors_before;
+        while Instant::now() < observation_deadline {
+            maximum_descriptors = maximum_descriptors.max(std::fs::read_dir("/dev/fd")?.count());
+            thread::sleep(Duration::from_millis(10));
+        }
+
+        assert!(
+            maximum_descriptors.saturating_sub(descriptors_before) < 64,
+            "non-recursive root churn retained unexpected descriptors: before={descriptors_before}, maximum={maximum_descriptors}"
+        );
+        Ok(())
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_watcher_uses_bounded_non_recursive_source_directories()
     -> Result<(), Box<dyn std::error::Error>> {
         let workspace = tempfile::tempdir()?;
         let root = workspace.path();
