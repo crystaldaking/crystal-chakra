@@ -5,11 +5,16 @@
 //! files. It never constructs or inspects an administrative Git path, and
 //! repository-controlled paths are passed as data rather than through a shell.
 
+mod commit_snapshot;
 mod diff;
 mod discovery;
 mod project_model;
 mod source_metadata;
 
+pub use commit_snapshot::{
+    CommitSnapshotLimits, GitCommitSnapshot, read_commit_snapshot_with_context,
+    read_head_commit_snapshot_with_context, resolve_head_commit_with_context,
+};
 pub use diff::GitWorkspaceDiff;
 pub use discovery::{
     DiscoveryError, WorkspaceInventory, discover_language_files, discover_source_files,

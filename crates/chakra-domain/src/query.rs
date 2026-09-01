@@ -11,6 +11,7 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use crate::composition::SourceLayer;
 use crate::diagnostic::{DiagnosticTruncationCause, SyntaxDiagnostic};
 use crate::envelope::QueryEnvelope;
 use crate::identity::{WorkspaceId, WorkspaceIdentity};
@@ -67,6 +68,7 @@ pub struct SymbolView {
     pub signature: Option<String>,
     pub provenance: Provenance,
     pub precision: Precision,
+    pub source_layer: SourceLayer,
     pub source_role: SourceRole,
     pub source_classification: SourceClassification,
     pub package: Option<SourcePackage>,
@@ -89,6 +91,7 @@ impl SymbolView {
             signature: symbol.signature.clone(),
             provenance: symbol.provenance,
             precision: symbol.precision,
+            source_layer: SourceLayer::CommitSnapshot,
             source_role: metadata.role,
             source_classification: metadata.classification,
             package: metadata.package.clone(),
@@ -444,6 +447,7 @@ pub struct FileSummary {
     pub symbol_count: u64,
     pub provenance: Provenance,
     pub precision: Precision,
+    pub source_layer: SourceLayer,
     pub source_role: SourceRole,
     pub source_classification: SourceClassification,
     pub package: Option<SourcePackage>,
@@ -595,6 +599,7 @@ pub struct TextMatch {
     pub line_truncated: bool,
     pub provenance: Provenance,
     pub precision: Precision,
+    pub source_layer: SourceLayer,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -677,6 +682,7 @@ pub struct SourceSnippet {
     pub truncated: bool,
     pub provenance: Provenance,
     pub precision: Precision,
+    pub source_layer: SourceLayer,
 }
 
 /// Bounded, provenance-tagged context around one symbol (SPEC §25).

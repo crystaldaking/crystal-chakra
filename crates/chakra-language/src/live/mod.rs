@@ -19,14 +19,19 @@ use std::time::{Duration, Instant};
 use chakra_domain::indexing::MAX_FILE_INVALIDATION_RECORDS;
 use chakra_domain::indexing::{
     CacheHealth, FileInvalidation, FileInvalidationReason, FullReconciliationReason,
-    IndexingDiagnostics, LiveQueueState, ReconciliationCounters, ReconciliationKind,
-    SYNTAX_FACT_CACHE_DISABLED_REASON,
+    IndexPublicationMetrics, IndexingDiagnostics, LiveQueueState, ReconciliationCounters,
+    ReconciliationKind, SYNTAX_FACT_CACHE_DISABLED_REASON,
 };
 use chakra_domain::location::RepoRelativePath;
 use chakra_domain::operation::OperationContext;
+use chakra_domain::query::DiffScope;
+use chakra_domain::revision::Revision;
 use chakra_domain::scheduling::WorkClass;
 use chakra_domain::state::{Freshness, WorkspaceStatus};
-use chakra_engine::{FreshnessBarrier, FreshnessBarrierError, SymbolGraph, WorkspaceEngine};
+use chakra_engine::{
+    DiffWorkspace, FreshnessBarrier, FreshnessBarrierError, SymbolGraph, WorkspaceDiff,
+    WorkspaceDiffProvider, WorkspaceEngine, source_layers_for_graph, workspace_graph_layers,
+};
 #[cfg(not(target_os = "macos"))]
 use notify::RecommendedWatcher;
 use notify::event::{AccessKind, AccessMode};
@@ -38,7 +43,7 @@ use tracing::{error, info, warn};
 
 use crate::indexer::{
     IndexOptions, ReconcileReport, WorkspaceIndexError, WorkspaceSourceScan, WorkspaceSyntaxIndex,
-    scan_discovered_sources_with_options,
+    index_commit_with_options, scan_discovered_sources_with_options,
 };
 use crate::scheduler::{PriorityWorkQueue, QueueFull};
 
@@ -1011,10 +1016,10 @@ fn reconcile(
                 &operation,
             )?;
             let ReconcileReport {
-                graph,
+                mut graph,
                 metrics: reconcile_metrics,
                 next_index,
-                indexing,
+                mut indexing,
                 project_model,
                 dependency_impact,
             } = syntax_index
@@ -1046,6 +1051,65 @@ fn reconcile(
                 WorkspaceStatus::Ready
             };
 
+            let current = engine.snapshot();
+            let candidate_graph = graph.as_ref().unwrap_or_else(|| current.graph());
+            let diff = match diff_for_graph(
+                repository_root,
+                current.revision().next(),
+                candidate_graph,
+                &operation,
+            ) {
+                Ok(diff) => diff,
+                Err(error) => {
+                    operation
+                        .check()
+                        .map_err(|_| WorkspaceIndexError::Cancelled)?;
+                    warn!(%error, "retrying unstable worktree layer composition");
+                    continue;
+                }
+            };
+            let commit_changed = diff.scope.base_commit != current.layers().commit_snapshot.commit;
+            let commit = if commit_changed {
+                let candidate = index_commit_with_options(
+                    repository_root,
+                    diff.scope.base_commit.as_deref(),
+                    IndexOptions::new(syntax_index.budgets(), operation.cancellation())?,
+                );
+                match candidate {
+                    Ok(commit) => Some(commit),
+                    Err(error) => {
+                        operation
+                            .check()
+                            .map_err(|_| WorkspaceIndexError::Cancelled)?;
+                        warn!(%error, "retrying changed commit snapshot construction");
+                        continue;
+                    }
+                }
+            } else {
+                None
+            };
+            let (commit_files, commit_bytes) = commit.as_ref().map_or_else(
+                || {
+                    (
+                        current.layers().commit_snapshot.source_files,
+                        current.layers().commit_snapshot.source_bytes,
+                    )
+                },
+                |commit| (commit.source_files, commit.source_bytes),
+            );
+            let layers = workspace_graph_layers(commit_files, commit_bytes, &diff);
+            let ownership_only_graph = graph.is_none() && current.layers() != &layers;
+            if graph.is_some() || ownership_only_graph {
+                let commit_graph = commit
+                    .as_ref()
+                    .map_or_else(|| current.commit_graph(), |commit| &commit.graph);
+                let source_layers = source_layers_for_graph(commit_graph, candidate_graph);
+                graph = Some(candidate_graph.clone().with_source_layers(source_layers));
+                if ownership_only_graph {
+                    mark_publication_reused(&mut indexing.publication);
+                }
+            }
+
             let _publication = match publication_gate.lock() {
                 Ok(guard) => guard,
                 Err(poisoned) => poisoned.into_inner(),
@@ -1056,17 +1120,39 @@ fn reconcile(
             operation
                 .check()
                 .map_err(|_| WorkspaceIndexError::Cancelled)?;
+            let verified_diff = match diff_for_graph(
+                repository_root,
+                current.revision().next(),
+                graph.as_ref().unwrap_or_else(|| current.graph()),
+                &operation,
+            ) {
+                Ok(diff) => diff,
+                Err(error) => {
+                    operation
+                        .check()
+                        .map_err(|_| WorkspaceIndexError::Cancelled)?;
+                    warn!(%error, "retrying worktree layer verification");
+                    continue;
+                }
+            };
+            if verified_diff != diff {
+                continue;
+            }
             let provider_inputs = next_index.as_ref().map_or_else(
                 || syntax_index.provider_inputs(),
                 |next| next.provider_inputs(),
             );
             let published = publish_fresh(
                 engine,
-                graph.as_ref(),
-                status,
-                &indexing,
-                provider_inputs,
-                project_model.as_ref(),
+                FreshPublication {
+                    graph: graph.as_ref(),
+                    commit_graph: commit.as_ref().map(|commit| &commit.graph),
+                    layers: &layers,
+                    status,
+                    indexing: &indexing,
+                    provider_inputs,
+                    project_model: project_model.as_ref(),
+                },
             )
             .map_err(WorkspaceIndexError::Update)?;
             if let Some(next_index) = next_index {
@@ -1567,17 +1653,77 @@ fn absent_watch_is_already_removed(error: &notify::Error) -> bool {
     )
 }
 
+fn diff_for_graph(
+    repository_root: &Path,
+    revision: Revision,
+    graph: &SymbolGraph,
+    operation: &OperationContext,
+) -> Result<WorkspaceDiff, WorkspaceIndexError> {
+    let workspace = DiffWorkspace::from_graph_with_context(
+        repository_root.to_path_buf(),
+        revision,
+        DiffScope::Worktree,
+        graph,
+        operation,
+    )
+    .map_err(|error| WorkspaceIndexError::Update(error.to_string()))?;
+    chakra_git::GitWorkspaceDiff
+        .diff_with_context(workspace, operation)
+        .map_err(|error| WorkspaceIndexError::Update(error.to_string()))
+}
+
+struct FreshPublication<'a> {
+    graph: Option<&'a SymbolGraph>,
+    commit_graph: Option<&'a SymbolGraph>,
+    layers: &'a chakra_domain::composition::WorkspaceGraphLayers,
+    status: WorkspaceStatus,
+    indexing: &'a chakra_domain::indexing::IndexingStatus,
+    provider_inputs: &'a [chakra_engine::ProviderInput],
+    project_model: Option<&'a chakra_domain::project::ProjectModel>,
+}
+
+fn mark_publication_reused(publication: &mut IndexPublicationMetrics) {
+    publication.structurally_incremental = true;
+    publication.reused_files = publication
+        .reused_files
+        .saturating_add(publication.rebuilt_files);
+    publication.rebuilt_files = 0;
+    publication.reused_source_bytes = publication
+        .reused_source_bytes
+        .saturating_add(publication.rebuilt_source_bytes);
+    publication.rebuilt_source_bytes = 0;
+    publication.reused_symbols = publication
+        .reused_symbols
+        .saturating_add(publication.rebuilt_symbols);
+    publication.rebuilt_symbols = 0;
+    publication.reused_edges = publication
+        .reused_edges
+        .saturating_add(publication.rebuilt_edges);
+    publication.rebuilt_edges = 0;
+    publication.reused_call_sites = publication
+        .reused_call_sites
+        .saturating_add(publication.rebuilt_call_sites);
+    publication.rebuilt_call_sites = 0;
+}
+
 fn publish_fresh(
     engine: &WorkspaceEngine,
-    graph: Option<&SymbolGraph>,
-    status: WorkspaceStatus,
-    indexing: &chakra_domain::indexing::IndexingStatus,
-    provider_inputs: &[chakra_engine::ProviderInput],
-    project_model: Option<&chakra_domain::project::ProjectModel>,
+    candidate: FreshPublication<'_>,
 ) -> Result<bool, String> {
+    let FreshPublication {
+        graph,
+        commit_graph,
+        layers,
+        status,
+        indexing,
+        provider_inputs,
+        project_model,
+    } = candidate;
     let started = Instant::now();
     let current = engine.snapshot();
     if graph.is_none()
+        && commit_graph.is_none()
+        && current.layers() == layers
         && project_model.is_none()
         && current.freshness() == Freshness::Fresh
         && current.status() == status
@@ -1590,6 +1736,11 @@ fn publish_fresh(
         let mut update = engine.begin_update();
         if let Some(graph) = graph {
             update.replace_graph(graph.clone());
+        }
+        if let Some(commit_graph) = commit_graph {
+            update.set_graph_layers(commit_graph.clone(), layers.clone());
+        } else {
+            update.set_layers(layers.clone());
         }
         if let Some(model) = project_model {
             update.set_project_model(model.clone());

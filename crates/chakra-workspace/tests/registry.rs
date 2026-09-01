@@ -2,12 +2,15 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
+use std::thread;
+use std::time::Duration;
 
+use chakra_domain::composition::SourceLayer;
 use chakra_domain::location::SourceRange;
 use chakra_domain::operation::OperationContext;
 use chakra_domain::provenance::Provenance;
 use chakra_domain::query::{
-    CallersRequest, QueryService, SearchRequest, StatusRequest, SymbolMatchMode,
+    CallersRequest, ChangeKind, QueryService, SearchRequest, StatusRequest, SymbolMatchMode,
     SymbolSearchRequest, WorkspaceQueryRouter,
 };
 use chakra_domain::revision::Revision;
@@ -86,6 +89,18 @@ fn linked_worktrees_keep_files_revisions_and_provider_facts_isolated()
     let primary_engine = registry.workspace(&primary.identity().workspace)?;
     let linked_engine = registry.workspace(&linked.identity().workspace)?;
     assert!(!Arc::ptr_eq(&primary_engine, &linked_engine));
+    assert_eq!(
+        primary_engine.snapshot().layers().commit_snapshot.commit,
+        linked_engine.snapshot().layers().commit_snapshot.commit
+    );
+    assert!(
+        linked_engine
+            .snapshot()
+            .layers()
+            .worktree_overlay
+            .files
+            .is_empty()
+    );
     assert!(matches!(
         registry.route(None),
         Err(chakra_domain::query::QueryError::WorkspaceSelectionRequired { .. })
@@ -130,6 +145,10 @@ fn linked_worktrees_keep_files_revisions_and_provider_facts_isolated()
         primary_callers.data.callers[0].provenance,
         Provenance::RustAnalyzer
     );
+    assert_eq!(
+        primary_callers.layers.workspace_enrichment.revision,
+        Some(primary_callers.revision)
+    );
 
     let linked_callers = linked_engine.callers(CallersRequest {
         symbol: Some(chakra_domain::query::SymbolRef::ByName("target".to_owned())),
@@ -173,6 +192,171 @@ fn registry_bounds_worktrees_and_rejects_cross_repository_state()
         Err(WorkspaceRegistryError::RepositoryMismatch { .. })
     ));
     repository_scoped.shutdown()?;
+    Ok(())
+}
+
+#[test]
+fn composes_commit_snapshot_overlay_and_rebased_head_atomically()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = LinkedWorktrees::new()?;
+    let root = &fixture.primary;
+    fs::write(root.join("src/unchanged.rs"), "pub fn unchanged() {}\n")?;
+    fs::write(root.join("src/old.rs"), "pub fn renamed_symbol() {}\n")?;
+    fs::write(root.join("src/deleted.rs"), "pub fn deleted_symbol() {}\n")?;
+    git(
+        root,
+        &["add", "src/unchanged.rs", "src/old.rs", "src/deleted.rs"],
+    )?;
+    git(root, &["commit", "-m", "layer base"])?;
+    let base = git_stdout(root, &["rev-parse", "HEAD"])?;
+
+    fs::write(
+        root.join("src/lib.rs"),
+        "pub fn target() {}\npub fn provider_caller() {}\npub fn dirty_symbol() {}\n",
+    )?;
+    git(root, &["mv", "src/old.rs", "src/renamed.rs"])?;
+    fs::write(
+        root.join("src/renamed.rs"),
+        "pub fn renamed_symbol() {}\npub fn renamed_dirty() {}\n",
+    )?;
+    fs::remove_file(root.join("src/deleted.rs"))?;
+    fs::write(root.join("src/added.rs"), "pub fn added_symbol() {}\n")?;
+
+    let registry = WorkspaceRegistry::new(WorkspaceRegistryConfig { max_workspaces: 1 })?;
+    let registered = registry.register(root, WorkspaceStartOptions::default())?;
+    let engine = registered.engine();
+    let snapshot = engine.snapshot();
+    assert_eq!(
+        snapshot.layers().commit_snapshot.commit.as_deref(),
+        Some(base.as_str())
+    );
+    assert_eq!(
+        snapshot
+            .commit_graph()
+            .file_source(&chakra_domain::location::RepoRelativePath::new(
+                "src/lib.rs"
+            )?),
+        Some("pub fn target() {}\npub fn provider_caller() {}\n")
+    );
+    assert!(
+        snapshot
+            .commit_graph()
+            .file_source(&chakra_domain::location::RepoRelativePath::new(
+                "src/added.rs"
+            )?)
+            .is_none()
+    );
+    assert_eq!(
+        exact_symbol(&engine, "unchanged")?.source_layer,
+        SourceLayer::CommitSnapshot
+    );
+    assert_eq!(
+        exact_symbol(&engine, "dirty_symbol")?.source_layer,
+        SourceLayer::WorktreeOverlay
+    );
+    assert_eq!(
+        exact_symbol(&engine, "added_symbol")?.source_layer,
+        SourceLayer::WorktreeOverlay
+    );
+    assert_eq!(
+        exact_symbol(&engine, "renamed_dirty")?.source_layer,
+        SourceLayer::WorktreeOverlay
+    );
+    assert!(
+        snapshot
+            .layers()
+            .worktree_overlay
+            .files
+            .iter()
+            .any(|change| {
+                change.change == ChangeKind::Deleted && change.path.as_str() == "src/deleted.rs"
+            })
+    );
+    assert!(
+        snapshot
+            .layers()
+            .worktree_overlay
+            .files
+            .iter()
+            .any(|change| {
+                change.change == ChangeKind::Renamed
+                    && change.path.as_str() == "src/renamed.rs"
+                    && change
+                        .previous_path
+                        .as_ref()
+                        .is_some_and(|path| path.as_str() == "src/old.rs")
+            })
+    );
+    let status = engine.status(StatusRequest)?;
+    assert_eq!(
+        status.layers.commit_snapshot,
+        snapshot.layers().commit_snapshot
+    );
+    assert_eq!(
+        status.layers.worktree_overlay,
+        snapshot.layers().worktree_overlay
+    );
+
+    git(root, &["add", "-A"])?;
+    git(root, &["commit", "-m", "materialize overlay"])?;
+    engine.require_fresh()?;
+    let committed = engine.snapshot();
+    let new_head = git_stdout(root, &["rev-parse", "HEAD"])?;
+    assert_ne!(new_head, base);
+    assert_eq!(
+        committed.layers().commit_snapshot.commit.as_deref(),
+        Some(new_head.as_str())
+    );
+    assert!(committed.layers().worktree_overlay.files.is_empty());
+    assert_eq!(
+        exact_symbol(&engine, "dirty_symbol")?.source_layer,
+        SourceLayer::CommitSnapshot
+    );
+
+    registry.shutdown()?;
+    Ok(())
+}
+
+#[test]
+fn rapidly_changing_worktree_eventually_publishes_one_final_composition()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = LinkedWorktrees::new()?;
+    let registry = WorkspaceRegistry::new(WorkspaceRegistryConfig { max_workspaces: 1 })?;
+    let registered = registry.register(&fixture.primary, WorkspaceStartOptions::default())?;
+    let engine = registered.engine();
+    let source = fixture.primary.join("src/lib.rs");
+    let writer = thread::spawn(move || -> Result<(), std::io::Error> {
+        for version in 0..20 {
+            fs::write(
+                &source,
+                format!(
+                    "pub fn target() {{}}\npub fn provider_caller() {{}}\npub fn rapid_{version}() {{}}\n"
+                ),
+            )?;
+            thread::sleep(Duration::from_millis(2));
+        }
+        Ok(())
+    });
+    let _ = engine.require_fresh();
+    writer.join().map_err(|_| "rapid writer panicked")??;
+    engine.require_fresh()?;
+    assert_eq!(search_count(&engine, "rapid_19")?, 1);
+    assert_eq!(
+        exact_symbol(&engine, "rapid_19")?.source_layer,
+        SourceLayer::WorktreeOverlay
+    );
+    let snapshot = engine.snapshot();
+    assert!(
+        snapshot
+            .layers()
+            .worktree_overlay
+            .files
+            .iter()
+            .any(|change| {
+                change.change == ChangeKind::Modified && change.path.as_str() == "src/lib.rs"
+            })
+    );
+    registry.shutdown()?;
     Ok(())
 }
 
@@ -252,6 +436,20 @@ fn git(cwd: &Path, args: &[&str]) -> Result<(), Box<dyn std::error::Error>> {
     let output = Command::new("git").args(args).current_dir(cwd).output()?;
     if output.status.success() {
         Ok(())
+    } else {
+        Err(format!(
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&output.stderr)
+        )
+        .into())
+    }
+}
+
+fn git_stdout(cwd: &Path, args: &[&str]) -> Result<String, Box<dyn std::error::Error>> {
+    let output = Command::new("git").args(args).current_dir(cwd).output()?;
+    if output.status.success() {
+        Ok(String::from_utf8(output.stdout)?.trim().to_owned())
     } else {
         Err(format!(
             "git {:?} failed: {}",

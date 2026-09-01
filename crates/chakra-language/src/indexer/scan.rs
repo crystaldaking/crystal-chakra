@@ -61,6 +61,103 @@ pub fn scan_repository_sources_with_options(
     )
 }
 
+pub(super) fn scan_commit_sources(
+    snapshot: &chakra_git::GitCommitSnapshot,
+    options: &IndexOptions,
+) -> Result<WorkspaceSourceScan, WorkspaceIndexError> {
+    let budgets = options.budgets.validate()?;
+    check_cancelled(&options.cancellation)?;
+    let mut files_by_language: BTreeMap<Language, BTreeMap<RepoRelativePath, Arc<str>>> =
+        BTreeMap::new();
+    for (path, source) in &snapshot.sources {
+        check_cancelled(&options.cancellation)?;
+        if let Some(language) = chakra_git::source_language(path.as_str()) {
+            files_by_language
+                .entry(language)
+                .or_default()
+                .insert(path.clone(), source.clone());
+        }
+    }
+    let mut languages = Vec::new();
+    for language in registered_languages() {
+        let files = files_by_language.remove(&language).unwrap_or_default();
+        let metadata = files
+            .keys()
+            .cloned()
+            .map(|path| {
+                let metadata = chakra_domain::source::SourceMetadata::path_fallback(&path);
+                (path, metadata)
+            })
+            .collect();
+        languages.push(WorkspaceLanguageSources {
+            language,
+            sources: LanguageSources { files, metadata },
+        });
+    }
+    let mut degradations = Vec::new();
+    if snapshot.discovered_files > budgets.max_files {
+        degradations.push(IndexDegradation {
+            phase: IndexPhase::GitInventory,
+            language: None,
+            cause: IndexBudgetKind::Files,
+            affected_capabilities: all_index_capabilities(),
+            limit: budgets.max_files,
+            observed: snapshot.discovered_files,
+            omitted: snapshot.discovered_files.saturating_sub(budgets.max_files),
+        });
+    }
+    if snapshot.oversized_files > 0 {
+        degradations.push(IndexDegradation {
+            phase: IndexPhase::SourceRead,
+            language: None,
+            cause: IndexBudgetKind::SourceFileBytes,
+            affected_capabilities: all_index_capabilities(),
+            limit: budgets.max_source_file_bytes,
+            observed: budgets.max_source_file_bytes.saturating_add(1),
+            omitted: snapshot.oversized_files,
+        });
+    }
+    if snapshot.workspace_omitted_files > 0 {
+        degradations.push(IndexDegradation {
+            phase: IndexPhase::SourceRead,
+            language: None,
+            cause: IndexBudgetKind::WorkspaceSourceBytes,
+            affected_capabilities: all_index_capabilities(),
+            limit: budgets.max_workspace_source_bytes,
+            observed: budgets.max_workspace_source_bytes.saturating_add(1),
+            omitted: snapshot.workspace_omitted_files,
+        });
+    }
+    let indexed_files = snapshot.sources.len() as u64;
+    Ok(WorkspaceSourceScan {
+        sources: WorkspaceSources { languages },
+        provider_inputs: Vec::new(),
+        project_model: chakra_domain::project::ProjectModel::default(),
+        discovered_files: snapshot.discovered_files,
+        indexed_files,
+        source_bytes: snapshot.source_bytes,
+        unreadable_files: snapshot.non_utf8_files,
+        unreadable_paths: Vec::new(),
+        degradations,
+        phases: vec![
+            phase(
+                IndexPhase::GitInventory,
+                None,
+                Duration::ZERO,
+                snapshot.discovered_files,
+                0,
+            ),
+            phase(
+                IndexPhase::SourceRead,
+                None,
+                Duration::ZERO,
+                indexed_files,
+                snapshot.source_bytes,
+            ),
+        ],
+    })
+}
+
 pub(crate) trait WorkspaceSourceLoader {
     fn observe(&mut self, path: &RepoRelativePath, metadata: &fs::Metadata);
 

@@ -41,8 +41,8 @@ registration order would also make an omitted selector nondeterministic.
   watcher tasks. Failed registration rolls back its reservation.
 - Precise provider instances are still installed on one workspace engine and
   cannot contribute to another. ADR-0049 adds one globally bounded pool while
-  retaining that binding. Commit snapshots and overlay sharing are follow-up
-  issues #48 and #49; this decision does not introduce either early.
+  retaining that binding. ADR-0050 implements commit snapshots and worktree
+  overlays; compatibility-keyed sharing remains follow-up issue #49.
 
 ## Alternatives considered
 
@@ -63,9 +63,9 @@ registration order would also make an omitted selector nondeterministic.
   provider installations are isolated by construction at the engine boundary.
 - Callers that register multiple worktrees must first discover identities and
   select one explicitly. Single-worktree callers remain compatible.
-- The initial registry rebuilds syntax state independently for each worktree.
-  Snapshot reuse is intentionally deferred until the commit/overlay model is
-  implemented and benchmarked.
+- The registry composes each worktree over a separately retained immutable
+  commit graph under ADR-0050. Identical snapshots are still rebuilt
+  independently until issue #49 implements compatibility-keyed reuse.
 - With ADR-0049, the CLI may accept several paths in one invocation because
   provider-global orchestration now preserves the registry's isolation and
   capacity bounds.
