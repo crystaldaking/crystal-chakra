@@ -69,7 +69,7 @@ const MAX_TRANSPORT_DRAIN_PER_PASS: usize = EVENT_QUEUE_CAPACITY;
 /// interval until it competes with freshness work FIFO (issue #44).
 const QUEUE_AGING_AFTER: Duration = Duration::from_secs(1);
 #[cfg(target_os = "macos")]
-const WATCHER_POLL_INTERVAL: Duration = Duration::from_millis(250);
+const WATCHER_POLL_INTERVAL: Duration = Duration::from_secs(2);
 
 #[cfg(not(target_os = "macos"))]
 type WorkspaceWatcher = RecommendedWatcher;
@@ -1999,7 +1999,7 @@ mod tests {
         let descriptors_before = std::fs::read_dir("/dev/fd")?.count();
 
         std::fs::create_dir(workspace.path().join("branch-switch"))?;
-        event_receiver.recv_timeout(Duration::from_secs(2))?;
+        event_receiver.recv_timeout(WATCHER_POLL_INTERVAL + Duration::from_secs(2))?;
         let observation_deadline = Instant::now() + Duration::from_millis(500);
         let mut maximum_descriptors = descriptors_before;
         while Instant::now() < observation_deadline {

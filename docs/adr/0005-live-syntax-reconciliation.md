@@ -23,7 +23,7 @@ over native filesystem mechanisms:
 
 - Use workspace-managed `notify` 8.2.0, selecting the current stable release
   rather than a release candidate. Native recommended watchers remain the
-  default off macOS. On macOS use `PollWatcher` with a 250 ms interval: the
+  default off macOS. On macOS use `PollWatcher` with a two-second interval: the
   FSEvents backend can block indefinitely in `FSEventStreamStart` (issue #65),
   while notify's kqueue backend re-adds a directory recursively after a
   link-count event even when the original registration was non-recursive. In
@@ -33,7 +33,10 @@ over native filesystem mechanisms:
   directories of indexed source files, non-recursively. This avoids recursive
   traversal inside `.git`, `target`, ignored, and generated trees. The
   directory set is capped at 4,096; exceeding the cap degrades watcher health
-  but does not disable exact freshness reconciliation.
+  but does not disable exact freshness reconciliation. The deliberately
+  conservative polling interval keeps idle metadata scanning bounded; a
+  `RequireFresh` query never waits for it and still requests an immediate
+  authoritative barrier.
 - Treat mutation-capable watcher events as wake-up hints. Pure access/open/read
   events are ignored: Linux inotify reports the indexer's own content reads,
   and allowing those events to advance the epoch would make a stable scan
