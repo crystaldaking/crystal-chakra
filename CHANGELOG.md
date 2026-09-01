@@ -19,6 +19,11 @@ version tags prefixed with `v`.
 - Live watcher refresh no longer reports an already-removed watch or vanished
   checkout directory as a backend failure, avoiding false degradation and
   redundant full reconciliation after branch switches (issue #154).
+- The macOS live watcher now uses bounded non-recursive polling instead of
+  notify's kqueue backend. Root-directory churn can make that backend
+  recursively retain ignored-tree descriptors; dogfooding observed more than
+  61,000 open files followed by `git ls-files` EBADF failures and stale
+  workspaces (issue #156).
 
 ## [0.2.0] - 2026-08-30
 
