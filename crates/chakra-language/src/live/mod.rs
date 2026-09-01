@@ -28,7 +28,9 @@ use chakra_domain::scheduling::WorkClass;
 use chakra_domain::state::{Freshness, WorkspaceStatus};
 use chakra_engine::{FreshnessBarrier, FreshnessBarrierError, SymbolGraph, WorkspaceEngine};
 use notify::event::{AccessKind, AccessMode};
-use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
+use notify::{
+    ErrorKind as NotifyErrorKind, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher,
+};
 use thiserror::Error;
 use tracing::{error, info, warn};
 
@@ -1493,10 +1495,14 @@ fn refresh_watches(
         if shared.is_stopped() {
             return Err(WorkspaceIndexError::Cancelled);
         }
-        if let Err(error) = watcher.unwatch(&directory) {
-            metrics.watcher_errors.fetch_add(1, Ordering::Relaxed);
-            warn!(path = %directory.display(), %error, "failed to remove filesystem watch");
-            degraded = true;
+        match watcher.unwatch(&directory) {
+            Ok(()) => {}
+            Err(error) if absent_watch_is_already_removed(&error) => {}
+            Err(error) => {
+                metrics.watcher_errors.fetch_add(1, Ordering::Relaxed);
+                warn!(path = %directory.display(), %error, "failed to remove filesystem watch");
+                degraded = true;
+            }
         }
         watched.remove(&directory);
     }
@@ -1525,6 +1531,13 @@ fn refresh_watches(
         .watched_directories
         .store(watched.len() as u64, Ordering::Relaxed);
     Ok(degraded)
+}
+
+fn absent_watch_is_already_removed(error: &notify::Error) -> bool {
+    matches!(
+        &error.kind,
+        NotifyErrorKind::WatchNotFound | NotifyErrorKind::PathNotFound
+    )
 }
 
 fn publish_fresh(
@@ -1917,6 +1930,19 @@ mod tests {
         assert_eq!(latest, 10);
         assert!(event_epoch_is_non_contiguous(&mut latest, 9));
         assert_eq!(latest, 10);
+    }
+
+    #[test]
+    fn absent_watches_are_idempotent_cleanup_not_backend_failures() {
+        assert!(absent_watch_is_already_removed(
+            &notify::Error::watch_not_found()
+        ));
+        assert!(absent_watch_is_already_removed(
+            &notify::Error::path_not_found()
+        ));
+        assert!(!absent_watch_is_already_removed(&notify::Error::generic(
+            "backend failure"
+        )));
     }
 
     #[cfg(target_os = "macos")]

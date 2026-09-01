@@ -14,6 +14,12 @@ version tags prefixed with `v`.
   than one worktree is registered, omitting the selector returns an explicit
   ambiguity error instead of leaking facts through registration-order routing.
 
+### Fixed
+
+- Live watcher refresh no longer reports an already-removed watch or vanished
+  checkout directory as a backend failure, avoiding false degradation and
+  redundant full reconciliation after branch switches (issue #154).
+
 ## [0.2.0] - 2026-08-30
 
 Chakra v0.2.0 adds explicit Cargo/Composer project scopes, dependency-scoped
