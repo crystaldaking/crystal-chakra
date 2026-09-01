@@ -419,9 +419,15 @@ Provider orchestration includes a resource manager with:
 - on-demand activation;
 - graceful fallback to syntax intelligence.
 
-The current implementation applies those bounds to the one active
-materialized worktree and routes each language to exactly one adapter.
-Multi-worktree ownership and scheduling remain deferred beyond v0.1.
+The workspace registry owns a separately published syntax engine and live
+index for each registered materialized worktree. Queries select one worktree
+before entering the query layer, so uncommitted syntax facts cannot cross
+worktree boundaries. Registration is globally bounded.
+
+Precise providers remain worktree-scoped. Global admission, activation, and
+eviction across those worktrees must use the bounded provider resource manager
+described above; it must not be implemented as one independent unbounded pool
+per worktree.
 
 ## 18. Syntax intelligence
 

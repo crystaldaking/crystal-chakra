@@ -70,5 +70,6 @@ Accepted decisions:
 - ADR-045: bounded live indexing diagnostics
 - ADR-046: bounded priority scheduling for interactive freshness
 - ADR-047: workspace-bound lazy file facts
+- ADR-048: bounded multi-worktree registry and query routing
 
 Do not pre-create empty ADRs merely to satisfy a list.

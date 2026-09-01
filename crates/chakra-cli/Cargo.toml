@@ -15,7 +15,6 @@ path = "src/main.rs"
 [dependencies]
 chakra-domain = { path = "../chakra-domain", version = "0.2.0" }
 chakra-engine = { path = "../chakra-engine", version = "0.2.0" }
-chakra-git = { path = "../chakra-git", version = "0.2.0" }
 chakra-language = { path = "../chakra-language", version = "0.2.0" }
 chakra-mcp = { path = "../chakra-mcp", version = "0.2.0" }
 chakra-provider-csharp-ls = { path = "../chakra-provider-csharp-ls", version = "0.2.0" }
@@ -28,6 +27,7 @@ chakra-provider-rust-analyzer = { path = "../chakra-provider-rust-analyzer", ver
 chakra-provider-terraform-ls = { path = "../chakra-provider-terraform-ls", version = "0.2.0" }
 chakra-provider-gopls = { path = "../chakra-provider-gopls", version = "0.2.0" }
 chakra-provider-vtsls = { path = "../chakra-provider-vtsls", version = "0.2.0" }
+chakra-workspace = { path = "../chakra-workspace", version = "0.2.0" }
 clap.workspace = true
 tokio.workspace = true
 tracing.workspace = true
