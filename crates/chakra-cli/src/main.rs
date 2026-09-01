@@ -7,7 +7,7 @@ use std::ffi::OsString;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::{Arc, OnceLock};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use chakra_domain::indexing::{
     DEFAULT_MAX_INDEX_CALL_SITES, DEFAULT_MAX_INDEX_EDGES, DEFAULT_MAX_INDEX_FILES,
@@ -15,12 +15,12 @@ use chakra_domain::indexing::{
     DEFAULT_MAX_WORKSPACE_SOURCE_BYTES, DEFAULT_MEMORY_TARGET_BYTES, DEFAULT_STARTUP_TARGET_MILLIS,
     IndexBudgets, IndexCancellation,
 };
-use chakra_domain::state::{Freshness, WorkspaceStatus};
 use chakra_domain::symbol::Language;
-use chakra_engine::{PreciseProvider, WorkspaceEngine};
+use chakra_engine::PreciseProvider;
 use chakra_provider_pool::{
     ProviderPool, ProviderPoolConfig, ProviderRegistration, ProviderStartError,
 };
+use chakra_workspace::{WorkspaceRegistry, WorkspaceRegistryConfig, WorkspaceStartOptions};
 use clap::{Args, CommandFactory, Parser, Subcommand};
 
 /// Local code intelligence layer for AI coding agents.
@@ -39,7 +39,7 @@ enum Commands {
 
 #[derive(Debug, Args)]
 struct ServeArgs {
-    /// Repository root to serve (single repository, single worktree in v0.1).
+    /// Materialized Git worktree to serve.
     #[arg(long, value_name = "PATH", default_value = ".")]
     repo: PathBuf,
 
@@ -273,55 +273,40 @@ async fn serve(args: ServeArgs) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let report = match tokio::task::spawn_blocking(move || {
-        chakra_language::index_repository_with_options(&repo, options)
+    let registry = match WorkspaceRegistry::new(WorkspaceRegistryConfig { max_workspaces: 1 }) {
+        Ok(registry) => Arc::new(registry),
+        Err(error) => {
+            eprintln!("chakra: invalid workspace registry configuration: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let start_registry = registry.clone();
+    let registered = match tokio::task::spawn_blocking(move || {
+        start_registry.register(
+            &repo,
+            WorkspaceStartOptions {
+                index: options,
+                live: chakra_language::LiveIndexOptions {
+                    startup_timeout: Duration::from_millis(live_index_startup_timeout_millis),
+                    ..chakra_language::LiveIndexOptions::default()
+                },
+            },
+        )
     })
     .await
     {
-        Ok(Ok(report)) => report,
+        Ok(Ok(registered)) => registered,
         Ok(Err(error)) => {
             eprintln!("chakra: {error}");
             return ExitCode::FAILURE;
         }
         Err(error) => {
-            eprintln!("chakra: syntax index task failed: {error}");
+            eprintln!("chakra: workspace startup task failed: {error}");
             return ExitCode::FAILURE;
         }
     };
-    let identity = match chakra_git::resolve_workspace_identity(&report.repository_root) {
-        Ok(identity) => identity,
-        Err(error) => {
-            eprintln!("chakra: {error}");
-            return ExitCode::FAILURE;
-        }
-    };
-    let engine = Arc::new(WorkspaceEngine::new(identity));
-    let diff_adapter: Arc<dyn chakra_engine::WorkspaceDiffProvider> =
-        Arc::new(chakra_git::GitWorkspaceDiff);
-    if let Err(error) = engine.install_diff_provider(diff_adapter) {
-        eprintln!("chakra: failed to install Git diff provider: {error}");
-        return ExitCode::FAILURE;
-    }
-    let mut update = engine.begin_update();
-    update.set_provider_inputs(report.provider_inputs.clone());
-    update.set_project_model(report.project_model.clone());
-    update.replace_graph(report.graph);
-    update.set_indexing(report.metrics.indexing.clone());
-    update.set_status(WorkspaceStatus::Indexing);
-    // The watcher is not active yet, so the initial scan cannot close the
-    // startup race. The live owner reclaims freshness after it starts
-    // watching and performs its mandatory reconciliation.
-    update.set_freshness(Freshness::Stale);
-    let publication_started = Instant::now();
-    if let Err(error) = engine.publish(update) {
-        eprintln!("chakra: failed to publish initial syntax index: {error}");
-        return ExitCode::FAILURE;
-    }
-    tracing::info!(
-        elapsed_micros = publication_started.elapsed().as_micros(),
-        "initial syntax revision publication completed"
-    );
-    let initial_metrics = report.metrics;
+    let engine = registered.engine();
+    let initial_metrics = registered.initial_metrics();
     tracing::info!(
         files = initial_metrics.parsed_files,
         rust_files = initial_metrics.rust_files,
@@ -346,32 +331,6 @@ async fn serve(args: ServeArgs) -> ExitCode {
         elapsed_micros = initial_metrics.elapsed.as_micros(),
         "initial syntax revision published as stale pending live reconciliation"
     );
-    let repository_root = report.repository_root;
-    let syntax_index = report.syntax_index;
-    let live_engine = engine.clone();
-    let live = match tokio::task::spawn_blocking(move || {
-        chakra_language::start_live_index_with_options(
-            repository_root,
-            syntax_index,
-            live_engine,
-            chakra_language::LiveIndexOptions {
-                startup_timeout: Duration::from_millis(live_index_startup_timeout_millis),
-                ..chakra_language::LiveIndexOptions::default()
-            },
-        )
-    })
-    .await
-    {
-        Ok(Ok(live)) => live,
-        Ok(Err(error)) => {
-            eprintln!("chakra: failed to start live syntax index: {error}");
-            return ExitCode::FAILURE;
-        }
-        Err(error) => {
-            eprintln!("chakra: live syntax index startup task failed: {error}");
-            return ExitCode::FAILURE;
-        }
-    };
     let mut registrations = Vec::new();
     if should_register_provider(no_rust_analyzer) {
         let query_wait_budget = chakra_provider_rust_analyzer::DEFAULT_QUERY_WAIT_TIMEOUT;
@@ -717,7 +676,7 @@ async fn serve(args: ServeArgs) -> ExitCode {
         Ok(pool) => pool,
         Err(error) => {
             eprintln!("chakra: invalid precise-provider pool: {error}");
-            let _ = tokio::task::spawn_blocking(move || live.shutdown()).await;
+            let _ = tokio::task::spawn_blocking(move || registry.shutdown()).await;
             return ExitCode::FAILURE;
         }
     };
@@ -725,11 +684,11 @@ async fn serve(args: ServeArgs) -> ExitCode {
         if let Err(error) = engine.install_precise_provider(provider) {
             eprintln!("chakra: failed to install precise provider: {error}");
             let _ = tokio::task::spawn_blocking(move || provider_pool.shutdown()).await;
-            let _ = tokio::task::spawn_blocking(move || live.shutdown()).await;
+            let _ = tokio::task::spawn_blocking(move || registry.shutdown()).await;
             return ExitCode::FAILURE;
         }
     }
-    let serve_result = chakra_mcp::serve_stdio(engine).await;
+    let serve_result = chakra_mcp::serve_stdio_router(registry.clone()).await;
     match tokio::task::spawn_blocking(move || provider_pool.shutdown()).await {
         Ok(Ok(())) => {}
         Ok(Err(error)) => {
@@ -739,14 +698,14 @@ async fn serve(args: ServeArgs) -> ExitCode {
             tracing::warn!(%error, "precise-provider pool shutdown task failed");
         }
     }
-    match tokio::task::spawn_blocking(move || live.shutdown()).await {
+    match tokio::task::spawn_blocking(move || registry.shutdown()).await {
         Ok(Ok(())) => {}
         Ok(Err(error)) => {
-            eprintln!("chakra: failed to stop live syntax index: {error}");
+            eprintln!("chakra: failed to stop workspace registry: {error}");
             return ExitCode::FAILURE;
         }
         Err(error) => {
-            eprintln!("chakra: live syntax index shutdown task failed: {error}");
+            eprintln!("chakra: workspace registry shutdown task failed: {error}");
             return ExitCode::FAILURE;
         }
     }

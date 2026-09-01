@@ -5,6 +5,15 @@ version tags prefixed with `v`.
 
 ## [Unreleased]
 
+### Added
+
+- A bounded, Git-aware workspace registry now owns an independent syntax
+  engine and live watcher for every registered worktree in one repository
+  (issues #46 and #152). MCP adds the read-only `workspaces` discovery tool and
+  accepts an optional flat `workspace_id` on every existing query. When more
+  than one worktree is registered, omitting the selector returns an explicit
+  ambiguity error instead of leaking facts through registration-order routing.
+
 ## [0.2.0] - 2026-08-30
 
 Chakra v0.2.0 adds explicit Cargo/Composer project scopes, dependency-scoped

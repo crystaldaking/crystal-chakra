@@ -6,6 +6,8 @@
 //! `docs/roadmap/v0.1.md` §3. Optional adapters fail with typed errors rather
 //! than returning placeholder data.
 
+use std::sync::Arc;
+
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -881,6 +883,12 @@ pub enum QueryError {
     ExecutionDeadlineExceeded,
     #[error("query response construction failed: {0}")]
     ResponseConstruction(String),
+    #[error("no workspaces are registered")]
+    NoWorkspacesRegistered,
+    #[error("workspace is not registered: {0}")]
+    WorkspaceNotFound(WorkspaceId),
+    #[error("multiple workspaces are registered; specify workspace_id (available: {available:?})")]
+    WorkspaceSelectionRequired { available: Vec<WorkspaceId> },
 }
 
 impl From<OperationAbort> for QueryError {
@@ -966,6 +974,23 @@ pub trait QueryService: Send + Sync {
         request: DiffContextRequest,
         operation: &OperationContext,
     ) -> Result<QueryEnvelope<DiffContextData>, QueryError>;
+}
+
+/// Process-local catalog used by adapters to select one independently owned
+/// materialized worktree before invoking the ordinary single-workspace query
+/// contract. Routing never combines revisions or graphs.
+pub trait WorkspaceQueryRouter: Send + Sync {
+    fn workspaces(&self) -> Result<Vec<WorkspaceIdentity>, QueryError>;
+
+    /// Resolves an explicit workspace, or the sole registered workspace when
+    /// `requested` is absent. An omitted selector is rejected once several
+    /// worktrees are ready so routing can never depend on registration order.
+    fn route(&self, requested: Option<&WorkspaceId>) -> Result<Arc<dyn QueryService>, QueryError>;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct WorkspaceCatalogData {
+    pub workspaces: Vec<WorkspaceIdentity>,
 }
 
 #[cfg(test)]
