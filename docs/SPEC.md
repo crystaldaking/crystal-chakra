@@ -403,16 +403,17 @@ must ignore PHP documents, and the query layer must not send PHP symbols to it.
 PHP remains fully usable through current Tree-sitter syntax intelligence when
 no precise PHP provider is configured.
 
-## 17. Provider resource model and future multi-worktree orchestration
+## 17. Provider resource model and multi-worktree orchestration
 
-Long term, precise language providers are logically worktree-scoped because uncommitted worktree states must not leak into each other.
+Precise language providers are logically worktree-scoped because uncommitted
+worktree states must not leak into each other.
 
 However, running one heavyweight language server per worktree without bounds is unacceptable.
 
 Provider orchestration includes a resource manager with:
 
-- maximum active providers;
-- memory/process budget;
+- global and per-worktree maximum active providers;
+- global and per-worktree deterministic memory/process budgets;
 - idle timeout;
 - LRU/idle eviction;
 - active/dormant states;
@@ -424,10 +425,11 @@ index for each registered materialized worktree. Queries select one worktree
 before entering the query layer, so uncommitted syntax facts cannot cross
 worktree boundaries. Registration is globally bounded.
 
-Precise providers remain worktree-scoped. Global admission, activation, and
-eviction across those worktrees must use the bounded provider resource manager
-described above; it must not be implemented as one independent unbounded pool
-per worktree.
+Precise providers remain worktree-scoped. One process-global manager owns
+admission, activation, and eviction across those worktrees; registrations are
+templates and every lazy runtime slot is bound to one complete workspace
+identity before it is installed in an engine. Cross-worktree requests are
+rejected before provider activation.
 
 ## 18. Syntax intelligence
 
@@ -607,7 +609,7 @@ Conceptual fields:
 
 ```json
 {
-  "schema_version": 15,
+  "schema_version": 16,
   "workspace_id": "...",
   "revision": 42,
   "freshness": "fresh",
@@ -735,7 +737,8 @@ Current high-level queries bound result items, serialized response bytes,
 examined candidates, visited edges/call sites, retained intermediate items,
 and section construction time as separate dimensions.
 
-Future multi-worktree language-provider orchestration must include explicit provider/memory limits.
+Multi-worktree language-provider orchestration applies explicit global and
+per-worktree provider/memory limits.
 
 ## 35. Concurrency
 

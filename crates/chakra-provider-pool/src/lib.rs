@@ -1,9 +1,10 @@
 //! Bounded orchestration for optional precise language providers.
 //!
-//! The pool owns lifecycle policy while each adapter continues to own its
-//! protocol worker and child process. Providers start from the exact query
-//! workspace, are routed by disjoint language capabilities, and may be
-//! reclaimed only while they have no in-flight query.
+//! One pool owns process-global lifecycle policy while each adapter instance
+//! continues to own one worktree's protocol worker and child process.
+//! Providers start from the exact query workspace, are routed by disjoint
+//! language capabilities, and may be reclaimed only while they have no
+//! in-flight query.
 
 mod config;
 
@@ -11,16 +12,18 @@ pub use config::{
     ProviderPoolConfig, ProviderPoolConfigError, ProviderRegistration, ProviderStartError,
 };
 
+use std::collections::HashMap;
 use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
+use chakra_domain::identity::{WorkspaceId, WorkspaceIdentity};
 use chakra_domain::operation::{OperationAbort, OperationContext};
 use chakra_domain::query::{
     ProviderFallbackCause, ProviderMetrics, ProviderOrchestrationMetrics, ProviderProgress,
-    ProviderQueueLatencyByPriority,
+    ProviderQueueLatencyByPriority, WorkspaceProviderOrchestrationMetrics,
 };
 use chakra_domain::revision::Revision;
 use chakra_domain::scheduling::QueueLatencyStats;
@@ -46,6 +49,14 @@ pub enum ProviderPoolShutdownError {
     Multiple { messages: Vec<String> },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum ProviderPoolWorkspaceError {
+    #[error("provider pool is shut down")]
+    Stopped,
+    #[error("workspace identity {workspace} conflicts with an existing provider-pool binding")]
+    IdentityConflict { workspace: WorkspaceId },
+}
+
 #[derive(Debug)]
 pub struct ProviderPool {
     inner: Arc<PoolInner>,
@@ -58,18 +69,11 @@ impl ProviderPool {
         registrations: Vec<ProviderRegistration>,
     ) -> Result<Self, ProviderPoolConfigError> {
         validate(&config, &registrations)?;
+        let registrations: Vec<_> = registrations.into_iter().map(Arc::new).collect();
         let inner = Arc::new(PoolInner {
             config,
-            slots: registrations
-                .into_iter()
-                .map(|registration| {
-                    Arc::new(ProviderSlot {
-                        registration,
-                        runtime: Mutex::new(SlotRuntime::default()),
-                        changed: Condvar::new(),
-                    })
-                })
-                .collect(),
+            registrations,
+            slots: Mutex::new(Vec::new()),
             state: Mutex::new(PoolState::default()),
             changed: Condvar::new(),
             stopped: AtomicBool::new(false),
@@ -85,23 +89,50 @@ impl ProviderPool {
         })
     }
 
-    /// Lazy provider handles suitable for installation in `WorkspaceEngine`.
-    pub fn providers(&self) -> Vec<Arc<dyn PreciseProvider>> {
-        self.inner
-            .slots
+    /// Lazy provider handles bound to exactly one materialized worktree.
+    pub fn providers_for(
+        &self,
+        workspace: &WorkspaceIdentity,
+    ) -> Result<Vec<Arc<dyn PreciseProvider>>, ProviderPoolWorkspaceError> {
+        if self.inner.stopped.load(Ordering::Acquire) {
+            return Err(ProviderPoolWorkspaceError::Stopped);
+        }
+        let mut slots = lock(&self.inner.slots);
+        if self.inner.stopped.load(Ordering::Acquire) {
+            return Err(ProviderPoolWorkspaceError::Stopped);
+        }
+        let existing: Vec<_> = slots
             .iter()
-            .enumerate()
-            .map(|(index, _)| {
-                Arc::new(PooledProvider {
-                    inner: self.inner.clone(),
-                    slot_index: index,
-                }) as Arc<dyn PreciseProvider>
+            .filter(|slot| slot.workspace.workspace == workspace.workspace)
+            .cloned()
+            .collect();
+        if !existing.is_empty() {
+            if existing.iter().any(|slot| slot.workspace != *workspace) {
+                return Err(ProviderPoolWorkspaceError::IdentityConflict {
+                    workspace: workspace.workspace.clone(),
+                });
+            }
+            return Ok(self.inner.wrappers(existing));
+        }
+        let created: Vec<_> = self
+            .inner
+            .registrations
+            .iter()
+            .map(|registration| {
+                Arc::new(ProviderSlot {
+                    workspace: workspace.clone(),
+                    registration: registration.clone(),
+                    runtime: Mutex::new(SlotRuntime::default()),
+                    changed: Condvar::new(),
+                })
             })
-            .collect()
+            .collect();
+        slots.extend(created.iter().cloned());
+        Ok(self.inner.wrappers(created))
     }
 
     pub fn metrics(&self) -> ProviderOrchestrationMetrics {
-        self.inner.metrics()
+        self.inner.metrics_for(None)
     }
 
     /// Stops admission, waits boundedly for admitted work, then joins the
@@ -109,7 +140,8 @@ impl ProviderPool {
     pub fn shutdown(&self) -> Result<(), ProviderPoolShutdownError> {
         self.inner.stopped.store(true, Ordering::Release);
         self.inner.changed.notify_all();
-        for slot in &self.inner.slots {
+        let slots = self.inner.slots();
+        for slot in &slots {
             slot.changed.notify_all();
         }
 
@@ -138,11 +170,8 @@ impl ProviderPool {
         {
             failures.push(ProviderPoolShutdownError::ReaperPanicked);
         }
-        for slot_index in 0..self.inner.slots.len() {
-            if let Err(error) = self
-                .inner
-                .evict_provider(slot_index, EvictionCause::Shutdown)
-            {
+        for slot in slots {
+            if let Err(error) = self.inner.evict_provider(&slot, EvictionCause::Shutdown) {
                 failures.push(ProviderPoolShutdownError::Provider {
                     message: error.to_string(),
                 });
@@ -169,7 +198,8 @@ impl Drop for ProviderPool {
 
 struct PoolInner {
     config: ProviderPoolConfig,
-    slots: Vec<Arc<ProviderSlot>>,
+    registrations: Vec<Arc<ProviderRegistration>>,
+    slots: Mutex<Vec<Arc<ProviderSlot>>>,
     state: Mutex<PoolState>,
     changed: Condvar,
     stopped: AtomicBool,
@@ -180,7 +210,8 @@ impl fmt::Debug for PoolInner {
         formatter
             .debug_struct("PoolInner")
             .field("config", &self.config)
-            .field("slots", &self.slots)
+            .field("registrations", &self.registrations)
+            .field("slots", &lock(&self.slots).len())
             .field("stopped", &self.stopped.load(Ordering::Acquire))
             .finish_non_exhaustive()
     }
@@ -190,6 +221,7 @@ impl fmt::Debug for PoolInner {
 struct PoolState {
     active_providers: usize,
     reserved_memory_bytes: u64,
+    workspace_usage: HashMap<WorkspaceId, WorkspaceUsage>,
     running_queries: usize,
     waiters: Vec<Waiter>,
     next_sequence: u64,
@@ -203,6 +235,12 @@ struct PoolState {
     queue_timeouts: u64,
     cancelled_queries: u64,
     queue_latency: [QueueLatencyStats; ProviderRequestPriority::COUNT],
+}
+
+#[derive(Debug, Default)]
+struct WorkspaceUsage {
+    active_providers: usize,
+    reserved_memory_bytes: u64,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -228,7 +266,8 @@ impl Waiter {
 }
 
 struct ProviderSlot {
-    registration: ProviderRegistration,
+    workspace: WorkspaceIdentity,
+    registration: Arc<ProviderRegistration>,
     runtime: Mutex<SlotRuntime>,
     changed: Condvar,
 }
@@ -237,6 +276,7 @@ impl fmt::Debug for ProviderSlot {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("ProviderSlot")
+            .field("workspace", &self.workspace.workspace)
             .field("registration", &self.registration)
             .finish_non_exhaustive()
     }
@@ -270,16 +310,16 @@ impl Default for SlotRuntime {
 #[derive(Debug)]
 struct PooledProvider {
     inner: Arc<PoolInner>,
-    slot_index: usize,
+    slot: Arc<ProviderSlot>,
 }
 
 impl PreciseProvider for PooledProvider {
     fn name(&self) -> &'static str {
-        self.slot().registration.name
+        self.slot.registration.name
     }
 
     fn supports(&self, language: Language) -> bool {
-        self.slot().registration.languages.contains(&language)
+        self.slot.registration.languages.contains(&language)
     }
 
     fn supports_path(
@@ -287,14 +327,14 @@ impl PreciseProvider for PooledProvider {
         language: Language,
         path: &chakra_domain::location::RepoRelativePath,
     ) -> bool {
-        self.slot().registration.supports_path(language, path)
+        self.slot.registration.supports_path(language, path)
     }
 
     fn state_for(&self, revision: Revision) -> ProviderState {
         if self.inner.stopped.load(Ordering::Acquire) {
             return ProviderState::Degraded;
         }
-        let runtime = lock(&self.slot().runtime);
+        let runtime = lock(&self.slot.runtime);
         if runtime.last_error.is_some() && runtime.provider.is_some() {
             ProviderState::Degraded
         } else if let Some(provider) = &runtime.provider {
@@ -312,7 +352,7 @@ impl PreciseProvider for PooledProvider {
     }
 
     fn last_error(&self) -> Option<String> {
-        let runtime = lock(&self.slot().runtime);
+        let runtime = lock(&self.slot.runtime);
         runtime.last_error.clone().or_else(|| {
             runtime
                 .provider
@@ -322,14 +362,14 @@ impl PreciseProvider for PooledProvider {
     }
 
     fn progress(&self) -> Option<ProviderProgress> {
-        lock(&self.slot().runtime)
+        lock(&self.slot.runtime)
             .provider
             .as_ref()
             .and_then(|provider| provider.progress())
     }
 
     fn metrics(&self) -> Option<ProviderMetrics> {
-        let metrics = lock(&self.slot().runtime)
+        let metrics = lock(&self.slot.runtime)
             .provider
             .as_ref()
             .and_then(|provider| provider.metrics())
@@ -338,7 +378,7 @@ impl PreciseProvider for PooledProvider {
     }
 
     fn orchestration_metrics(&self) -> Option<ProviderOrchestrationMetrics> {
-        Some(self.inner.metrics())
+        Some(self.inner.metrics_for(Some(&self.slot.workspace.workspace)))
     }
 
     fn query_wait_budget(&self) -> Option<Duration> {
@@ -346,14 +386,14 @@ impl PreciseProvider for PooledProvider {
             self.inner
                 .config
                 .query_queue_timeout
-                .saturating_add(self.slot().registration.additional_wait_budget),
+                .saturating_add(self.slot.registration.additional_wait_budget),
         )
     }
 
     fn shutdown(&self) -> Result<(), ProviderShutdownError> {
         let _ = self
             .inner
-            .evict_provider(self.slot_index, EvictionCause::Shutdown)?;
+            .evict_provider(&self.slot, EvictionCause::Shutdown)?;
         Ok(())
     }
 
@@ -363,7 +403,9 @@ impl PreciseProvider for PooledProvider {
         operation: &OperationContext,
     ) -> PreciseQueryResult {
         let revision = request.workspace.revision;
-        if !self.supports(request.symbol.language) {
+        if !self.supports(request.symbol.language)
+            || request.workspace.repository_root != self.slot.workspace.root
+        {
             return PreciseQueryResult::unavailable_because(
                 revision,
                 ProviderState::Degraded,
@@ -403,7 +445,7 @@ impl PreciseProvider for PooledProvider {
         };
         let provider = match self
             .inner
-            .activate(self.slot_index, &request.workspace, operation)
+            .activate(&self.slot, &request.workspace, operation)
         {
             Ok(provider) => provider,
             Err(ActivationFailure::Stopped) => {
@@ -458,12 +500,6 @@ impl PreciseProvider for PooledProvider {
     }
 }
 
-impl PooledProvider {
-    fn slot(&self) -> &Arc<ProviderSlot> {
-        &self.inner.slots[self.slot_index]
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AdmissionFailure {
     Stopped,
@@ -482,6 +518,22 @@ enum ActivationFailure {
 }
 
 impl PoolInner {
+    fn slots(&self) -> Vec<Arc<ProviderSlot>> {
+        lock(&self.slots).clone()
+    }
+
+    fn wrappers(self: &Arc<Self>, slots: Vec<Arc<ProviderSlot>>) -> Vec<Arc<dyn PreciseProvider>> {
+        slots
+            .into_iter()
+            .map(|slot| {
+                Arc::new(PooledProvider {
+                    inner: self.clone(),
+                    slot,
+                }) as Arc<dyn PreciseProvider>
+            })
+            .collect()
+    }
+
     fn admit(
         self: &Arc<Self>,
         priority: ProviderRequestPriority,
@@ -565,11 +617,10 @@ impl PoolInner {
 
     fn activate(
         self: &Arc<Self>,
-        slot_index: usize,
+        slot: &Arc<ProviderSlot>,
         workspace: &ProviderWorkspace,
         operation: &OperationContext,
     ) -> Result<ProviderLease, ActivationFailure> {
-        let slot = &self.slots[slot_index];
         loop {
             operation
                 .check()
@@ -586,7 +637,7 @@ impl PoolInner {
                 runtime.last_used = Instant::now();
                 return Ok(ProviderLease {
                     inner: self.clone(),
-                    slot_index,
+                    slot: slot.clone(),
                     provider,
                 });
             }
@@ -609,7 +660,7 @@ impl PoolInner {
             break;
         }
 
-        if let Err(failure) = self.reserve_capacity(slot_index) {
+        if let Err(failure) = self.reserve_capacity(slot) {
             let mut runtime = lock(&slot.runtime);
             runtime.activating = false;
             runtime.last_error = Some("provider pool has no reclaimable capacity".to_owned());
@@ -632,9 +683,9 @@ impl PoolInner {
                 if self.stopped.load(Ordering::Acquire) {
                     drop(runtime);
                     match provider.shutdown() {
-                        Ok(()) => self.release_reservation(slot_index),
+                        Ok(()) => self.release_reservation(slot),
                         Err(error) => self.retain_after_shutdown_failure(
-                            slot_index,
+                            slot,
                             provider,
                             format!(
                                 "provider activated after pool stopped; shutdown failed: {error}"
@@ -657,7 +708,7 @@ impl PoolInner {
                 slot.changed.notify_all();
                 Ok(ProviderLease {
                     inner: self.clone(),
-                    slot_index,
+                    slot: slot.clone(),
                     provider,
                 })
             }
@@ -669,14 +720,10 @@ impl PoolInner {
                     Ok(()) => {
                         let mut runtime = lock(&slot.runtime);
                         runtime.activating = false;
-                        self.record_activation_failure(
-                            slot_index,
-                            &mut runtime,
-                            MESSAGE.to_owned(),
-                        );
+                        self.record_activation_failure(slot, &mut runtime, MESSAGE.to_owned());
                     }
                     Err(error) => self.retain_after_shutdown_failure(
-                        slot_index,
+                        slot,
                         provider,
                         format!("{MESSAGE}; shutdown failed: {error}"),
                         true,
@@ -687,11 +734,11 @@ impl PoolInner {
             Err(error) => {
                 if let Some(abort) = error.abort() {
                     runtime.last_error = None;
-                    self.release_reservation(slot_index);
+                    self.release_reservation(slot);
                     slot.changed.notify_all();
                     return Err(self.record_activation_abort(abort));
                 }
-                self.record_activation_failure(slot_index, &mut runtime, error.to_string());
+                self.record_activation_failure(slot, &mut runtime, error.to_string());
                 Err(ActivationFailure::StartFailed)
             }
         }
@@ -699,15 +746,15 @@ impl PoolInner {
 
     fn record_activation_failure(
         &self,
-        slot_index: usize,
+        slot: &Arc<ProviderSlot>,
         runtime: &mut SlotRuntime,
         message: String,
     ) {
         self.apply_activation_backoff(runtime, message);
-        self.release_reservation(slot_index);
+        self.release_reservation(slot);
         let mut state = lock(&self.state);
         state.activation_failures = state.activation_failures.saturating_add(1);
-        self.slots[slot_index].changed.notify_all();
+        slot.changed.notify_all();
     }
 
     fn apply_activation_backoff(&self, runtime: &mut SlotRuntime, message: String) {
@@ -725,12 +772,11 @@ impl PoolInner {
 
     fn retain_after_shutdown_failure(
         &self,
-        slot_index: usize,
+        slot: &Arc<ProviderSlot>,
         provider: Arc<dyn PreciseProvider>,
         message: String,
         activation_failed: bool,
     ) {
-        let slot = &self.slots[slot_index];
         let mut runtime = lock(&slot.runtime);
         runtime.provider = Some(provider);
         runtime.activating = false;
@@ -763,29 +809,51 @@ impl PoolInner {
         }
     }
 
-    fn reserve_capacity(&self, slot_index: usize) -> Result<(), ActivationFailure> {
+    fn reserve_capacity(&self, slot: &Arc<ProviderSlot>) -> Result<(), ActivationFailure> {
         loop {
             if self.stopped.load(Ordering::Acquire) {
                 return Err(ActivationFailure::Stopped);
             }
-            let reservation = self.slots[slot_index].registration.reserved_memory_bytes;
+            let reservation = slot.registration.reserved_memory_bytes;
             let mut state = lock(&self.state);
-            let active_available = state.active_providers < self.config.max_active_providers;
-            let memory_available = state.reserved_memory_bytes.saturating_add(reservation)
+            let global_active_available = state.active_providers < self.config.max_active_providers;
+            let global_memory_available = state.reserved_memory_bytes.saturating_add(reservation)
                 <= self.config.max_reserved_memory_bytes;
-            if active_available && memory_available {
+            let (workspace_active, workspace_memory) = state
+                .workspace_usage
+                .get(&slot.workspace.workspace)
+                .map(|usage| (usage.active_providers, usage.reserved_memory_bytes))
+                .unwrap_or_default();
+            let workspace_active_available =
+                workspace_active < self.config.max_active_providers_per_workspace;
+            let workspace_memory_available = workspace_memory.saturating_add(reservation)
+                <= self.config.max_reserved_memory_bytes_per_workspace;
+            if global_active_available
+                && global_memory_available
+                && workspace_active_available
+                && workspace_memory_available
+            {
                 state.active_providers += 1;
                 state.reserved_memory_bytes =
                     state.reserved_memory_bytes.saturating_add(reservation);
+                let usage = state
+                    .workspace_usage
+                    .entry(slot.workspace.workspace.clone())
+                    .or_default();
+                usage.active_providers += 1;
+                usage.reserved_memory_bytes =
+                    usage.reserved_memory_bytes.saturating_add(reservation);
                 return Ok(());
             }
+            let workspace_limited = !workspace_active_available || !workspace_memory_available;
             drop(state);
-            let Some(victim) = self.oldest_evictable_slot(slot_index) else {
+            let workspace_filter = workspace_limited.then_some(&slot.workspace.workspace);
+            let Some(victim) = self.oldest_evictable_slot(slot, workspace_filter) else {
                 let mut state = lock(&self.state);
                 state.saturated_queries = state.saturated_queries.saturating_add(1);
                 return Err(ActivationFailure::Capacity);
             };
-            match self.evict_provider(victim, EvictionCause::Resource) {
+            match self.evict_provider(&victim, EvictionCause::Resource) {
                 Ok(true) => {}
                 Ok(false) => continue,
                 Err(_) => {
@@ -797,26 +865,29 @@ impl PoolInner {
         }
     }
 
-    fn oldest_evictable_slot(&self, excluded: usize) -> Option<usize> {
-        self.slots
-            .iter()
-            .enumerate()
-            .filter(|(index, _)| *index != excluded)
-            .filter_map(|(index, slot)| {
+    fn oldest_evictable_slot(
+        &self,
+        excluded: &Arc<ProviderSlot>,
+        workspace: Option<&WorkspaceId>,
+    ) -> Option<Arc<ProviderSlot>> {
+        self.slots()
+            .into_iter()
+            .filter(|slot| !Arc::ptr_eq(slot, excluded))
+            .filter(|slot| workspace.is_none_or(|workspace| slot.workspace.workspace == *workspace))
+            .filter_map(|slot| {
                 let runtime = lock(&slot.runtime);
                 (runtime.provider.is_some() && runtime.in_flight == 0 && !runtime.activating)
-                    .then_some((index, runtime.last_used))
+                    .then_some((slot.clone(), runtime.last_used))
             })
             .min_by_key(|(_, last_used)| *last_used)
-            .map(|(index, _)| index)
+            .map(|(slot, _)| slot)
     }
 
     fn evict_provider(
         &self,
-        slot_index: usize,
+        slot: &Arc<ProviderSlot>,
         cause: EvictionCause,
     ) -> Result<bool, ProviderShutdownError> {
-        let slot = &self.slots[slot_index];
         let mut runtime = lock(&slot.runtime);
         if cause != EvictionCause::Shutdown && (runtime.in_flight > 0 || runtime.activating) {
             return Ok(false);
@@ -844,7 +915,7 @@ impl PoolInner {
         runtime.last_error = None;
         slot.changed.notify_all();
         drop(runtime);
-        self.release_reservation(slot_index);
+        self.release_reservation(slot);
         let mut state = lock(&self.state);
         match cause {
             EvictionCause::Idle => {
@@ -858,18 +929,47 @@ impl PoolInner {
         Ok(true)
     }
 
-    fn release_reservation(&self, slot_index: usize) {
-        let reservation = self.slots[slot_index].registration.reserved_memory_bytes;
+    fn release_reservation(&self, slot: &Arc<ProviderSlot>) {
+        let reservation = slot.registration.reserved_memory_bytes;
         let mut state = lock(&self.state);
         state.active_providers = state.active_providers.saturating_sub(1);
         state.reserved_memory_bytes = state.reserved_memory_bytes.saturating_sub(reservation);
+        let remove_usage = if let Some(usage) =
+            state.workspace_usage.get_mut(&slot.workspace.workspace)
+        {
+            usage.active_providers = usage.active_providers.saturating_sub(1);
+            usage.reserved_memory_bytes = usage.reserved_memory_bytes.saturating_sub(reservation);
+            usage.active_providers == 0 && usage.reserved_memory_bytes == 0
+        } else {
+            false
+        };
+        if remove_usage {
+            state.workspace_usage.remove(&slot.workspace.workspace);
+        }
         self.changed.notify_all();
     }
 
-    fn metrics(&self) -> ProviderOrchestrationMetrics {
+    fn metrics_for(&self, workspace: Option<&WorkspaceId>) -> ProviderOrchestrationMetrics {
+        let slots = self.slots();
+        let mut configured_workspaces: Vec<_> = slots
+            .iter()
+            .map(|slot| slot.workspace.workspace.as_str())
+            .collect();
+        configured_workspaces.sort_unstable();
+        configured_workspaces.dedup();
         let state = lock(&self.state);
+        let workspace_metrics = workspace.map(|workspace| {
+            let usage = state.workspace_usage.get(workspace);
+            WorkspaceProviderOrchestrationMetrics {
+                active_providers: usage.map_or(0, |usage| usage.active_providers as u64),
+                max_active_providers: self.config.max_active_providers_per_workspace as u64,
+                reserved_memory_bytes: usage.map_or(0, |usage| usage.reserved_memory_bytes),
+                max_reserved_memory_bytes: self.config.max_reserved_memory_bytes_per_workspace,
+            }
+        });
         ProviderOrchestrationMetrics {
-            configured_providers: self.slots.len() as u64,
+            configured_providers: self.registrations.len() as u64,
+            configured_workspaces: configured_workspaces.len() as u64,
             active_providers: state.active_providers as u64,
             max_active_providers: self.config.max_active_providers as u64,
             reserved_memory_bytes: state.reserved_memory_bytes,
@@ -892,6 +992,7 @@ impl PoolInner {
                 normal: state.queue_latency[ProviderRequestPriority::Normal.index()],
                 interactive: state.queue_latency[ProviderRequestPriority::Interactive.index()],
             },
+            workspace: workspace_metrics,
         }
     }
 }
@@ -912,17 +1013,16 @@ impl Drop for QueryPermit {
 #[derive(Debug)]
 struct ProviderLease {
     inner: Arc<PoolInner>,
-    slot_index: usize,
+    slot: Arc<ProviderSlot>,
     provider: Arc<dyn PreciseProvider>,
 }
 
 impl Drop for ProviderLease {
     fn drop(&mut self) {
-        let slot = &self.inner.slots[self.slot_index];
-        let mut runtime = lock(&slot.runtime);
+        let mut runtime = lock(&self.slot.runtime);
         runtime.in_flight = runtime.in_flight.saturating_sub(1);
         runtime.last_used = Instant::now();
-        slot.changed.notify_all();
+        self.slot.changed.notify_all();
         self.inner.changed.notify_all();
     }
 }
@@ -939,7 +1039,9 @@ fn validate(
     registrations: &[ProviderRegistration],
 ) -> Result<(), ProviderPoolConfigError> {
     if config.max_active_providers == 0
+        || config.max_active_providers_per_workspace == 0
         || config.max_reserved_memory_bytes == 0
+        || config.max_reserved_memory_bytes_per_workspace == 0
         || config.max_concurrent_queries == 0
         || config.max_queued_queries == 0
         || config.query_queue_timeout.is_zero()
@@ -970,6 +1072,13 @@ fn validate(
                 provider: registration.name.to_owned(),
                 reserved: registration.reserved_memory_bytes,
                 maximum: config.max_reserved_memory_bytes,
+            });
+        }
+        if registration.reserved_memory_bytes > config.max_reserved_memory_bytes_per_workspace {
+            return Err(ProviderPoolConfigError::ReservationExceedsWorkspace {
+                provider: registration.name.to_owned(),
+                reserved: registration.reserved_memory_bytes,
+                maximum: config.max_reserved_memory_bytes_per_workspace,
             });
         }
         for (language_index, language) in registration.languages.iter().enumerate() {
@@ -1010,9 +1119,9 @@ fn reaper_loop(inner: Arc<PoolInner>) {
         if inner.stopped.load(Ordering::Acquire) {
             break;
         }
-        for slot_index in 0..inner.slots.len() {
+        for slot in inner.slots() {
             let should_evict = {
-                let runtime = lock(&inner.slots[slot_index].runtime);
+                let runtime = lock(&slot.runtime);
                 runtime.provider.is_some()
                     && runtime.in_flight == 0
                     && !runtime.activating
@@ -1021,7 +1130,7 @@ fn reaper_loop(inner: Arc<PoolInner>) {
             if should_evict {
                 // The slot retains the provider reservation and last error;
                 // a later reaper pass or final shutdown retries cleanup.
-                let _ = inner.evict_provider(slot_index, EvictionCause::Idle);
+                let _ = inner.evict_provider(&slot, EvictionCause::Idle);
             }
         }
     }
@@ -1075,11 +1184,12 @@ fn wait_timeout<'a, T>(
 #[cfg(test)]
 mod tests {
     use std::error::Error;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::sync::Barrier;
     use std::sync::atomic::{AtomicU64, AtomicUsize};
     use std::sync::mpsc;
 
+    use chakra_domain::identity::RepositoryId;
     use chakra_domain::location::{RepoRelativePath, SourceRange, TextPosition};
     use chakra_engine::{CallHierarchyDirections, ProviderDocument, ProviderSymbol};
 
@@ -1217,6 +1327,7 @@ mod tests {
         order: Arc<Mutex<Vec<String>>>,
         gate: Arc<(Mutex<bool>, Condvar)>,
         activations: Arc<AtomicUsize>,
+        activation_roots: Arc<Mutex<Vec<PathBuf>>>,
         shutdowns: Arc<AtomicUsize>,
     }
 
@@ -1229,6 +1340,7 @@ mod tests {
                 order: Arc::new(Mutex::new(Vec::new())),
                 gate: Arc::new((Mutex::new(false), Condvar::new())),
                 activations: Arc::new(AtomicUsize::new(0)),
+                activation_roots: Arc::new(Mutex::new(Vec::new())),
                 shutdowns: Arc::new(AtomicUsize::new(0)),
             }
         }
@@ -1244,8 +1356,9 @@ mod tests {
                 name,
                 languages.clone(),
                 reservation,
-                move |_workspace, _operation| {
+                move |workspace, _operation| {
                     controls.activations.fetch_add(1, Ordering::AcqRel);
+                    lock(&controls.activation_roots).push(workspace.repository_root);
                     Ok(Arc::new(FakeProvider {
                         name,
                         languages: languages.clone(),
@@ -1273,6 +1386,15 @@ mod tests {
         name: &str,
         priority: ProviderRequestPriority,
     ) -> Result<PreciseQueryRequest, TestError> {
+        request_in(&std::env::current_dir()?, language, name, priority)
+    }
+
+    fn request_in(
+        root: &Path,
+        language: Language,
+        name: &str,
+        priority: ProviderRequestPriority,
+    ) -> Result<PreciseQueryRequest, TestError> {
         let path = match language {
             Language::Rust => "src/lib.rs",
             Language::Php => "src/index.php",
@@ -1288,7 +1410,7 @@ mod tests {
         };
         Ok(PreciseQueryRequest {
             workspace: ProviderWorkspace::from_documents(
-                PathBuf::from("."),
+                root.to_path_buf(),
                 Revision(7),
                 vec![
                     ProviderDocument {
@@ -1337,6 +1459,22 @@ mod tests {
             .ok_or_else(|| format!("provider for {language:?} missing").into())
     }
 
+    fn providers(pool: &ProviderPool) -> Result<Vec<Arc<dyn PreciseProvider>>, TestError> {
+        let identity = WorkspaceIdentity::for_primary_worktree(&std::env::current_dir()?)?;
+        Ok(pool.providers_for(&identity)?)
+    }
+
+    fn worktree_identities(
+        first: &Path,
+        second: &Path,
+    ) -> Result<(WorkspaceIdentity, WorkspaceIdentity), TestError> {
+        let repository = RepositoryId::from_stable_key("test-shared-git-object-database")?;
+        Ok((
+            WorkspaceIdentity::for_repository(first, repository.clone())?,
+            WorkspaceIdentity::for_repository(second, repository)?,
+        ))
+    }
+
     fn wait_until(timeout: Duration, mut condition: impl FnMut() -> bool) -> Result<(), TestError> {
         let deadline = Instant::now() + timeout;
         while !condition() {
@@ -1357,7 +1495,7 @@ mod tests {
                 language == Language::Hcl && !path.as_str().ends_with(".tf.json")
             });
         let pool = ProviderPool::start(ProviderPoolConfig::default(), vec![registration])?;
-        let provider = provider_for(&pool.providers(), Language::Hcl)?;
+        let provider = provider_for(&providers(&pool)?, Language::Hcl)?;
 
         assert!(provider.supports_path(Language::Hcl, &RepoRelativePath::new("main.tf")?));
         assert!(!provider.supports_path(
@@ -1386,7 +1524,7 @@ mod tests {
                 controls.registration("pyright", vec![Language::Python], 10),
             ],
         )?;
-        let providers = pool.providers();
+        let providers = providers(&pool)?;
         assert!(
             providers
                 .iter()
@@ -1419,6 +1557,275 @@ mod tests {
     }
 
     #[test]
+    fn provider_handles_reject_cross_worktree_requests() -> Result<(), TestError> {
+        let first_root = tempfile::tempdir()?;
+        let second_root = tempfile::tempdir()?;
+        let (first, second) = worktree_identities(first_root.path(), second_root.path())?;
+        let controls = FakeControls::new(None);
+        let pool = ProviderPool::start(
+            ProviderPoolConfig {
+                max_active_providers: 2,
+                max_active_providers_per_workspace: 1,
+                max_reserved_memory_bytes: 20,
+                max_reserved_memory_bytes_per_workspace: 10,
+                ..ProviderPoolConfig::default()
+            },
+            vec![controls.registration("rust", vec![Language::Rust], 10)],
+        )?;
+        let first_provider = provider_for(&pool.providers_for(&first)?, Language::Rust)?;
+        let second_provider = provider_for(&pool.providers_for(&second)?, Language::Rust)?;
+
+        let rejected = first_provider.enrich(request_in(
+            &second.root,
+            Language::Rust,
+            "wrong-worktree",
+            ProviderRequestPriority::Interactive,
+        )?);
+        assert_eq!(rejected.state, ProviderState::Degraded);
+        assert_eq!(
+            rejected.fallback_cause,
+            Some(ProviderFallbackCause::ActivationFailed)
+        );
+        assert_eq!(controls.activations.load(Ordering::Acquire), 0);
+
+        assert_eq!(
+            first_provider
+                .enrich(request_in(
+                    &first.root,
+                    Language::Rust,
+                    "first",
+                    ProviderRequestPriority::Interactive,
+                )?)
+                .state,
+            ProviderState::Ready
+        );
+        assert_eq!(
+            second_provider
+                .enrich(request_in(
+                    &second.root,
+                    Language::Rust,
+                    "second",
+                    ProviderRequestPriority::Interactive,
+                )?)
+                .state,
+            ProviderState::Ready
+        );
+        assert_eq!(pool.metrics().active_providers, 2);
+        assert!(pool.metrics().workspace.is_none());
+        let first_metrics = first_provider
+            .orchestration_metrics()
+            .ok_or("workspace-bound pool metrics missing")?;
+        assert_eq!(first_metrics.configured_workspaces, 2);
+        assert_eq!(
+            first_metrics.workspace,
+            Some(WorkspaceProviderOrchestrationMetrics {
+                active_providers: 1,
+                max_active_providers: 1,
+                reserved_memory_bytes: 10,
+                max_reserved_memory_bytes: 10,
+            })
+        );
+        assert_eq!(
+            lock(&controls.activation_roots).as_slice(),
+            [first.root.clone(), second.root.clone()]
+        );
+
+        let conflicting = WorkspaceIdentity {
+            root: first_root.path().to_path_buf(),
+            ..second.clone()
+        };
+        assert!(matches!(
+            pool.providers_for(&conflicting),
+            Err(ProviderPoolWorkspaceError::IdentityConflict { workspace })
+                if workspace == second.workspace
+        ));
+        pool.shutdown()?;
+        assert!(matches!(
+            pool.providers_for(&first),
+            Err(ProviderPoolWorkspaceError::Stopped)
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn per_workspace_provider_count_limit_evicts_only_within_the_limited_worktree()
+    -> Result<(), TestError> {
+        let first_root = tempfile::tempdir()?;
+        let second_root = tempfile::tempdir()?;
+        let (first, second) = worktree_identities(first_root.path(), second_root.path())?;
+        let controls = FakeControls::new(None);
+        let pool = ProviderPool::start(
+            ProviderPoolConfig {
+                max_active_providers: 4,
+                max_active_providers_per_workspace: 1,
+                max_reserved_memory_bytes: 40,
+                max_reserved_memory_bytes_per_workspace: 20,
+                ..ProviderPoolConfig::default()
+            },
+            vec![
+                controls.registration("rust", vec![Language::Rust], 10),
+                controls.registration("pyright", vec![Language::Python], 10),
+            ],
+        )?;
+        let first_providers = pool.providers_for(&first)?;
+        let second_providers = pool.providers_for(&second)?;
+
+        for (workspace, providers) in [(&first, &first_providers), (&second, &second_providers)] {
+            for language in [Language::Rust, Language::Python] {
+                assert_eq!(
+                    provider_for(providers, language)?
+                        .enrich(request_in(
+                            &workspace.root,
+                            language,
+                            "target",
+                            ProviderRequestPriority::Normal,
+                        )?)
+                        .state,
+                    ProviderState::Ready
+                );
+            }
+        }
+
+        let metrics = pool.metrics();
+        assert_eq!(metrics.active_providers, 2);
+        assert_eq!(metrics.reserved_memory_bytes, 20);
+        assert_eq!(metrics.resource_evictions, 2);
+        assert_eq!(controls.shutdowns.load(Ordering::Acquire), 2);
+        pool.shutdown()?;
+        assert_eq!(controls.shutdowns.load(Ordering::Acquire), 4);
+        Ok(())
+    }
+
+    #[test]
+    fn per_workspace_memory_limit_does_not_evict_another_worktree() -> Result<(), TestError> {
+        let first_root = tempfile::tempdir()?;
+        let second_root = tempfile::tempdir()?;
+        let (first, second) = worktree_identities(first_root.path(), second_root.path())?;
+        let controls = FakeControls::new(None);
+        let pool = ProviderPool::start(
+            ProviderPoolConfig {
+                max_active_providers: 4,
+                max_active_providers_per_workspace: 2,
+                max_reserved_memory_bytes: 40,
+                max_reserved_memory_bytes_per_workspace: 10,
+                ..ProviderPoolConfig::default()
+            },
+            vec![
+                controls.registration("rust", vec![Language::Rust], 10),
+                controls.registration("pyright", vec![Language::Python], 10),
+            ],
+        )?;
+        let first_providers = pool.providers_for(&first)?;
+        let second_providers = pool.providers_for(&second)?;
+        let second_rust = provider_for(&second_providers, Language::Rust)?;
+
+        assert_eq!(
+            second_rust
+                .enrich(request_in(
+                    &second.root,
+                    Language::Rust,
+                    "second-rust",
+                    ProviderRequestPriority::Normal,
+                )?)
+                .state,
+            ProviderState::Ready
+        );
+        for language in [Language::Rust, Language::Python] {
+            assert_eq!(
+                provider_for(&first_providers, language)?
+                    .enrich(request_in(
+                        &first.root,
+                        language,
+                        "first",
+                        ProviderRequestPriority::Normal,
+                    )?)
+                    .state,
+                ProviderState::Ready
+            );
+        }
+
+        assert_eq!(
+            second_rust
+                .enrich(request_in(
+                    &second.root,
+                    Language::Rust,
+                    "second-still-warm",
+                    ProviderRequestPriority::Normal,
+                )?)
+                .state,
+            ProviderState::Ready
+        );
+        assert_eq!(controls.activations.load(Ordering::Acquire), 3);
+        assert_eq!(controls.shutdowns.load(Ordering::Acquire), 1);
+        let metrics = pool.metrics();
+        assert_eq!(metrics.active_providers, 2);
+        assert_eq!(metrics.reserved_memory_bytes, 20);
+        assert_eq!(metrics.resource_evictions, 1);
+        pool.shutdown()?;
+        assert_eq!(controls.shutdowns.load(Ordering::Acquire), 3);
+        Ok(())
+    }
+
+    #[test]
+    fn simultaneous_languages_and_worktrees_share_global_admission_safely() -> Result<(), TestError>
+    {
+        let first_root = tempfile::tempdir()?;
+        let second_root = tempfile::tempdir()?;
+        let (first, second) = worktree_identities(first_root.path(), second_root.path())?;
+        let barrier = Arc::new(Barrier::new(5));
+        let controls = FakeControls::new(Some(barrier.clone()));
+        let pool = ProviderPool::start(
+            ProviderPoolConfig {
+                max_active_providers: 4,
+                max_active_providers_per_workspace: 2,
+                max_reserved_memory_bytes: 40,
+                max_reserved_memory_bytes_per_workspace: 20,
+                max_concurrent_queries: 4,
+                ..ProviderPoolConfig::default()
+            },
+            vec![
+                controls.registration("rust", vec![Language::Rust], 10),
+                controls.registration("pyright", vec![Language::Python], 10),
+            ],
+        )?;
+        let mut workers = Vec::new();
+        for workspace in [&first, &second] {
+            let providers = pool.providers_for(workspace)?;
+            for language in [Language::Rust, Language::Python] {
+                let provider = provider_for(&providers, language)?;
+                let query = request_in(
+                    &workspace.root,
+                    language,
+                    "simultaneous",
+                    ProviderRequestPriority::Interactive,
+                )?;
+                workers.push(thread::spawn(move || provider.enrich(query)));
+            }
+        }
+        barrier.wait();
+        for worker in workers {
+            assert_eq!(
+                worker.join().map_err(|_| "provider query panicked")?.state,
+                ProviderState::Ready
+            );
+        }
+        assert_eq!(controls.max_active_queries.load(Ordering::Acquire), 4);
+        assert_eq!(pool.metrics().active_providers, 4);
+        let mut roots = lock(&controls.activation_roots).clone();
+        roots.sort();
+        let mut expected_roots = vec![
+            first.root.clone(),
+            first.root,
+            second.root.clone(),
+            second.root,
+        ];
+        expected_roots.sort();
+        assert_eq!(roots, expected_roots);
+        pool.shutdown()?;
+        Ok(())
+    }
+
+    #[test]
     fn higher_priority_waiter_runs_first_and_full_queue_falls_back() -> Result<(), TestError> {
         let controls = FakeControls::new(None);
         let pool = Arc::new(ProviderPool::start(
@@ -1432,7 +1839,7 @@ mod tests {
             },
             vec![controls.registration("rust", vec![Language::Rust], 10)],
         )?);
-        let provider = provider_for(&pool.providers(), Language::Rust)?;
+        let provider = provider_for(&providers(&pool)?, Language::Rust)?;
         let holding_provider = provider.clone();
         let holding = thread::spawn(move || -> Result<_, TestError> {
             Ok(holding_provider.enrich(request(
@@ -1570,7 +1977,7 @@ mod tests {
             },
             vec![controls.registration("rust", vec![Language::Rust], 10)],
         )?);
-        let provider = provider_for(&pool.providers(), Language::Rust)?;
+        let provider = provider_for(&providers(&pool)?, Language::Rust)?;
         let holding_provider = provider.clone();
         let holding = thread::spawn(move || -> Result<_, TestError> {
             Ok(holding_provider.enrich(request(
@@ -1633,7 +2040,7 @@ mod tests {
             },
             vec![controls.registration("rust", vec![Language::Rust], 10)],
         )?);
-        let provider = provider_for(&pool.providers(), Language::Rust)?;
+        let provider = provider_for(&providers(&pool)?, Language::Rust)?;
         let holding_provider = provider.clone();
         let holding = thread::spawn(move || -> Result<_, TestError> {
             Ok(holding_provider.enrich(request(
@@ -1684,7 +2091,7 @@ mod tests {
                 controls.registration("pyright", vec![Language::Python], 10),
             ],
         )?;
-        let providers = pool.providers();
+        let providers = providers(&pool)?;
         assert_eq!(
             provider_for(&providers, Language::Rust)?
                 .enrich(request(
@@ -1751,7 +2158,7 @@ mod tests {
                 },
             )],
         )?;
-        let provider = provider_for(&pool.providers(), Language::Rust)?;
+        let provider = provider_for(&providers(&pool)?, Language::Rust)?;
         let first = provider.enrich(request(
             Language::Rust,
             "first",
@@ -1797,6 +2204,21 @@ mod tests {
                 Vec::new(),
             ),
             Err(ProviderPoolConfigError::ZeroBound)
+        ));
+        assert!(matches!(
+            ProviderPool::start(
+                ProviderPoolConfig {
+                    max_reserved_memory_bytes: 20,
+                    max_reserved_memory_bytes_per_workspace: 5,
+                    ..ProviderPoolConfig::default()
+                },
+                vec![controls.registration("too-large-locally", vec![Language::Python], 10)],
+            ),
+            Err(ProviderPoolConfigError::ReservationExceedsWorkspace {
+                reserved: 10,
+                maximum: 5,
+                ..
+            })
         ));
         assert!(matches!(
             ProviderPool::start(
@@ -1859,7 +2281,7 @@ mod tests {
                 },
             )],
         )?);
-        let provider = provider_for(&pool.providers(), Language::Rust)?;
+        let provider = provider_for(&providers(&pool)?, Language::Rust)?;
         let operation = OperationContext::unbounded();
         let query_operation = operation.clone();
         let query = request(
@@ -1918,7 +2340,7 @@ mod tests {
                 controls.registration("pyright", vec![Language::Python], 10),
             ],
         )?;
-        let providers = pool.providers();
+        let providers = providers(&pool)?;
         let rust = provider_for(&providers, Language::Rust)?;
         let python = provider_for(&providers, Language::Python)?;
         assert_eq!(
@@ -1998,7 +2420,7 @@ mod tests {
                 },
             )],
         )?;
-        let provider = provider_for(&pool.providers(), Language::Rust)?;
+        let provider = provider_for(&providers(&pool)?, Language::Rust)?;
 
         let first = provider.enrich(request(
             Language::Rust,

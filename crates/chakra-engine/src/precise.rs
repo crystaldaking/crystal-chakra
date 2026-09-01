@@ -653,15 +653,16 @@ pub trait PreciseProvider: std::fmt::Debug + Send + Sync {
     }
 
     /// Bounded provider-owned cache and synchronization instrumentation.
-    /// These counters are strictly provider-local; workspace-global pool
+    /// These counters are strictly provider-local; shared pool
     /// lifecycle/admission counters are reported via `orchestration_metrics`.
     fn metrics(&self) -> Option<ProviderMetrics> {
         None
     }
 
-    /// Workspace-global provider-pool lifecycle and admission counters, when
-    /// this adapter belongs to a shared pool. Pooled adapters return the same
-    /// shared snapshot; the query layer reports it once (issue #61).
+    /// Process-global provider-pool lifecycle/admission counters and the
+    /// selected worktree's resource envelope, when this adapter belongs to a
+    /// shared pool. Pooled adapters installed in one engine return the same
+    /// snapshot; the query layer reports it once (issues #47 and #61).
     fn orchestration_metrics(&self) -> Option<ProviderOrchestrationMetrics> {
         None
     }

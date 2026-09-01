@@ -11,7 +11,7 @@ use crate::revision::Revision;
 use crate::state::{Freshness, ProviderState, WorkspaceStatus};
 
 /// Current envelope schema version.
-pub const SCHEMA_VERSION: u32 = 15;
+pub const SCHEMA_VERSION: u32 = 16;
 
 /// Response section whose contents were cut by a bounded query operation.
 #[derive(
@@ -192,8 +192,8 @@ mod tests {
     #[test]
     fn spec_envelope_example_tracks_the_current_schema_version() {
         assert_eq!(
-            SCHEMA_VERSION, 15,
-            "the project-scope query contract must not reuse schema 14"
+            SCHEMA_VERSION, 16,
+            "multi-worktree provider metrics must not reuse schema 15"
         );
         let spec = include_str!("../../../docs/SPEC.md");
         let expected = format!("\"schema_version\": {SCHEMA_VERSION}");

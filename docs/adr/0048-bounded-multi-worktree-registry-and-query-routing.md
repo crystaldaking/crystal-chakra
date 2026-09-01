@@ -40,10 +40,9 @@ registration order would also make an omitted selector nondeterministic.
   engine as stale before releasing the identity. The registry never detaches
   watcher tasks. Failed registration rolls back its reservation.
 - Precise provider instances are still installed on one workspace engine and
-  cannot contribute to another. A globally bounded provider pool across all
-  registered worktrees is follow-up issue #47. Commit snapshots and overlay
-  sharing are follow-up issues #48 and #49; this decision does not introduce
-  either early.
+  cannot contribute to another. ADR-0049 adds one globally bounded pool while
+  retaining that binding. Commit snapshots and overlay sharing are follow-up
+  issues #48 and #49; this decision does not introduce either early.
 
 ## Alternatives considered
 
@@ -67,9 +66,9 @@ registration order would also make an omitted selector nondeterministic.
 - The initial registry rebuilds syntax state independently for each worktree.
   Snapshot reuse is intentionally deferred until the commit/overlay model is
   implemented and benchmarked.
-- The registry owns worktree lifecycle but does not yet make the CLI accept
-  several paths in one invocation; the public routing contract and registry
-  are ready for the provider-global orchestration added by issue #47.
+- With ADR-0049, the CLI may accept several paths in one invocation because
+  provider-global orchestration now preserves the registry's isolation and
+  capacity bounds.
 
 ## Validation / follow-up
 
@@ -79,5 +78,6 @@ registration order would also make an omitted selector nondeterministic.
   rejection, and stale publication after unregister.
 - MCP contract tests verify the additive tool/request surface and explicit
   selection failure with multiple worktrees.
-- Issue #47 must make provider admission global across registered worktrees
-  before the CLI exposes multi-worktree startup as a supported beta workflow.
+- ADR-0049 and issue #47 make provider admission global across registered
+  worktrees before the CLI exposes multi-worktree startup as a supported beta
+  workflow.

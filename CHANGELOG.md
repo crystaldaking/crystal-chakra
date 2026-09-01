@@ -13,6 +13,13 @@ version tags prefixed with `v`.
   accepts an optional flat `workspace_id` on every existing query. When more
   than one worktree is registered, omitting the selector returns an explicit
   ambiguity error instead of leaking facts through registration-order routing.
+- One process-global precise-provider pool now serves every registered
+  worktree with lazy, worktree-bound provider instances, global and
+  per-worktree process/memory limits, global idle/LRU reclamation, and shared
+  bounded query admission (issue #47). `chakra serve --repo` is repeatable,
+  and status exposes both the global pool envelope and the selected
+  worktree's resource usage. The additive metrics contract advances the query
+  envelope schema to version 16.
 
 ### Fixed
 

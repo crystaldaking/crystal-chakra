@@ -11,7 +11,9 @@ use thiserror::Error;
 #[derive(Debug, Clone)]
 pub struct ProviderPoolConfig {
     pub max_active_providers: usize,
+    pub max_active_providers_per_workspace: usize,
     pub max_reserved_memory_bytes: u64,
+    pub max_reserved_memory_bytes_per_workspace: u64,
     pub max_concurrent_queries: usize,
     pub max_queued_queries: usize,
     pub query_queue_timeout: Duration,
@@ -26,7 +28,9 @@ impl Default for ProviderPoolConfig {
     fn default() -> Self {
         Self {
             max_active_providers: 3,
+            max_active_providers_per_workspace: 3,
             max_reserved_memory_bytes: 2 * 1024 * 1024 * 1024,
+            max_reserved_memory_bytes_per_workspace: 2 * 1024 * 1024 * 1024,
             max_concurrent_queries: 4,
             max_queued_queries: 16,
             query_queue_timeout: Duration::from_secs(1),
@@ -53,6 +57,14 @@ pub enum ProviderPoolConfigError {
         "provider registration {provider} reserves {reserved} bytes, above the pool maximum {maximum}"
     )]
     ReservationExceedsPool {
+        provider: String,
+        reserved: u64,
+        maximum: u64,
+    },
+    #[error(
+        "provider registration {provider} reserves {reserved} bytes, above the per-workspace maximum {maximum}"
+    )]
+    ReservationExceedsWorkspace {
         provider: String,
         reserved: u64,
         maximum: u64,
