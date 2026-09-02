@@ -5,7 +5,7 @@ use std::fs;
 use std::path::Path;
 use std::process::Command;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use chakra_domain::identity::WorkspaceIdentity;
 use chakra_domain::indexing::{
@@ -86,6 +86,19 @@ fn start_with_options(
         start_live_index(report.repository_root, report.syntax_index, engine.clone())?
     };
     Ok((engine, live))
+}
+
+fn wait_until(condition: impl Fn() -> bool, what: &str) -> Result<(), Box<dyn Error>> {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !condition() {
+        if Instant::now() > deadline {
+            return Err(format!("timed out waiting for {what}").into());
+        }
+        for _ in 0..64 {
+            std::thread::yield_now();
+        }
+    }
+    Ok(())
 }
 
 #[test]
@@ -1497,6 +1510,15 @@ fn configured_checkpoint_forces_a_bounded_full_reread() -> Result<(), Box<dyn Er
     let baseline = live.metrics();
 
     assert_eq!(symbols(&engine, "one::alpha")?, ["one::alpha"]);
+
+    // Freshness barriers outrank the queued background checkpoint. The
+    // query therefore proves the scheduling trigger, but can return before
+    // the worker records the checkpoint completion. Synchronize with that
+    // explicit metric instead of racing an immediate snapshot.
+    wait_until(
+        || live.metrics().full_reconciliations > baseline.full_reconciliations,
+        "periodic checkpoint reconciliation",
+    )?;
 
     let metrics = live.metrics();
     assert_eq!(
