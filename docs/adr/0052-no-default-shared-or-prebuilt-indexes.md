@@ -80,8 +80,9 @@ that is slower and substantially larger than rebuilding.
   store. No new production dependency is introduced by this decision.
 - The complete payload remains an internal, versioned cache format rather
   than a portable release artifact contract.
-- Issue #162 separately tracks the discovered loss of the typed `oversized`
-  reason when the MessagePack writer reaches its bound.
+- Issue #162 corrects the discovered loss of the typed `oversized` reason
+  when the MessagePack writer reaches its bound; it does not change the
+  measured no-go.
 
 ## Validation / follow-up
 

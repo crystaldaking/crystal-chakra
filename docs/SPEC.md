@@ -650,7 +650,7 @@ Conceptual fields:
 
 ```json
 {
-  "schema_version": 18,
+  "schema_version": 19,
   "workspace_id": "...",
   "revision": 42,
   "freshness": "fresh",
@@ -698,6 +698,11 @@ File, text-match, symbol, and declaration-snippet facts carry a `source_layer`
 that distinguishes immutable commit content from the materialized worktree
 overlay. This is separate from fact provenance such as `tree_sitter`, `git`,
 or `rust_analyzer`.
+
+In `status`, `data.index_diagnostics.syntax_fact_cache` refers only to the
+rejected v0.2 per-file syntax-fact cache experiment. Compatible complete
+commit reuse is reported independently at `layers.commit_snapshot.reuse`;
+neither field is a summary of the other.
 
 The exact schema is an implementation decision and should be tested as a contract.
 

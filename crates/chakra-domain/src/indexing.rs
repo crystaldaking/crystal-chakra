@@ -511,7 +511,10 @@ pub struct ProjectInvalidationDiagnostics {
 /// operational picture owned by the live indexing pipeline.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct IndexingDiagnostics {
-    pub cache: CacheHealth,
+    /// Health of the rejected v0.2 per-file syntax-fact cache experiment.
+    /// Complete commit-snapshot reuse is reported separately in
+    /// `layers.commit_snapshot.reuse`.
+    pub syntax_fact_cache: CacheHealth,
     pub counters: ReconciliationCounters,
     pub queue: LiveQueueState,
     /// Why manifest/config inputs most recently invalidated project scopes,
@@ -632,7 +635,7 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         const SOURCE_MARKER: &str = "fn secret_internal_payload() { leak() }";
         let diagnostics = IndexingDiagnostics {
-            cache: CacheHealth::Disabled {
+            syntax_fact_cache: CacheHealth::Disabled {
                 reason: SYNTAX_FACT_CACHE_DISABLED_REASON.to_owned(),
             },
             counters: ReconciliationCounters {
@@ -664,8 +667,10 @@ mod tests {
             file_invalidation_records: 1,
         };
 
-        let json = serde_json::to_string(&diagnostics)?;
-        assert!(json.contains("\"cache\":{\"state\":\"disabled\""));
+        let value = serde_json::to_value(&diagnostics)?;
+        assert_eq!(value["syntax_fact_cache"]["state"], "disabled");
+        assert!(value.get("cache").is_none());
+        let json = serde_json::to_string(&value)?;
         assert!(json.contains("\"reason\":\"content_changed\""));
         assert!(json.contains("\"last_reconciliation_kind\":\"targeted\""));
         assert!(json.contains("\"cold_start\""));
@@ -673,7 +678,7 @@ mod tests {
         assert!(!json.contains(SOURCE_MARKER));
         assert!(json.contains("src/secret.rs"));
 
-        let roundtrip: IndexingDiagnostics = serde_json::from_str(&json)?;
+        let roundtrip: IndexingDiagnostics = serde_json::from_value(value)?;
         assert_eq!(roundtrip, diagnostics);
         Ok(())
     }
