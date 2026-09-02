@@ -32,17 +32,17 @@ pub struct WorkspaceInventory {
 }
 
 #[derive(Debug)]
-struct BoundedRead {
-    bytes: Vec<u8>,
-    exceeded: bool,
+pub(crate) struct BoundedRead {
+    pub(crate) bytes: Vec<u8>,
+    pub(crate) exceeded: bool,
 }
 
 #[derive(Debug)]
-struct GitOutput {
-    status: ExitStatus,
-    stdout: Vec<u8>,
-    stderr: Vec<u8>,
-    stdout_exceeded: bool,
+pub(crate) struct GitOutput {
+    pub(crate) status: ExitStatus,
+    pub(crate) stdout: Vec<u8>,
+    pub(crate) stderr: Vec<u8>,
+    pub(crate) stdout_exceeded: bool,
 }
 
 /// Failure to establish the Git worktree or enumerate its source files.
@@ -80,6 +80,8 @@ pub enum DiscoveryError {
     Timeout { command: &'static str, seconds: u64 },
     #[error("Git returned an invalid repository root object id: {0}")]
     InvalidRootObjectId(String),
+    #[error("Git returned malformed commit object data: {0}")]
+    MalformedCommitObject(String),
     #[error("repository has more than the {MAX_REPOSITORY_ROOTS} supported root objects")]
     TooManyRootObjects,
     #[error("Git returned a non-UTF-8 administrative path")]
@@ -102,7 +104,7 @@ pub enum DiscoveryError {
     Identity(#[from] IdentityError),
 }
 
-fn read_bounded(mut reader: impl Read, limit: usize) -> io::Result<BoundedRead> {
+pub(crate) fn read_bounded(mut reader: impl Read, limit: usize) -> io::Result<BoundedRead> {
     let mut bytes = Vec::with_capacity(limit.min(8 * 1024));
     let mut exceeded = false;
     let mut buffer = [0_u8; 8 * 1024];
@@ -124,7 +126,7 @@ fn terminate_child(child: &mut std::process::Child) {
     let _ = child.wait();
 }
 
-fn capture_git(
+pub(crate) fn capture_git(
     current_dir: &Path,
     command_name: &'static str,
     args: &[&OsStr],
@@ -235,7 +237,7 @@ fn capture_git(
     })
 }
 
-fn git_output(
+pub(crate) fn git_output(
     current_dir: &Path,
     command_name: &'static str,
     args: &[&OsStr],

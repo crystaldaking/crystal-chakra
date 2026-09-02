@@ -5,6 +5,83 @@ version tags prefixed with `v`.
 
 ## [Unreleased]
 
+## [0.3.0-beta.1] - 2026-09-02
+
+Chakra v0.3.0-beta.1 is the first v0.3 prerelease. It adds isolated
+multi-worktree serving, a process-global bounded provider pool, and atomic
+`CommitSnapshot + WorktreeOverlay + WorkspaceEnrichment` composition with
+compatible process-local snapshot reuse. Persistent snapshot restore remains
+opt-in; release benchmarks rejected default restore and prebuilt import.
+
+### Breaking
+
+- The status field `data.index_diagnostics.cache` is renamed to
+  `data.index_diagnostics.syntax_fact_cache` so the disabled v0.2 per-file
+  cache experiment is not confused with enabled process-local or opt-in disk
+  commit-snapshot reuse (issue #160). The query envelope schema advances from
+  18 to 19; consumers should read complete snapshot reuse separately from
+  `layers.commit_snapshot.reuse`.
+
+### Added
+
+- A bounded, Git-aware workspace registry now owns an independent syntax
+  engine and live watcher for every registered worktree in one repository
+  (issues #46 and #152). MCP adds the read-only `workspaces` discovery tool and
+  accepts an optional flat `workspace_id` on every existing query. When more
+  than one worktree is registered, omitting the selector returns an explicit
+  ambiguity error instead of leaking facts through registration-order routing.
+- One process-global precise-provider pool now serves every registered
+  worktree with lazy, worktree-bound provider instances, global and
+  per-worktree process/memory limits, global idle/LRU reclamation, and shared
+  bounded query admission (issue #47). `chakra serve --repo` is repeatable,
+  and status exposes both the global pool envelope and the selected
+  worktree's resource usage. The additive metrics contract advances the query
+  envelope schema to version 16.
+- Workspace revisions now implement
+  `CommitSnapshot + WorktreeOverlay + WorkspaceEnrichment`: Chakra builds the
+  immutable base graph directly from Git blobs, incrementally reconciles the
+  materialized checkout, keeps live provider enrichment worktree-bound, and
+  atomically reports commit/delta/enrichment provenance plus per-result source
+  layers (issue #48, ADR-0050). The additive query contract advances the
+  envelope schema to version 17.
+- Compatible immutable commit indexes are now coalesced and structurally
+  shared across worktrees, including after `HEAD` transitions (issue #49,
+  ADR-0051). An opt-in bounded local artifact store restores the already
+  materialized per-language graphs together with their incremental adapter
+  state, uses a repository/commit/format/model/adapter/config compatibility
+  key, BLAKE3 integrity, atomic directory publication, deterministic fallback,
+  and LRU disk eviction. Status reports reuse benefit and typed rejection;
+  overlays and provider enrichment remain worktree-bound. This additive
+  contract advances the query envelope schema to version 18. Per issue #50's
+  benchmark decision, persistent restore remains opt-in.
+
+### Evaluation
+
+- Complete compatible snapshots were benchmarked through the production
+  codec/store for cold rebuild, local disk restore, and a BLAKE3-verified
+  copied CI-artifact simulation (issue #50, ADR-0052). Verdict: **no-go** for
+  default disk restore and prebuilt import. On qualifying corpora, Laravel
+  restore was only 0.41–0.44× as fast as rebuild with a 16.49×-source
+  artifact, while Symfony exceeded the 512 MiB writer bound. Process-local
+  sharing remains enabled, disk storage remains opt-in, and no network/import
+  surface is added. Evidence and trust/provenance requirements are recorded
+  in `docs/evaluation/v0.3.0-shared-indexes.md`.
+
+### Fixed
+
+- Complete snapshot encoding now preserves a bounded-writer overflow as the
+  typed `oversized` rejection instead of flattening it into `corrupt`, keeping
+  size limits distinguishable from malformed artifact data (issue #162).
+
+- Live watcher refresh no longer reports an already-removed watch or vanished
+  checkout directory as a backend failure, avoiding false degradation and
+  redundant full reconciliation after branch switches (issue #154).
+- The macOS live watcher now uses bounded non-recursive polling instead of
+  notify's kqueue backend. Root-directory churn can make that backend
+  recursively retain ignored-tree descriptors; dogfooding observed more than
+  61,000 open files followed by `git ls-files` EBADF failures and stale
+  workspaces (issue #156).
+
 ## [0.2.0] - 2026-08-30
 
 Chakra v0.2.0 adds explicit Cargo/Composer project scopes, dependency-scoped
@@ -525,7 +602,8 @@ record every pre-1.0 compatibility break explicitly (ADR-0043).
 - All development after this release follows the Gitflow policy in
   `CONTRIBUTING.md` and `AGENTS.md`.
 
-[Unreleased]: https://github.com/crystaldaking/crystal-chakra/compare/v0.2.0...develop
+[Unreleased]: https://github.com/crystaldaking/crystal-chakra/compare/v0.3.0-beta.1...develop
+[0.3.0-beta.1]: https://github.com/crystaldaking/crystal-chakra/compare/v0.2.0...v0.3.0-beta.1
 [0.2.0]: https://github.com/crystaldaking/crystal-chakra/compare/v0.1.3...v0.2.0
 [0.1.3]: https://github.com/crystaldaking/crystal-chakra/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/crystaldaking/crystal-chakra/compare/v0.1.1...v0.1.2

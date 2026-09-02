@@ -20,6 +20,7 @@ use chakra_engine::{
     BoundedGraphBuilder, CallSiteInput, ConsistencyError, GraphBuildLimits, GraphBuildReport,
     GraphError, SymbolGraph,
 };
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracing::{info, info_span};
 
@@ -183,18 +184,18 @@ pub enum RustIndexError {
     Cancelled,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 struct SymbolAddress {
     path: RepoRelativePath,
     index: usize,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 enum DependencyKey {
     Exact(String, SymbolKind),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct RelationshipEdge {
     kind: EdgeKind,
     from: SymbolAddress,
@@ -204,7 +205,7 @@ struct RelationshipEdge {
     location: Option<SourceRange>,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct RelationshipContribution {
     dependencies: HashSet<DependencyKey>,
     edges: Vec<RelationshipEdge>,
@@ -261,7 +262,7 @@ impl<'a> SymbolCatalog<'a> {
 ///
 /// Entity ids are intentionally absent here: they are revision-scoped and
 /// assigned only while a complete immutable graph is materialized.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RustSyntaxIndex {
     files: BTreeMap<RepoRelativePath, Arc<ParsedFile>>,
     metadata: BTreeMap<RepoRelativePath, SourceMetadata>,

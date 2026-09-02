@@ -19,22 +19,31 @@ use std::time::{Duration, Instant};
 use chakra_domain::indexing::MAX_FILE_INVALIDATION_RECORDS;
 use chakra_domain::indexing::{
     CacheHealth, FileInvalidation, FileInvalidationReason, FullReconciliationReason,
-    IndexingDiagnostics, LiveQueueState, ReconciliationCounters, ReconciliationKind,
-    SYNTAX_FACT_CACHE_DISABLED_REASON,
+    IndexPublicationMetrics, IndexingDiagnostics, LiveQueueState, ReconciliationCounters,
+    ReconciliationKind, SYNTAX_FACT_CACHE_DISABLED_REASON,
 };
 use chakra_domain::location::RepoRelativePath;
 use chakra_domain::operation::OperationContext;
+use chakra_domain::query::DiffScope;
+use chakra_domain::revision::Revision;
 use chakra_domain::scheduling::WorkClass;
 use chakra_domain::state::{Freshness, WorkspaceStatus};
-use chakra_engine::{FreshnessBarrier, FreshnessBarrierError, SymbolGraph, WorkspaceEngine};
+use chakra_engine::{
+    DiffWorkspace, FreshnessBarrier, FreshnessBarrierError, SymbolGraph, WorkspaceDiff,
+    WorkspaceDiffProvider, WorkspaceEngine, source_layers_for_graph, workspace_graph_layers,
+};
+#[cfg(not(target_os = "macos"))]
+use notify::RecommendedWatcher;
 use notify::event::{AccessKind, AccessMode};
-use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
+#[cfg(target_os = "macos")]
+use notify::{Config as NotifyConfig, PollWatcher};
+use notify::{ErrorKind as NotifyErrorKind, Event, EventKind, RecursiveMode, Watcher};
 use thiserror::Error;
 use tracing::{error, info, warn};
 
 use crate::indexer::{
-    IndexOptions, ReconcileReport, WorkspaceIndexError, WorkspaceSourceScan, WorkspaceSyntaxIndex,
-    scan_discovered_sources_with_options,
+    CommitIndexProvider, IndexOptions, ReconcileReport, WorkspaceIndexError, WorkspaceSourceScan,
+    WorkspaceSyntaxIndex, index_commit_with_options, scan_discovered_sources_with_options,
 };
 use crate::scheduler::{PriorityWorkQueue, QueueFull};
 
@@ -64,6 +73,30 @@ const MAX_TRANSPORT_DRAIN_PER_PASS: usize = EVENT_QUEUE_CAPACITY;
 /// One aging interval: queued background work is promoted one class per
 /// interval until it competes with freshness work FIFO (issue #44).
 const QUEUE_AGING_AFTER: Duration = Duration::from_secs(1);
+#[cfg(target_os = "macos")]
+const WATCHER_POLL_INTERVAL: Duration = Duration::from_secs(2);
+
+#[cfg(not(target_os = "macos"))]
+type WorkspaceWatcher = RecommendedWatcher;
+#[cfg(target_os = "macos")]
+type WorkspaceWatcher = PollWatcher;
+
+#[cfg(not(target_os = "macos"))]
+fn new_workspace_watcher(
+    event_handler: impl notify::EventHandler,
+) -> notify::Result<WorkspaceWatcher> {
+    notify::recommended_watcher(event_handler)
+}
+
+#[cfg(target_os = "macos")]
+fn new_workspace_watcher(
+    event_handler: impl notify::EventHandler,
+) -> notify::Result<WorkspaceWatcher> {
+    PollWatcher::new(
+        event_handler,
+        NotifyConfig::default().with_poll_interval(WATCHER_POLL_INTERVAL),
+    )
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LiveIndexOptions {
@@ -164,7 +197,7 @@ impl LiveIndexDiagnostics {
         let metrics = self.metrics.snapshot();
         let (requested, completed) = self.shared.pending_generation().unwrap_or((0, 0));
         IndexingDiagnostics {
-            cache: CacheHealth::Disabled {
+            syntax_fact_cache: CacheHealth::Disabled {
                 reason: SYNTAX_FACT_CACHE_DISABLED_REASON.to_owned(),
             },
             counters: ReconciliationCounters {
@@ -296,6 +329,24 @@ pub fn start_live_index_with_options(
     engine: Arc<WorkspaceEngine>,
     options: LiveIndexOptions,
 ) -> Result<LiveIndex, LiveIndexError> {
+    start_live_index_with_options_and_commit_provider(
+        repository_root,
+        syntax_index,
+        engine,
+        options,
+        None,
+    )
+}
+
+/// Starts the live owner with repository-scoped commit reuse for `HEAD`
+/// transitions. The provider is never consulted for ordinary file edits.
+pub fn start_live_index_with_options_and_commit_provider(
+    repository_root: PathBuf,
+    syntax_index: WorkspaceSyntaxIndex,
+    engine: Arc<WorkspaceEngine>,
+    options: LiveIndexOptions,
+    commit_provider: Option<Arc<dyn CommitIndexProvider>>,
+) -> Result<LiveIndex, LiveIndexError> {
     if options.full_reconcile_interval == 0 {
         return Err(LiveIndexError::InvalidFullReconcileInterval);
     }
@@ -329,6 +380,7 @@ pub fn start_live_index_with_options(
                 worker_publication_gate,
                 ready_sender,
                 options,
+                commit_provider,
             );
         })?;
 
@@ -413,6 +465,7 @@ fn run_worker(
     publication_gate: Arc<Mutex<()>>,
     ready: SyncSender<Result<(), String>>,
     options: LiveIndexOptions,
+    commit_provider: Option<Arc<dyn CommitIndexProvider>>,
 ) {
     let administrative_paths = match chakra_git::resolve_git_administrative_paths(&repository_root)
     {
@@ -428,7 +481,7 @@ fn run_worker(
     let callback_engine = engine.clone();
     let callback_publication_gate = publication_gate.clone();
     let callback_root = repository_root.clone();
-    let watcher = notify::recommended_watcher(move |event: notify::Result<Event>| {
+    let event_handler = move |event: notify::Result<Event>| {
         let (hints, uncertain) = match event {
             Ok(event) => {
                 callback_metrics
@@ -469,7 +522,8 @@ fn run_worker(
             }
             Err(TrySendError::Disconnected(_)) => {}
         }
-    });
+    };
+    let watcher = new_workspace_watcher(event_handler);
     let mut watcher = match watcher {
         Ok(watcher) => watcher,
         Err(error) => {
@@ -550,6 +604,7 @@ fn run_worker(
                 {
                     let kind = reconcile(
                         &repository_root,
+                        commit_provider.as_deref(),
                         &mut syntax_index,
                         &engine,
                         &mut watcher,
@@ -585,6 +640,7 @@ fn run_worker(
                 checkpoint_pending = false;
                 let kind = reconcile(
                     &repository_root,
+                    commit_provider.as_deref(),
                     &mut syntax_index,
                     &engine,
                     &mut watcher,
@@ -704,6 +760,7 @@ fn run_worker(
                 }
                 let kind = reconcile(
                     &repository_root,
+                    commit_provider.as_deref(),
                     &mut syntax_index,
                     &engine,
                     &mut watcher,
@@ -741,6 +798,7 @@ fn run_worker(
         {
             let kind = reconcile(
                 &repository_root,
+                commit_provider.as_deref(),
                 &mut syntax_index,
                 &engine,
                 &mut watcher,
@@ -916,9 +974,10 @@ fn invalidate_for_event(
 #[allow(clippy::too_many_arguments)]
 fn reconcile(
     repository_root: &Path,
+    commit_provider: Option<&dyn CommitIndexProvider>,
     syntax_index: &mut WorkspaceSyntaxIndex,
     engine: &WorkspaceEngine,
-    watcher: &mut RecommendedWatcher,
+    watcher: &mut WorkspaceWatcher,
     watched: &mut BTreeSet<PathBuf>,
     metrics: &MetricsState,
     shared: &BarrierShared,
@@ -982,10 +1041,10 @@ fn reconcile(
                 &operation,
             )?;
             let ReconcileReport {
-                graph,
+                mut graph,
                 metrics: reconcile_metrics,
                 next_index,
-                indexing,
+                mut indexing,
                 project_model,
                 dependency_impact,
             } = syntax_index
@@ -1017,6 +1076,79 @@ fn reconcile(
                 WorkspaceStatus::Ready
             };
 
+            let current = engine.snapshot();
+            let candidate_graph = graph.as_ref().unwrap_or_else(|| current.graph());
+            let diff = match diff_for_graph(
+                repository_root,
+                current.revision().next(),
+                candidate_graph,
+                &operation,
+            ) {
+                Ok(diff) => diff,
+                Err(error) => {
+                    operation
+                        .check()
+                        .map_err(|_| WorkspaceIndexError::Cancelled)?;
+                    warn!(%error, "retrying unstable worktree layer composition");
+                    continue;
+                }
+            };
+            let commit_changed = diff.scope.base_commit != current.layers().commit_snapshot.commit;
+            let commit = if commit_changed {
+                let index_options =
+                    IndexOptions::new(syntax_index.budgets(), operation.cancellation())?;
+                let candidate = match commit_provider {
+                    Some(provider) => provider.commit_index(
+                        repository_root,
+                        &current.identity().repository,
+                        diff.scope.base_commit.as_deref(),
+                        index_options,
+                    ),
+                    None => index_commit_with_options(
+                        repository_root,
+                        diff.scope.base_commit.as_deref(),
+                        index_options,
+                    ),
+                };
+                match candidate {
+                    Ok(commit) => Some(commit),
+                    Err(error) => {
+                        operation
+                            .check()
+                            .map_err(|_| WorkspaceIndexError::Cancelled)?;
+                        warn!(%error, "retrying changed commit snapshot construction");
+                        continue;
+                    }
+                }
+            } else {
+                None
+            };
+            let (commit_files, commit_bytes) = commit.as_ref().map_or_else(
+                || {
+                    (
+                        current.layers().commit_snapshot.source_files,
+                        current.layers().commit_snapshot.source_bytes,
+                    )
+                },
+                |commit| (commit.source_files, commit.source_bytes),
+            );
+            let mut layers = workspace_graph_layers(commit_files, commit_bytes, &diff);
+            layers.commit_snapshot.reuse = commit.as_ref().map_or_else(
+                || current.layers().commit_snapshot.reuse.clone(),
+                |commit| commit.reuse.clone(),
+            );
+            let ownership_only_graph = graph.is_none() && current.layers() != &layers;
+            if graph.is_some() || ownership_only_graph {
+                let commit_graph = commit
+                    .as_ref()
+                    .map_or_else(|| current.commit_graph(), |commit| &commit.graph);
+                let source_layers = source_layers_for_graph(commit_graph, candidate_graph);
+                graph = Some(candidate_graph.clone().with_source_layers(source_layers));
+                if ownership_only_graph {
+                    mark_publication_reused(&mut indexing.publication);
+                }
+            }
+
             let _publication = match publication_gate.lock() {
                 Ok(guard) => guard,
                 Err(poisoned) => poisoned.into_inner(),
@@ -1027,17 +1159,39 @@ fn reconcile(
             operation
                 .check()
                 .map_err(|_| WorkspaceIndexError::Cancelled)?;
+            let verified_diff = match diff_for_graph(
+                repository_root,
+                current.revision().next(),
+                graph.as_ref().unwrap_or_else(|| current.graph()),
+                &operation,
+            ) {
+                Ok(diff) => diff,
+                Err(error) => {
+                    operation
+                        .check()
+                        .map_err(|_| WorkspaceIndexError::Cancelled)?;
+                    warn!(%error, "retrying worktree layer verification");
+                    continue;
+                }
+            };
+            if verified_diff != diff {
+                continue;
+            }
             let provider_inputs = next_index.as_ref().map_or_else(
                 || syntax_index.provider_inputs(),
                 |next| next.provider_inputs(),
             );
             let published = publish_fresh(
                 engine,
-                graph.as_ref(),
-                status,
-                &indexing,
-                provider_inputs,
-                project_model.as_ref(),
+                FreshPublication {
+                    graph: graph.as_ref(),
+                    commit_graph: commit.as_ref().map(|commit| &commit.graph),
+                    layers: &layers,
+                    status,
+                    indexing: &indexing,
+                    provider_inputs,
+                    project_model: project_model.as_ref(),
+                },
             )
             .map_err(WorkspaceIndexError::Update)?;
             if let Some(next_index) = next_index {
@@ -1469,7 +1623,7 @@ fn desired_watch_directories(
 }
 
 fn refresh_watches(
-    watcher: &mut RecommendedWatcher,
+    watcher: &mut WorkspaceWatcher,
     repository_root: &Path,
     indexed_paths: &[RepoRelativePath],
     watched: &mut BTreeSet<PathBuf>,
@@ -1493,10 +1647,14 @@ fn refresh_watches(
         if shared.is_stopped() {
             return Err(WorkspaceIndexError::Cancelled);
         }
-        if let Err(error) = watcher.unwatch(&directory) {
-            metrics.watcher_errors.fetch_add(1, Ordering::Relaxed);
-            warn!(path = %directory.display(), %error, "failed to remove filesystem watch");
-            degraded = true;
+        match watcher.unwatch(&directory) {
+            Ok(()) => {}
+            Err(error) if absent_watch_is_already_removed(&error) => {}
+            Err(error) => {
+                metrics.watcher_errors.fetch_add(1, Ordering::Relaxed);
+                warn!(path = %directory.display(), %error, "failed to remove filesystem watch");
+                degraded = true;
+            }
         }
         watched.remove(&directory);
     }
@@ -1527,17 +1685,84 @@ fn refresh_watches(
     Ok(degraded)
 }
 
+fn absent_watch_is_already_removed(error: &notify::Error) -> bool {
+    matches!(
+        &error.kind,
+        NotifyErrorKind::WatchNotFound | NotifyErrorKind::PathNotFound
+    )
+}
+
+fn diff_for_graph(
+    repository_root: &Path,
+    revision: Revision,
+    graph: &SymbolGraph,
+    operation: &OperationContext,
+) -> Result<WorkspaceDiff, WorkspaceIndexError> {
+    let workspace = DiffWorkspace::from_graph_with_context(
+        repository_root.to_path_buf(),
+        revision,
+        DiffScope::Worktree,
+        graph,
+        operation,
+    )
+    .map_err(|error| WorkspaceIndexError::Update(error.to_string()))?;
+    chakra_git::GitWorkspaceDiff
+        .diff_with_context(workspace, operation)
+        .map_err(|error| WorkspaceIndexError::Update(error.to_string()))
+}
+
+struct FreshPublication<'a> {
+    graph: Option<&'a SymbolGraph>,
+    commit_graph: Option<&'a SymbolGraph>,
+    layers: &'a chakra_domain::composition::WorkspaceGraphLayers,
+    status: WorkspaceStatus,
+    indexing: &'a chakra_domain::indexing::IndexingStatus,
+    provider_inputs: &'a [chakra_engine::ProviderInput],
+    project_model: Option<&'a chakra_domain::project::ProjectModel>,
+}
+
+fn mark_publication_reused(publication: &mut IndexPublicationMetrics) {
+    publication.structurally_incremental = true;
+    publication.reused_files = publication
+        .reused_files
+        .saturating_add(publication.rebuilt_files);
+    publication.rebuilt_files = 0;
+    publication.reused_source_bytes = publication
+        .reused_source_bytes
+        .saturating_add(publication.rebuilt_source_bytes);
+    publication.rebuilt_source_bytes = 0;
+    publication.reused_symbols = publication
+        .reused_symbols
+        .saturating_add(publication.rebuilt_symbols);
+    publication.rebuilt_symbols = 0;
+    publication.reused_edges = publication
+        .reused_edges
+        .saturating_add(publication.rebuilt_edges);
+    publication.rebuilt_edges = 0;
+    publication.reused_call_sites = publication
+        .reused_call_sites
+        .saturating_add(publication.rebuilt_call_sites);
+    publication.rebuilt_call_sites = 0;
+}
+
 fn publish_fresh(
     engine: &WorkspaceEngine,
-    graph: Option<&SymbolGraph>,
-    status: WorkspaceStatus,
-    indexing: &chakra_domain::indexing::IndexingStatus,
-    provider_inputs: &[chakra_engine::ProviderInput],
-    project_model: Option<&chakra_domain::project::ProjectModel>,
+    candidate: FreshPublication<'_>,
 ) -> Result<bool, String> {
+    let FreshPublication {
+        graph,
+        commit_graph,
+        layers,
+        status,
+        indexing,
+        provider_inputs,
+        project_model,
+    } = candidate;
     let started = Instant::now();
     let current = engine.snapshot();
     if graph.is_none()
+        && commit_graph.is_none()
+        && current.layers() == layers
         && project_model.is_none()
         && current.freshness() == Freshness::Fresh
         && current.status() == status
@@ -1550,6 +1775,11 @@ fn publish_fresh(
         let mut update = engine.begin_update();
         if let Some(graph) = graph {
             update.replace_graph(graph.clone());
+        }
+        if let Some(commit_graph) = commit_graph {
+            update.set_graph_layers(commit_graph.clone(), layers.clone());
+        } else {
+            update.set_layers(layers.clone());
         }
         if let Some(model) = project_model {
             update.set_project_model(model.clone());
@@ -1919,15 +2149,64 @@ mod tests {
         assert_eq!(latest, 10);
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
-    fn macos_recommended_watcher_is_kqueue() {
-        assert_eq!(RecommendedWatcher::kind(), notify::WatcherKind::Kqueue);
+    fn absent_watches_are_idempotent_cleanup_not_backend_failures() {
+        assert!(absent_watch_is_already_removed(
+            &notify::Error::watch_not_found()
+        ));
+        assert!(absent_watch_is_already_removed(
+            &notify::Error::path_not_found()
+        ));
+        assert!(!absent_watch_is_already_removed(&notify::Error::generic(
+            "backend failure"
+        )));
     }
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn kqueue_uses_bounded_non_recursive_source_directories()
+    fn macos_workspace_watcher_is_polling() {
+        assert_eq!(WorkspaceWatcher::kind(), notify::WatcherKind::PollWatcher);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_root_churn_does_not_recursively_retain_ignored_file_descriptors()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let workspace = tempfile::tempdir()?;
+        let ignored = workspace.path().join("target/corpus/deep");
+        std::fs::create_dir_all(&ignored)?;
+        for index in 0..256 {
+            std::fs::write(ignored.join(format!("ignored-{index}.txt")), b"ignored")?;
+        }
+
+        let (event_sender, event_receiver) = mpsc::sync_channel(8);
+        let mut watcher = new_workspace_watcher(move |event: notify::Result<Event>| {
+            if event.is_ok() {
+                let _ = event_sender.try_send(());
+            }
+        })?;
+        watcher.watch(workspace.path(), RecursiveMode::NonRecursive)?;
+        let descriptors_before = std::fs::read_dir("/dev/fd")?.count();
+
+        std::fs::create_dir(workspace.path().join("branch-switch"))?;
+        event_receiver.recv_timeout(WATCHER_POLL_INTERVAL + Duration::from_secs(2))?;
+        let observation_deadline = Instant::now() + Duration::from_millis(500);
+        let mut maximum_descriptors = descriptors_before;
+        while Instant::now() < observation_deadline {
+            maximum_descriptors = maximum_descriptors.max(std::fs::read_dir("/dev/fd")?.count());
+            thread::sleep(Duration::from_millis(10));
+        }
+
+        assert!(
+            maximum_descriptors.saturating_sub(descriptors_before) < 64,
+            "non-recursive root churn retained unexpected descriptors: before={descriptors_before}, maximum={maximum_descriptors}"
+        );
+        Ok(())
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_watcher_uses_bounded_non_recursive_source_directories()
     -> Result<(), Box<dyn std::error::Error>> {
         let workspace = tempfile::tempdir()?;
         let root = workspace.path();

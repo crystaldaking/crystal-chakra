@@ -82,6 +82,12 @@ Examples:
 
 A `CommitSnapshot` must **not** be defined as a precise LSP index of a commit.
 
+The current v0.3 implementation resolves the immutable commit object through
+Git, reads supported regular-file blobs without checking out another
+worktree, and builds only inventory, source, path-classification, Tree-sitter,
+and deterministic syntax-tier facts. It retains that graph separately from
+the effective materialized graph.
+
 ### WorktreeOverlay
 
 Materialized filesystem delta relative to a base commit:
@@ -93,6 +99,11 @@ Materialized filesystem delta relative to a base commit:
 - deleted files;
 - renamed files;
 - syntax/index deltas derived from those changes.
+
+The overlay is file-owned and deterministic. Its public inventory distinguishes
+add, modify, delete, and Git-detected rename; current-file facts also carry an
+exact `commit_snapshot` or `worktree_overlay` source layer. A bounded public
+change list is never used as the sole ownership proof.
 
 ### WorkspaceEnrichment
 
@@ -107,6 +118,9 @@ Examples:
 - lazy precise call hierarchy results.
 
 This layer is workspace-scoped and revision-aware. It is not intrinsically reusable for an arbitrary non-materialized Git commit.
+
+Query envelopes expose an enrichment revision only when the selected
+worktree's provider is ready for the exact observed syntax revision.
 
 ## 4. Canonical state and derived state
 
@@ -328,25 +342,52 @@ CommitSnapshot(commit)
 
 contains offline/syntax-tier information unless that commit is explicitly materialized and separately enriched.
 
+For an active worktree Chakra atomically publishes the immutable commit graph,
+the deterministic worktree delta, the effective graph, and the current
+worktree-scoped enrichment boundary as one workspace revision. A `HEAD` change
+replaces the commit layer; an ordinary file change retains it and updates only
+the effective overlay contribution.
+
 Precise language-provider enrichment for a historical commit requires materialization, for example a detached temporary worktree. Historical materialization is **not required in v0.1** and should not become default behavior without explicit resource/security/lifecycle design.
 
 If precise enrichment is cached in the future, treat it as an optimization with a richer environment fingerprint, not as intrinsic commit truth.
 
-## 14. Future snapshot compatibility
+## 14. Snapshot compatibility and reuse
 
-If persistent commit snapshots are introduced later, a cache key must account for more than commit SHA. Relevant compatibility inputs can include:
+Reusable commit snapshots are keyed by the complete world that determines
+their materialization-independent facts, never by commit SHA alone. The key
+includes:
 
 - repository identity;
 - commit SHA;
 - Chakra index format version;
 - graph model version;
-- parser/query version;
-- language/provider versions where relevant;
+- parser/adapter versions and the Chakra language-index version;
 - indexing configuration fingerprint.
+
+Provider versions and live environment state are not part of this syntax-only
+key because provider enrichment is never stored in a commit snapshot. A
+future provider cache requires its own richer fingerprint.
+
+Compatible process-local commit state may be structurally shared across
+worktrees. Local disk artifacts must contain the complete incremental adapter
+state and already materialized graph, use checksummed bounded decoding and
+atomic publication, tolerate corruption through deterministic rebuild, and
+apply bounded eviction. Worktree overlays and provider enrichment are always
+rebuilt or retained by their materialized-worktree owner.
 
 SQLite schema version and semantic index format version are distinct concepts.
 
-Cache existence must be justified by benchmarks comparing restoration to deterministic rebuild.
+Enabling persistent restore by default or importing CI-produced artifacts must
+be justified by benchmarks comparing complete restoration and verification to
+deterministic rebuild.
+
+The v0.3 complete-snapshot evaluation rejected both defaults: qualifying
+repositories restored more slowly than deterministic rebuild and exceeded the
+artifact-size budget, while the largest corpus target exceeded the bounded
+writer. Local disk restore therefore remains opt-in and prebuilt import is not
+a product surface. Any future representation must pass the fixed complete
+restore, size, and graph-equivalence gates in ADR-052 before product wiring.
 
 ## 15. Language provider architecture
 
@@ -403,25 +444,33 @@ must ignore PHP documents, and the query layer must not send PHP symbols to it.
 PHP remains fully usable through current Tree-sitter syntax intelligence when
 no precise PHP provider is configured.
 
-## 17. Provider resource model and future multi-worktree orchestration
+## 17. Provider resource model and multi-worktree orchestration
 
-Long term, precise language providers are logically worktree-scoped because uncommitted worktree states must not leak into each other.
+Precise language providers are logically worktree-scoped because uncommitted
+worktree states must not leak into each other.
 
 However, running one heavyweight language server per worktree without bounds is unacceptable.
 
 Provider orchestration includes a resource manager with:
 
-- maximum active providers;
-- memory/process budget;
+- global and per-worktree maximum active providers;
+- global and per-worktree deterministic memory/process budgets;
 - idle timeout;
 - LRU/idle eviction;
 - active/dormant states;
 - on-demand activation;
 - graceful fallback to syntax intelligence.
 
-The current implementation applies those bounds to the one active
-materialized worktree and routes each language to exactly one adapter.
-Multi-worktree ownership and scheduling remain deferred beyond v0.1.
+The workspace registry owns a separately published syntax engine and live
+index for each registered materialized worktree. Queries select one worktree
+before entering the query layer, so uncommitted syntax facts cannot cross
+worktree boundaries. Registration is globally bounded.
+
+Precise providers remain worktree-scoped. One process-global manager owns
+admission, activation, and eviction across those worktrees; registrations are
+templates and every lazy runtime slot is bound to one complete workspace
+identity before it is installed in an engine. Cross-worktree requests are
+rejected before provider activation.
 
 ## 18. Syntax intelligence
 
@@ -601,11 +650,32 @@ Conceptual fields:
 
 ```json
 {
-  "schema_version": 15,
+  "schema_version": 19,
   "workspace_id": "...",
   "revision": 42,
   "freshness": "fresh",
   "status": "ready",
+  "layers": {
+    "commit_snapshot": {
+      "commit": "...",
+      "source_files": 120,
+      "source_bytes": 456789,
+      "reuse": {
+        "origin": "memory_reuse",
+        "reused_files": 120,
+        "reused_source_bytes": 456789,
+        "elapsed_micros": 40,
+        "artifact_bytes": null,
+        "rejection": null
+      }
+    },
+    "worktree_overlay": {
+      "files": [],
+      "files_truncated": false,
+      "files_omitted": null
+    },
+    "workspace_enrichment": { "workspace_id": "...", "provider_state": "ready", "revision": 42 }
+  },
   "truncated": false,
   "truncation": [],
   "data": {}
@@ -623,6 +693,16 @@ Every query carries the observed revision's bounded indexing coverage,
 capability, degradation, memory, scheduling, and publication summary. Detailed
 per-phase indexing measurements are operator telemetry exposed by `status`
 rather than repeated in every query envelope.
+
+File, text-match, symbol, and declaration-snippet facts carry a `source_layer`
+that distinguishes immutable commit content from the materialized worktree
+overlay. This is separate from fact provenance such as `tree_sitter`, `git`,
+or `rust_analyzer`.
+
+In `status`, `data.index_diagnostics.syntax_fact_cache` refers only to the
+rejected v0.2 per-file syntax-fact cache experiment. Compatible complete
+commit reuse is reported independently at `layers.commit_snapshot.reuse`;
+neither field is a summary of the other.
 
 The exact schema is an implementation decision and should be tested as a contract.
 
@@ -729,7 +809,8 @@ Current high-level queries bound result items, serialized response bytes,
 examined candidates, visited edges/call sites, retained intermediate items,
 and section construction time as separate dimensions.
 
-Future multi-worktree language-provider orchestration must include explicit provider/memory limits.
+Multi-worktree language-provider orchestration applies explicit global and
+per-worktree provider/memory limits.
 
 ## 35. Concurrency
 
@@ -950,7 +1031,8 @@ Unless promoted by a later roadmap decision, do not build:
 
 - multi-worktree orchestration;
 - arbitrary historical commit materialization;
-- persistent graph snapshot reuse;
+- persistence of worktree overlays or precise provider enrichment as commit
+  truth;
 - semantic/vector search;
 - cross-repository graph;
 - eager precise whole-repository call graph;

@@ -68,6 +68,8 @@ owned shutdown.
 - The orchestration crate is intentionally synchronous because the provider
   contract and adapter workers are synchronous; every admission and lifecycle
   wait is bounded or cancellation-aware.
+- ADR-0049 extends these limits across multiple registered worktrees while
+  keeping every active provider instance and document stream worktree-bound.
 
 ## Validation
 

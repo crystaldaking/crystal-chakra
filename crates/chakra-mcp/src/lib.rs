@@ -5,4 +5,4 @@
 
 mod server;
 
-pub use server::{ChakraMcpServer, ServeError, serve_stdio};
+pub use server::{ChakraMcpServer, ServeError, serve_stdio, serve_stdio_router};

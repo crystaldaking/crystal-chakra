@@ -9,6 +9,7 @@ use std::num::TryFromIntError;
 
 use chakra_domain::location::{RepoRelativePath, SourceRange, TextPosition};
 use chakra_domain::symbol::{EdgeKind, SymbolKind};
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tree_sitter::{Node, Parser, Point};
 
@@ -40,21 +41,21 @@ pub(crate) enum LaravelParseError {
     },
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct LaravelFile {
     pub symbols: Vec<FrameworkSymbolDraft>,
     pub relations: Vec<FrameworkRelationDraft>,
     pub truncated: bool,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct FrameworkSymbolDraft {
     pub qualified_name: String,
     pub location: SourceRange,
     pub signature: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct FrameworkRelationDraft {
     pub kind: EdgeKind,
     pub from: FrameworkEndpoint,
@@ -62,7 +63,7 @@ pub(crate) struct FrameworkRelationDraft {
     pub location: SourceRange,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) enum FrameworkEndpoint {
     /// Alternatives are tried in order. This is used for conventions such as
     /// listener `handle` with `__invoke` fallback without inventing both.
@@ -70,7 +71,7 @@ pub(crate) enum FrameworkEndpoint {
     Synthetic(usize),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct FrameworkSelector {
     pub qualified_name: String,
     pub kinds: Vec<SymbolKind>,

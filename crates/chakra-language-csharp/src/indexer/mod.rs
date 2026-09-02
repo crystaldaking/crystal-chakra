@@ -20,6 +20,7 @@ use chakra_engine::{
     BoundedGraphBuilder, CallSiteInput, ConsistencyError, GraphBuildLimits, GraphBuildReport,
     GraphError, SymbolGraph,
 };
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracing::{info, info_span};
 
@@ -191,18 +192,18 @@ pub enum CSharpIndexError {
     Cancelled,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub(super) struct SymbolAddress {
     pub(super) path: RepoRelativePath,
     pub(super) index: usize,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 enum DependencyKey {
     Exact(String, SymbolKind),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct RelationshipEdge {
     kind: EdgeKind,
     from: SymbolAddress,
@@ -212,7 +213,7 @@ struct RelationshipEdge {
     location: Option<SourceRange>,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct RelationshipContribution {
     dependencies: HashSet<DependencyKey>,
     edges: Vec<RelationshipEdge>,
@@ -242,7 +243,7 @@ impl RelationshipContribution {
 ///
 /// Entity ids are intentionally absent here: they are revision-scoped and
 /// assigned only while a complete immutable graph is materialized.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CSharpSyntaxIndex {
     files: BTreeMap<RepoRelativePath, Arc<ParsedFile>>,
     metadata: BTreeMap<RepoRelativePath, SourceMetadata>,

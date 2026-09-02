@@ -2,12 +2,17 @@
 
 mod resources;
 mod scan;
+mod snapshot;
 mod status;
 
 use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+use chakra_domain::composition::{
+    CommitSnapshotOrigin, CommitSnapshotRejection, CommitSnapshotReuse,
+};
+use chakra_domain::identity::RepositoryId;
 use chakra_domain::indexing::{
     IndexBudgetError, IndexBudgets, IndexCancellation, IndexDegradation, IndexMemoryMetrics,
     IndexPhase, IndexPhaseMeasurement, IndexPublicationMetrics, IndexSchedulingMetrics,
@@ -29,13 +34,17 @@ use crate::adapter::{
 };
 
 use resources::{process_cpu_micros, process_peak_rss_bytes, process_rss_bytes};
-use scan::check_cancelled;
+use scan::{check_cancelled, scan_commit_sources};
 use status::{
     IndexingParts, LanguageIndexingFacts, build_indexing_status, indexing_semantically_equal,
 };
 
 pub(crate) use scan::{WorkspaceSourceLoader, scan_discovered_sources_with_options};
 pub use scan::{scan_repository_sources, scan_repository_sources_with_options};
+pub use snapshot::{
+    COMMIT_SNAPSHOT_FORMAT_VERSION, COMMIT_SNAPSHOT_GRAPH_MODEL_VERSION,
+    CommitSnapshotCompatibility, CommitSnapshotPayloadError,
+};
 
 const PARALLEL_PARSE_FILE_THRESHOLD: u64 = 32;
 const INDEX_WORKER_MEMORY_RESERVE_BYTES: u64 = 64 * 1024 * 1024;
@@ -369,6 +378,39 @@ pub struct IndexReport {
     pub project_model: ProjectModel,
 }
 
+/// Materialization-independent syntax index of one exact commit.
+#[derive(Debug, Clone)]
+pub struct CommitIndexReport {
+    pub commit: Option<String>,
+    pub graph: SymbolGraph,
+    pub indexing: IndexingStatus,
+    pub source_files: u64,
+    pub source_bytes: u64,
+    pub reuse: CommitSnapshotReuse,
+    syntax_index: WorkspaceSyntaxIndex,
+    repository_root: PathBuf,
+}
+
+/// Effective worktree index plus the immutable commit graph it overlays.
+#[derive(Debug)]
+pub struct LayeredIndexReport {
+    pub commit: CommitIndexReport,
+    pub effective: IndexReport,
+}
+
+/// Repository-level owner capable of returning a complete compatible commit
+/// index. The live pipeline uses this adapter only when `HEAD` changes; the
+/// ordinary one-file path remains the structurally incremental syntax index.
+pub trait CommitIndexProvider: std::fmt::Debug + Send + Sync {
+    fn commit_index(
+        &self,
+        repository_root: &Path,
+        repository: &RepositoryId,
+        commit: Option<&str>,
+        options: IndexOptions,
+    ) -> Result<CommitIndexReport, WorkspaceIndexError>;
+}
+
 #[derive(Debug, Error)]
 pub enum WorkspaceIndexError {
     #[error(transparent)]
@@ -405,12 +447,17 @@ pub enum WorkspaceIndexError {
     Cancelled,
     #[error("workspace syntax index update failed: {0}")]
     Update(String),
+    #[error("commit snapshot codec failed: {0}")]
+    Snapshot(String),
+    #[error("commit snapshot payload exceeds the {limit}-byte bound")]
+    SnapshotOversized { limit: u64 },
 }
 
 #[derive(Debug, Clone)]
 struct WorkspaceAdapterState {
     adapter: Box<dyn SyntaxLanguageAdapter>,
     limits: GraphBuildLimits,
+    framework: AdapterFrameworkMetrics,
 }
 
 #[derive(Debug, Clone)]
@@ -529,6 +576,17 @@ impl WorkspaceSyntaxIndex {
             total.saturating_add(build.omitted_call_sites)
         });
         let graph_changed = reconciled.iter().any(|report| report.next_index.is_some());
+        let next_frameworks: Vec<AdapterFrameworkMetrics> = self
+            .adapters
+            .iter()
+            .zip(reconciled.iter())
+            .map(|(state, report)| {
+                report
+                    .build_metrics
+                    .as_ref()
+                    .map_or(state.framework, |metrics| metrics.framework)
+            })
+            .collect();
         let next_adapters: Vec<Box<dyn SyntaxLanguageAdapter>> = self
             .adapters
             .iter()
@@ -634,7 +692,12 @@ impl WorkspaceSyntaxIndex {
             adapters: next_adapters
                 .into_iter()
                 .zip(limits.iter().copied())
-                .map(|(adapter, limits)| WorkspaceAdapterState { adapter, limits })
+                .zip(next_frameworks)
+                .map(|((adapter, limits), framework)| WorkspaceAdapterState {
+                    adapter,
+                    limits,
+                    framework,
+                })
                 .collect(),
             budgets: self.budgets,
             indexing: indexing.clone(),
@@ -743,14 +806,219 @@ pub fn index_repository_with_options(
     root: &Path,
     options: IndexOptions,
 ) -> Result<IndexReport, WorkspaceIndexError> {
+    check_cancelled(&options.cancellation)?;
+    let operation = OperationContext::from_cancellation(options.cancellation.clone());
+    let repository_root = chakra_git::resolve_repository_root_with_context(root, &operation)?;
+    let scan = scan_repository_sources_with_options(&repository_root, &options)?;
+    index_workspace_source_scan_with_options(&repository_root, scan, options)
+}
+
+/// Builds a materialization-independent syntax snapshot from the Git object
+/// named by `HEAD`. Source bodies come from immutable blobs, not the live
+/// filesystem; provider inputs and live project probes are deliberately absent.
+pub fn index_head_commit_with_options(
+    root: &Path,
+    options: IndexOptions,
+) -> Result<CommitIndexReport, WorkspaceIndexError> {
+    let budgets = options.budgets.validate()?;
+    let operation = OperationContext::from_cancellation(options.cancellation.clone());
+    let snapshot = chakra_git::read_head_commit_snapshot_with_context(
+        root,
+        chakra_git::CommitSnapshotLimits {
+            max_files: budgets.max_files,
+            max_source_file_bytes: budgets.max_source_file_bytes,
+            max_workspace_source_bytes: budgets.max_workspace_source_bytes,
+        },
+        &operation,
+    )?;
+    index_git_commit_snapshot(snapshot, options)
+}
+
+/// Builds an immutable syntax snapshot for an already resolved commit id.
+pub fn index_commit_with_options(
+    root: &Path,
+    commit: Option<&str>,
+    options: IndexOptions,
+) -> Result<CommitIndexReport, WorkspaceIndexError> {
+    let budgets = options.budgets.validate()?;
+    let operation = OperationContext::from_cancellation(options.cancellation.clone());
+    let snapshot = chakra_git::read_commit_snapshot_with_context(
+        root,
+        commit,
+        chakra_git::CommitSnapshotLimits {
+            max_files: budgets.max_files,
+            max_source_file_bytes: budgets.max_source_file_bytes,
+            max_workspace_source_bytes: budgets.max_workspace_source_bytes,
+        },
+        &operation,
+    )?;
+    index_git_commit_snapshot(snapshot, options)
+}
+
+fn index_git_commit_snapshot(
+    snapshot: chakra_git::GitCommitSnapshot,
+    options: IndexOptions,
+) -> Result<CommitIndexReport, WorkspaceIndexError> {
+    let scan = scan_commit_sources(&snapshot, &options)?;
+    let report =
+        index_workspace_source_scan_with_options(&snapshot.repository_root, scan, options)?;
+    Ok(CommitIndexReport {
+        commit: snapshot.commit,
+        graph: report.graph,
+        indexing: report.metrics.indexing,
+        source_files: snapshot.discovered_files,
+        source_bytes: snapshot.source_bytes,
+        reuse: CommitSnapshotReuse {
+            origin: CommitSnapshotOrigin::ColdBuild,
+            rejection: Some(CommitSnapshotRejection::CacheDisabled),
+            ..CommitSnapshotReuse::default()
+        },
+        syntax_index: report.syntax_index,
+        repository_root: report.repository_root,
+    })
+}
+
+impl CommitIndexReport {
+    /// Complete compatibility inputs for persisted commit syntax state.
+    pub fn snapshot_compatibility(&self) -> CommitSnapshotCompatibility {
+        snapshot::compatibility(&self.syntax_index)
+    }
+
+    /// Encodes the immutable graph plus every adapter's incremental state.
+    pub fn encode_snapshot(
+        &self,
+        cancellation: &IndexCancellation,
+    ) -> Result<Vec<u8>, CommitSnapshotPayloadError> {
+        snapshot::encode(self, cancellation)
+    }
+
+    /// Restores a complete commit index for `repository_root`. The caller is
+    /// responsible for validating repository identity, commit, and the full
+    /// compatibility key before invoking this decoder.
+    pub fn decode_snapshot(
+        repository_root: PathBuf,
+        expected_commit: Option<&str>,
+        expected_budgets: IndexBudgets,
+        payload: &[u8],
+        cancellation: &IndexCancellation,
+    ) -> Result<Self, CommitSnapshotPayloadError> {
+        snapshot::decode(
+            repository_root,
+            expected_commit,
+            expected_budgets,
+            payload,
+            cancellation,
+        )
+    }
+
+    /// Cheap process-local reuse for another materialized worktree of the
+    /// same repository and compatible commit.
+    pub fn clone_for_root(&self, repository_root: PathBuf) -> Self {
+        let mut reused = self.clone();
+        reused.repository_root = repository_root;
+        reused
+    }
+
+    /// Applies the final materialized worktree as one deterministic,
+    /// file-owned incremental overlay over this commit index.
+    pub fn compose_worktree(
+        self,
+        options: IndexOptions,
+    ) -> Result<LayeredIndexReport, WorkspaceIndexError> {
+        let started = Instant::now();
+        let scan = scan_repository_sources_with_options(&self.repository_root, &options)?;
+        let provider_inputs = scan.provider_inputs.clone();
+        let project_model = scan.project_model.clone();
+        let report = self
+            .syntax_index
+            .reconcile_sources_with_cancellation(scan, &options.cancellation)?;
+        let graph = report.graph.unwrap_or_else(|| self.graph.clone());
+        let syntax_index = report
+            .next_index
+            .unwrap_or_else(|| self.syntax_index.clone());
+        let metrics =
+            metrics_from_reconciled_index(&syntax_index, &graph, report.indexing, started);
+        let effective = IndexReport {
+            repository_root: self.repository_root.clone(),
+            graph,
+            metrics,
+            syntax_index,
+            provider_inputs,
+            project_model,
+        };
+        Ok(LayeredIndexReport {
+            commit: self,
+            effective,
+        })
+    }
+}
+
+fn metrics_from_reconciled_index(
+    syntax_index: &WorkspaceSyntaxIndex,
+    graph: &SymbolGraph,
+    indexing: IndexingStatus,
+    started: Instant,
+) -> IndexMetrics {
+    let language_files = |language: Language| {
+        syntax_index
+            .adapters
+            .iter()
+            .find(|state| state.adapter.language() == language)
+            .map_or(0, |state| state.adapter.fact_counts().files)
+    };
+    let framework = syntax_index.adapters.iter().fold(
+        AdapterFrameworkMetrics::default(),
+        |mut combined, state| {
+            combined.detected |= state.framework.detected;
+            combined.symbols = combined.symbols.saturating_add(state.framework.symbols);
+            combined.edges = combined.edges.saturating_add(state.framework.edges);
+            combined.truncated_files = combined
+                .truncated_files
+                .saturating_add(state.framework.truncated_files);
+            combined
+        },
+    );
+    IndexMetrics {
+        discovered_files: indexing.coverage.discovered_files,
+        parsed_files: indexing.coverage.parsed_files,
+        syntax_error_files: indexing.coverage.syntax_error_files,
+        truncated_call_sites: indexing.coverage.omitted_call_sites,
+        symbols: graph.symbol_count(),
+        edges: graph.edge_count(),
+        call_sites: graph.call_site_count(),
+        ambiguous_call_sites: graph.ambiguous_call_site_count(),
+        unresolved_call_sites: graph.unresolved_call_site_count(),
+        rust_files: language_files(Language::Rust),
+        php_files: language_files(Language::Php),
+        typescript_files: language_files(Language::TypeScript),
+        python_files: language_files(Language::Python),
+        javascript_files: language_files(Language::JavaScript),
+        java_files: language_files(Language::Java),
+        csharp_files: language_files(Language::CSharp),
+        shell_files: language_files(Language::Shell),
+        cpp_files: language_files(Language::Cpp),
+        hcl_files: language_files(Language::Hcl),
+        go_files: language_files(Language::Go),
+        laravel_detected: framework.detected,
+        framework_symbols: framework.symbols,
+        framework_edges: framework.edges,
+        framework_truncated_files: framework.truncated_files,
+        elapsed: started.elapsed(),
+        indexing,
+    }
+}
+
+fn index_workspace_source_scan_with_options(
+    repository_root: &Path,
+    mut scan: WorkspaceSourceScan,
+    options: IndexOptions,
+) -> Result<IndexReport, WorkspaceIndexError> {
     let started = Instant::now();
     let budgets = options.budgets.validate()?;
     let worker_policy = WorkerPolicy::from_budgets(budgets);
     check_cancelled(&options.cancellation)?;
-    let operation = OperationContext::from_cancellation(options.cancellation.clone());
-    let repository_root = chakra_git::resolve_repository_root_with_context(root, &operation)?;
+    let repository_root = repository_root.to_path_buf();
     let mut rss_peak = process_rss_bytes();
-    let mut scan = scan_repository_sources_with_options(&repository_root, &options)?;
     rss_peak = max_option(rss_peak, process_rss_bytes());
 
     let prototypes = default_adapters();
@@ -759,6 +1027,10 @@ pub fn index_repository_with_options(
     for (adapter, limits) in prototypes.iter().zip(limits.iter().copied()) {
         let language = adapter.language();
         let sources = scan.sources.take(language);
+        let dependencies = DependencyEvidence {
+            framework_detected: (language == Language::Php)
+                .then(|| chakra_language_php::laravel_detected_from_model(&scan.project_model)),
+        };
         builds.push(
             adapter
                 .cold_build(
@@ -766,7 +1038,7 @@ pub fn index_repository_with_options(
                     limits,
                     worker_policy.effective_worker_limit as usize,
                     PARALLEL_PARSE_FILE_THRESHOLD as usize,
-                    &repository_root,
+                    dependencies,
                     &options.cancellation,
                 )
                 .map_err(|source| WorkspaceIndexError::Adapter {
@@ -907,7 +1179,12 @@ pub fn index_repository_with_options(
         adapters: built_adapters
             .into_iter()
             .zip(limits.iter().copied())
-            .map(|(adapter, limits)| WorkspaceAdapterState { adapter, limits })
+            .zip(built_metrics.iter().map(|metrics| metrics.framework))
+            .map(|((adapter, limits), framework)| WorkspaceAdapterState {
+                adapter,
+                limits,
+                framework,
+            })
             .collect(),
         budgets,
         indexing: indexing.clone(),
@@ -1106,6 +1383,47 @@ mod tests {
         assert!(!report.metrics.indexing.is_degraded());
         assert_eq!(report.metrics.indexing.scheduling.peak_active_workers, 1);
         assert_eq!(report.metrics.indexing.scheduling.parallel_parse_files, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn layered_composition_preserves_live_framework_metrics() -> Result<(), Box<dyn Error>> {
+        let repository = repository()?;
+        fs::create_dir(repository.path().join("routes"))?;
+        fs::write(
+            repository.path().join("composer.json"),
+            r#"{"require":{"laravel/framework":"^12.0"}}"#,
+        )?;
+        fs::write(
+            repository.path().join("routes/web.php"),
+            "<?php\nuse Illuminate\\Support\\Facades\\Route;\nfinal class Controller { public function __invoke(): void {} }\nRoute::get('/health', Controller::class);\n",
+        )?;
+        let add = Command::new("git")
+            .current_dir(repository.path())
+            .args(["add", "composer.json", "routes/web.php"])
+            .status()?;
+        assert!(add.success());
+        let commit = Command::new("git")
+            .current_dir(repository.path())
+            .args([
+                "-c",
+                "user.name=Chakra Test",
+                "-c",
+                "user.email=chakra@example.invalid",
+                "commit",
+                "--quiet",
+                "-m",
+                "fixture",
+            ])
+            .status()?;
+        assert!(commit.success());
+
+        let commit = index_head_commit_with_options(repository.path(), IndexOptions::default())?;
+        assert!(commit.syntax_index.project_model().units.is_empty());
+        let layered = commit.compose_worktree(IndexOptions::default())?;
+
+        assert!(layered.effective.metrics.laravel_detected);
+        assert!(layered.effective.metrics.framework_symbols > 0);
         Ok(())
     }
 

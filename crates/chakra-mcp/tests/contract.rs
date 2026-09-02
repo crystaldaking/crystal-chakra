@@ -36,7 +36,7 @@ use tempfile::TempDir;
 struct StubService;
 
 impl StubService {
-    fn identity() -> Result<WorkspaceIdentity, Box<dyn Error>> {
+    fn identity() -> Result<WorkspaceIdentity, Box<dyn Error + Send + Sync>> {
         Ok(WorkspaceIdentity::for_primary_worktree(
             std::path::Path::new("."),
         )?)
@@ -84,7 +84,7 @@ impl QueryService for StubService {
                 },
                 syntax_diagnostics: Default::default(),
                 index_diagnostics: Some(IndexingDiagnostics {
-                    cache: CacheHealth::Disabled {
+                    syntax_fact_cache: CacheHealth::Disabled {
                         reason: SYNTAX_FACT_CACHE_DISABLED_REASON.to_owned(),
                     },
                     counters: Default::default(),
@@ -196,7 +196,8 @@ async fn status_tool_is_listed_and_callable() -> Result<(), Box<dyn Error + Send
             "repo_map",
             "search",
             "status",
-            "symbol_search"
+            "symbol_search",
+            "workspaces"
         ]
     );
     let status_tool = tools
@@ -213,6 +214,11 @@ async fn status_tool_is_listed_and_callable() -> Result<(), Box<dyn Error + Send
     assert!(status_output_schema.to_string().contains("truncation"));
     assert!(status_output_schema.to_string().contains("providers"));
     assert!(tools.iter().all(|tool| tool.output_schema.is_some()));
+    let workspaces_tool = tools
+        .iter()
+        .find(|tool| tool.name == "workspaces")
+        .ok_or("workspaces tool not listed")?;
+    assert!(workspaces_tool.description.is_some());
     for name in [
         "repo_map",
         "symbol_search",
@@ -261,6 +267,10 @@ async fn status_tool_is_listed_and_callable() -> Result<(), Box<dyn Error + Send
         0
     );
     assert_eq!(structured["provider_state"], "not_configured");
+    assert_eq!(
+        structured["layers"]["commit_snapshot"]["reuse"]["origin"],
+        "cold_build"
+    );
     assert_eq!(structured["indexing"]["budgets"]["max_files"], 100_000);
     assert!(structured["indexing"]["coverage"].is_object());
     assert!(structured["indexing"]["capabilities"].is_array());
@@ -270,9 +280,10 @@ async fn status_tool_is_listed_and_callable() -> Result<(), Box<dyn Error + Send
     assert_eq!(structured["data"]["query_execution"]["running"], 0);
     // Live indexing diagnostics serialize as typed domain data (issue #43).
     assert_eq!(
-        structured["data"]["index_diagnostics"]["cache"]["state"],
+        structured["data"]["index_diagnostics"]["syntax_fact_cache"]["state"],
         "disabled"
     );
+    assert!(structured["data"]["index_diagnostics"]["cache"].is_null());
     assert_eq!(
         structured["data"]["index_diagnostics"]["recent_file_invalidations"][0]["reason"],
         "content_changed"
@@ -284,6 +295,19 @@ async fn status_tool_is_listed_and_callable() -> Result<(), Box<dyn Error + Send
     assert_eq!(
         structured["data"]["syntax_diagnostics"]["total_diagnostics"],
         0
+    );
+
+    let result = client
+        .call_tool(CallToolRequestParams::new("workspaces"))
+        .await?;
+    assert_eq!(result.is_error, Some(false));
+    let structured = result
+        .structured_content
+        .ok_or("workspaces must return structured content")?;
+    assert_eq!(structured["workspaces"].as_array().map(Vec::len), Some(1));
+    assert_eq!(
+        structured["workspaces"][0]["workspace"],
+        StubService::identity()?.workspace.as_str()
     );
 
     client.cancel().await?;

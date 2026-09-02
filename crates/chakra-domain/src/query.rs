@@ -6,9 +6,12 @@
 //! `docs/roadmap/v0.1.md` §3. Optional adapters fail with typed errors rather
 //! than returning placeholder data.
 
+use std::sync::Arc;
+
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use crate::composition::SourceLayer;
 use crate::diagnostic::{DiagnosticTruncationCause, SyntaxDiagnostic};
 use crate::envelope::QueryEnvelope;
 use crate::identity::{WorkspaceId, WorkspaceIdentity};
@@ -65,6 +68,7 @@ pub struct SymbolView {
     pub signature: Option<String>,
     pub provenance: Provenance,
     pub precision: Precision,
+    pub source_layer: SourceLayer,
     pub source_role: SourceRole,
     pub source_classification: SourceClassification,
     pub package: Option<SourcePackage>,
@@ -87,6 +91,7 @@ impl SymbolView {
             signature: symbol.signature.clone(),
             provenance: symbol.provenance,
             precision: symbol.precision,
+            source_layer: SourceLayer::CommitSnapshot,
             source_role: metadata.role,
             source_classification: metadata.classification,
             package: metadata.package.clone(),
@@ -282,8 +287,19 @@ pub struct ProviderQueueLatencyByPriority {
 /// Provider-pool lifecycle and admission counters. Reservations are
 /// deterministic configuration bounds, not process RSS measurements.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct WorkspaceProviderOrchestrationMetrics {
+    pub active_providers: u64,
+    pub max_active_providers: u64,
+    pub reserved_memory_bytes: u64,
+    pub max_reserved_memory_bytes: u64,
+}
+
+/// Process-global provider-pool counters plus the selected worktree's local
+/// resource envelope when observed through a workspace-bound provider.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ProviderOrchestrationMetrics {
     pub configured_providers: u64,
+    pub configured_workspaces: u64,
     pub active_providers: u64,
     pub max_active_providers: u64,
     pub reserved_memory_bytes: u64,
@@ -304,6 +320,8 @@ pub struct ProviderOrchestrationMetrics {
     /// Admission queue wait per self-describing provider priority (issue #44).
     #[serde(default)]
     pub queue_latency_by_priority: ProviderQueueLatencyByPriority,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<WorkspaceProviderOrchestrationMetrics>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -372,8 +390,9 @@ pub struct StatusData {
     pub workspace: WorkspaceIdentity,
     pub counts: IndexCounts,
     pub providers: Vec<ProviderInfo>,
-    /// Workspace-global provider-pool lifecycle/admission counters, reported
-    /// once for the whole pool instead of repeated per provider (issue #61).
+    /// Process-global provider-pool lifecycle/admission counters plus the
+    /// selected worktree's local resource envelope, reported once instead of
+    /// repeated per provider (issues #47 and #61).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_pool: Option<ProviderOrchestrationMetrics>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -428,6 +447,7 @@ pub struct FileSummary {
     pub symbol_count: u64,
     pub provenance: Provenance,
     pub precision: Precision,
+    pub source_layer: SourceLayer,
     pub source_role: SourceRole,
     pub source_classification: SourceClassification,
     pub package: Option<SourcePackage>,
@@ -579,6 +599,7 @@ pub struct TextMatch {
     pub line_truncated: bool,
     pub provenance: Provenance,
     pub precision: Precision,
+    pub source_layer: SourceLayer,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -661,6 +682,7 @@ pub struct SourceSnippet {
     pub truncated: bool,
     pub provenance: Provenance,
     pub precision: Precision,
+    pub source_layer: SourceLayer,
 }
 
 /// Bounded, provenance-tagged context around one symbol (SPEC §25).
@@ -881,6 +903,12 @@ pub enum QueryError {
     ExecutionDeadlineExceeded,
     #[error("query response construction failed: {0}")]
     ResponseConstruction(String),
+    #[error("no workspaces are registered")]
+    NoWorkspacesRegistered,
+    #[error("workspace is not registered: {0}")]
+    WorkspaceNotFound(WorkspaceId),
+    #[error("multiple workspaces are registered; specify workspace_id (available: {available:?})")]
+    WorkspaceSelectionRequired { available: Vec<WorkspaceId> },
 }
 
 impl From<OperationAbort> for QueryError {
@@ -968,6 +996,23 @@ pub trait QueryService: Send + Sync {
     ) -> Result<QueryEnvelope<DiffContextData>, QueryError>;
 }
 
+/// Process-local catalog used by adapters to select one independently owned
+/// materialized worktree before invoking the ordinary single-workspace query
+/// contract. Routing never combines revisions or graphs.
+pub trait WorkspaceQueryRouter: Send + Sync {
+    fn workspaces(&self) -> Result<Vec<WorkspaceIdentity>, QueryError>;
+
+    /// Resolves an explicit workspace, or the sole registered workspace when
+    /// `requested` is absent. An omitted selector is rejected once several
+    /// worktrees are ready so routing can never depend on registration order.
+    fn route(&self, requested: Option<&WorkspaceId>) -> Result<Arc<dyn QueryService>, QueryError>;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct WorkspaceCatalogData {
+    pub workspaces: Vec<WorkspaceIdentity>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1016,6 +1061,42 @@ mod tests {
         assert_eq!(json["interactive"]["samples"], 1);
         assert!(json.get("normal").is_some());
         assert!(json.get("background").is_some());
+        Ok(())
+    }
+
+    #[test]
+    fn provider_pool_metrics_serialize_global_and_workspace_envelopes()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let metrics = ProviderOrchestrationMetrics {
+            configured_providers: 2,
+            configured_workspaces: 3,
+            active_providers: 2,
+            max_active_providers: 4,
+            reserved_memory_bytes: 20,
+            max_reserved_memory_bytes: 40,
+            workspace: Some(WorkspaceProviderOrchestrationMetrics {
+                active_providers: 1,
+                max_active_providers: 2,
+                reserved_memory_bytes: 10,
+                max_reserved_memory_bytes: 20,
+            }),
+            ..ProviderOrchestrationMetrics::default()
+        };
+
+        let json = serde_json::to_value(metrics)?;
+        assert_eq!(json["configured_providers"], 2);
+        assert_eq!(json["configured_workspaces"], 3);
+        assert_eq!(json["active_providers"], 2);
+        assert_eq!(json["max_active_providers"], 4);
+        assert_eq!(json["reserved_memory_bytes"], 20);
+        assert_eq!(json["max_reserved_memory_bytes"], 40);
+        assert_eq!(json["workspace"]["active_providers"], 1);
+        assert_eq!(json["workspace"]["max_active_providers"], 2);
+        assert_eq!(json["workspace"]["reserved_memory_bytes"], 10);
+        assert_eq!(json["workspace"]["max_reserved_memory_bytes"], 20);
+
+        let without_workspace = serde_json::to_value(ProviderOrchestrationMetrics::default())?;
+        assert!(without_workspace.get("workspace").is_none());
         Ok(())
     }
 

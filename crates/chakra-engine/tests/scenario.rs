@@ -318,7 +318,7 @@ impl FreshnessBarrier for FixedDiagnosticsBarrier {
 
 fn fixed_diagnostics() -> Result<IndexingDiagnostics, Box<dyn Error>> {
     Ok(IndexingDiagnostics {
-        cache: CacheHealth::Disabled {
+        syntax_fact_cache: CacheHealth::Disabled {
             reason: SYNTAX_FACT_CACHE_DISABLED_REASON.to_owned(),
         },
         counters: ReconciliationCounters {
@@ -370,7 +370,7 @@ fn status_reports_installed_index_diagnostics_and_engine_cold_builds() -> Result
         .index_diagnostics
         .ok_or("installed diagnostics must reach status")?;
     assert_eq!(
-        diagnostics.cache,
+        diagnostics.syntax_fact_cache,
         CacheHealth::Disabled {
             reason: SYNTAX_FACT_CACHE_DISABLED_REASON.to_owned(),
         }

@@ -48,6 +48,7 @@ mod provider;
 mod report;
 mod runner;
 mod scenarios;
+pub mod shared_index;
 
 use std::error::Error;
 use std::fmt;

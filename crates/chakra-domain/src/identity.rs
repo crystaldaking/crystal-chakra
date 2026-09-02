@@ -37,7 +37,7 @@ impl fmt::Display for RepositoryId {
     }
 }
 
-/// Identity of one materialized workspace (v0.1: the single active worktree).
+/// Stable identity of one materialized worktree.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct WorkspaceId(String);
 
@@ -53,8 +53,8 @@ impl fmt::Display for WorkspaceId {
     }
 }
 
-/// Identity of the single registered workspace: repository id plus the
-/// canonical root of the materialized worktree.
+/// Identity of one registered workspace: repository id plus the canonical
+/// root of its materialized worktree.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct WorkspaceIdentity {
     pub repository: RepositoryId,
@@ -93,8 +93,8 @@ impl WorkspaceIdentity {
         })
     }
 
-    /// Identity of the primary (and only, in v0.1) materialized worktree
-    /// rooted at `root` when no Git adapter is available.
+    /// Identity of the primary materialized worktree rooted at `root` when no
+    /// Git adapter is available.
     ///
     /// Production Git workspaces should use the Git adapter's repository
     /// identity and [`WorkspaceIdentity::for_repository`].

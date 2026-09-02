@@ -11,6 +11,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock, RwLock};
 
 use arc_swap::ArcSwap;
+use chakra_domain::composition::WorkspaceGraphLayers;
 use chakra_domain::identity::WorkspaceIdentity;
 use chakra_domain::indexing::{IndexingDiagnostics, IndexingStatus};
 use chakra_domain::location::RepoRelativePath;
@@ -37,6 +38,9 @@ pub struct WorkspaceSnapshot {
     provider_state: ProviderState,
     indexing: Arc<IndexingStatus>,
     graph: Arc<SymbolGraph>,
+    /// Materialization-independent syntax facts for the exact base commit.
+    commit_graph: Arc<SymbolGraph>,
+    layers: Arc<WorkspaceGraphLayers>,
     provider_inputs: Arc<BTreeMap<chakra_domain::location::RepoRelativePath, ProviderInput>>,
     /// Typed Cargo/Composer project scope model published with the same
     /// atomic revision as the graph (issue #41).
@@ -70,6 +74,14 @@ impl WorkspaceSnapshot {
 
     pub fn graph(&self) -> &SymbolGraph {
         self.graph.as_ref()
+    }
+
+    pub fn commit_graph(&self) -> &SymbolGraph {
+        self.commit_graph.as_ref()
+    }
+
+    pub fn layers(&self) -> &WorkspaceGraphLayers {
+        self.layers.as_ref()
     }
 
     /// The typed project scope model of this exact revision (issue #41).
@@ -180,6 +192,8 @@ pub struct UpdateBuilder {
     provider_state: ProviderState,
     indexing: Arc<IndexingStatus>,
     graph: Arc<SymbolGraph>,
+    commit_graph: Arc<SymbolGraph>,
+    layers: Arc<WorkspaceGraphLayers>,
     provider_inputs: Arc<BTreeMap<chakra_domain::location::RepoRelativePath, ProviderInput>>,
     project_model: Arc<ProjectModel>,
 }
@@ -214,6 +228,19 @@ impl UpdateBuilder {
     pub fn replace_graph(&mut self, graph: SymbolGraph) {
         self.freshness = Freshness::Stale;
         self.graph = Arc::new(graph);
+    }
+
+    /// Replaces the immutable commit layer and its composition metadata in
+    /// the same private update as the effective graph.
+    pub fn set_graph_layers(&mut self, commit_graph: SymbolGraph, layers: WorkspaceGraphLayers) {
+        self.commit_graph = Arc::new(commit_graph);
+        self.layers = Arc::new(layers);
+    }
+
+    /// Updates the overlay description while retaining the current commit
+    /// graph allocation.
+    pub fn set_layers(&mut self, layers: WorkspaceGraphLayers) {
+        self.layers = Arc::new(layers);
     }
 
     pub fn set_status(&mut self, status: WorkspaceStatus) {
@@ -286,6 +313,8 @@ impl WorkspaceEngine {
             provider_state: ProviderState::NotConfigured,
             indexing: Arc::new(IndexingStatus::default()),
             graph: Arc::new(SymbolGraph::new()),
+            commit_graph: Arc::new(SymbolGraph::new()),
+            layers: Arc::new(WorkspaceGraphLayers::default()),
             provider_inputs: Arc::new(BTreeMap::new()),
             project_model: Arc::new(ProjectModel::default()),
         };
@@ -440,6 +469,8 @@ impl WorkspaceEngine {
             provider_state: base.provider_state,
             indexing: base.indexing.clone(),
             graph: base.graph.clone(),
+            commit_graph: base.commit_graph.clone(),
+            layers: base.layers.clone(),
             provider_inputs: base.provider_inputs.clone(),
             project_model: base.project_model.clone(),
         }
@@ -466,6 +497,8 @@ impl WorkspaceEngine {
             provider_state: update.provider_state,
             indexing: update.indexing,
             graph: update.graph,
+            commit_graph: update.commit_graph,
+            layers: update.layers,
             provider_inputs: update.provider_inputs,
             project_model: update.project_model,
         });

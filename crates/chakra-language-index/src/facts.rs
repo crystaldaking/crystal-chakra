@@ -8,9 +8,10 @@ use std::sync::Arc;
 use chakra_domain::diagnostic::SyntaxDiagnostic;
 use chakra_domain::location::SourceRange;
 use chakra_domain::symbol::{CallForm, CallTargetKind, EdgeKind, SymbolKey, SymbolKind};
+use serde::{Deserialize, Serialize};
 
 /// One extracted declaration before revision-local entity ids exist.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SymbolDraft {
     pub key: SymbolKey,
     pub location: SourceRange,
@@ -19,7 +20,7 @@ pub struct SymbolDraft {
 }
 
 /// One extracted call expression before revision-local entity ids exist.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CallDraft {
     pub caller: usize,
     pub form: CallForm,
@@ -37,7 +38,7 @@ pub struct CallDraft {
 
 /// One extracted named relation (for example a base-type or trait
 /// relationship) with bounded candidate spellings.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NamedRelationDraft {
     pub from: usize,
     pub candidates: Vec<String>,
@@ -46,7 +47,7 @@ pub struct NamedRelationDraft {
 }
 
 /// All syntax facts extracted from one source file.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ParsedFile {
     pub source: Arc<str>,
     pub module_path: Vec<String>,

@@ -8,7 +8,7 @@
 
 use std::collections::BTreeMap;
 use std::fmt::Debug;
-use std::path::Path;
+use std::io::{self, Cursor, Read, Write};
 use std::sync::Arc;
 
 use chakra_domain::indexing::{IndexCancellation, IndexPhaseMeasurement, IndexPublicationMetrics};
@@ -16,7 +16,8 @@ use chakra_domain::location::RepoRelativePath;
 use chakra_domain::source::SourceMetadata;
 use chakra_domain::symbol::Language;
 use chakra_engine::{GraphBuildLimits, GraphBuildReport, SymbolGraph};
-use tracing::warn;
+use serde::Serialize;
+use serde::de::DeserializeOwned;
 
 use crate::indexer::WorkspaceIndexError;
 
@@ -144,7 +145,7 @@ impl From<chakra_language_csharp::SyntaxFactCounts> for AdapterFactCounts {
 
 /// Framework-enrichment contribution of one adapter build. Zero for adapters
 /// without framework enrichment.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct AdapterFrameworkMetrics {
     pub detected: bool,
     pub symbols: u64,
@@ -311,15 +312,15 @@ pub trait SyntaxLanguageAdapter: Debug + Send + Sync {
     fn clone_box(&self) -> Box<dyn SyntaxLanguageAdapter>;
 
     /// Bounded, worker-scheduled cold build from classified sources.
-    /// `repository_root` lets adapters read optional ecosystem metadata
-    /// (Composer/Laravel detection) during the build.
+    /// Dependency evidence is derived from the same captured source layer;
+    /// adapters never read a mutable worktree behind the owner's back.
     fn cold_build(
         &self,
         sources: LanguageSources,
         graph_limits: GraphBuildLimits,
         worker_limit: usize,
         parallel_file_threshold: usize,
-        repository_root: &Path,
+        dependencies: DependencyEvidence,
         cancellation: &IndexCancellation,
     ) -> Result<AdapterColdBuild, WorkspaceIndexError>;
 
@@ -345,12 +346,179 @@ pub trait SyntaxLanguageAdapter: Debug + Send + Sync {
 
     /// Fact counts backing the workspace indexing status.
     fn fact_counts(&self) -> AdapterFactCounts;
+
+    /// Versioned identity of this adapter's complete persisted state. Bump
+    /// this value whenever parsing, relationship resolution, graph layout,
+    /// or the encoded adapter type changes incompatibly.
+    fn snapshot_version(&self) -> &'static str;
+
+    /// Encodes the complete materialization-independent adapter state,
+    /// including its already materialized graph and incremental facts.
+    fn encode_snapshot(
+        &self,
+        cancellation: &IndexCancellation,
+    ) -> Result<Vec<u8>, WorkspaceIndexError>;
+
+    /// Restores one complete adapter state written by the exact compatible
+    /// [`Self::snapshot_version`]. Callers still validate the resulting
+    /// graph and the enclosing compatibility fingerprint.
+    fn decode_snapshot(
+        &self,
+        payload: &[u8],
+        cancellation: &IndexCancellation,
+    ) -> Result<Box<dyn SyntaxLanguageAdapter>, WorkspaceIndexError>;
 }
 
 impl Clone for Box<dyn SyntaxLanguageAdapter> {
     fn clone(&self) -> Self {
         self.clone_box()
     }
+}
+
+const MAX_SNAPSHOT_BYTES: usize = 512 * 1024 * 1024;
+
+struct CancellationWriter<'a> {
+    bytes: Vec<u8>,
+    cancellation: &'a IndexCancellation,
+    max_bytes: usize,
+}
+
+impl Write for CancellationWriter<'_> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        if self.cancellation.is_cancelled() {
+            return Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled"));
+        }
+        if self.bytes.len().saturating_add(buf.len()) > self.max_bytes {
+            return Err(io::Error::new(
+                io::ErrorKind::FileTooLarge,
+                "snapshot byte bound exceeded",
+            ));
+        }
+        self.bytes.extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+struct CancellationReader<'a> {
+    cursor: Cursor<&'a [u8]>,
+    cancellation: &'a IndexCancellation,
+}
+
+impl Read for CancellationReader<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if self.cancellation.is_cancelled() {
+            return Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled"));
+        }
+        self.cursor.read(buf)
+    }
+}
+
+pub(crate) fn encode_snapshot_value<T: Serialize>(
+    value: &T,
+    cancellation: &IndexCancellation,
+) -> Result<Vec<u8>, WorkspaceIndexError> {
+    encode_snapshot_value_bounded(value, cancellation, MAX_SNAPSHOT_BYTES)
+}
+
+fn encode_snapshot_value_bounded<T: Serialize>(
+    value: &T,
+    cancellation: &IndexCancellation,
+    max_bytes: usize,
+) -> Result<Vec<u8>, WorkspaceIndexError> {
+    let mut writer = CancellationWriter {
+        bytes: Vec::new(),
+        cancellation,
+        max_bytes,
+    };
+    let result = value.serialize(&mut rmp_serde::Serializer::new(&mut writer).with_struct_map());
+    if cancellation.is_cancelled() {
+        return Err(WorkspaceIndexError::Cancelled);
+    }
+    result.map_err(|error| match error {
+        rmp_serde::encode::Error::InvalidValueWrite(error) => {
+            let error: io::Error = error.into();
+            if error.kind() == io::ErrorKind::FileTooLarge {
+                WorkspaceIndexError::SnapshotOversized {
+                    limit: u64::try_from(max_bytes).unwrap_or(u64::MAX),
+                }
+            } else {
+                WorkspaceIndexError::Snapshot(error.to_string())
+            }
+        }
+        error => WorkspaceIndexError::Snapshot(error.to_string()),
+    })?;
+    Ok(writer.bytes)
+}
+
+pub(crate) fn decode_snapshot_value<T: DeserializeOwned>(
+    payload: &[u8],
+    cancellation: &IndexCancellation,
+) -> Result<T, WorkspaceIndexError> {
+    if payload.len() > MAX_SNAPSHOT_BYTES {
+        return Err(WorkspaceIndexError::SnapshotOversized {
+            limit: MAX_SNAPSHOT_BYTES as u64,
+        });
+    }
+    let reader = CancellationReader {
+        cursor: Cursor::new(payload),
+        cancellation,
+    };
+    let mut deserializer = rmp_serde::Deserializer::new(reader);
+    let value = T::deserialize(&mut deserializer);
+    if cancellation.is_cancelled() {
+        return Err(WorkspaceIndexError::Cancelled);
+    }
+    let reader = deserializer.into_inner();
+    let consumed = reader.cursor.position();
+    let value = value.map_err(|error| WorkspaceIndexError::Snapshot(error.to_string()))?;
+    if consumed != payload.len() as u64 {
+        return Err(WorkspaceIndexError::Snapshot(
+            "snapshot payload contains trailing bytes".to_owned(),
+        ));
+    }
+    Ok(value)
+}
+
+fn decode_adapter_snapshot<T>(
+    payload: &[u8],
+    cancellation: &IndexCancellation,
+) -> Result<Box<dyn SyntaxLanguageAdapter>, WorkspaceIndexError>
+where
+    T: DeserializeOwned + SyntaxLanguageAdapter + 'static,
+{
+    let adapter: T = decode_snapshot_value(payload, cancellation)?;
+    adapter
+        .graph()
+        .audit_consistency()
+        .map_err(|error| WorkspaceIndexError::Snapshot(error.to_string()))?;
+    Ok(Box::new(adapter))
+}
+
+macro_rules! snapshot_codec_methods {
+    ($adapter:ty, $version:literal) => {
+        fn snapshot_version(&self) -> &'static str {
+            $version
+        }
+
+        fn encode_snapshot(
+            &self,
+            cancellation: &IndexCancellation,
+        ) -> Result<Vec<u8>, WorkspaceIndexError> {
+            encode_snapshot_value(self, cancellation)
+        }
+
+        fn decode_snapshot(
+            &self,
+            payload: &[u8],
+            cancellation: &IndexCancellation,
+        ) -> Result<Box<dyn SyntaxLanguageAdapter>, WorkspaceIndexError> {
+            decode_adapter_snapshot::<$adapter>(payload, cancellation)
+        }
+    };
 }
 
 /// Fresh registry of every syntax language adapter, in composition order.
@@ -400,7 +568,7 @@ impl SyntaxLanguageAdapter for chakra_language_rust::RustSyntaxIndex {
         graph_limits: GraphBuildLimits,
         worker_limit: usize,
         parallel_file_threshold: usize,
-        _repository_root: &Path,
+        _dependencies: DependencyEvidence,
         cancellation: &IndexCancellation,
     ) -> Result<AdapterColdBuild, WorkspaceIndexError> {
         let (index, graph, metrics) = Self::from_classified_sources_scheduled(
@@ -461,6 +629,8 @@ impl SyntaxLanguageAdapter for chakra_language_rust::RustSyntaxIndex {
     fn fact_counts(&self) -> AdapterFactCounts {
         self.fact_counts().into()
     }
+
+    snapshot_codec_methods!(chakra_language_rust::RustSyntaxIndex, "rust:s1");
 }
 
 impl SyntaxLanguageAdapter for chakra_language_php::PhpSyntaxIndex {
@@ -478,19 +648,10 @@ impl SyntaxLanguageAdapter for chakra_language_php::PhpSyntaxIndex {
         graph_limits: GraphBuildLimits,
         worker_limit: usize,
         parallel_file_threshold: usize,
-        repository_root: &Path,
+        dependencies: DependencyEvidence,
         cancellation: &IndexCancellation,
     ) -> Result<AdapterColdBuild, WorkspaceIndexError> {
-        let laravel_detected = match chakra_language_php::detect_laravel(repository_root) {
-            Ok(detected) => detected,
-            Err(error) => {
-                warn!(
-                    error = %error,
-                    "Laravel enrichment disabled because Composer metadata is unavailable or invalid"
-                );
-                false
-            }
-        };
+        let laravel_detected = dependencies.framework_detected.unwrap_or(false);
         let (index, graph, metrics) = Self::from_classified_sources_scheduled(
             sources.into(),
             graph_limits,
@@ -564,6 +725,8 @@ impl SyntaxLanguageAdapter for chakra_language_php::PhpSyntaxIndex {
     fn fact_counts(&self) -> AdapterFactCounts {
         self.fact_counts().into()
     }
+
+    snapshot_codec_methods!(chakra_language_php::PhpSyntaxIndex, "php:s1");
 }
 
 impl SyntaxLanguageAdapter for chakra_language_typescript::TypeScriptSyntaxIndex {
@@ -581,7 +744,7 @@ impl SyntaxLanguageAdapter for chakra_language_typescript::TypeScriptSyntaxIndex
         graph_limits: GraphBuildLimits,
         worker_limit: usize,
         parallel_file_threshold: usize,
-        _repository_root: &Path,
+        _dependencies: DependencyEvidence,
         cancellation: &IndexCancellation,
     ) -> Result<AdapterColdBuild, WorkspaceIndexError> {
         let (index, graph, metrics) = Self::from_classified_sources_scheduled(
@@ -642,6 +805,11 @@ impl SyntaxLanguageAdapter for chakra_language_typescript::TypeScriptSyntaxIndex
     fn fact_counts(&self) -> AdapterFactCounts {
         self.fact_counts().into()
     }
+
+    snapshot_codec_methods!(
+        chakra_language_typescript::TypeScriptSyntaxIndex,
+        "typescript:s1"
+    );
 }
 
 impl SyntaxLanguageAdapter for chakra_language_python::PythonSyntaxIndex {
@@ -659,7 +827,7 @@ impl SyntaxLanguageAdapter for chakra_language_python::PythonSyntaxIndex {
         graph_limits: GraphBuildLimits,
         worker_limit: usize,
         parallel_file_threshold: usize,
-        _repository_root: &Path,
+        _dependencies: DependencyEvidence,
         cancellation: &IndexCancellation,
     ) -> Result<AdapterColdBuild, WorkspaceIndexError> {
         let (index, graph, metrics) = Self::from_classified_sources_scheduled(
@@ -720,6 +888,8 @@ impl SyntaxLanguageAdapter for chakra_language_python::PythonSyntaxIndex {
     fn fact_counts(&self) -> AdapterFactCounts {
         self.fact_counts().into()
     }
+
+    snapshot_codec_methods!(chakra_language_python::PythonSyntaxIndex, "python:s1");
 }
 
 impl SyntaxLanguageAdapter for chakra_language_javascript::JavaScriptSyntaxIndex {
@@ -737,7 +907,7 @@ impl SyntaxLanguageAdapter for chakra_language_javascript::JavaScriptSyntaxIndex
         graph_limits: GraphBuildLimits,
         worker_limit: usize,
         parallel_file_threshold: usize,
-        _repository_root: &Path,
+        _dependencies: DependencyEvidence,
         cancellation: &IndexCancellation,
     ) -> Result<AdapterColdBuild, WorkspaceIndexError> {
         let (index, graph, metrics) = Self::from_classified_sources_scheduled(
@@ -798,6 +968,11 @@ impl SyntaxLanguageAdapter for chakra_language_javascript::JavaScriptSyntaxIndex
     fn fact_counts(&self) -> AdapterFactCounts {
         self.fact_counts().into()
     }
+
+    snapshot_codec_methods!(
+        chakra_language_javascript::JavaScriptSyntaxIndex,
+        "javascript:s1"
+    );
 }
 
 impl SyntaxLanguageAdapter for chakra_language_java::JavaSyntaxIndex {
@@ -815,7 +990,7 @@ impl SyntaxLanguageAdapter for chakra_language_java::JavaSyntaxIndex {
         graph_limits: GraphBuildLimits,
         worker_limit: usize,
         parallel_file_threshold: usize,
-        _repository_root: &Path,
+        _dependencies: DependencyEvidence,
         cancellation: &IndexCancellation,
     ) -> Result<AdapterColdBuild, WorkspaceIndexError> {
         let (index, graph, metrics) = Self::from_classified_sources_scheduled(
@@ -876,6 +1051,8 @@ impl SyntaxLanguageAdapter for chakra_language_java::JavaSyntaxIndex {
     fn fact_counts(&self) -> AdapterFactCounts {
         self.fact_counts().into()
     }
+
+    snapshot_codec_methods!(chakra_language_java::JavaSyntaxIndex, "java:s1");
 }
 
 impl SyntaxLanguageAdapter for chakra_language_csharp::CSharpSyntaxIndex {
@@ -893,7 +1070,7 @@ impl SyntaxLanguageAdapter for chakra_language_csharp::CSharpSyntaxIndex {
         graph_limits: GraphBuildLimits,
         worker_limit: usize,
         parallel_file_threshold: usize,
-        _repository_root: &Path,
+        _dependencies: DependencyEvidence,
         cancellation: &IndexCancellation,
     ) -> Result<AdapterColdBuild, WorkspaceIndexError> {
         let (index, graph, metrics) = Self::from_classified_sources_scheduled(
@@ -954,6 +1131,8 @@ impl SyntaxLanguageAdapter for chakra_language_csharp::CSharpSyntaxIndex {
     fn fact_counts(&self) -> AdapterFactCounts {
         self.fact_counts().into()
     }
+
+    snapshot_codec_methods!(chakra_language_csharp::CSharpSyntaxIndex, "csharp:s1");
 }
 
 impl SyntaxLanguageAdapter for chakra_language_shell::ShellSyntaxIndex {
@@ -971,7 +1150,7 @@ impl SyntaxLanguageAdapter for chakra_language_shell::ShellSyntaxIndex {
         graph_limits: GraphBuildLimits,
         worker_limit: usize,
         parallel_file_threshold: usize,
-        _repository_root: &Path,
+        _dependencies: DependencyEvidence,
         cancellation: &IndexCancellation,
     ) -> Result<AdapterColdBuild, WorkspaceIndexError> {
         let (index, graph, metrics) = Self::from_classified_sources_scheduled(
@@ -1032,6 +1211,8 @@ impl SyntaxLanguageAdapter for chakra_language_shell::ShellSyntaxIndex {
     fn fact_counts(&self) -> AdapterFactCounts {
         self.fact_counts().into()
     }
+
+    snapshot_codec_methods!(chakra_language_shell::ShellSyntaxIndex, "shell:s1");
 }
 
 impl SyntaxLanguageAdapter for chakra_language_cpp::CppSyntaxIndex {
@@ -1049,7 +1230,7 @@ impl SyntaxLanguageAdapter for chakra_language_cpp::CppSyntaxIndex {
         graph_limits: GraphBuildLimits,
         worker_limit: usize,
         parallel_file_threshold: usize,
-        _repository_root: &Path,
+        _dependencies: DependencyEvidence,
         cancellation: &IndexCancellation,
     ) -> Result<AdapterColdBuild, WorkspaceIndexError> {
         let (index, graph, metrics) = Self::from_classified_sources_scheduled(
@@ -1110,6 +1291,8 @@ impl SyntaxLanguageAdapter for chakra_language_cpp::CppSyntaxIndex {
     fn fact_counts(&self) -> AdapterFactCounts {
         self.fact_counts().into()
     }
+
+    snapshot_codec_methods!(chakra_language_cpp::CppSyntaxIndex, "cpp:s1");
 }
 
 impl SyntaxLanguageAdapter for chakra_language_hcl::HclSyntaxIndex {
@@ -1127,7 +1310,7 @@ impl SyntaxLanguageAdapter for chakra_language_hcl::HclSyntaxIndex {
         graph_limits: GraphBuildLimits,
         worker_limit: usize,
         parallel_file_threshold: usize,
-        _repository_root: &Path,
+        _dependencies: DependencyEvidence,
         cancellation: &IndexCancellation,
     ) -> Result<AdapterColdBuild, WorkspaceIndexError> {
         let (index, graph, metrics) = Self::from_classified_sources_scheduled(
@@ -1188,6 +1371,8 @@ impl SyntaxLanguageAdapter for chakra_language_hcl::HclSyntaxIndex {
     fn fact_counts(&self) -> AdapterFactCounts {
         self.fact_counts().into()
     }
+
+    snapshot_codec_methods!(chakra_language_hcl::HclSyntaxIndex, "hcl:s1");
 }
 
 impl SyntaxLanguageAdapter for chakra_language_go::GoSyntaxIndex {
@@ -1205,7 +1390,7 @@ impl SyntaxLanguageAdapter for chakra_language_go::GoSyntaxIndex {
         graph_limits: GraphBuildLimits,
         worker_limit: usize,
         parallel_file_threshold: usize,
-        _repository_root: &Path,
+        _dependencies: DependencyEvidence,
         cancellation: &IndexCancellation,
     ) -> Result<AdapterColdBuild, WorkspaceIndexError> {
         let (index, graph, metrics) = Self::from_classified_sources_scheduled(
@@ -1266,6 +1451,8 @@ impl SyntaxLanguageAdapter for chakra_language_go::GoSyntaxIndex {
     fn fact_counts(&self) -> AdapterFactCounts {
         self.fact_counts().into()
     }
+
+    snapshot_codec_methods!(chakra_language_go::GoSyntaxIndex, "go:s1");
 }
 
 #[cfg(test)]
@@ -1275,5 +1462,18 @@ mod tests {
     #[test]
     fn adapter_registry_matches_the_domain_language_catalog() {
         assert_eq!(registered_languages(), Language::ALL);
+    }
+
+    #[test]
+    fn bounded_snapshot_writer_preserves_the_oversized_reason() {
+        let outcome = encode_snapshot_value_bounded(
+            &vec!["a value larger than one encoded byte"],
+            &IndexCancellation::default(),
+            1,
+        );
+        assert!(matches!(
+            outcome,
+            Err(WorkspaceIndexError::SnapshotOversized { limit: 1 })
+        ));
     }
 }

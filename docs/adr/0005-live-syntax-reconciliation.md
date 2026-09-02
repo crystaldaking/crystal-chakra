@@ -2,7 +2,7 @@
 
 Status: accepted
 Date: 2026-08-15
-Last reviewed: 2026-08-21
+Last reviewed: 2026-09-02
 
 ## Context
 
@@ -21,17 +21,22 @@ over native filesystem mechanisms:
 
 ## Decision
 
-- Use workspace-managed `notify` 8.2.0 and `recommended_watcher`, selecting
-  the current stable release rather than a release candidate. On macOS,
-  compile the documented `macos_kqueue` backend instead of the default
-  FSEvents backend: repeated `FSEventStreamStart` calls can block indefinitely
-  during watcher registration, while kqueue avoids that API and reports
-  registration errors through the existing typed startup/degradation paths.
-  Watch only the repository root and the existing ancestor directories of
-  indexed source files, non-recursively. This avoids recursive watches inside
-  `.git`, `target`, ignored, and generated trees. The directory set is capped at
-  4,096; exceeding the cap degrades watcher health but does not disable exact
-  freshness reconciliation.
+- Use workspace-managed `notify` 8.2.0, selecting the current stable release
+  rather than a release candidate. Native recommended watchers remain the
+  default off macOS. On macOS use `PollWatcher` with a two-second interval: the
+  FSEvents backend can block indefinitely in `FSEventStreamStart` (issue #65),
+  while notify's kqueue backend re-adds a directory recursively after a
+  link-count event even when the original registration was non-recursive. In
+  dogfooding that retained more than 61,000 descriptors from ignored
+  `target/corpus` files and prevented Git inventory subprocesses from starting
+  (issue #156). Poll only the repository root and the existing ancestor
+  directories of indexed source files, non-recursively. This avoids recursive
+  traversal inside `.git`, `target`, ignored, and generated trees. The
+  directory set is capped at 4,096; exceeding the cap degrades watcher health
+  but does not disable exact freshness reconciliation. The deliberately
+  conservative polling interval keeps idle metadata scanning bounded; a
+  `RequireFresh` query never waits for it and still requests an immediate
+  authoritative barrier.
 - Treat mutation-capable watcher events as wake-up hints. Pure access/open/read
   events are ignored: Linux inotify reports the indexer's own content reads,
   and allowing those events to advance the epoch would make a stable scan
@@ -170,12 +175,13 @@ over native filesystem mechanisms:
 
 ## Consequences
 
-- Production dependency added: `notify` 8.2.0 (CC0-1.0). On macOS Chakra
-  enables its documented kqueue feature (with the target-specific `kqueue`
-  and `mio` dependencies) instead of FSEvents; other supported platforms keep
-  their native adapters. The stable crate declares Rust 1.77 as its minimum,
+- Production dependency added: `notify` 8.2.0 (CC0-1.0). On macOS Chakra uses
+  the crate's portable polling adapter; the `macos_kqueue` compile feature is
+  still required to disable the default FSEvents module, but Chakra never
+  instantiates the kqueue watcher. Other supported platforms keep their native
+  recommended adapters. The stable crate declares Rust 1.77 as its minimum,
   below Chakra's pinned Rust 1.97.1. Compile and transitive cost are accepted
-  for a mature native watcher rather than reimplementing platform APIs.
+  for a mature watcher abstraction rather than reimplementing platform APIs.
 - A warmed no-op fresh barrier performs two shared Git inventory checkpoints
   and two filesystem identity passes but reads zero source bodies. Both
   identity passes cover sources and classification inputs and are required to
@@ -217,9 +223,11 @@ over native filesystem mechanisms:
   source bodies or bytes read.
 - A pure unit test checks both quiet and absolute debounce deadlines using
   synthetic instants.
-- A macOS-only unit test pins `RecommendedWatcher` to kqueue, and the parallel
-  conformance suite exercises repeated owned watcher startup and shutdown
-  without the former FSEvents registration stall (issue #65).
+- macOS-only unit tests pin the workspace watcher to polling and prove that a
+  root-directory change does not recursively retain descriptors for an
+  ignored deep tree. The parallel conformance suite exercises repeated owned
+  watcher startup and shutdown without the former FSEvents registration stall
+  (issues #65 and #156).
 - A deterministic unit regression holds startup behind a cooperative gate,
   reaches the configured deadline, and proves the owned worker is cancelled
   and joined before `StartupTimeout` is returned. macOS CI runs the watcher

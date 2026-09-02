@@ -1,7 +1,7 @@
 [package]
 name = "chakra-language"
 description = "Multi-language syntax index composition and live reconciliation for Chakra"
-version = "0.2.0"
+version = "0.3.0-beta.1"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -9,22 +9,25 @@ repository.workspace = true
 publish = false
 
 [dependencies]
-chakra-domain = { path = "../chakra-domain", version = "0.2.0" }
-chakra-engine = { path = "../chakra-engine", version = "0.2.0" }
-chakra-git = { path = "../chakra-git", version = "0.2.0" }
-chakra-language-java = { path = "../chakra-language-java", version = "0.2.0" }
-chakra-language-csharp = { path = "../chakra-language-csharp", version = "0.2.0" }
-chakra-language-shell = { path = "../chakra-language-shell", version = "0.2.0" }
-chakra-language-cpp = { path = "../chakra-language-cpp", version = "0.2.0" }
-chakra-language-hcl = { path = "../chakra-language-hcl", version = "0.2.0" }
-chakra-language-index = { path = "../chakra-language-index", version = "0.2.0" }
-chakra-language-go = { path = "../chakra-language-go", version = "0.2.0" }
-chakra-language-javascript = { path = "../chakra-language-javascript", version = "0.2.0" }
-chakra-language-php = { path = "../chakra-language-php", version = "0.2.0" }
-chakra-language-python = { path = "../chakra-language-python", version = "0.2.0" }
-chakra-language-rust = { path = "../chakra-language-rust", version = "0.2.0" }
-chakra-language-typescript = { path = "../chakra-language-typescript", version = "0.2.0" }
+chakra-domain = { path = "../chakra-domain", version = "0.3.0-beta.1" }
+chakra-engine = { path = "../chakra-engine", version = "0.3.0-beta.1" }
+chakra-git = { path = "../chakra-git", version = "0.3.0-beta.1" }
+chakra-language-java = { path = "../chakra-language-java", version = "0.3.0-beta.1" }
+chakra-language-csharp = { path = "../chakra-language-csharp", version = "0.3.0-beta.1" }
+chakra-language-shell = { path = "../chakra-language-shell", version = "0.3.0-beta.1" }
+chakra-language-cpp = { path = "../chakra-language-cpp", version = "0.3.0-beta.1" }
+chakra-language-hcl = { path = "../chakra-language-hcl", version = "0.3.0-beta.1" }
+chakra-language-index = { path = "../chakra-language-index", version = "0.3.0-beta.1" }
+chakra-language-go = { path = "../chakra-language-go", version = "0.3.0-beta.1" }
+chakra-language-javascript = { path = "../chakra-language-javascript", version = "0.3.0-beta.1" }
+chakra-language-php = { path = "../chakra-language-php", version = "0.3.0-beta.1" }
+chakra-language-python = { path = "../chakra-language-python", version = "0.3.0-beta.1" }
+chakra-language-rust = { path = "../chakra-language-rust", version = "0.3.0-beta.1" }
+chakra-language-typescript = { path = "../chakra-language-typescript", version = "0.3.0-beta.1" }
+blake3.workspace = true
 notify.workspace = true
+rmp-serde.workspace = true
+serde.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 

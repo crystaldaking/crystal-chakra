@@ -7,11 +7,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use chakra_domain::envelope::QueryEnvelope;
+use chakra_domain::identity::{WorkspaceId, WorkspaceIdentity};
 use chakra_domain::operation::OperationContext;
 use chakra_domain::query::{
     CallersData, CallersRequest, ContextData, ContextRequest, DiffContextData, DiffContextRequest,
     QueryError, QueryExecutionMetrics, QueryService, RepoMapData, RepoMapRequest, SearchData,
     SearchRequest, StatusData, StatusRequest, SymbolSearchData, SymbolSearchRequest,
+    WorkspaceCatalogData, WorkspaceQueryRouter,
 };
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::tool::IntoCallToolResult;
@@ -20,7 +22,7 @@ use rmcp::model::{CallToolResponse, CallToolResult};
 use rmcp::transport::stdio;
 use rmcp::{ErrorData, ServerHandler, ServiceExt, tool, tool_handler, tool_router};
 use schemars::JsonSchema;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::sync::Semaphore;
 
@@ -29,6 +31,34 @@ const MAX_MCP_ENVELOPE_BYTES: usize = 1024 * 1024;
 const QUERY_QUEUE_TIMEOUT: Duration = Duration::from_secs(5);
 const QUERY_EXECUTION_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_ERROR_MESSAGE_CHARS: usize = 1_024;
+
+#[derive(Debug, Default, Deserialize, JsonSchema)]
+struct WorkspaceTargetRequest {
+    /// Required when more than one worktree is registered. Omit for a
+    /// single-worktree service.
+    #[serde(default)]
+    workspace_id: Option<WorkspaceId>,
+}
+
+macro_rules! routed_request {
+    ($name:ident, $request:ty) => {
+        #[derive(Debug, Deserialize, JsonSchema)]
+        struct $name {
+            /// Required when more than one worktree is registered.
+            #[serde(default)]
+            workspace_id: Option<WorkspaceId>,
+            #[serde(flatten)]
+            request: $request,
+        }
+    };
+}
+
+routed_request!(RoutedRepoMapRequest, RepoMapRequest);
+routed_request!(RoutedSearchRequest, SearchRequest);
+routed_request!(RoutedSymbolSearchRequest, SymbolSearchRequest);
+routed_request!(RoutedContextRequest, ContextRequest);
+routed_request!(RoutedCallersRequest, CallersRequest);
+routed_request!(RoutedDiffContextRequest, DiffContextRequest);
 
 #[derive(Debug, Default)]
 struct QueryMetricsState {
@@ -188,12 +218,32 @@ impl Drop for PermitHoldGuard {
 /// MCP server handle. Cloneable so transports can share one query service.
 #[derive(Clone)]
 pub struct ChakraMcpServer {
-    service: Arc<dyn QueryService>,
+    router: Arc<dyn WorkspaceQueryRouter>,
     query_slots: Arc<Semaphore>,
     query_metrics: Arc<QueryMetricsState>,
     queue_timeout: Duration,
     execution_timeout: Duration,
     tool_router: ToolRouter<Self>,
+}
+
+struct SingleWorkspaceRouter {
+    service: Arc<dyn QueryService>,
+}
+
+impl WorkspaceQueryRouter for SingleWorkspaceRouter {
+    fn workspaces(&self) -> Result<Vec<WorkspaceIdentity>, QueryError> {
+        Ok(vec![self.service.status(StatusRequest)?.data.workspace])
+    }
+
+    fn route(&self, requested: Option<&WorkspaceId>) -> Result<Arc<dyn QueryService>, QueryError> {
+        if let Some(requested) = requested {
+            let current = self.service.status(StatusRequest)?.workspace_id;
+            if requested != &current {
+                return Err(QueryError::WorkspaceNotFound(requested.clone()));
+            }
+        }
+        Ok(self.service.clone())
+    }
 }
 
 fn to_error_data(error: QueryError) -> ErrorData {
@@ -205,11 +255,16 @@ fn to_error_data(error: QueryError) -> ErrorData {
         | QueryError::CursorWorkspaceMismatch { .. }
         | QueryError::SymbolNotFound(_)
         | QueryError::AmbiguousSymbol { .. }
-        | QueryError::FreshnessNotMet { .. } => ErrorData::invalid_params(error.to_string(), None),
+        | QueryError::FreshnessNotMet { .. }
+        | QueryError::WorkspaceNotFound(_)
+        | QueryError::WorkspaceSelectionRequired { .. } => {
+            ErrorData::invalid_params(error.to_string(), None)
+        }
         QueryError::Unsupported(_)
         | QueryError::FreshnessUnavailable(_)
         | QueryError::DiffUnavailable(_)
-        | QueryError::ResponseConstruction(_) => ErrorData::internal_error(error.to_string(), None),
+        | QueryError::ResponseConstruction(_)
+        | QueryError::NoWorkspacesRegistered => ErrorData::internal_error(error.to_string(), None),
         QueryError::Cancelled => execution_error("client_cancelled", error.to_string()),
         QueryError::ExecutionDeadlineExceeded => {
             execution_error("execution_deadline", error.to_string())
@@ -333,8 +388,12 @@ where
 #[tool_router]
 impl ChakraMcpServer {
     pub fn new(service: Arc<dyn QueryService>) -> Self {
+        Self::with_workspace_router(Arc::new(SingleWorkspaceRouter { service }))
+    }
+
+    pub fn with_workspace_router(router: Arc<dyn WorkspaceQueryRouter>) -> Self {
         Self {
-            service,
+            router,
             query_slots: Arc::new(Semaphore::new(MAX_CONCURRENT_QUERIES)),
             query_metrics: Arc::new(QueryMetricsState::default()),
             queue_timeout: QUERY_QUEUE_TIMEOUT,
@@ -350,7 +409,7 @@ impl ChakraMcpServer {
         execution_timeout: Duration,
     ) -> Self {
         Self {
-            service,
+            router: Arc::new(SingleWorkspaceRouter { service }),
             query_slots: Arc::new(Semaphore::new(MAX_CONCURRENT_QUERIES)),
             query_metrics: Arc::new(QueryMetricsState::default()),
             queue_timeout,
@@ -361,6 +420,7 @@ impl ChakraMcpServer {
 
     async fn execute_query<T, F>(
         &self,
+        workspace_id: Option<WorkspaceId>,
         query: F,
     ) -> Result<BudgetedJson<QueryEnvelope<T>>, ErrorData>
     where
@@ -369,6 +429,10 @@ impl ChakraMcpServer {
             + Send
             + 'static,
     {
+        let service = self
+            .router
+            .route(workspace_id.as_ref())
+            .map_err(to_error_data)?;
         let operation = OperationContext::with_timeout(self.execution_timeout);
         let mut cancellation =
             ClientCancellationGuard::new(operation.clone(), self.query_metrics.clone());
@@ -404,7 +468,6 @@ impl ChakraMcpServer {
             }
         };
         drop(queued);
-        let service = self.service.clone();
         let metrics = self.query_metrics.clone();
         let blocking_operation = operation.clone();
         let hold = PermitHoldGuard::new(metrics, Instant::now());
@@ -423,8 +486,24 @@ impl ChakraMcpServer {
     }
 
     #[tool(
+        name = "workspaces",
+        description = "List the independently owned materialized Git worktrees available to Chakra",
+        output_schema = rmcp::handler::server::tool::schema_for_output::<WorkspaceCatalogData>(),
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn workspaces(&self) -> Result<BudgetedJson<WorkspaceCatalogData>, ErrorData> {
+        let workspaces = self.router.workspaces().map_err(to_error_data)?;
+        BudgetedJson::new(WorkspaceCatalogData { workspaces })
+    }
+
+    #[tool(
         name = "status",
-        description = "Chakra workspace status: identity, published revision, index counts, provider state, live indexing diagnostics",
+        description = "Chakra worktree status: identity, published revision, index counts, provider state, live indexing diagnostics; pass workspace_id when several worktrees are registered",
         output_schema = rmcp::handler::server::tool::schema_for_output::<QueryEnvelope<StatusData>>(),
         annotations(
             read_only_hint = true,
@@ -433,8 +512,15 @@ impl ChakraMcpServer {
             open_world_hint = false
         )
     )]
-    async fn status(&self) -> Result<BudgetedJson<QueryEnvelope<StatusData>>, ErrorData> {
-        let mut envelope = self.service.status(StatusRequest).map_err(to_error_data)?;
+    async fn status(
+        &self,
+        Parameters(target): Parameters<WorkspaceTargetRequest>,
+    ) -> Result<BudgetedJson<QueryEnvelope<StatusData>>, ErrorData> {
+        let service = self
+            .router
+            .route(target.workspace_id.as_ref())
+            .map_err(to_error_data)?;
+        let mut envelope = service.status(StatusRequest).map_err(to_error_data)?;
         envelope.data.query_execution = Some(self.query_metrics.snapshot());
         BudgetedJson::new(envelope)
     }
@@ -452,10 +538,10 @@ impl ChakraMcpServer {
     )]
     async fn repo_map(
         &self,
-        Parameters(request): Parameters<RepoMapRequest>,
+        Parameters(request): Parameters<RoutedRepoMapRequest>,
     ) -> Result<BudgetedJson<QueryEnvelope<RepoMapData>>, ErrorData> {
-        self.execute_query(move |service, operation| {
-            service.repo_map_with_context(request, operation)
+        self.execute_query(request.workspace_id, move |service, operation| {
+            service.repo_map_with_context(request.request, operation)
         })
         .await
     }
@@ -473,10 +559,10 @@ impl ChakraMcpServer {
     )]
     async fn search(
         &self,
-        Parameters(request): Parameters<SearchRequest>,
+        Parameters(request): Parameters<RoutedSearchRequest>,
     ) -> Result<BudgetedJson<QueryEnvelope<SearchData>>, ErrorData> {
-        self.execute_query(move |service, operation| {
-            service.search_with_context(request, operation)
+        self.execute_query(request.workspace_id, move |service, operation| {
+            service.search_with_context(request.request, operation)
         })
         .await
     }
@@ -494,10 +580,10 @@ impl ChakraMcpServer {
     )]
     async fn symbol_search(
         &self,
-        Parameters(request): Parameters<SymbolSearchRequest>,
+        Parameters(request): Parameters<RoutedSymbolSearchRequest>,
     ) -> Result<BudgetedJson<QueryEnvelope<SymbolSearchData>>, ErrorData> {
-        self.execute_query(move |service, operation| {
-            service.symbol_search_with_context(request, operation)
+        self.execute_query(request.workspace_id, move |service, operation| {
+            service.symbol_search_with_context(request.request, operation)
         })
         .await
     }
@@ -515,10 +601,10 @@ impl ChakraMcpServer {
     )]
     async fn context(
         &self,
-        Parameters(request): Parameters<ContextRequest>,
+        Parameters(request): Parameters<RoutedContextRequest>,
     ) -> Result<BudgetedJson<QueryEnvelope<ContextData>>, ErrorData> {
-        self.execute_query(move |service, operation| {
-            service.context_with_context(request, operation)
+        self.execute_query(request.workspace_id, move |service, operation| {
+            service.context_with_context(request.request, operation)
         })
         .await
     }
@@ -536,10 +622,10 @@ impl ChakraMcpServer {
     )]
     async fn callers(
         &self,
-        Parameters(request): Parameters<CallersRequest>,
+        Parameters(request): Parameters<RoutedCallersRequest>,
     ) -> Result<BudgetedJson<QueryEnvelope<CallersData>>, ErrorData> {
-        self.execute_query(move |service, operation| {
-            service.callers_with_context(request, operation)
+        self.execute_query(request.workspace_id, move |service, operation| {
+            service.callers_with_context(request.request, operation)
         })
         .await
     }
@@ -557,10 +643,10 @@ impl ChakraMcpServer {
     )]
     async fn diff_context(
         &self,
-        Parameters(request): Parameters<DiffContextRequest>,
+        Parameters(request): Parameters<RoutedDiffContextRequest>,
     ) -> Result<BudgetedJson<QueryEnvelope<DiffContextData>>, ErrorData> {
-        self.execute_query(move |service, operation| {
-            service.diff_context_with_context(request, operation)
+        self.execute_query(request.workspace_id, move |service, operation| {
+            service.diff_context_with_context(request.request, operation)
         })
         .await
     }
@@ -568,7 +654,7 @@ impl ChakraMcpServer {
 
 #[tool_handler(
     name = "chakra",
-    instructions = "Chakra multi-language code intelligence: inspect status and repo_map, search indexed source, resolve ambiguous names through symbol_search, request context or callers for one entity, and use diff_context for current worktree or branch-relative changes. Results are bounded and carry language, revision, freshness, provider state and capabilities, provenance, and precision.",
+    instructions = "Chakra multi-language code intelligence: inspect workspaces, status, and repo_map; search indexed source; resolve ambiguous names through symbol_search; request context or callers for one entity; and use diff_context for current worktree or branch-relative changes. When workspaces lists more than one worktree, pass its workspace_id to every workspace query. Results are bounded and carry language, revision, freshness, provider state and capabilities, provenance, and precision.",
     router = self.tool_router
 )]
 impl ServerHandler for ChakraMcpServer {}
@@ -588,6 +674,18 @@ pub enum ServeError {
 /// goes to stderr (configured by the CLI).
 pub async fn serve_stdio(service: Arc<dyn QueryService>) -> Result<(), ServeError> {
     let server = ChakraMcpServer::new(service);
+    serve_server(server).await
+}
+
+/// Serves a multi-worktree router over stdin/stdout until the client
+/// disconnects. Each tool request is resolved to one worktree before it
+/// enters the ordinary query executor.
+pub async fn serve_stdio_router(router: Arc<dyn WorkspaceQueryRouter>) -> Result<(), ServeError> {
+    let server = ChakraMcpServer::with_workspace_router(router);
+    serve_server(server).await
+}
+
+async fn serve_server(server: ChakraMcpServer) -> Result<(), ServeError> {
     let running = server
         .serve(stdio())
         .await
@@ -601,6 +699,7 @@ pub async fn serve_stdio(service: Arc<dyn QueryService>) -> Result<(), ServeErro
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::mpsc;
 
@@ -611,6 +710,38 @@ mod tests {
     use super::*;
 
     static SERIALIZE_CALLS: AtomicUsize = AtomicUsize::new(0);
+
+    struct TestWorkspaceRouter {
+        entries: Vec<(WorkspaceIdentity, Arc<WorkspaceEngine>)>,
+    }
+
+    impl WorkspaceQueryRouter for TestWorkspaceRouter {
+        fn workspaces(&self) -> Result<Vec<WorkspaceIdentity>, QueryError> {
+            Ok(self
+                .entries
+                .iter()
+                .map(|(identity, _)| identity.clone())
+                .collect())
+        }
+
+        fn route(
+            &self,
+            requested: Option<&WorkspaceId>,
+        ) -> Result<Arc<dyn QueryService>, QueryError> {
+            let requested = requested.ok_or_else(|| QueryError::WorkspaceSelectionRequired {
+                available: self
+                    .entries
+                    .iter()
+                    .map(|(identity, _)| identity.workspace.clone())
+                    .collect(),
+            })?;
+            self.entries
+                .iter()
+                .find(|(identity, _)| &identity.workspace == requested)
+                .map(|(_, engine)| engine.clone() as Arc<dyn QueryService>)
+                .ok_or_else(|| QueryError::WorkspaceNotFound(requested.clone()))
+        }
+    }
 
     struct CountedPayload;
 
@@ -632,6 +763,70 @@ mod tests {
         fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
             String::json_schema(generator)
         }
+    }
+
+    #[tokio::test]
+    async fn workspace_catalog_requires_explicit_routing_when_multiple_are_ready()
+    -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let temp = tempfile::tempdir()?;
+        let first_root = temp.path().join("first");
+        let second_root = temp.path().join("second");
+        fs::create_dir_all(&first_root)?;
+        fs::create_dir_all(&second_root)?;
+        let first = WorkspaceIdentity::for_primary_worktree(&first_root)?;
+        let second = WorkspaceIdentity::for_primary_worktree(&second_root)?;
+        let server = ChakraMcpServer::with_workspace_router(Arc::new(TestWorkspaceRouter {
+            entries: vec![
+                (first.clone(), Arc::new(WorkspaceEngine::new(first.clone()))),
+                (
+                    second.clone(),
+                    Arc::new(WorkspaceEngine::new(second.clone())),
+                ),
+            ],
+        }));
+
+        let catalog = server.workspaces().await?;
+        assert_eq!(
+            catalog.value["workspaces"].as_array().map(Vec::len),
+            Some(2)
+        );
+
+        let missing = server
+            .status(Parameters(WorkspaceTargetRequest::default()))
+            .await;
+        let error = match missing {
+            Ok(_) => return Err("unscoped status unexpectedly succeeded".into()),
+            Err(error) => error,
+        };
+        assert!(error.message.contains("specify workspace_id"));
+
+        let selected = server
+            .status(Parameters(WorkspaceTargetRequest {
+                workspace_id: Some(second.workspace.clone()),
+            }))
+            .await?;
+        assert_eq!(
+            selected.value["workspace_id"],
+            serde_json::json!(second.workspace)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn routed_tool_requests_keep_the_existing_flat_json_shape()
+    -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let request: RoutedSearchRequest = serde_json::from_value(serde_json::json!({
+            "workspace_id": "workspace-a",
+            "query": "needle",
+            "limit": 7
+        }))?;
+        assert_eq!(
+            request.workspace_id.map(|id| id.to_string()).as_deref(),
+            Some("workspace-a")
+        );
+        assert_eq!(request.request.query, "needle");
+        assert_eq!(request.request.limit, Some(7));
+        Ok(())
     }
 
     #[test]
@@ -677,7 +872,7 @@ mod tests {
         let task_server = server.clone();
         let task = tokio::spawn(async move {
             task_server
-                .execute_query::<StatusData, _>(move |_, _| {
+                .execute_query::<StatusData, _>(None, move |_, _| {
                     task_called.store(true, Ordering::Release);
                     Err(QueryError::Unsupported("cancelled test query"))
                 })
@@ -706,7 +901,7 @@ mod tests {
         let workspace_id = identity.workspace.clone();
         let server = ChakraMcpServer::new(Arc::new(WorkspaceEngine::new(identity)));
         let result = server
-            .execute_query::<String, _>(move |_, _| {
+            .execute_query::<String, _>(None, move |_, _| {
                 Ok(QueryEnvelope::new(
                     workspace_id,
                     chakra_domain::revision::Revision(1),
@@ -738,7 +933,7 @@ mod tests {
         let first_started = started.clone();
         let first = tokio::spawn(async move {
             first_server
-                .execute_query::<String, _>(move |_, operation| {
+                .execute_query::<String, _>(None, move |_, operation| {
                     first_started.send(1).map_err(|_| QueryError::Cancelled)?;
                     loop {
                         match operation.check() {
@@ -753,7 +948,7 @@ mod tests {
         let second_started = started.clone();
         let second = tokio::spawn(async move {
             second_server
-                .execute_query::<String, _>(move |_, operation| {
+                .execute_query::<String, _>(None, move |_, operation| {
                     second_started.send(2).map_err(|_| QueryError::Cancelled)?;
                     loop {
                         match operation.check() {
@@ -773,7 +968,7 @@ mod tests {
         let third_server = server.clone();
         let third = tokio::spawn(async move {
             third_server
-                .execute_query::<String, _>(move |_, operation| {
+                .execute_query::<String, _>(None, move |_, operation| {
                     operation.check()?;
                     Ok(QueryEnvelope::new(
                         workspace_id,
@@ -840,7 +1035,7 @@ mod tests {
         let called = Arc::new(AtomicBool::new(false));
         let observed = called.clone();
         let queue_error = match queued_server
-            .execute_query::<String, _>(move |_, _| {
+            .execute_query::<String, _>(None, move |_, _| {
                 observed.store(true, Ordering::Release);
                 Err(QueryError::Unsupported("queue deadline test"))
             })
@@ -863,7 +1058,7 @@ mod tests {
             Duration::from_millis(10),
         );
         let execution_error = match deadline_server
-            .execute_query::<String, _>(move |_, operation| {
+            .execute_query::<String, _>(None, move |_, operation| {
                 loop {
                     match operation.check() {
                         Ok(()) => std::thread::park_timeout(Duration::from_millis(1)),
