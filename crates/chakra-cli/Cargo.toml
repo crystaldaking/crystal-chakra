@@ -1,7 +1,7 @@
 [package]
 name = "chakra-cli"
 description = "User-facing chakra CLI and binary entry point"
-version = "0.3.0-beta.1"
+version = "0.3.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -13,21 +13,21 @@ name = "chakra"
 path = "src/main.rs"
 
 [dependencies]
-chakra-domain = { path = "../chakra-domain", version = "0.3.0-beta.1" }
-chakra-engine = { path = "../chakra-engine", version = "0.3.0-beta.1" }
-chakra-language = { path = "../chakra-language", version = "0.3.0-beta.1" }
-chakra-mcp = { path = "../chakra-mcp", version = "0.3.0-beta.1" }
-chakra-provider-csharp-ls = { path = "../chakra-provider-csharp-ls", version = "0.3.0-beta.1" }
-chakra-provider-bash-language-server = { path = "../chakra-provider-bash-language-server", version = "0.3.0-beta.1" }
-chakra-provider-clangd = { path = "../chakra-provider-clangd", version = "0.3.0-beta.1" }
-chakra-provider-jdtls = { path = "../chakra-provider-jdtls", version = "0.3.0-beta.1" }
-chakra-provider-pool = { path = "../chakra-provider-pool", version = "0.3.0-beta.1" }
-chakra-provider-pyright = { path = "../chakra-provider-pyright", version = "0.3.0-beta.1" }
-chakra-provider-rust-analyzer = { path = "../chakra-provider-rust-analyzer", version = "0.3.0-beta.1" }
-chakra-provider-terraform-ls = { path = "../chakra-provider-terraform-ls", version = "0.3.0-beta.1" }
-chakra-provider-gopls = { path = "../chakra-provider-gopls", version = "0.3.0-beta.1" }
-chakra-provider-vtsls = { path = "../chakra-provider-vtsls", version = "0.3.0-beta.1" }
-chakra-workspace = { path = "../chakra-workspace", version = "0.3.0-beta.1" }
+chakra-domain = { path = "../chakra-domain", version = "0.3.0" }
+chakra-engine = { path = "../chakra-engine", version = "0.3.0" }
+chakra-language = { path = "../chakra-language", version = "0.3.0" }
+chakra-mcp = { path = "../chakra-mcp", version = "0.3.0" }
+chakra-provider-csharp-ls = { path = "../chakra-provider-csharp-ls", version = "0.3.0" }
+chakra-provider-bash-language-server = { path = "../chakra-provider-bash-language-server", version = "0.3.0" }
+chakra-provider-clangd = { path = "../chakra-provider-clangd", version = "0.3.0" }
+chakra-provider-jdtls = { path = "../chakra-provider-jdtls", version = "0.3.0" }
+chakra-provider-pool = { path = "../chakra-provider-pool", version = "0.3.0" }
+chakra-provider-pyright = { path = "../chakra-provider-pyright", version = "0.3.0" }
+chakra-provider-rust-analyzer = { path = "../chakra-provider-rust-analyzer", version = "0.3.0" }
+chakra-provider-terraform-ls = { path = "../chakra-provider-terraform-ls", version = "0.3.0" }
+chakra-provider-gopls = { path = "../chakra-provider-gopls", version = "0.3.0" }
+chakra-provider-vtsls = { path = "../chakra-provider-vtsls", version = "0.3.0" }
+chakra-workspace = { path = "../chakra-workspace", version = "0.3.0" }
 clap.workspace = true
 tokio.workspace = true
 tracing.workspace = true

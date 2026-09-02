@@ -436,29 +436,30 @@ fn unborn_repository_id(common_dir: &Path) -> Result<RepositoryId, DiscoveryErro
 
 #[cfg(windows)]
 fn unborn_repository_id(common_dir: &Path) -> Result<RepositoryId, DiscoveryError> {
-    use std::os::windows::fs::MetadataExt;
+    use file_id::{FileId, get_file_id};
 
-    let metadata =
-        std::fs::metadata(common_dir).map_err(|source| DiscoveryError::AdministrativeMetadata {
+    let file_id =
+        get_file_id(common_dir).map_err(|source| DiscoveryError::AdministrativeMetadata {
             path: common_dir.to_path_buf(),
             source,
         })?;
-    let volume =
-        metadata
-            .volume_serial_number()
-            .ok_or_else(|| DiscoveryError::AdministrativeMetadata {
+    let key = match file_id {
+        FileId::HighRes {
+            volume_serial_number,
+            file_id,
+        } => format!("git-unborn:windows:high:{volume_serial_number:x}:{file_id:x}"),
+        FileId::LowRes {
+            volume_serial_number,
+            file_index,
+        } => format!("git-unborn:windows:low:{volume_serial_number:x}:{file_index:x}"),
+        FileId::Inode { .. } => {
+            return Err(DiscoveryError::AdministrativeMetadata {
                 path: common_dir.to_path_buf(),
-                source: io::Error::other("volume serial number is unavailable"),
-            })?;
-    let file = metadata
-        .file_index()
-        .ok_or_else(|| DiscoveryError::AdministrativeMetadata {
-            path: common_dir.to_path_buf(),
-            source: io::Error::other("file index is unavailable"),
-        })?;
-    Ok(RepositoryId::from_stable_key(format!(
-        "git-unborn:windows:{volume:x}:{file:x}"
-    ))?)
+                source: io::Error::other("Windows file identity returned an inode"),
+            });
+        }
+    };
+    Ok(RepositoryId::from_stable_key(key)?)
 }
 
 #[cfg(not(any(unix, windows)))]

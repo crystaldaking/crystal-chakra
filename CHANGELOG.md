@@ -5,10 +5,10 @@ version tags prefixed with `v`.
 
 ## [Unreleased]
 
-## [0.3.0-beta.1] - 2026-09-02
+## [0.3.0] - 2026-09-02
 
-Chakra v0.3.0-beta.1 is the first v0.3 prerelease. It adds isolated
-multi-worktree serving, a process-global bounded provider pool, and atomic
+Chakra v0.3.0 is the first public beta. It adds isolated multi-worktree
+serving, a process-global bounded provider pool, and atomic
 `CommitSnapshot + WorktreeOverlay + WorkspaceEnrichment` composition with
 compatible process-local snapshot reuse. Persistent snapshot restore remains
 opt-in; release benchmarks rejected default restore and prebuilt import.
@@ -24,6 +24,12 @@ opt-in; release benchmarks rejected default restore and prebuilt import.
 
 ### Added
 
+- Stable-tag release automation now builds native archives for x86-64 Linux,
+  Intel and Apple-silicon macOS, and x86-64 Windows before publishing the
+  GitHub Release. Every release includes SHA-256 checksums and GitHub/Sigstore
+  build-provenance attestations; the same workflow has a non-publishing
+  preflight mode for validating all platforms before tagging (issues #170 and
+  #171).
 - A bounded, Git-aware workspace registry now owns an independent syntax
   engine and live watcher for every registered worktree in one repository
   (issues #46 and #152). MCP adds the read-only `workspaces` discovery tool and
@@ -69,6 +75,10 @@ opt-in; release benchmarks rejected default restore and prebuilt import.
 
 ### Fixed
 
+- Unborn repository identity now uses a stable-Rust Windows file-ID adapter
+  instead of nightly-only standard-library metadata methods. Native Windows
+  release builds retain volume-qualified repository identity and verify that
+  identity across an ordinary checkout rename (issue #173).
 - Complete snapshot encoding now preserves a bounded-writer overflow as the
   typed `oversized` rejection instead of flattening it into `corrupt`, keeping
   size limits distinguishable from malformed artifact data (issue #162).
@@ -602,8 +612,8 @@ record every pre-1.0 compatibility break explicitly (ADR-0043).
 - All development after this release follows the Gitflow policy in
   `CONTRIBUTING.md` and `AGENTS.md`.
 
-[Unreleased]: https://github.com/crystaldaking/crystal-chakra/compare/v0.3.0-beta.1...develop
-[0.3.0-beta.1]: https://github.com/crystaldaking/crystal-chakra/compare/v0.2.0...v0.3.0-beta.1
+[Unreleased]: https://github.com/crystaldaking/crystal-chakra/compare/v0.3.0...develop
+[0.3.0]: https://github.com/crystaldaking/crystal-chakra/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/crystaldaking/crystal-chakra/compare/v0.1.3...v0.2.0
 [0.1.3]: https://github.com/crystaldaking/crystal-chakra/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/crystaldaking/crystal-chakra/compare/v0.1.1...v0.1.2

@@ -114,3 +114,19 @@ fn distinct_unborn_local_repositories_do_not_collapse_to_one_identity() -> Resul
     assert!(first_id.as_str().starts_with("git-unborn:"));
     Ok(())
 }
+
+#[test]
+fn unborn_repository_identity_survives_path_move() -> Result<(), Box<dyn Error>> {
+    let parent = TempDir::new()?;
+    let original = parent.path().join("original-unborn");
+    let moved = parent.path().join("moved-unborn");
+    fs::create_dir(&original)?;
+    initialize(&original, false)?;
+
+    let before = resolve_repository_identity(&original)?;
+    fs::rename(&original, &moved)?;
+    let after = resolve_repository_identity(&moved)?;
+
+    assert_eq!(before, after);
+    Ok(())
+}
