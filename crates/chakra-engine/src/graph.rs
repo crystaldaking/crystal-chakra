@@ -6,10 +6,11 @@
 //! partitions. See `docs/adr/0002-in-memory-graph-representation.md`.
 
 use std::cmp::Ordering;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use chakra_domain::composition::SourceLayer;
 use chakra_domain::diagnostic::SyntaxDiagnostic;
 use chakra_domain::location::{RepoRelativePath, SourceRange};
 use chakra_domain::operation::{OperationAbort, OperationContext};
@@ -415,6 +416,9 @@ pub struct SymbolGraph {
     /// Workspace composition is a shallow immutable list of disjoint
     /// language partitions. Owned language graphs keep this `None`.
     parts: Option<Arc<Vec<SymbolGraph>>>,
+    /// File ownership in the commit/overlay composition. This lives on the
+    /// outer composed graph so language indexes remain reusable commit facts.
+    source_layers: Arc<BTreeMap<RepoRelativePath, SourceLayer>>,
     /// Persistent ordered arena. Values are independently shared so updating
     /// a trie path never copies unchanged symbol payloads.
     symbols: RedBlackTreeMapSync<EntityId, Arc<Symbol>>,
@@ -477,6 +481,30 @@ impl<'a> IntoIterator for Symbols<'a> {
 impl SymbolGraph {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Attaches deterministic source-layer ownership without mutating any
+    /// language partition or syntax fact.
+    pub fn with_source_layers(
+        mut self,
+        source_layers: BTreeMap<RepoRelativePath, SourceLayer>,
+    ) -> Self {
+        self.source_layers = Arc::new(source_layers);
+        self
+    }
+
+    pub fn file_source_layer(&self, path: &RepoRelativePath) -> SourceLayer {
+        self.source_layers.get(path).copied().unwrap_or_else(|| {
+            self.parts
+                .as_ref()
+                .and_then(|parts| {
+                    parts
+                        .iter()
+                        .find(|part| part.file_source(path).is_some())
+                        .map(|part| part.file_source_layer(path))
+                })
+                .unwrap_or_default()
+        })
     }
 
     fn ensure_owned(&self) -> Result<(), GraphError> {

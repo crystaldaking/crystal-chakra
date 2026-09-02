@@ -72,5 +72,6 @@ Accepted decisions:
 - ADR-047: workspace-bound lazy file facts
 - ADR-048: bounded multi-worktree registry and query routing
 - ADR-049: worktree-bound instances in a global provider pool
+- ADR-050: commit snapshot and worktree overlay composition
 
 Do not pre-create empty ADRs merely to satisfy a list.

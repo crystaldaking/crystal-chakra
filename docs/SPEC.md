@@ -82,6 +82,12 @@ Examples:
 
 A `CommitSnapshot` must **not** be defined as a precise LSP index of a commit.
 
+The current v0.3 implementation resolves the immutable commit object through
+Git, reads supported regular-file blobs without checking out another
+worktree, and builds only inventory, source, path-classification, Tree-sitter,
+and deterministic syntax-tier facts. It retains that graph separately from
+the effective materialized graph.
+
 ### WorktreeOverlay
 
 Materialized filesystem delta relative to a base commit:
@@ -93,6 +99,11 @@ Materialized filesystem delta relative to a base commit:
 - deleted files;
 - renamed files;
 - syntax/index deltas derived from those changes.
+
+The overlay is file-owned and deterministic. Its public inventory distinguishes
+add, modify, delete, and Git-detected rename; current-file facts also carry an
+exact `commit_snapshot` or `worktree_overlay` source layer. A bounded public
+change list is never used as the sole ownership proof.
 
 ### WorkspaceEnrichment
 
@@ -107,6 +118,9 @@ Examples:
 - lazy precise call hierarchy results.
 
 This layer is workspace-scoped and revision-aware. It is not intrinsically reusable for an arbitrary non-materialized Git commit.
+
+Query envelopes expose an enrichment revision only when the selected
+worktree's provider is ready for the exact observed syntax revision.
 
 ## 4. Canonical state and derived state
 
@@ -327,6 +341,12 @@ CommitSnapshot(commit)
 ```
 
 contains offline/syntax-tier information unless that commit is explicitly materialized and separately enriched.
+
+For an active worktree Chakra atomically publishes the immutable commit graph,
+the deterministic worktree delta, the effective graph, and the current
+worktree-scoped enrichment boundary as one workspace revision. A `HEAD` change
+replaces the commit layer; an ordinary file change retains it and updates only
+the effective overlay contribution.
 
 Precise language-provider enrichment for a historical commit requires materialization, for example a detached temporary worktree. Historical materialization is **not required in v0.1** and should not become default behavior without explicit resource/security/lifecycle design.
 
@@ -609,11 +629,20 @@ Conceptual fields:
 
 ```json
 {
-  "schema_version": 16,
+  "schema_version": 17,
   "workspace_id": "...",
   "revision": 42,
   "freshness": "fresh",
   "status": "ready",
+  "layers": {
+    "commit_snapshot": { "commit": "...", "source_files": 120, "source_bytes": 456789 },
+    "worktree_overlay": {
+      "files": [],
+      "files_truncated": false,
+      "files_omitted": null
+    },
+    "workspace_enrichment": { "workspace_id": "...", "provider_state": "ready", "revision": 42 }
+  },
   "truncated": false,
   "truncation": [],
   "data": {}
@@ -631,6 +660,11 @@ Every query carries the observed revision's bounded indexing coverage,
 capability, degradation, memory, scheduling, and publication summary. Detailed
 per-phase indexing measurements are operator telemetry exposed by `status`
 rather than repeated in every query envelope.
+
+File, text-match, symbol, and declaration-snippet facts carry a `source_layer`
+that distinguishes immutable commit content from the materialized worktree
+overlay. This is separate from fact provenance such as `tree_sitter`, `git`,
+or `rust_analyzer`.
 
 The exact schema is an implementation decision and should be tested as a contract.
 

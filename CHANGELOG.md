@@ -20,6 +20,13 @@ version tags prefixed with `v`.
   and status exposes both the global pool envelope and the selected
   worktree's resource usage. The additive metrics contract advances the query
   envelope schema to version 16.
+- Workspace revisions now implement
+  `CommitSnapshot + WorktreeOverlay + WorkspaceEnrichment`: Chakra builds the
+  immutable base graph directly from Git blobs, incrementally reconciles the
+  materialized checkout, keeps live provider enrichment worktree-bound, and
+  atomically reports commit/delta/enrichment provenance plus per-result source
+  layers (issue #48, ADR-0050). The additive query contract advances the
+  envelope schema to version 17.
 
 ### Fixed
 

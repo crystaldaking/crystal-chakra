@@ -12,16 +12,22 @@ use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use chakra_domain::identity::{RepositoryId, WorkspaceId, WorkspaceIdentity};
-use chakra_domain::query::{QueryError, QueryService, WorkspaceQueryRouter};
+use chakra_domain::operation::OperationContext;
+use chakra_domain::query::{DiffScope, QueryError, QueryService, WorkspaceQueryRouter};
+use chakra_domain::revision::Revision;
 use chakra_domain::state::{Freshness, WorkspaceStatus};
-use chakra_engine::{PublishError, WorkspaceDiffProvider, WorkspaceEngine};
+use chakra_engine::{
+    DiffWorkspace, PublishError, WorkspaceDiffProvider, WorkspaceEngine, source_layers_for_graph,
+    workspace_graph_layers,
+};
 use chakra_language::{
     IndexMetrics, IndexOptions, LiveIndex, LiveIndexError, LiveIndexOptions, WorkspaceIndexError,
-    index_repository_with_options, start_live_index_with_options,
+    index_head_commit_with_options, start_live_index_with_options,
 };
 use thiserror::Error;
 
 const MAX_STALE_PUBLICATION_ATTEMPTS: usize = 3;
+const MAX_LAYER_COMPOSITION_ATTEMPTS: usize = 3;
 
 /// Hard process-local bounds for one repository registry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -108,6 +114,8 @@ pub enum WorkspaceRegistryError {
     Index(#[from] WorkspaceIndexError),
     #[error("failed to install the worktree Git diff adapter")]
     DiffProviderInstall,
+    #[error("failed to compose commit snapshot and worktree overlay: {0}")]
+    LayerComposition(String),
     #[error("failed to publish the initial worktree revision: {0}")]
     InitialPublish(#[source] PublishError),
     #[error(transparent)]
@@ -441,7 +449,53 @@ impl WorkspaceRuntime {
         identity: WorkspaceIdentity,
         options: WorkspaceStartOptions,
     ) -> Result<Self, WorkspaceRegistryError> {
-        let report = index_repository_with_options(&identity.root, options.index)?;
+        let mut last_instability = None;
+        for _ in 0..MAX_LAYER_COMPOSITION_ATTEMPTS {
+            match Self::start_once(identity.clone(), options.clone()) {
+                Ok(runtime) => return Ok(runtime),
+                Err(WorkspaceRegistryError::LayerComposition(message)) => {
+                    last_instability = Some(message);
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        Err(WorkspaceRegistryError::LayerComposition(
+            last_instability
+                .unwrap_or_else(|| "worktree kept changing during startup composition".to_owned()),
+        ))
+    }
+
+    fn start_once(
+        identity: WorkspaceIdentity,
+        options: WorkspaceStartOptions,
+    ) -> Result<Self, WorkspaceRegistryError> {
+        let layered = index_head_commit_with_options(&identity.root, options.index.clone())?
+            .compose_worktree(options.index)?;
+        let mut report = layered.effective;
+        let operation = OperationContext::unbounded();
+        let diff_workspace = DiffWorkspace::from_graph_with_context(
+            identity.root.clone(),
+            Revision::INITIAL,
+            DiffScope::Worktree,
+            &report.graph,
+            &operation,
+        )
+        .map_err(|error| WorkspaceRegistryError::LayerComposition(error.to_string()))?;
+        let diff = chakra_git::GitWorkspaceDiff
+            .diff_with_context(diff_workspace, &operation)
+            .map_err(|error| WorkspaceRegistryError::LayerComposition(error.to_string()))?;
+        if diff.scope.base_commit != layered.commit.commit {
+            return Err(WorkspaceRegistryError::LayerComposition(
+                "HEAD changed while the commit snapshot was being composed".to_owned(),
+            ));
+        }
+        let layers = workspace_graph_layers(
+            layered.commit.source_files,
+            layered.commit.source_bytes,
+            &diff,
+        );
+        let source_layers = source_layers_for_graph(&layered.commit.graph, &report.graph);
+        report.graph = report.graph.with_source_layers(source_layers);
         let engine = Arc::new(WorkspaceEngine::new(identity.clone()));
         let diff_adapter: Arc<dyn WorkspaceDiffProvider> = Arc::new(chakra_git::GitWorkspaceDiff);
         engine
@@ -452,6 +506,7 @@ impl WorkspaceRuntime {
         update.set_provider_inputs(report.provider_inputs.clone());
         update.set_project_model(report.project_model.clone());
         update.replace_graph(report.graph);
+        update.set_graph_layers(layered.commit.graph, layers);
         update.set_indexing(report.metrics.indexing.clone());
         update.set_status(WorkspaceStatus::Indexing);
         // The watcher is not active yet. Its mandatory startup reconciliation

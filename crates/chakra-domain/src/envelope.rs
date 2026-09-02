@@ -5,13 +5,14 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::composition::{EffectiveWorkspaceLayers, WorkspaceGraphLayers};
 use crate::identity::WorkspaceId;
 use crate::indexing::IndexingStatus;
 use crate::revision::Revision;
 use crate::state::{Freshness, ProviderState, WorkspaceStatus};
 
 /// Current envelope schema version.
-pub const SCHEMA_VERSION: u32 = 16;
+pub const SCHEMA_VERSION: u32 = 17;
 
 /// Response section whose contents were cut by a bounded query operation.
 #[derive(
@@ -109,6 +110,8 @@ pub struct QueryEnvelope<T> {
     pub status: WorkspaceStatus,
     /// State of the precise provider relative to `revision` (SPEC §6).
     pub provider_state: ProviderState,
+    /// Exact commit/overlay/enrichment composition observed by this query.
+    pub layers: EffectiveWorkspaceLayers,
     /// Coverage and degradation of the syntax revision observed by this
     /// query. This is revision metadata, not a live mutable counter.
     pub indexing: IndexingStatus,
@@ -132,6 +135,12 @@ impl<T> QueryEnvelope<T> {
         truncation.sort();
         truncation.dedup();
         let truncated = !truncation.is_empty();
+        let layers = EffectiveWorkspaceLayers::from_graph_layers(
+            &WorkspaceGraphLayers::default(),
+            workspace_id.clone(),
+            revision,
+            provider_state,
+        );
         Self {
             schema_version: SCHEMA_VERSION,
             workspace_id,
@@ -139,6 +148,7 @@ impl<T> QueryEnvelope<T> {
             freshness,
             status,
             provider_state,
+            layers,
             indexing: IndexingStatus::default(),
             truncated,
             truncation,
@@ -148,6 +158,11 @@ impl<T> QueryEnvelope<T> {
 
     pub fn with_indexing(mut self, indexing: IndexingStatus) -> Self {
         self.indexing = indexing;
+        self
+    }
+
+    pub fn with_layers(mut self, layers: EffectiveWorkspaceLayers) -> Self {
+        self.layers = layers;
         self
     }
 }
@@ -179,6 +194,11 @@ mod tests {
         assert_eq!(json["freshness"], "fresh");
         assert_eq!(json["status"], "ready");
         assert_eq!(json["provider_state"], "catching_up");
+        assert!(json["layers"]["commit_snapshot"].is_object());
+        assert_eq!(
+            json["layers"]["workspace_enrichment"]["revision"],
+            serde_json::Value::Null
+        );
         assert!(json["indexing"].is_object());
         assert_eq!(json["truncated"], false);
         assert_eq!(json["truncation"], serde_json::json!([]));
@@ -192,8 +212,8 @@ mod tests {
     #[test]
     fn spec_envelope_example_tracks_the_current_schema_version() {
         assert_eq!(
-            SCHEMA_VERSION, 16,
-            "multi-worktree provider metrics must not reuse schema 15"
+            SCHEMA_VERSION, 17,
+            "workspace-layer provenance must not reuse schema 16"
         );
         let spec = include_str!("../../../docs/SPEC.md");
         let expected = format!("\"schema_version\": {SCHEMA_VERSION}");

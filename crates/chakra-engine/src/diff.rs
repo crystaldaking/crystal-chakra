@@ -7,14 +7,21 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use chakra_domain::composition::{
+    CommitSnapshotLayer, OverlayFileChange, SourceLayer, WorkspaceGraphLayers, WorktreeOverlayLayer,
+};
 use chakra_domain::location::RepoRelativePath;
 use chakra_domain::operation::{OperationAbort, OperationContext};
 use chakra_domain::provenance::{Precision, Provenance};
 use chakra_domain::query::{ChangeKind, DiffScope, ResolvedDiffScope};
 use chakra_domain::revision::Revision;
+use std::collections::BTreeMap;
 use thiserror::Error;
 
+use crate::SymbolGraph;
 use crate::WorkspaceSnapshot;
+
+const MAX_PUBLISHED_OVERLAY_FILES: usize = 500;
 
 /// One source document captured in the same atomically published revision
 /// used by the query.
@@ -34,6 +41,26 @@ pub struct DiffWorkspace {
 }
 
 impl DiffWorkspace {
+    pub fn from_graph_with_context(
+        repository_root: PathBuf,
+        revision: Revision,
+        scope: DiffScope,
+        graph: &SymbolGraph,
+        operation: &OperationContext,
+    ) -> Result<Self, OperationAbort> {
+        let documents = graph
+            .snapshot_documents_with_context(operation)?
+            .into_iter()
+            .map(|(path, source)| DiffDocument { path, source })
+            .collect();
+        Ok(Self {
+            repository_root,
+            revision,
+            scope,
+            documents,
+        })
+    }
+
     pub(crate) fn from_snapshot_with_context(
         snapshot: &WorkspaceSnapshot,
         scope: DiffScope,
@@ -52,6 +79,65 @@ impl DiffWorkspace {
             documents,
         })
     }
+}
+
+/// Converts an adapter-verified worktree diff into the layer metadata that is
+/// atomically published beside the effective graph.
+pub fn workspace_graph_layers(
+    source_files: u64,
+    source_bytes: u64,
+    diff: &WorkspaceDiff,
+) -> WorkspaceGraphLayers {
+    let published_files = diff.files.len().min(MAX_PUBLISHED_OVERLAY_FILES);
+    let locally_omitted = diff.files.len().saturating_sub(published_files) as u64;
+    let files_omitted = match diff.truncation {
+        Some(truncation) => truncation
+            .omitted
+            .map(|omitted| locally_omitted.saturating_add(omitted as u64)),
+        None if locally_omitted > 0 => Some(locally_omitted),
+        None => None,
+    };
+    WorkspaceGraphLayers {
+        commit_snapshot: CommitSnapshotLayer {
+            commit: diff.scope.base_commit.clone(),
+            source_files,
+            source_bytes,
+        },
+        worktree_overlay: WorktreeOverlayLayer {
+            files: diff
+                .files
+                .iter()
+                .take(published_files)
+                .map(|change| OverlayFileChange {
+                    path: change.path.clone(),
+                    previous_path: change.previous_path.clone(),
+                    change: change.change,
+                })
+                .collect(),
+            files_truncated: locally_omitted > 0 || diff.truncation.is_some(),
+            files_omitted,
+        },
+    }
+}
+
+/// Exact current-file ownership derived from immutable commit and effective
+/// source contents. Unlike the bounded public overlay inventory, this map
+/// cannot mislabel a fact when the changed-file list is truncated.
+pub fn source_layers_for_graph(
+    commit_graph: &SymbolGraph,
+    effective_graph: &SymbolGraph,
+) -> BTreeMap<RepoRelativePath, SourceLayer> {
+    effective_graph
+        .source_files_iter()
+        .map(|(path, source)| {
+            let layer = if commit_graph.file_source(path) == Some(source) {
+                SourceLayer::CommitSnapshot
+            } else {
+                SourceLayer::WorktreeOverlay
+            };
+            (path.clone(), layer)
+        })
+        .collect()
 }
 
 /// One current file change supplied by the workspace adapter.
@@ -110,4 +196,73 @@ pub trait WorkspaceDiffProvider: std::fmt::Debug + Send + Sync {
         workspace: DiffWorkspace,
         operation: &OperationContext,
     ) -> Result<WorkspaceDiff, WorkspaceDiffError>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chakra_domain::query::DiffScope;
+
+    #[test]
+    fn published_overlay_inventory_is_bounded_and_reports_omissions()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let files = (0..=MAX_PUBLISHED_OVERLAY_FILES)
+            .map(|index| {
+                Ok(WorkspaceFileChange {
+                    path: RepoRelativePath::new(format!("src/file_{index:04}.rs"))?,
+                    previous_path: None,
+                    change: ChangeKind::Modified,
+                    provenance: Provenance::Git,
+                    precision: Precision::Precise,
+                })
+            })
+            .collect::<Result<Vec<_>, Box<dyn std::error::Error>>>()?;
+        let layers = workspace_graph_layers(
+            501,
+            1_024,
+            &WorkspaceDiff {
+                revision: Revision::INITIAL,
+                scope: ResolvedDiffScope {
+                    requested: DiffScope::Worktree,
+                    base_commit: Some("a".repeat(40)),
+                },
+                files,
+                truncation: Some(DiffInventoryTruncation {
+                    limit: MAX_PUBLISHED_OVERLAY_FILES + 1,
+                    omitted: Some(7),
+                }),
+            },
+        );
+
+        assert_eq!(
+            layers.worktree_overlay.files.len(),
+            MAX_PUBLISHED_OVERLAY_FILES
+        );
+        assert_eq!(layers.worktree_overlay.files_omitted, Some(8));
+        assert!(layers.worktree_overlay.files_truncated);
+        Ok(())
+    }
+
+    #[test]
+    fn published_overlay_preserves_unknown_adapter_truncation() {
+        let layers = workspace_graph_layers(
+            0,
+            0,
+            &WorkspaceDiff {
+                revision: Revision::INITIAL,
+                scope: ResolvedDiffScope {
+                    requested: DiffScope::Worktree,
+                    base_commit: None,
+                },
+                files: Vec::new(),
+                truncation: Some(DiffInventoryTruncation {
+                    limit: 0,
+                    omitted: None,
+                }),
+            },
+        );
+
+        assert!(layers.worktree_overlay.files_truncated);
+        assert_eq!(layers.worktree_overlay.files_omitted, None);
+    }
 }

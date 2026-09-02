@@ -8,7 +8,6 @@
 
 use std::collections::BTreeMap;
 use std::fmt::Debug;
-use std::path::Path;
 use std::sync::Arc;
 
 use chakra_domain::indexing::{IndexCancellation, IndexPhaseMeasurement, IndexPublicationMetrics};
@@ -16,7 +15,6 @@ use chakra_domain::location::RepoRelativePath;
 use chakra_domain::source::SourceMetadata;
 use chakra_domain::symbol::Language;
 use chakra_engine::{GraphBuildLimits, GraphBuildReport, SymbolGraph};
-use tracing::warn;
 
 use crate::indexer::WorkspaceIndexError;
 
@@ -311,15 +309,15 @@ pub trait SyntaxLanguageAdapter: Debug + Send + Sync {
     fn clone_box(&self) -> Box<dyn SyntaxLanguageAdapter>;
 
     /// Bounded, worker-scheduled cold build from classified sources.
-    /// `repository_root` lets adapters read optional ecosystem metadata
-    /// (Composer/Laravel detection) during the build.
+    /// Dependency evidence is derived from the same captured source layer;
+    /// adapters never read a mutable worktree behind the owner's back.
     fn cold_build(
         &self,
         sources: LanguageSources,
         graph_limits: GraphBuildLimits,
         worker_limit: usize,
         parallel_file_threshold: usize,
-        repository_root: &Path,
+        dependencies: DependencyEvidence,
         cancellation: &IndexCancellation,
     ) -> Result<AdapterColdBuild, WorkspaceIndexError>;
 
@@ -400,7 +398,7 @@ impl SyntaxLanguageAdapter for chakra_language_rust::RustSyntaxIndex {
         graph_limits: GraphBuildLimits,
         worker_limit: usize,
         parallel_file_threshold: usize,
-        _repository_root: &Path,
+        _dependencies: DependencyEvidence,
         cancellation: &IndexCancellation,
     ) -> Result<AdapterColdBuild, WorkspaceIndexError> {
         let (index, graph, metrics) = Self::from_classified_sources_scheduled(
@@ -478,19 +476,10 @@ impl SyntaxLanguageAdapter for chakra_language_php::PhpSyntaxIndex {
         graph_limits: GraphBuildLimits,
         worker_limit: usize,
         parallel_file_threshold: usize,
-        repository_root: &Path,
+        dependencies: DependencyEvidence,
         cancellation: &IndexCancellation,
     ) -> Result<AdapterColdBuild, WorkspaceIndexError> {
-        let laravel_detected = match chakra_language_php::detect_laravel(repository_root) {
-            Ok(detected) => detected,
-            Err(error) => {
-                warn!(
-                    error = %error,
-                    "Laravel enrichment disabled because Composer metadata is unavailable or invalid"
-                );
-                false
-            }
-        };
+        let laravel_detected = dependencies.framework_detected.unwrap_or(false);
         let (index, graph, metrics) = Self::from_classified_sources_scheduled(
             sources.into(),
             graph_limits,
@@ -581,7 +570,7 @@ impl SyntaxLanguageAdapter for chakra_language_typescript::TypeScriptSyntaxIndex
         graph_limits: GraphBuildLimits,
         worker_limit: usize,
         parallel_file_threshold: usize,
-        _repository_root: &Path,
+        _dependencies: DependencyEvidence,
         cancellation: &IndexCancellation,
     ) -> Result<AdapterColdBuild, WorkspaceIndexError> {
         let (index, graph, metrics) = Self::from_classified_sources_scheduled(
@@ -659,7 +648,7 @@ impl SyntaxLanguageAdapter for chakra_language_python::PythonSyntaxIndex {
         graph_limits: GraphBuildLimits,
         worker_limit: usize,
         parallel_file_threshold: usize,
-        _repository_root: &Path,
+        _dependencies: DependencyEvidence,
         cancellation: &IndexCancellation,
     ) -> Result<AdapterColdBuild, WorkspaceIndexError> {
         let (index, graph, metrics) = Self::from_classified_sources_scheduled(
@@ -737,7 +726,7 @@ impl SyntaxLanguageAdapter for chakra_language_javascript::JavaScriptSyntaxIndex
         graph_limits: GraphBuildLimits,
         worker_limit: usize,
         parallel_file_threshold: usize,
-        _repository_root: &Path,
+        _dependencies: DependencyEvidence,
         cancellation: &IndexCancellation,
     ) -> Result<AdapterColdBuild, WorkspaceIndexError> {
         let (index, graph, metrics) = Self::from_classified_sources_scheduled(
@@ -815,7 +804,7 @@ impl SyntaxLanguageAdapter for chakra_language_java::JavaSyntaxIndex {
         graph_limits: GraphBuildLimits,
         worker_limit: usize,
         parallel_file_threshold: usize,
-        _repository_root: &Path,
+        _dependencies: DependencyEvidence,
         cancellation: &IndexCancellation,
     ) -> Result<AdapterColdBuild, WorkspaceIndexError> {
         let (index, graph, metrics) = Self::from_classified_sources_scheduled(
@@ -893,7 +882,7 @@ impl SyntaxLanguageAdapter for chakra_language_csharp::CSharpSyntaxIndex {
         graph_limits: GraphBuildLimits,
         worker_limit: usize,
         parallel_file_threshold: usize,
-        _repository_root: &Path,
+        _dependencies: DependencyEvidence,
         cancellation: &IndexCancellation,
     ) -> Result<AdapterColdBuild, WorkspaceIndexError> {
         let (index, graph, metrics) = Self::from_classified_sources_scheduled(
@@ -971,7 +960,7 @@ impl SyntaxLanguageAdapter for chakra_language_shell::ShellSyntaxIndex {
         graph_limits: GraphBuildLimits,
         worker_limit: usize,
         parallel_file_threshold: usize,
-        _repository_root: &Path,
+        _dependencies: DependencyEvidence,
         cancellation: &IndexCancellation,
     ) -> Result<AdapterColdBuild, WorkspaceIndexError> {
         let (index, graph, metrics) = Self::from_classified_sources_scheduled(
@@ -1049,7 +1038,7 @@ impl SyntaxLanguageAdapter for chakra_language_cpp::CppSyntaxIndex {
         graph_limits: GraphBuildLimits,
         worker_limit: usize,
         parallel_file_threshold: usize,
-        _repository_root: &Path,
+        _dependencies: DependencyEvidence,
         cancellation: &IndexCancellation,
     ) -> Result<AdapterColdBuild, WorkspaceIndexError> {
         let (index, graph, metrics) = Self::from_classified_sources_scheduled(
@@ -1127,7 +1116,7 @@ impl SyntaxLanguageAdapter for chakra_language_hcl::HclSyntaxIndex {
         graph_limits: GraphBuildLimits,
         worker_limit: usize,
         parallel_file_threshold: usize,
-        _repository_root: &Path,
+        _dependencies: DependencyEvidence,
         cancellation: &IndexCancellation,
     ) -> Result<AdapterColdBuild, WorkspaceIndexError> {
         let (index, graph, metrics) = Self::from_classified_sources_scheduled(
@@ -1205,7 +1194,7 @@ impl SyntaxLanguageAdapter for chakra_language_go::GoSyntaxIndex {
         graph_limits: GraphBuildLimits,
         worker_limit: usize,
         parallel_file_threshold: usize,
-        _repository_root: &Path,
+        _dependencies: DependencyEvidence,
         cancellation: &IndexCancellation,
     ) -> Result<AdapterColdBuild, WorkspaceIndexError> {
         let (index, graph, metrics) = Self::from_classified_sources_scheduled(

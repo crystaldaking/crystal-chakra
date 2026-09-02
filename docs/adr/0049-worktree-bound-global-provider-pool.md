@@ -56,8 +56,9 @@ engine would multiply heavyweight processes and defeat the process limit.
 - A local quota can cause syntax fallback even when unused global capacity
   remains; status identifies both envelopes so that degradation is
   diagnosable.
-- Snapshot and overlay reuse remain separate concerns. Provider enrichment is
-  materialization-dependent and is never stored as an intrinsic commit fact.
+- ADR-0050 composes snapshots and overlays separately from this pool. Provider
+  enrichment remains materialization-dependent and is never stored as an
+  intrinsic commit fact.
 
 ## Validation / follow-up
 

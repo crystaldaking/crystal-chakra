@@ -14,7 +14,7 @@ mod query;
 
 pub use diff::{
     DiffDocument, DiffInventoryTruncation, DiffWorkspace, WorkspaceDiff, WorkspaceDiffError,
-    WorkspaceDiffProvider, WorkspaceFileChange,
+    WorkspaceDiffProvider, WorkspaceFileChange, source_layers_for_graph, workspace_graph_layers,
 };
 pub use engine::{
     BarrierAlreadyInstalled, DiffProviderAlreadyInstalled, FreshnessBarrier, FreshnessBarrierError,

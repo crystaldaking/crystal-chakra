@@ -732,10 +732,13 @@ fn related_from_edges(
 }
 
 fn symbol_view(graph: &SymbolGraph, symbol: &Symbol) -> SymbolView {
-    if let Some(metadata) = graph.file_metadata(&symbol.key.path) {
-        return SymbolView::from_symbol_with_metadata(symbol, metadata);
-    }
-    SymbolView::from(symbol)
+    let mut view = if let Some(metadata) = graph.file_metadata(&symbol.key.path) {
+        SymbolView::from_symbol_with_metadata(symbol, metadata)
+    } else {
+        SymbolView::from(symbol)
+    };
+    view.source_layer = graph.file_source_layer(&symbol.key.path);
+    view
 }
 
 #[derive(Debug)]
@@ -2252,6 +2255,14 @@ fn envelope<T>(
         truncation,
         data,
     )
+    .with_layers(
+        chakra_domain::composition::EffectiveWorkspaceLayers::from_graph_layers(
+            snapshot.layers(),
+            snapshot.identity().workspace.clone(),
+            snapshot.revision(),
+            provider_state,
+        ),
+    )
     .with_indexing(if construction.query == "status" {
         snapshot.indexing().clone()
     } else {
@@ -2383,6 +2394,7 @@ fn source_snippet(
             truncated,
             provenance: symbol.provenance,
             precision: symbol.precision,
+            source_layer: graph.file_source_layer(range.file()),
         }),
         detail,
     )
@@ -2423,6 +2435,7 @@ fn byte_bounded_source(
             truncated: true,
             provenance: source.provenance,
             precision: source.precision,
+            source_layer: source.source_layer,
         };
         let bytes = serialized_len(&candidate)?;
         if bytes <= CONTEXT_SOURCE_BYTES {
@@ -2705,6 +2718,7 @@ impl QueryService for WorkspaceEngine {
         let files = filtered
             .into_iter()
             .map(|(summary, language)| FileSummary {
+                source_layer: snapshot.graph().file_source_layer(&summary.path),
                 path: summary.path,
                 language,
                 symbol_count: summary.symbol_count,
@@ -2855,6 +2869,7 @@ impl QueryService for WorkspaceEngine {
                         line_truncated: omitted.is_some(),
                         provenance: Provenance::TextSearch,
                         precision: Precision::Textual,
+                        source_layer: snapshot.graph().file_source_layer(path),
                     });
                 }
             }

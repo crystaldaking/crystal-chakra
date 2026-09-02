@@ -16,10 +16,11 @@ pub use adapter::{
 };
 pub use chakra_domain::indexing::ReconciliationKind;
 pub use indexer::{
-    DependencyImpactMetrics, IndexMetrics, IndexOptions, IndexReport, ReconcileMetrics,
-    ReconcileReport, WorkspaceIndexError, WorkspaceLanguageSources, WorkspaceSourceScan,
-    WorkspaceSources, WorkspaceSyntaxIndex, index_repository, index_repository_with_options,
-    scan_repository_sources, scan_repository_sources_with_options,
+    CommitIndexReport, DependencyImpactMetrics, IndexMetrics, IndexOptions, IndexReport,
+    LayeredIndexReport, ReconcileMetrics, ReconcileReport, WorkspaceIndexError,
+    WorkspaceLanguageSources, WorkspaceSourceScan, WorkspaceSources, WorkspaceSyntaxIndex,
+    index_commit_with_options, index_head_commit_with_options, index_repository,
+    index_repository_with_options, scan_repository_sources, scan_repository_sources_with_options,
 };
 pub use live::{
     LiveIndex, LiveIndexError, LiveIndexMetrics, LiveIndexOptions, start_live_index,
