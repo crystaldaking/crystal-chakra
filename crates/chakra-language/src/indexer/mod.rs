@@ -2,12 +2,17 @@
 
 mod resources;
 mod scan;
+mod snapshot;
 mod status;
 
 use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+use chakra_domain::composition::{
+    CommitSnapshotOrigin, CommitSnapshotRejection, CommitSnapshotReuse,
+};
+use chakra_domain::identity::RepositoryId;
 use chakra_domain::indexing::{
     IndexBudgetError, IndexBudgets, IndexCancellation, IndexDegradation, IndexMemoryMetrics,
     IndexPhase, IndexPhaseMeasurement, IndexPublicationMetrics, IndexSchedulingMetrics,
@@ -36,6 +41,10 @@ use status::{
 
 pub(crate) use scan::{WorkspaceSourceLoader, scan_discovered_sources_with_options};
 pub use scan::{scan_repository_sources, scan_repository_sources_with_options};
+pub use snapshot::{
+    COMMIT_SNAPSHOT_FORMAT_VERSION, COMMIT_SNAPSHOT_GRAPH_MODEL_VERSION,
+    CommitSnapshotCompatibility, CommitSnapshotPayloadError,
+};
 
 const PARALLEL_PARSE_FILE_THRESHOLD: u64 = 32;
 const INDEX_WORKER_MEMORY_RESERVE_BYTES: u64 = 64 * 1024 * 1024;
@@ -370,13 +379,14 @@ pub struct IndexReport {
 }
 
 /// Materialization-independent syntax index of one exact commit.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct CommitIndexReport {
     pub commit: Option<String>,
     pub graph: SymbolGraph,
     pub indexing: IndexingStatus,
     pub source_files: u64,
     pub source_bytes: u64,
+    pub reuse: CommitSnapshotReuse,
     syntax_index: WorkspaceSyntaxIndex,
     repository_root: PathBuf,
 }
@@ -386,6 +396,19 @@ pub struct CommitIndexReport {
 pub struct LayeredIndexReport {
     pub commit: CommitIndexReport,
     pub effective: IndexReport,
+}
+
+/// Repository-level owner capable of returning a complete compatible commit
+/// index. The live pipeline uses this adapter only when `HEAD` changes; the
+/// ordinary one-file path remains the structurally incremental syntax index.
+pub trait CommitIndexProvider: std::fmt::Debug + Send + Sync {
+    fn commit_index(
+        &self,
+        repository_root: &Path,
+        repository: &RepositoryId,
+        commit: Option<&str>,
+        options: IndexOptions,
+    ) -> Result<CommitIndexReport, WorkspaceIndexError>;
 }
 
 #[derive(Debug, Error)]
@@ -424,6 +447,8 @@ pub enum WorkspaceIndexError {
     Cancelled,
     #[error("workspace syntax index update failed: {0}")]
     Update(String),
+    #[error("commit snapshot codec failed: {0}")]
+    Snapshot(String),
 }
 
 #[derive(Debug, Clone)]
@@ -841,12 +866,57 @@ fn index_git_commit_snapshot(
         indexing: report.metrics.indexing,
         source_files: snapshot.discovered_files,
         source_bytes: snapshot.source_bytes,
+        reuse: CommitSnapshotReuse {
+            origin: CommitSnapshotOrigin::ColdBuild,
+            rejection: Some(CommitSnapshotRejection::CacheDisabled),
+            ..CommitSnapshotReuse::default()
+        },
         syntax_index: report.syntax_index,
         repository_root: report.repository_root,
     })
 }
 
 impl CommitIndexReport {
+    /// Complete compatibility inputs for persisted commit syntax state.
+    pub fn snapshot_compatibility(&self) -> CommitSnapshotCompatibility {
+        snapshot::compatibility(&self.syntax_index)
+    }
+
+    /// Encodes the immutable graph plus every adapter's incremental state.
+    pub fn encode_snapshot(
+        &self,
+        cancellation: &IndexCancellation,
+    ) -> Result<Vec<u8>, CommitSnapshotPayloadError> {
+        snapshot::encode(self, cancellation)
+    }
+
+    /// Restores a complete commit index for `repository_root`. The caller is
+    /// responsible for validating repository identity, commit, and the full
+    /// compatibility key before invoking this decoder.
+    pub fn decode_snapshot(
+        repository_root: PathBuf,
+        expected_commit: Option<&str>,
+        expected_budgets: IndexBudgets,
+        payload: &[u8],
+        cancellation: &IndexCancellation,
+    ) -> Result<Self, CommitSnapshotPayloadError> {
+        snapshot::decode(
+            repository_root,
+            expected_commit,
+            expected_budgets,
+            payload,
+            cancellation,
+        )
+    }
+
+    /// Cheap process-local reuse for another materialized worktree of the
+    /// same repository and compatible commit.
+    pub fn clone_for_root(&self, repository_root: PathBuf) -> Self {
+        let mut reused = self.clone();
+        reused.repository_root = repository_root;
+        reused
+    }
+
     /// Applies the final materialized worktree as one deterministic,
     /// file-owned incremental overlay over this commit index.
     pub fn compose_worktree(

@@ -12,6 +12,7 @@ use chakra_domain::provenance::{Precision, Provenance};
 use chakra_domain::symbol::{
     CallForm, CallTargetKind, Language, MAX_RECEIVER_HINT_CHARS, SymbolKey, SymbolKind,
 };
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tree_sitter::{Node, Parser, Point};
 
@@ -42,7 +43,7 @@ pub(crate) enum ParseError {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct ParsedFile {
     pub source: Arc<str>,
     pub module_path: Vec<String>,
@@ -54,7 +55,7 @@ pub(crate) struct ParsedFile {
     pub diagnostic_count: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct SymbolDraft {
     pub key: SymbolKey,
     pub location: SourceRange,
@@ -62,7 +63,7 @@ pub(crate) struct SymbolDraft {
     pub parent: Option<usize>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct CallDraft {
     pub caller: usize,
     pub form: CallForm,
@@ -82,7 +83,7 @@ struct CallTarget<'tree> {
     location: Node<'tree>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct ImplDraft {
     pub symbol: usize,
     /// Exact syntactic container prefix at the impl site, including inline

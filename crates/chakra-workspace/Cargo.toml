@@ -13,6 +13,9 @@ chakra-domain = { path = "../chakra-domain", version = "0.2.0" }
 chakra-engine = { path = "../chakra-engine", version = "0.2.0" }
 chakra-git = { path = "../chakra-git", version = "0.2.0" }
 chakra-language = { path = "../chakra-language", version = "0.2.0" }
+blake3.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 

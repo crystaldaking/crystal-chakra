@@ -267,6 +267,10 @@ async fn status_tool_is_listed_and_callable() -> Result<(), Box<dyn Error + Send
         0
     );
     assert_eq!(structured["provider_state"], "not_configured");
+    assert_eq!(
+        structured["layers"]["commit_snapshot"]["reuse"]["origin"],
+        "cold_build"
+    );
     assert_eq!(structured["indexing"]["budgets"]["max_files"], 100_000);
     assert!(structured["indexing"]["coverage"].is_object());
     assert!(structured["indexing"]["capabilities"].is_array());

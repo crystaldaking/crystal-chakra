@@ -23,6 +23,7 @@ use chakra_engine::{
     BoundedGraphBuilder, CallSiteInput, ConsistencyError, GraphBuildLimits, GraphBuildReport,
     GraphError, SymbolGraph,
 };
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracing::{info, info_span, warn};
 
@@ -215,7 +216,7 @@ use catalog::{
     strict_call_site_tier,
 };
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PhpSyntaxIndex {
     files: BTreeMap<RepoRelativePath, Arc<ParsedFile>>,
     metadata: BTreeMap<RepoRelativePath, SourceMetadata>,

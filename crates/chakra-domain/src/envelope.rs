@@ -12,7 +12,7 @@ use crate::revision::Revision;
 use crate::state::{Freshness, ProviderState, WorkspaceStatus};
 
 /// Current envelope schema version.
-pub const SCHEMA_VERSION: u32 = 17;
+pub const SCHEMA_VERSION: u32 = 18;
 
 /// Response section whose contents were cut by a bounded query operation.
 #[derive(
@@ -196,6 +196,14 @@ mod tests {
         assert_eq!(json["provider_state"], "catching_up");
         assert!(json["layers"]["commit_snapshot"].is_object());
         assert_eq!(
+            json["layers"]["commit_snapshot"]["reuse"]["origin"],
+            "cold_build"
+        );
+        assert_eq!(
+            json["layers"]["commit_snapshot"]["reuse"]["reused_files"],
+            0
+        );
+        assert_eq!(
             json["layers"]["workspace_enrichment"]["revision"],
             serde_json::Value::Null
         );
@@ -212,7 +220,7 @@ mod tests {
     #[test]
     fn spec_envelope_example_tracks_the_current_schema_version() {
         assert_eq!(
-            SCHEMA_VERSION, 17,
+            SCHEMA_VERSION, 18,
             "workspace-layer provenance must not reuse schema 16"
         );
         let spec = include_str!("../../../docs/SPEC.md");

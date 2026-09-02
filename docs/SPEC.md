@@ -352,21 +352,35 @@ Precise language-provider enrichment for a historical commit requires materializ
 
 If precise enrichment is cached in the future, treat it as an optimization with a richer environment fingerprint, not as intrinsic commit truth.
 
-## 14. Future snapshot compatibility
+## 14. Snapshot compatibility and reuse
 
-If persistent commit snapshots are introduced later, a cache key must account for more than commit SHA. Relevant compatibility inputs can include:
+Reusable commit snapshots are keyed by the complete world that determines
+their materialization-independent facts, never by commit SHA alone. The key
+includes:
 
 - repository identity;
 - commit SHA;
 - Chakra index format version;
 - graph model version;
-- parser/query version;
-- language/provider versions where relevant;
+- parser/adapter versions and the Chakra language-index version;
 - indexing configuration fingerprint.
+
+Provider versions and live environment state are not part of this syntax-only
+key because provider enrichment is never stored in a commit snapshot. A
+future provider cache requires its own richer fingerprint.
+
+Compatible process-local commit state may be structurally shared across
+worktrees. Local disk artifacts must contain the complete incremental adapter
+state and already materialized graph, use checksummed bounded decoding and
+atomic publication, tolerate corruption through deterministic rebuild, and
+apply bounded eviction. Worktree overlays and provider enrichment are always
+rebuilt or retained by their materialized-worktree owner.
 
 SQLite schema version and semantic index format version are distinct concepts.
 
-Cache existence must be justified by benchmarks comparing restoration to deterministic rebuild.
+Enabling persistent restore by default or importing CI-produced artifacts must
+be justified by benchmarks comparing complete restoration and verification to
+deterministic rebuild.
 
 ## 15. Language provider architecture
 
@@ -629,13 +643,25 @@ Conceptual fields:
 
 ```json
 {
-  "schema_version": 17,
+  "schema_version": 18,
   "workspace_id": "...",
   "revision": 42,
   "freshness": "fresh",
   "status": "ready",
   "layers": {
-    "commit_snapshot": { "commit": "...", "source_files": 120, "source_bytes": 456789 },
+    "commit_snapshot": {
+      "commit": "...",
+      "source_files": 120,
+      "source_bytes": 456789,
+      "reuse": {
+        "origin": "memory_reuse",
+        "reused_files": 120,
+        "reused_source_bytes": 456789,
+        "elapsed_micros": 40,
+        "artifact_bytes": null,
+        "rejection": null
+      }
+    },
     "worktree_overlay": {
       "files": [],
       "files_truncated": false,
@@ -993,7 +1019,8 @@ Unless promoted by a later roadmap decision, do not build:
 
 - multi-worktree orchestration;
 - arbitrary historical commit materialization;
-- persistent graph snapshot reuse;
+- persistence of worktree overlays or precise provider enrichment as commit
+  truth;
 - semantic/vector search;
 - cross-repository graph;
 - eager precise whole-repository call graph;

@@ -46,7 +46,7 @@ impl SymbolCatalog {
 /// The key keeps ordinary member-call materialization proportional to the
 /// imported scopes and same-name extension containers, instead of rescanning
 /// every parsed file for every call site.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub(super) struct ExtensionCatalog {
     pub(super) by_name: HashMap<String, HashMap<String, BTreeSet<String>>>,
 }

@@ -21,6 +21,7 @@ use chakra_domain::symbol::{
     MAX_RECEIVER_HINT_CHARS, ReceiverTypeSource, Symbol, SymbolKey, SymbolKind,
 };
 use rpds::{HashTrieMapSync, RedBlackTreeMapSync};
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 /// Revision-local entity ids are partitioned per language through an
@@ -145,7 +146,7 @@ pub struct CallSiteInput {
 }
 
 /// Allocation limits applied while a private language graph is materialized.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GraphBuildLimits {
     pub max_symbols: u64,
     pub max_edges: u64,
@@ -161,7 +162,7 @@ impl GraphBuildLimits {
 }
 
 /// Exact retained/omitted work from bounded graph construction.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GraphBuildReport {
     pub retained_symbols: u64,
     pub omitted_symbols: u64,
@@ -354,7 +355,7 @@ impl BoundedGraphBuilder {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 struct CallLookupKey {
     language: Language,
     target_kind: CallTargetKind,
@@ -375,7 +376,7 @@ pub struct ConsistencyAudit {
     pub elapsed: Duration,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct IndexedFile {
     symbols: Vec<EntityId>,
     /// Immutable source captured in the same published revision as the
@@ -411,7 +412,7 @@ pub struct GraphDiagnosticSummary {
 ///
 /// Mutated only through `add_*` while a snapshot is being built privately;
 /// once published it is immutable behind an `Arc`.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SymbolGraph {
     /// Workspace composition is a shallow immutable list of disjoint
     /// language partitions. Owned language graphs keep this `None`.

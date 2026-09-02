@@ -7,6 +7,8 @@
 //! query continues to pin exactly one atomically published workspace
 //! revision.
 
+mod snapshot_cache;
+
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -22,9 +24,13 @@ use chakra_engine::{
 };
 use chakra_language::{
     IndexMetrics, IndexOptions, LiveIndex, LiveIndexError, LiveIndexOptions, WorkspaceIndexError,
-    index_head_commit_with_options, start_live_index_with_options,
+    start_live_index_with_options_and_commit_provider,
 };
 use thiserror::Error;
+
+pub use snapshot_cache::{
+    CommitSnapshotCache, CommitSnapshotCacheConfig, CommitSnapshotCacheError,
+};
 
 const MAX_STALE_PUBLICATION_ATTEMPTS: usize = 3;
 const MAX_LAYER_COMPOSITION_ATTEMPTS: usize = 3;
@@ -112,6 +118,8 @@ pub enum WorkspaceRegistryError {
     Git(#[from] chakra_git::DiscoveryError),
     #[error(transparent)]
     Index(#[from] WorkspaceIndexError),
+    #[error(transparent)]
+    SnapshotCache(#[from] CommitSnapshotCacheError),
     #[error("failed to install the worktree Git diff adapter")]
     DiffProviderInstall,
     #[error("failed to compose commit snapshot and worktree overlay: {0}")]
@@ -148,13 +156,24 @@ struct RegistryState {
 #[derive(Debug)]
 pub struct WorkspaceRegistry {
     config: WorkspaceRegistryConfig,
+    commit_snapshots: Arc<CommitSnapshotCache>,
     state: Mutex<RegistryState>,
 }
 
 impl WorkspaceRegistry {
     pub fn new(config: WorkspaceRegistryConfig) -> Result<Self, WorkspaceRegistryError> {
+        Self::new_with_snapshot_cache(config, CommitSnapshotCacheConfig::default())
+    }
+
+    /// Creates a registry with explicit process-local/disk snapshot bounds.
+    /// Disk reuse remains opt-in until issue #50's benchmark decision.
+    pub fn new_with_snapshot_cache(
+        config: WorkspaceRegistryConfig,
+        snapshot_cache: CommitSnapshotCacheConfig,
+    ) -> Result<Self, WorkspaceRegistryError> {
         Ok(Self {
             config: config.validate()?,
+            commit_snapshots: Arc::new(CommitSnapshotCache::new(snapshot_cache)?),
             state: Mutex::new(RegistryState::default()),
         })
     }
@@ -173,7 +192,8 @@ impl WorkspaceRegistry {
         let identity = chakra_git::resolve_workspace_identity(root)?;
         self.reserve(identity.clone())?;
 
-        let started = WorkspaceRuntime::start(identity.clone(), options);
+        let started =
+            WorkspaceRuntime::start(identity.clone(), options, self.commit_snapshots.clone());
         match started {
             Ok(runtime) => self.finish_registration(runtime),
             Err(error) => {
@@ -448,10 +468,11 @@ impl WorkspaceRuntime {
     fn start(
         identity: WorkspaceIdentity,
         options: WorkspaceStartOptions,
+        commit_snapshots: Arc<CommitSnapshotCache>,
     ) -> Result<Self, WorkspaceRegistryError> {
         let mut last_instability = None;
         for _ in 0..MAX_LAYER_COMPOSITION_ATTEMPTS {
-            match Self::start_once(identity.clone(), options.clone()) {
+            match Self::start_once(identity.clone(), options.clone(), commit_snapshots.clone()) {
                 Ok(runtime) => return Ok(runtime),
                 Err(WorkspaceRegistryError::LayerComposition(message)) => {
                     last_instability = Some(message);
@@ -468,8 +489,17 @@ impl WorkspaceRuntime {
     fn start_once(
         identity: WorkspaceIdentity,
         options: WorkspaceStartOptions,
+        commit_snapshots: Arc<CommitSnapshotCache>,
     ) -> Result<Self, WorkspaceRegistryError> {
-        let layered = index_head_commit_with_options(&identity.root, options.index.clone())?
+        let operation = OperationContext::from_cancellation(options.index.cancellation.clone());
+        let commit = chakra_git::resolve_head_commit_with_context(&identity.root, &operation)?;
+        let layered = commit_snapshots
+            .load_or_build(
+                &identity.root,
+                &identity.repository,
+                commit.as_deref(),
+                options.index.clone(),
+            )?
             .compose_worktree(options.index)?;
         let mut report = layered.effective;
         let operation = OperationContext::unbounded();
@@ -489,11 +519,12 @@ impl WorkspaceRuntime {
                 "HEAD changed while the commit snapshot was being composed".to_owned(),
             ));
         }
-        let layers = workspace_graph_layers(
+        let mut layers = workspace_graph_layers(
             layered.commit.source_files,
             layered.commit.source_bytes,
             &diff,
         );
+        layers.commit_snapshot.reuse = layered.commit.reuse.clone();
         let source_layers = source_layers_for_graph(&layered.commit.graph, &report.graph);
         report.graph = report.graph.with_source_layers(source_layers);
         let engine = Arc::new(WorkspaceEngine::new(identity.clone()));
@@ -516,11 +547,12 @@ impl WorkspaceRuntime {
             .publish(update)
             .map_err(WorkspaceRegistryError::InitialPublish)?;
 
-        let live = start_live_index_with_options(
+        let live = start_live_index_with_options_and_commit_provider(
             report.repository_root,
             report.syntax_index,
             engine.clone(),
             options.live,
+            Some(commit_snapshots),
         )?;
         Ok(Self {
             identity,

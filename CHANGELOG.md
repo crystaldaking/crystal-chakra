@@ -27,6 +27,16 @@ version tags prefixed with `v`.
   atomically reports commit/delta/enrichment provenance plus per-result source
   layers (issue #48, ADR-0050). The additive query contract advances the
   envelope schema to version 17.
+- Compatible immutable commit indexes are now coalesced and structurally
+  shared across worktrees, including after `HEAD` transitions (issue #49,
+  ADR-0051). An opt-in bounded local artifact store restores the already
+  materialized per-language graphs together with their incremental adapter
+  state, uses a repository/commit/format/model/adapter/config compatibility
+  key, BLAKE3 integrity, atomic directory publication, deterministic fallback,
+  and LRU disk eviction. Status reports reuse benefit and typed rejection;
+  overlays and provider enrichment remain worktree-bound. This additive
+  contract advances the query envelope schema to version 18. Persistent
+  restore stays disabled by default until issue #50's benchmark decision.
 
 ### Fixed
 

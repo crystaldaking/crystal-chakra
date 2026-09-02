@@ -36,6 +36,47 @@ pub enum SourceLayer {
     WorktreeOverlay,
 }
 
+/// How the immutable commit syntax layer was obtained for this workspace.
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum CommitSnapshotOrigin {
+    /// Deterministic Git-object scan and syntax build.
+    #[default]
+    ColdBuild,
+    /// Exact compatible state cloned inside the current process.
+    MemoryReuse,
+    /// Complete compatible state restored from a local atomic artifact.
+    DiskRestore,
+}
+
+/// Why a compatible snapshot could not be reused before a cold build.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum CommitSnapshotRejection {
+    CacheDisabled,
+    NotFound,
+    FormatMismatch,
+    CompatibilityMismatch,
+    Corrupt,
+    Oversized,
+    IoFailure,
+}
+
+/// Observable benefit/fallback record for the commit layer. Counts describe
+/// parsing and graph construction avoided by a successful reuse; precise
+/// provider work is never included.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct CommitSnapshotReuse {
+    pub origin: CommitSnapshotOrigin,
+    pub reused_files: u64,
+    pub reused_source_bytes: u64,
+    pub elapsed_micros: u64,
+    pub artifact_bytes: Option<u64>,
+    pub rejection: Option<CommitSnapshotRejection>,
+}
+
 /// One deterministic file-owned worktree contribution.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct OverlayFileChange {
@@ -54,6 +95,7 @@ pub struct CommitSnapshotLayer {
     pub commit: Option<String>,
     pub source_files: u64,
     pub source_bytes: u64,
+    pub reuse: CommitSnapshotReuse,
 }
 
 /// Materialized delta relative to [`CommitSnapshotLayer::commit`].

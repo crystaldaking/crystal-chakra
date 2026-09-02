@@ -102,6 +102,7 @@ pub fn workspace_graph_layers(
             commit: diff.scope.base_commit.clone(),
             source_files,
             source_bytes,
+            reuse: Default::default(),
         },
         worktree_overlay: WorktreeOverlayLayer {
             files: diff
