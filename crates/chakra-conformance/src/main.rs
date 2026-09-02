@@ -101,6 +101,38 @@ enum Command {
         #[arg(long, hide = true)]
         only: Option<String>,
     },
+    /// Evaluate trusted local and CI-produced complete commit snapshots
+    /// (issue #50). The CI path is a local transport simulation: this command
+    /// never fetches artifacts or enables import in the product.
+    SharedIndexes {
+        /// Corpus languages to include (default: rust and php).
+        #[arg(long)]
+        language: Vec<String>,
+        /// Evaluate only this corpus repository (`owner/repository`).
+        #[arg(long)]
+        repository: Option<String>,
+        /// Skip the small fixture targets.
+        #[arg(long)]
+        no_fixtures: bool,
+        /// Skip the corpus targets.
+        #[arg(long)]
+        no_corpus: bool,
+        /// Artifact directory (default: target/shared-indexes).
+        #[arg(long)]
+        emit: Option<PathBuf>,
+        /// Corpus manifest path (default: docs/support/corpus/manifest.json).
+        #[arg(long)]
+        manifest: Option<PathBuf>,
+        /// Corpus cache root (default: target/corpus).
+        #[arg(long)]
+        cache: Option<PathBuf>,
+        /// Measurement runs per target (default: 2, for spread estimates).
+        #[arg(long, default_value_t = 2)]
+        runs: u32,
+        /// Internal: evaluate exactly one named target (process isolation).
+        #[arg(long, hide = true)]
+        only: Option<String>,
+    },
 }
 
 fn main() -> ExitCode {
@@ -164,6 +196,27 @@ fn execute() -> Check<u64> {
             runs,
             only,
         } => persistence(
+            language,
+            repository,
+            emit,
+            manifest,
+            cache,
+            runs,
+            only,
+            no_fixtures,
+            no_corpus,
+        ),
+        Command::SharedIndexes {
+            language,
+            repository,
+            no_fixtures,
+            no_corpus,
+            emit,
+            manifest,
+            cache,
+            runs,
+            only,
+        } => shared_indexes(
             language,
             repository,
             emit,
@@ -442,6 +495,127 @@ fn persistence(
         let status = child.status()?;
         if !status.success() {
             eprintln!("persistence: evaluation failed for `{}`", target.name);
+            failures += 1;
+        }
+    }
+    Ok(failures)
+}
+
+/// Shared-index subcommand: measures the production complete-snapshot codec
+/// and store for cold rebuild, same-machine disk restore, and a copied
+/// CI-artifact simulation. Each target runs in an isolated child process.
+#[allow(clippy::too_many_arguments)]
+fn shared_indexes(
+    language: Vec<String>,
+    repository: Option<String>,
+    emit: Option<PathBuf>,
+    manifest: Option<PathBuf>,
+    cache: Option<PathBuf>,
+    runs: u32,
+    only: Option<String>,
+    no_fixtures: bool,
+    no_corpus: bool,
+) -> Check<u64> {
+    use chakra_conformance::corpus::workspace_root;
+    use chakra_conformance::persistence::{
+        PersistenceTarget, TargetKind, corpus_targets, fixture_targets,
+    };
+    use chakra_conformance::shared_index::{
+        SharedIndexReport, default_emit_dir, default_spool_dir, evaluate_target, summarize,
+    };
+
+    if cfg!(debug_assertions) {
+        return Err(failure(
+            "shared-index benchmarks require an optimized binary; run `cargo run --release -p chakra-conformance -- shared-indexes ...`",
+        )
+        .into());
+    }
+    let manifest_path = manifest.unwrap_or_else(default_manifest_path);
+    let cache = cache.unwrap_or_else(default_cache_root);
+    let emit = emit.unwrap_or_else(default_emit_dir);
+    let spool = default_spool_dir();
+    std::fs::create_dir_all(&emit)?;
+    std::fs::create_dir_all(&spool)?;
+
+    let mut targets: Vec<PersistenceTarget> = Vec::new();
+    if !no_fixtures {
+        targets.extend(fixture_targets(&workspace_root())?);
+    }
+    if !no_corpus {
+        let languages = if language.is_empty() {
+            vec!["rust".to_owned(), "php".to_owned()]
+        } else {
+            language
+        };
+        let manifest = CorpusManifest::load(&manifest_path)?;
+        let mut corpus = corpus_targets(&manifest, &languages, &cache);
+        if let Some(repository) = repository.as_deref() {
+            corpus.retain(|target| target.name.ends_with(&format!("/{repository}")));
+            if corpus.is_empty() {
+                return Err(failure(format!(
+                    "repository `{repository}` is not registered for the selected languages"
+                ))
+                .into());
+            }
+        }
+        targets.extend(corpus);
+    }
+    if targets.is_empty() {
+        return Err(failure("shared-index target selection is empty").into());
+    }
+
+    if let Some(only) = only.as_deref() {
+        let target = targets
+            .iter()
+            .find(|target| target.name == only)
+            .ok_or_else(|| failure(format!("shared-index target `{only}` is not selected")))?;
+        let report = evaluate_target(target, runs, &spool)?;
+        println!("{}", summarize(&report));
+        let path = emit.join(SharedIndexReport::file_name(&report.target));
+        std::fs::write(&path, report.render()?)?;
+        println!("wrote {}", path.display());
+        return Ok(0);
+    }
+
+    if targets.len() == 1 {
+        let report = evaluate_target(&targets[0], runs, &spool)?;
+        println!("{}", summarize(&report));
+        let path = emit.join(SharedIndexReport::file_name(&report.target));
+        std::fs::write(&path, report.render()?)?;
+        println!("wrote {}", path.display());
+        return Ok(0);
+    }
+
+    let executable = std::env::current_exe()?;
+    let mut failures = 0_u64;
+    for target in &targets {
+        let mut child = ProcessCommand::new(&executable);
+        child
+            .arg("shared-indexes")
+            .arg("--only")
+            .arg(&target.name)
+            .arg("--runs")
+            .arg(runs.to_string())
+            .arg("--emit")
+            .arg(&emit)
+            .arg("--manifest")
+            .arg(&manifest_path)
+            .arg("--cache")
+            .arg(&cache);
+        if no_fixtures {
+            child.arg("--no-fixtures");
+        }
+        if no_corpus {
+            child.arg("--no-corpus");
+        }
+        if matches!(target.kind, TargetKind::Corpus)
+            && let Some(language) = target.name.split('/').nth(1)
+        {
+            child.arg("--language").arg(language);
+        }
+        let status = child.status()?;
+        if !status.success() {
+            eprintln!("shared-index: evaluation failed for `{}`", target.name);
             failures += 1;
         }
     }

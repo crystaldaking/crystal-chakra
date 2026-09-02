@@ -382,6 +382,13 @@ Enabling persistent restore by default or importing CI-produced artifacts must
 be justified by benchmarks comparing complete restoration and verification to
 deterministic rebuild.
 
+The v0.3 complete-snapshot evaluation rejected both defaults: qualifying
+repositories restored more slowly than deterministic rebuild and exceeded the
+artifact-size budget, while the largest corpus target exceeded the bounded
+writer. Local disk restore therefore remains opt-in and prebuilt import is not
+a product surface. Any future representation must pass the fixed complete
+restore, size, and graph-equivalence gates in ADR-052 before product wiring.
+
 ## 15. Language provider architecture
 
 Language intelligence is an adapter boundary.
