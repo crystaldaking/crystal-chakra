@@ -1,7 +1,7 @@
 [package]
 name = "chakra-domain"
 description = "Core domain types and query contracts for Chakra (no MCP/LSP dependencies)"
-version = "0.2.0"
+version = "0.3.0-beta.1"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true

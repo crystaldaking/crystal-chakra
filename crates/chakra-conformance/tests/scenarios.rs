@@ -13,8 +13,8 @@ static LIVE_CONFORMANCE: Mutex<()> = Mutex::new(());
 
 fn assert_language_passes(language: &str) -> Result<(), Box<dyn Error>> {
     // Each language suite creates and destroys several real filesystem
-    // watchers. Serialize them so native backend resource contention cannot
-    // obscure conformance failures; macOS uses the kqueue path from ADR-0005.
+    // watchers. Serialize them so backend resource contention cannot obscure
+    // conformance failures; macOS uses the polling path from ADR-0005.
     let _live_conformance = LIVE_CONFORMANCE
         .lock()
         .map_err(|_| std::io::Error::other("live conformance lock is poisoned"))?;
