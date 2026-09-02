@@ -35,8 +35,20 @@ version tags prefixed with `v`.
   key, BLAKE3 integrity, atomic directory publication, deterministic fallback,
   and LRU disk eviction. Status reports reuse benefit and typed rejection;
   overlays and provider enrichment remain worktree-bound. This additive
-  contract advances the query envelope schema to version 18. Persistent
-  restore stays disabled by default until issue #50's benchmark decision.
+  contract advances the query envelope schema to version 18. Per issue #50's
+  benchmark decision, persistent restore remains opt-in.
+
+### Evaluation
+
+- Complete compatible snapshots were benchmarked through the production
+  codec/store for cold rebuild, local disk restore, and a BLAKE3-verified
+  copied CI-artifact simulation (issue #50, ADR-0052). Verdict: **no-go** for
+  default disk restore and prebuilt import. On qualifying corpora, Laravel
+  restore was only 0.41–0.44× as fast as rebuild with a 16.49×-source
+  artifact, while Symfony exceeded the 512 MiB writer bound. Process-local
+  sharing remains enabled, disk storage remains opt-in, and no network/import
+  surface is added. Evidence and trust/provenance requirements are recorded
+  in `docs/evaluation/v0.3.0-shared-indexes.md`.
 
 ### Fixed
 

@@ -188,10 +188,12 @@ dependencies = [
 name = "chakra-conformance"
 version = "0.2.0"
 dependencies = [
+ "blake3",
  "chakra-domain",
  "chakra-engine",
  "chakra-git",
  "chakra-language",
+ "chakra-workspace",
  "clap",
  "nix",
  "serde",

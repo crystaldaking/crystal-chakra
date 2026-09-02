@@ -9,10 +9,12 @@ repository.workspace = true
 publish = false
 
 [dependencies]
+blake3.workspace = true
 chakra-domain = { path = "../chakra-domain", version = "0.2.0" }
 chakra-engine = { path = "../chakra-engine", version = "0.2.0" }
 chakra-git = { path = "../chakra-git", version = "0.2.0" }
 chakra-language = { path = "../chakra-language", version = "0.2.0" }
+chakra-workspace = { path = "../chakra-workspace", version = "0.2.0" }
 clap.workspace = true
 serde.workspace = true
 serde_json.workspace = true
