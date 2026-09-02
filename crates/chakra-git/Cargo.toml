@@ -14,6 +14,9 @@ chakra-engine = { path = "../chakra-engine", version = "0.3.0" }
 serde_json.workspace = true
 thiserror.workspace = true
 
+[target.'cfg(windows)'.dependencies]
+file-id.workspace = true
+
 [dev-dependencies]
 tempfile.workspace = true
 

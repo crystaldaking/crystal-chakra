@@ -75,6 +75,10 @@ opt-in; release benchmarks rejected default restore and prebuilt import.
 
 ### Fixed
 
+- Unborn repository identity now uses a stable-Rust Windows file-ID adapter
+  instead of nightly-only standard-library metadata methods. Native Windows
+  release builds retain volume-qualified repository identity and verify that
+  identity across an ordinary checkout rename (issue #173).
 - Complete snapshot encoding now preserves a bounded-writer overflow as the
   typed `oversized` rejection instead of flattening it into `corrupt`, keeping
   size limits distinguishable from malformed artifact data (issue #162).
