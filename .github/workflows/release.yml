@@ -1,0 +1,241 @@
+name: release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Stable release tag to build without publishing
+        required: true
+        type: string
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.event_name }}-${{ github.ref }}-${{ inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    outputs:
+      tag: ${{ steps.release.outputs.tag }}
+      version: ${{ steps.release.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@1.97.1
+      - id: release
+        name: Validate release identity
+        env:
+          DISPATCH_TAG: ${{ inputs.tag }}
+        run: |
+          if [[ "${GITHUB_EVENT_NAME}" == "push" ]]; then
+            tag="${GITHUB_REF_NAME}"
+            if [[ "$(git cat-file -t "${tag}")" != "tag" ]]; then
+              echo "release tag must be annotated: ${tag}" >&2
+              exit 1
+            fi
+            git fetch --no-tags --depth=1 origin \
+              +refs/heads/main:refs/remotes/origin/main
+            if [[ "$(git rev-parse HEAD)" != "$(git rev-parse origin/main)" ]]; then
+              echo "release tag must point to the current main commit" >&2
+              exit 1
+            fi
+          else
+            tag="${DISPATCH_TAG}"
+            if [[ "${GITHUB_REF_NAME}" != "main" ]]; then
+              echo "manual release preflight must run from main" >&2
+              exit 1
+            fi
+          fi
+          if [[ ! "${tag}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "release tag must match vX.Y.Z: ${tag}" >&2
+            exit 1
+          fi
+
+          version="${tag#v}"
+          mapfile -t package_versions < <(
+            cargo metadata --locked --no-deps --format-version 1 |
+              jq -r '.packages[].version' |
+              sort -u
+          )
+          if [[ "${#package_versions[@]}" -ne 1 || "${package_versions[0]}" != "${version}" ]]; then
+            printf 'workspace package versions do not match %s: %s\n' \
+              "${version}" "${package_versions[*]}" >&2
+            exit 1
+          fi
+
+          python3 tools/extract_release_notes.py "${version}" >/dev/null
+          printf 'tag=%s\nversion=%s\n' "${tag}" "${version}" >>"${GITHUB_OUTPUT}"
+
+  build:
+    name: Build ${{ matrix.target }}
+    needs: prepare
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+          - runner: macos-15-intel
+            target: x86_64-apple-darwin
+          - runner: macos-15
+            target: aarch64-apple-darwin
+          - runner: windows-2022
+            target: x86_64-pc-windows-msvc
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@1.97.1
+      - name: Build release binary
+        run: >-
+          cargo build --locked --release --package chakra-cli --bin chakra
+          --target ${{ matrix.target }}
+      - name: Verify Unix binary version
+        if: runner.os != 'Windows'
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          expected="chakra ${RELEASE_TAG#v}"
+          actual="$("target/${TARGET}/release/chakra" --version)"
+          test "${actual}" = "${expected}"
+      - name: Verify Windows binary version
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          $expected = "chakra $($env:RELEASE_TAG.Substring(1))"
+          $actual = (& "target/$env:TARGET/release/chakra.exe" --version).Trim()
+          if ($actual -ne $expected) {
+            throw "expected '$expected', got '$actual'"
+          }
+      - name: Package Unix archive
+        if: runner.os != 'Windows'
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          bundle="chakra-${RELEASE_TAG}-${TARGET}"
+          mkdir "${bundle}"
+          install -m 0755 "target/${TARGET}/release/chakra" "${bundle}/chakra"
+          install -m 0644 LICENSE README.md "${bundle}/"
+          tar -czf "${bundle}.tar.gz" "${bundle}"
+
+          verify_dir="$(mktemp -d)"
+          tar -xzf "${bundle}.tar.gz" -C "${verify_dir}"
+          test "$("${verify_dir}/${bundle}/chakra" --version)" = \
+            "chakra ${RELEASE_TAG#v}"
+      - name: Package Windows archive
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          $bundle = "chakra-$env:RELEASE_TAG-$env:TARGET"
+          New-Item -ItemType Directory -Path $bundle | Out-Null
+          Copy-Item "target/$env:TARGET/release/chakra.exe" "$bundle/chakra.exe"
+          Copy-Item LICENSE, README.md $bundle
+          Compress-Archive -Path $bundle -DestinationPath "$bundle.zip"
+
+          Expand-Archive "$bundle.zip" -DestinationPath verify
+          $actual = (& "verify/$bundle/chakra.exe" --version).Trim()
+          if ($actual -ne "chakra $($env:RELEASE_TAG.Substring(1))") {
+            throw "packaged binary reports unexpected version: $actual"
+          }
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-${{ matrix.target }}
+          path: chakra-${{ needs.prepare.outputs.tag }}-${{ matrix.target }}.*
+          if-no-files-found: error
+          retention-days: 7
+
+  assemble:
+    needs: [prepare, build]
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: release-*
+          path: bundle
+          merge-multiple: true
+      - name: Verify archives and create checksum manifest
+        env:
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+        run: |
+          expected=(
+            "chakra-${RELEASE_TAG}-x86_64-unknown-linux-gnu.tar.gz"
+            "chakra-${RELEASE_TAG}-x86_64-apple-darwin.tar.gz"
+            "chakra-${RELEASE_TAG}-aarch64-apple-darwin.tar.gz"
+            "chakra-${RELEASE_TAG}-x86_64-pc-windows-msvc.zip"
+          )
+          for archive in "${expected[@]}"; do
+            test -f "bundle/${archive}"
+          done
+          test "$(find bundle -maxdepth 1 -type f | wc -l | tr -d ' ')" -eq 4
+
+          (
+            cd bundle
+            sha256sum *.tar.gz *.zip | sort -k2 >SHA256SUMS
+            sha256sum --check SHA256SUMS
+          )
+      - name: Extract release notes
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: python3 tools/extract_release_notes.py "${VERSION}" >bundle/RELEASE_NOTES.md
+      - name: Attest release archives
+        uses: actions/attest@v4
+        with:
+          subject-checksums: bundle/SHA256SUMS
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-bundle
+          path: bundle/
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    if: github.event_name == 'push'
+    needs: [prepare, assemble]
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: release-bundle
+          path: bundle
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          gh release create "${RELEASE_TAG}" \
+            ./bundle/*.tar.gz \
+            ./bundle/*.zip \
+            ./bundle/SHA256SUMS \
+            --repo "${GITHUB_REPOSITORY}" \
+            --verify-tag \
+            --fail-on-no-commits \
+            --latest \
+            --title "Chakra ${VERSION}" \
+            --notes-file ./bundle/RELEASE_NOTES.md

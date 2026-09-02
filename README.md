@@ -45,7 +45,56 @@ The generated [support matrix](docs/support/SUPPORT_MATRIX.md) records the
 capability-level evidence. Language-specific behavior and honest limitations
 live under [docs/languages](docs/languages/).
 
-## Install from source
+## Install
+
+### Prebuilt release archives
+
+[Chakra v0.3.0](https://github.com/crystaldaking/crystal-chakra/releases/tag/v0.3.0)
+ships native archives for:
+
+| Platform | Target | Archive |
+|---|---|---|
+| Linux x86-64 (glibc) | `x86_64-unknown-linux-gnu` | `.tar.gz` |
+| macOS Apple silicon | `aarch64-apple-darwin` | `.tar.gz` |
+| macOS Intel | `x86_64-apple-darwin` | `.tar.gz` |
+| Windows x86-64 | `x86_64-pc-windows-msvc` | `.zip` |
+
+Archive names have the form `chakra-v0.3.0-<target>.<format>`. Each contains
+the `chakra` executable, this README, and the MIT license in a versioned
+directory. Download `SHA256SUMS` from the same release and verify the archive
+before installing it. For example, on Linux:
+
+```sh
+version=v0.3.0
+target=x86_64-unknown-linux-gnu
+archive="chakra-${version}-${target}.tar.gz"
+base="https://github.com/crystaldaking/crystal-chakra/releases/download/${version}"
+curl -fLO "${base}/${archive}"
+curl -fLO "${base}/SHA256SUMS"
+grep " ${archive}$" SHA256SUMS | sha256sum --check -
+tar -xzf "${archive}"
+sudo install -m 0755 "chakra-${version}-${target}/chakra" /usr/local/bin/chakra
+chakra --version
+```
+
+On macOS, choose `aarch64-apple-darwin` for Apple silicon or
+`x86_64-apple-darwin` for Intel and verify with
+`grep " ${archive}$" SHA256SUMS | shasum -a 256 --check -`. On Windows, compare
+`(Get-FileHash <archive> -Algorithm SHA256).Hash` with the matching
+`SHA256SUMS` entry, expand the zip, and put the directory containing
+`chakra.exe` on `PATH`.
+
+GitHub also publishes signed build-provenance attestations for every archive:
+
+```sh
+gh attestation verify "${archive}" --repo crystaldaking/crystal-chakra
+```
+
+The binaries are not yet platform code-signed or Apple-notarized. Use the
+attestation to verify their GitHub Actions provenance, or build from source if
+your local policy requires a signed executable.
+
+### Build from source
 
 Requirements:
 
@@ -55,7 +104,7 @@ Requirements:
 ```sh
 git clone https://github.com/crystaldaking/crystal-chakra.git
 cd crystal-chakra
-git checkout v0.3.0-beta.1
+git checkout v0.3.0
 cargo install --locked --path crates/chakra-cli
 chakra --version
 ```
@@ -184,10 +233,13 @@ gate, verifies support artifacts, and exercises the native macOS watcher path.
 
 ## Project status and limits
 
-Chakra v0.1.x serves one repository and one active materialized worktree per
-process. It deliberately does not provide persistent graph restoration,
-historical commit materialization, cross-repository graphs, semantic/vector
-search, an eager complete precise call graph, arbitrary command execution, or
+Chakra v0.3.0 is the first public beta. One process serves one repository and
+a bounded set of isolated materialized worktrees. Compatible commit snapshots
+are shared in process and may be restored from an opt-in bounded local store;
+live provider enrichment remains tied to the materialized worktree. Chakra
+deliberately does not provide historical commit materialization,
+cross-repository graphs, semantic/vector search, prebuilt or network snapshot
+import, an eager complete precise call graph, arbitrary command execution, or
 a web UI.
 
 Syntax intelligence is intentionally conservative. Dynamic dispatch, macros,
