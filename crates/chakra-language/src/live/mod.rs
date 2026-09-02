@@ -197,7 +197,7 @@ impl LiveIndexDiagnostics {
         let metrics = self.metrics.snapshot();
         let (requested, completed) = self.shared.pending_generation().unwrap_or((0, 0));
         IndexingDiagnostics {
-            cache: CacheHealth::Disabled {
+            syntax_fact_cache: CacheHealth::Disabled {
                 reason: SYNTAX_FACT_CACHE_DISABLED_REASON.to_owned(),
             },
             counters: ReconciliationCounters {

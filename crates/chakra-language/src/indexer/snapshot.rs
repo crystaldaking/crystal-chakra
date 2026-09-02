@@ -123,7 +123,7 @@ pub(super) fn encode(
             payload: state
                 .adapter
                 .encode_snapshot(cancellation)
-                .map_err(|error| CommitSnapshotPayloadError::Codec(error.to_string()))?,
+                .map_err(|error| map_workspace_codec_error(error, cancellation))?,
         });
     }
     let payload = SnapshotPayload {
@@ -313,7 +313,12 @@ fn map_workspace_codec_error(
     if cancellation.is_cancelled() || matches!(error, super::WorkspaceIndexError::Cancelled) {
         CommitSnapshotPayloadError::Cancelled
     } else {
-        CommitSnapshotPayloadError::Codec(error.to_string())
+        match error {
+            super::WorkspaceIndexError::SnapshotOversized { limit } => {
+                CommitSnapshotPayloadError::Oversized { limit }
+            }
+            error => CommitSnapshotPayloadError::Codec(error.to_string()),
+        }
     }
 }
 
@@ -340,6 +345,18 @@ mod tests {
         ));
         assert!(!snapshot_size_within_bound(
             MAX_SNAPSHOT_BYTES - HEADER_BYTES + 1
+        ));
+    }
+
+    #[test]
+    fn adapter_size_rejection_stays_typed_at_the_complete_snapshot_boundary() {
+        let error = map_workspace_codec_error(
+            crate::WorkspaceIndexError::SnapshotOversized { limit: 7 },
+            &IndexCancellation::default(),
+        );
+        assert!(matches!(
+            error,
+            CommitSnapshotPayloadError::Oversized { limit: 7 }
         ));
     }
 }

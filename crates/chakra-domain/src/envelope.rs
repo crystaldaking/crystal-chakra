@@ -12,7 +12,7 @@ use crate::revision::Revision;
 use crate::state::{Freshness, ProviderState, WorkspaceStatus};
 
 /// Current envelope schema version.
-pub const SCHEMA_VERSION: u32 = 18;
+pub const SCHEMA_VERSION: u32 = 19;
 
 /// Response section whose contents were cut by a bounded query operation.
 #[derive(
@@ -220,8 +220,8 @@ mod tests {
     #[test]
     fn spec_envelope_example_tracks_the_current_schema_version() {
         assert_eq!(
-            SCHEMA_VERSION, 18,
-            "workspace-layer provenance must not reuse schema 16"
+            SCHEMA_VERSION, 19,
+            "syntax-fact cache diagnostics rename must advance schema 18"
         );
         let spec = include_str!("../../../docs/SPEC.md");
         let expected = format!("\"schema_version\": {SCHEMA_VERSION}");

@@ -449,6 +449,8 @@ pub enum WorkspaceIndexError {
     Update(String),
     #[error("commit snapshot codec failed: {0}")]
     Snapshot(String),
+    #[error("commit snapshot payload exceeds the {limit}-byte bound")]
+    SnapshotOversized { limit: u64 },
 }
 
 #[derive(Debug, Clone)]

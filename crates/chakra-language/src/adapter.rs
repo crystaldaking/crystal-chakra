@@ -380,6 +380,7 @@ const MAX_SNAPSHOT_BYTES: usize = 512 * 1024 * 1024;
 struct CancellationWriter<'a> {
     bytes: Vec<u8>,
     cancellation: &'a IndexCancellation,
+    max_bytes: usize,
 }
 
 impl Write for CancellationWriter<'_> {
@@ -387,7 +388,7 @@ impl Write for CancellationWriter<'_> {
         if self.cancellation.is_cancelled() {
             return Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled"));
         }
-        if self.bytes.len().saturating_add(buf.len()) > MAX_SNAPSHOT_BYTES {
+        if self.bytes.len().saturating_add(buf.len()) > self.max_bytes {
             return Err(io::Error::new(
                 io::ErrorKind::FileTooLarge,
                 "snapshot byte bound exceeded",
@@ -420,15 +421,36 @@ pub(crate) fn encode_snapshot_value<T: Serialize>(
     value: &T,
     cancellation: &IndexCancellation,
 ) -> Result<Vec<u8>, WorkspaceIndexError> {
+    encode_snapshot_value_bounded(value, cancellation, MAX_SNAPSHOT_BYTES)
+}
+
+fn encode_snapshot_value_bounded<T: Serialize>(
+    value: &T,
+    cancellation: &IndexCancellation,
+    max_bytes: usize,
+) -> Result<Vec<u8>, WorkspaceIndexError> {
     let mut writer = CancellationWriter {
         bytes: Vec::new(),
         cancellation,
+        max_bytes,
     };
     let result = value.serialize(&mut rmp_serde::Serializer::new(&mut writer).with_struct_map());
     if cancellation.is_cancelled() {
         return Err(WorkspaceIndexError::Cancelled);
     }
-    result.map_err(|error| WorkspaceIndexError::Snapshot(error.to_string()))?;
+    result.map_err(|error| match error {
+        rmp_serde::encode::Error::InvalidValueWrite(error) => {
+            let error: io::Error = error.into();
+            if error.kind() == io::ErrorKind::FileTooLarge {
+                WorkspaceIndexError::SnapshotOversized {
+                    limit: u64::try_from(max_bytes).unwrap_or(u64::MAX),
+                }
+            } else {
+                WorkspaceIndexError::Snapshot(error.to_string())
+            }
+        }
+        error => WorkspaceIndexError::Snapshot(error.to_string()),
+    })?;
     Ok(writer.bytes)
 }
 
@@ -437,9 +459,9 @@ pub(crate) fn decode_snapshot_value<T: DeserializeOwned>(
     cancellation: &IndexCancellation,
 ) -> Result<T, WorkspaceIndexError> {
     if payload.len() > MAX_SNAPSHOT_BYTES {
-        return Err(WorkspaceIndexError::Snapshot(
-            "snapshot byte bound exceeded".to_owned(),
-        ));
+        return Err(WorkspaceIndexError::SnapshotOversized {
+            limit: MAX_SNAPSHOT_BYTES as u64,
+        });
     }
     let reader = CancellationReader {
         cursor: Cursor::new(payload),
@@ -1440,5 +1462,18 @@ mod tests {
     #[test]
     fn adapter_registry_matches_the_domain_language_catalog() {
         assert_eq!(registered_languages(), Language::ALL);
+    }
+
+    #[test]
+    fn bounded_snapshot_writer_preserves_the_oversized_reason() {
+        let outcome = encode_snapshot_value_bounded(
+            &vec!["a value larger than one encoded byte"],
+            &IndexCancellation::default(),
+            1,
+        );
+        assert!(matches!(
+            outcome,
+            Err(WorkspaceIndexError::SnapshotOversized { limit: 1 })
+        ));
     }
 }

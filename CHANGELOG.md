@@ -5,6 +5,15 @@ version tags prefixed with `v`.
 
 ## [Unreleased]
 
+### Breaking
+
+- The status field `data.index_diagnostics.cache` is renamed to
+  `data.index_diagnostics.syntax_fact_cache` so the disabled v0.2 per-file
+  cache experiment is not confused with enabled process-local or opt-in disk
+  commit-snapshot reuse (issue #160). The query envelope schema advances from
+  18 to 19; consumers should read complete snapshot reuse separately from
+  `layers.commit_snapshot.reuse`.
+
 ### Added
 
 - A bounded, Git-aware workspace registry now owns an independent syntax
@@ -51,6 +60,10 @@ version tags prefixed with `v`.
   in `docs/evaluation/v0.3.0-shared-indexes.md`.
 
 ### Fixed
+
+- Complete snapshot encoding now preserves a bounded-writer overflow as the
+  typed `oversized` rejection instead of flattening it into `corrupt`, keeping
+  size limits distinguishable from malformed artifact data (issue #162).
 
 - Live watcher refresh no longer reports an already-removed watch or vanished
   checkout directory as a backend failure, avoiding false degradation and

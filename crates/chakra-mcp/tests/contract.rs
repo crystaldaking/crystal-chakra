@@ -84,7 +84,7 @@ impl QueryService for StubService {
                 },
                 syntax_diagnostics: Default::default(),
                 index_diagnostics: Some(IndexingDiagnostics {
-                    cache: CacheHealth::Disabled {
+                    syntax_fact_cache: CacheHealth::Disabled {
                         reason: SYNTAX_FACT_CACHE_DISABLED_REASON.to_owned(),
                     },
                     counters: Default::default(),
@@ -280,9 +280,10 @@ async fn status_tool_is_listed_and_callable() -> Result<(), Box<dyn Error + Send
     assert_eq!(structured["data"]["query_execution"]["running"], 0);
     // Live indexing diagnostics serialize as typed domain data (issue #43).
     assert_eq!(
-        structured["data"]["index_diagnostics"]["cache"]["state"],
+        structured["data"]["index_diagnostics"]["syntax_fact_cache"]["state"],
         "disabled"
     );
+    assert!(structured["data"]["index_diagnostics"]["cache"].is_null());
     assert_eq!(
         structured["data"]["index_diagnostics"]["recent_file_invalidations"][0]["reason"],
         "content_changed"

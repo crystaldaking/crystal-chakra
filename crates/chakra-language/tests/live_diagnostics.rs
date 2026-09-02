@@ -83,7 +83,7 @@ fn cold_start_and_cache_health_are_reported_honestly() -> Result<(), Box<dyn Err
 
     let diagnostics = live.diagnostics();
     assert_eq!(
-        diagnostics.cache,
+        diagnostics.syntax_fact_cache,
         CacheHealth::Disabled {
             reason: SYNTAX_FACT_CACHE_DISABLED_REASON.to_owned(),
         }
@@ -284,7 +284,7 @@ fn status_query_carries_diagnostics_and_engine_cold_build_count() -> Result<(), 
         .index_diagnostics
         .ok_or("live diagnostics must reach the status query")?;
     assert_eq!(
-        diagnostics.cache,
+        diagnostics.syntax_fact_cache,
         CacheHealth::Disabled {
             reason: SYNTAX_FACT_CACHE_DISABLED_REASON.to_owned(),
         }
