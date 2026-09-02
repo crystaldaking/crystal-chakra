@@ -61,6 +61,7 @@ jobs:
       - run: python3 tools/check_support_matrix.py --check
       # Hermetic corpus-fetcher retry tests; never touch the network.
       - run: python3 tools/test_fetch_corpus.py
+      - run: python3 tools/test_extract_release_notes.py
 
   conformance:
     runs-on: ubuntu-latest

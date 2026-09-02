@@ -126,6 +126,12 @@ Before freezing an Unreleased changelog section on `release/<version>`:
    generated support/corpus artifacts.
 4. Confirm the release commit, annotated tag, and GitHub release all identify
    the same version and commit.
+5. Run the release workflow's manual preflight from the final `main` commit
+   before tagging. It must build and package every supported target without
+   publishing a release.
+6. After pushing the annotated tag, wait for the tag-triggered release workflow
+   and verify every archive, `SHA256SUMS`, and build-provenance attestation
+   before closing the milestone.
 
 ## Licensing
 
