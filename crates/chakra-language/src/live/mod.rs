@@ -42,8 +42,8 @@ use thiserror::Error;
 use tracing::{error, info, warn};
 
 use crate::indexer::{
-    IndexOptions, ReconcileReport, WorkspaceIndexError, WorkspaceSourceScan, WorkspaceSyntaxIndex,
-    index_commit_with_options, scan_discovered_sources_with_options,
+    CommitIndexProvider, IndexOptions, ReconcileReport, WorkspaceIndexError, WorkspaceSourceScan,
+    WorkspaceSyntaxIndex, index_commit_with_options, scan_discovered_sources_with_options,
 };
 use crate::scheduler::{PriorityWorkQueue, QueueFull};
 
@@ -329,6 +329,24 @@ pub fn start_live_index_with_options(
     engine: Arc<WorkspaceEngine>,
     options: LiveIndexOptions,
 ) -> Result<LiveIndex, LiveIndexError> {
+    start_live_index_with_options_and_commit_provider(
+        repository_root,
+        syntax_index,
+        engine,
+        options,
+        None,
+    )
+}
+
+/// Starts the live owner with repository-scoped commit reuse for `HEAD`
+/// transitions. The provider is never consulted for ordinary file edits.
+pub fn start_live_index_with_options_and_commit_provider(
+    repository_root: PathBuf,
+    syntax_index: WorkspaceSyntaxIndex,
+    engine: Arc<WorkspaceEngine>,
+    options: LiveIndexOptions,
+    commit_provider: Option<Arc<dyn CommitIndexProvider>>,
+) -> Result<LiveIndex, LiveIndexError> {
     if options.full_reconcile_interval == 0 {
         return Err(LiveIndexError::InvalidFullReconcileInterval);
     }
@@ -362,6 +380,7 @@ pub fn start_live_index_with_options(
                 worker_publication_gate,
                 ready_sender,
                 options,
+                commit_provider,
             );
         })?;
 
@@ -446,6 +465,7 @@ fn run_worker(
     publication_gate: Arc<Mutex<()>>,
     ready: SyncSender<Result<(), String>>,
     options: LiveIndexOptions,
+    commit_provider: Option<Arc<dyn CommitIndexProvider>>,
 ) {
     let administrative_paths = match chakra_git::resolve_git_administrative_paths(&repository_root)
     {
@@ -584,6 +604,7 @@ fn run_worker(
                 {
                     let kind = reconcile(
                         &repository_root,
+                        commit_provider.as_deref(),
                         &mut syntax_index,
                         &engine,
                         &mut watcher,
@@ -619,6 +640,7 @@ fn run_worker(
                 checkpoint_pending = false;
                 let kind = reconcile(
                     &repository_root,
+                    commit_provider.as_deref(),
                     &mut syntax_index,
                     &engine,
                     &mut watcher,
@@ -738,6 +760,7 @@ fn run_worker(
                 }
                 let kind = reconcile(
                     &repository_root,
+                    commit_provider.as_deref(),
                     &mut syntax_index,
                     &engine,
                     &mut watcher,
@@ -775,6 +798,7 @@ fn run_worker(
         {
             let kind = reconcile(
                 &repository_root,
+                commit_provider.as_deref(),
                 &mut syntax_index,
                 &engine,
                 &mut watcher,
@@ -950,6 +974,7 @@ fn invalidate_for_event(
 #[allow(clippy::too_many_arguments)]
 fn reconcile(
     repository_root: &Path,
+    commit_provider: Option<&dyn CommitIndexProvider>,
     syntax_index: &mut WorkspaceSyntaxIndex,
     engine: &WorkspaceEngine,
     watcher: &mut WorkspaceWatcher,
@@ -1070,11 +1095,21 @@ fn reconcile(
             };
             let commit_changed = diff.scope.base_commit != current.layers().commit_snapshot.commit;
             let commit = if commit_changed {
-                let candidate = index_commit_with_options(
-                    repository_root,
-                    diff.scope.base_commit.as_deref(),
-                    IndexOptions::new(syntax_index.budgets(), operation.cancellation())?,
-                );
+                let index_options =
+                    IndexOptions::new(syntax_index.budgets(), operation.cancellation())?;
+                let candidate = match commit_provider {
+                    Some(provider) => provider.commit_index(
+                        repository_root,
+                        &current.identity().repository,
+                        diff.scope.base_commit.as_deref(),
+                        index_options,
+                    ),
+                    None => index_commit_with_options(
+                        repository_root,
+                        diff.scope.base_commit.as_deref(),
+                        index_options,
+                    ),
+                };
                 match candidate {
                     Ok(commit) => Some(commit),
                     Err(error) => {
@@ -1097,7 +1132,11 @@ fn reconcile(
                 },
                 |commit| (commit.source_files, commit.source_bytes),
             );
-            let layers = workspace_graph_layers(commit_files, commit_bytes, &diff);
+            let mut layers = workspace_graph_layers(commit_files, commit_bytes, &diff);
+            layers.commit_snapshot.reuse = commit.as_ref().map_or_else(
+                || current.layers().commit_snapshot.reuse.clone(),
+                |commit| commit.reuse.clone(),
+            );
             let ownership_only_graph = graph.is_none() && current.layers() != &layers;
             if graph.is_some() || ownership_only_graph {
                 let commit_graph = commit

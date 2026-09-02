@@ -14,6 +14,7 @@ use chakra_domain::symbol::{
     CallForm, CallTargetKind, EdgeKind, Language, MAX_RECEIVER_HINT_CHARS, ReceiverTypeSource,
     SymbolKey, SymbolKind,
 };
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tree_sitter::{Node, Parser, Point};
 
@@ -44,7 +45,7 @@ pub(crate) enum ParseError {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct ParsedFile {
     pub source: Arc<str>,
     pub symbols: Vec<SymbolDraft>,
@@ -56,7 +57,7 @@ pub(crate) struct ParsedFile {
     pub diagnostic_count: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct SymbolDraft {
     pub key: SymbolKey,
     pub location: SourceRange,
@@ -64,7 +65,7 @@ pub(crate) struct SymbolDraft {
     pub parent: Option<usize>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct CallDraft {
     pub caller: usize,
     pub form: CallForm,
@@ -88,7 +89,7 @@ struct CallTarget<'tree> {
     location: Node<'tree>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct NamedRelationDraft {
     pub from: usize,
     pub target: String,
@@ -96,14 +97,14 @@ pub(crate) struct NamedRelationDraft {
     pub kind: EdgeKind,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct TypeRelationDraft {
     pub from: usize,
     pub target: String,
     pub kind: TypeRelationKind,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub(crate) enum TypeRelationKind {
     Trait,
     Extends,

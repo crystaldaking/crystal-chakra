@@ -1,17 +1,17 @@
 use super::*;
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub(super) struct SymbolAddress {
     pub(super) path: RepoRelativePath,
     pub(super) index: usize,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub(super) enum DependencyKey {
     Exact(String, SymbolKind),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub(super) struct RelationshipEdge {
     pub(super) kind: EdgeKind,
     pub(super) from: SymbolAddress,
@@ -21,7 +21,7 @@ pub(super) struct RelationshipEdge {
     pub(super) location: Option<SourceRange>,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub(super) struct RelationshipContribution {
     pub(super) dependencies: HashSet<DependencyKey>,
     pub(super) edges: Vec<RelationshipEdge>,

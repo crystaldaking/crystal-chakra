@@ -2,10 +2,12 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
+use std::sync::Barrier;
 use std::thread;
 use std::time::Duration;
 
-use chakra_domain::composition::SourceLayer;
+use chakra_domain::composition::{CommitSnapshotOrigin, CommitSnapshotRejection, SourceLayer};
+use chakra_domain::indexing::IndexCancellation;
 use chakra_domain::location::SourceRange;
 use chakra_domain::operation::OperationContext;
 use chakra_domain::provenance::Provenance;
@@ -20,7 +22,8 @@ use chakra_engine::{
     PreciseProvider, PreciseQueryRequest, PreciseQueryResult, PreciseRelation, WorkspaceEngine,
 };
 use chakra_workspace::{
-    WorkspaceRegistry, WorkspaceRegistryConfig, WorkspaceRegistryError, WorkspaceStartOptions,
+    CommitSnapshotCache, CommitSnapshotCacheConfig, WorkspaceRegistry, WorkspaceRegistryConfig,
+    WorkspaceRegistryError, WorkspaceStartOptions,
 };
 use tempfile::TempDir;
 
@@ -81,6 +84,47 @@ fn linked_worktrees_keep_files_revisions_and_provider_facts_isolated()
     let registry = WorkspaceRegistry::new(WorkspaceRegistryConfig { max_workspaces: 2 })?;
     let primary = registry.register(&fixture.primary, WorkspaceStartOptions::default())?;
     let linked = registry.register(&fixture.linked, WorkspaceStartOptions::default())?;
+
+    assert_eq!(
+        primary
+            .engine()
+            .snapshot()
+            .layers()
+            .commit_snapshot
+            .reuse
+            .origin,
+        CommitSnapshotOrigin::ColdBuild
+    );
+    assert_eq!(
+        primary
+            .engine()
+            .snapshot()
+            .layers()
+            .commit_snapshot
+            .reuse
+            .rejection,
+        Some(CommitSnapshotRejection::CacheDisabled)
+    );
+    assert_eq!(
+        linked
+            .engine()
+            .snapshot()
+            .layers()
+            .commit_snapshot
+            .reuse
+            .origin,
+        CommitSnapshotOrigin::MemoryReuse
+    );
+    assert!(
+        linked
+            .engine()
+            .snapshot()
+            .layers()
+            .commit_snapshot
+            .reuse
+            .reused_files
+            > 0
+    );
 
     assert_eq!(primary.identity().repository, linked.identity().repository);
     assert_ne!(primary.identity().workspace, linked.identity().workspace);
@@ -192,6 +236,326 @@ fn registry_bounds_worktrees_and_rejects_cross_repository_state()
         Err(WorkspaceRegistryError::RepositoryMismatch { .. })
     ));
     repository_scoped.shutdown()?;
+    Ok(())
+}
+
+#[test]
+fn disk_snapshot_restore_rejects_corruption_migration_and_incompatible_budgets()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = LinkedWorktrees::new()?;
+    let cache_dir = fixture._temp.path().join("snapshot-cache");
+    fs::write(
+        fixture.primary.join("src/stable.rs"),
+        "pub fn stable_for_snapshot_restore() {}\n",
+    )?;
+    git(&fixture.primary, &["add", "src/stable.rs"])?;
+    git(&fixture.primary, &["commit", "-m", "add stable source"])?;
+    let shared_head = git_stdout(&fixture.primary, &["rev-parse", "HEAD"])?;
+    git(&fixture.linked, &["checkout", "--detach", &shared_head])?;
+    let mut config = CommitSnapshotCacheConfig::with_directory(cache_dir.clone());
+    config.max_disk_artifacts = 1;
+    let identity = chakra_git::resolve_workspace_identity(&fixture.primary)?;
+    let commit = chakra_git::resolve_head_commit_with_context(
+        &fixture.primary,
+        &OperationContext::unbounded(),
+    )?;
+
+    let first_cache = CommitSnapshotCache::new(config.clone())?;
+    let first = first_cache.load_or_build(
+        &fixture.primary,
+        &identity.repository,
+        commit.as_deref(),
+        chakra_language::IndexOptions::default(),
+    )?;
+    assert_eq!(first.reuse.origin, CommitSnapshotOrigin::ColdBuild);
+    assert_eq!(
+        first.reuse.rejection,
+        Some(CommitSnapshotRejection::NotFound)
+    );
+    assert!(first.reuse.artifact_bytes.is_some_and(|bytes| bytes > 0));
+    drop(first_cache);
+
+    let initial_payload = fs::read(only_artifact(&cache_dir)?.join("snapshot.bin"))?;
+    chakra_language::CommitIndexReport::decode_snapshot(
+        fixture.linked.clone(),
+        commit.as_deref(),
+        chakra_domain::indexing::IndexBudgets::default(),
+        &initial_payload,
+        &IndexCancellation::default(),
+    )
+    .map_err(|error| format!("direct snapshot restore failed: {error}"))?;
+
+    let restored = CommitSnapshotCache::new(config.clone())?.load_or_build(
+        &fixture.linked,
+        &identity.repository,
+        commit.as_deref(),
+        chakra_language::IndexOptions::default(),
+    )?;
+    assert_eq!(
+        restored.reuse.origin,
+        CommitSnapshotOrigin::DiskRestore,
+        "reuse report: {:?}",
+        restored.reuse
+    );
+    assert_eq!(restored.graph.symbol_count(), first.graph.symbol_count());
+    let linked_source_path = fixture.linked.join("src/lib.rs");
+    let linked_source = fs::read_to_string(&linked_source_path)?;
+    fs::write(
+        &linked_source_path,
+        format!("{linked_source}pub fn restored_incremental_edit() {{}}\n"),
+    )?;
+    let layered = restored
+        .clone()
+        .compose_worktree(chakra_language::IndexOptions::default())?;
+    fs::write(&linked_source_path, linked_source)?;
+    assert_eq!(
+        layered.effective.metrics.indexing.publication.rebuilt_files,
+        1
+    );
+    assert!(layered.effective.metrics.indexing.publication.reused_files > 0);
+    assert!(
+        layered
+            .effective
+            .graph
+            .symbols()
+            .iter()
+            .any(|symbol| symbol.name() == "restored_incremental_edit")
+    );
+
+    let artifact = only_artifact(&cache_dir)?;
+    let payload_path = artifact.join("snapshot.bin");
+    let mut payload = fs::read(&payload_path)?;
+    let last = payload.len().saturating_sub(1);
+    payload[last] ^= 0xff;
+    fs::write(&payload_path, payload)?;
+    let repaired = CommitSnapshotCache::new(config.clone())?.load_or_build(
+        &fixture.primary,
+        &identity.repository,
+        commit.as_deref(),
+        chakra_language::IndexOptions::default(),
+    )?;
+    assert_eq!(repaired.reuse.origin, CommitSnapshotOrigin::ColdBuild);
+    assert_eq!(
+        repaired.reuse.rejection,
+        Some(CommitSnapshotRejection::Corrupt)
+    );
+
+    let artifact = only_artifact(&cache_dir)?;
+    let payload_path = artifact.join("snapshot.bin");
+    let mut payload = fs::read(&payload_path)?;
+    payload[4..8].copy_from_slice(&0_u32.to_le_bytes());
+    fs::write(&payload_path, payload)?;
+    let migrated = CommitSnapshotCache::new(config.clone())?.load_or_build(
+        &fixture.primary,
+        &identity.repository,
+        commit.as_deref(),
+        chakra_language::IndexOptions::default(),
+    )?;
+    assert_eq!(migrated.reuse.origin, CommitSnapshotOrigin::ColdBuild);
+    assert_eq!(
+        migrated.reuse.rejection,
+        Some(CommitSnapshotRejection::FormatMismatch)
+    );
+
+    let missing_payload = only_artifact(&cache_dir)?.join("snapshot.bin");
+    fs::remove_file(&missing_payload)?;
+    let repaired_missing_payload = CommitSnapshotCache::new(config.clone())?.load_or_build(
+        &fixture.primary,
+        &identity.repository,
+        commit.as_deref(),
+        chakra_language::IndexOptions::default(),
+    )?;
+    assert_eq!(
+        repaired_missing_payload.reuse.origin,
+        CommitSnapshotOrigin::ColdBuild
+    );
+    assert_eq!(
+        repaired_missing_payload.reuse.rejection,
+        Some(CommitSnapshotRejection::NotFound)
+    );
+    assert!(!fs::read(only_artifact(&cache_dir)?.join("snapshot.bin"))?.is_empty());
+
+    let mut budgets = chakra_domain::indexing::IndexBudgets::default();
+    budgets.max_symbols = budgets.max_symbols.saturating_sub(1);
+    let incompatible = CommitSnapshotCache::new(config.clone())?.load_or_build(
+        &fixture.primary,
+        &identity.repository,
+        commit.as_deref(),
+        chakra_language::IndexOptions::new(budgets, IndexCancellation::default())?,
+    )?;
+    assert_eq!(incompatible.reuse.origin, CommitSnapshotOrigin::ColdBuild);
+    assert_eq!(
+        incompatible.reuse.rejection,
+        Some(CommitSnapshotRejection::NotFound)
+    );
+    assert_eq!(artifact_count(&cache_dir)?, 1);
+
+    let cancellation = IndexCancellation::default();
+    cancellation.cancel();
+    assert!(matches!(
+        CommitSnapshotCache::new(config)?.load_or_build(
+            &fixture.primary,
+            &identity.repository,
+            commit.as_deref(),
+            chakra_language::IndexOptions::new(
+                chakra_domain::indexing::IndexBudgets::default(),
+                cancellation,
+            )?,
+        ),
+        Err(chakra_workspace::CommitSnapshotCacheError::Cancelled)
+    ));
+
+    let tiny_dir = fixture._temp.path().join("tiny-snapshot-cache");
+    let mut tiny = CommitSnapshotCacheConfig::with_directory(tiny_dir.clone());
+    tiny.max_artifact_bytes = 32;
+    let oversized = CommitSnapshotCache::new(tiny)?.load_or_build(
+        &fixture.primary,
+        &identity.repository,
+        commit.as_deref(),
+        chakra_language::IndexOptions::default(),
+    )?;
+    assert_eq!(oversized.reuse.origin, CommitSnapshotOrigin::ColdBuild);
+    assert_eq!(
+        oversized.reuse.rejection,
+        Some(CommitSnapshotRejection::Oversized)
+    );
+    assert_eq!(artifact_count(&tiny_dir)?, 0);
+    Ok(())
+}
+
+#[test]
+fn concurrent_snapshot_builders_coalesce_in_memory_and_publish_one_disk_artifact()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = LinkedWorktrees::new()?;
+    let identity = chakra_git::resolve_workspace_identity(&fixture.primary)?;
+    let commit = chakra_git::resolve_head_commit_with_context(
+        &fixture.primary,
+        &OperationContext::unbounded(),
+    )?;
+
+    let memory_cache = Arc::new(CommitSnapshotCache::new(
+        CommitSnapshotCacheConfig::default(),
+    )?);
+    let start = Arc::new(Barrier::new(3));
+    let mut workers = Vec::new();
+    for root in [fixture.primary.clone(), fixture.linked.clone()] {
+        let cache = memory_cache.clone();
+        let start = start.clone();
+        let repository = identity.repository.clone();
+        let commit = commit.clone();
+        workers.push(thread::spawn(move || {
+            start.wait();
+            cache.load_or_build(
+                &root,
+                &repository,
+                commit.as_deref(),
+                chakra_language::IndexOptions::default(),
+            )
+        }));
+    }
+    start.wait();
+    let mut origins = Vec::new();
+    for worker in workers {
+        let report = worker
+            .join()
+            .map_err(|_| "memory cache worker panicked")??;
+        origins.push(report.reuse.origin);
+    }
+    origins.sort_by_key(|origin| match origin {
+        CommitSnapshotOrigin::ColdBuild => 0,
+        CommitSnapshotOrigin::MemoryReuse => 1,
+        CommitSnapshotOrigin::DiskRestore => 2,
+    });
+    assert_eq!(
+        origins,
+        vec![
+            CommitSnapshotOrigin::ColdBuild,
+            CommitSnapshotOrigin::MemoryReuse
+        ]
+    );
+
+    let cache_dir = fixture._temp.path().join("concurrent-disk-cache");
+    let config = CommitSnapshotCacheConfig::with_directory(cache_dir.clone());
+    let start = Arc::new(Barrier::new(3));
+    let mut workers = Vec::new();
+    for root in [fixture.primary.clone(), fixture.linked.clone()] {
+        let cache = CommitSnapshotCache::new(config.clone())?;
+        let start = start.clone();
+        let repository = identity.repository.clone();
+        let commit = commit.clone();
+        workers.push(thread::spawn(move || {
+            start.wait();
+            cache.load_or_build(
+                &root,
+                &repository,
+                commit.as_deref(),
+                chakra_language::IndexOptions::default(),
+            )
+        }));
+    }
+    start.wait();
+    let mut disk_origins = Vec::new();
+    for worker in workers {
+        let report = worker.join().map_err(|_| "disk cache worker panicked")??;
+        disk_origins.push(report.reuse.origin);
+    }
+    assert!(disk_origins.contains(&CommitSnapshotOrigin::ColdBuild));
+    assert!(disk_origins.iter().all(|origin| matches!(
+        origin,
+        CommitSnapshotOrigin::ColdBuild | CommitSnapshotOrigin::DiskRestore
+    )));
+    assert_eq!(artifact_count(&cache_dir)?, 1);
+    assert_eq!(
+        CommitSnapshotCache::new(config)?
+            .load_or_build(
+                &fixture.primary,
+                &identity.repository,
+                commit.as_deref(),
+                chakra_language::IndexOptions::default(),
+            )?
+            .reuse
+            .origin,
+        CommitSnapshotOrigin::DiskRestore
+    );
+    Ok(())
+}
+
+#[test]
+fn head_transitions_reuse_commit_state_without_sharing_worktree_overlay()
+-> Result<(), Box<dyn std::error::Error>> {
+    let fixture = LinkedWorktrees::new()?;
+    let registry = WorkspaceRegistry::new(WorkspaceRegistryConfig { max_workspaces: 2 })?;
+    let primary = registry.register(&fixture.primary, WorkspaceStartOptions::default())?;
+    let linked = registry.register(&fixture.linked, WorkspaceStartOptions::default())?;
+
+    fs::write(
+        fixture.primary.join("src/lib.rs"),
+        "pub fn target() {}\npub fn provider_caller() {}\npub fn committed_next() {}\n",
+    )?;
+    git(&fixture.primary, &["add", "src/lib.rs"])?;
+    git(&fixture.primary, &["commit", "-m", "next commit"])?;
+    let next = git_stdout(&fixture.primary, &["rev-parse", "HEAD"])?;
+    assert_eq!(search_count(&primary.engine(), "committed_next")?, 1);
+    assert_eq!(
+        primary
+            .engine()
+            .snapshot()
+            .layers()
+            .commit_snapshot
+            .reuse
+            .origin,
+        CommitSnapshotOrigin::ColdBuild
+    );
+
+    git(&fixture.linked, &["checkout", "--detach", &next])?;
+    assert_eq!(search_count(&linked.engine(), "committed_next")?, 1);
+    let snapshot = linked.engine().snapshot();
+    assert_eq!(
+        snapshot.layers().commit_snapshot.reuse.origin,
+        CommitSnapshotOrigin::MemoryReuse
+    );
+    assert!(snapshot.layers().worktree_overlay.files.is_empty());
+    registry.shutdown()?;
     Ok(())
 }
 
@@ -463,4 +827,27 @@ fn git_stdout(cwd: &Path, args: &[&str]) -> Result<String, Box<dyn std::error::E
 fn path_text(path: &Path) -> Result<&str, Box<dyn std::error::Error>> {
     path.to_str()
         .ok_or_else(|| format!("non-UTF-8 test path: {}", path.display()).into())
+}
+
+fn artifact_count(cache_dir: &Path) -> Result<usize, Box<dyn std::error::Error>> {
+    let entries = cache_dir.join("entries");
+    if !entries.is_dir() {
+        return Ok(0);
+    }
+    Ok(fs::read_dir(entries)?
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+        .count())
+}
+
+fn only_artifact(cache_dir: &Path) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let entries = fs::read_dir(cache_dir.join("entries"))?
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+        .map(|entry| entry.path())
+        .collect::<Vec<_>>();
+    match entries.as_slice() {
+        [entry] => Ok(entry.clone()),
+        _ => Err(format!("expected one cache artifact, found {}", entries.len()).into()),
+    }
 }
