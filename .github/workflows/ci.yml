@@ -38,7 +38,7 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
-      # Exercise Chakra's native kqueue selection and owned watcher lifecycle.
+      # Exercise Chakra's bounded polling selection and owned watcher lifecycle.
       - uses: dtolnay/rust-toolchain@1.97.1
       - run: cargo test --locked -p chakra-language --lib
       - run: cargo test --locked -p chakra-language --test live_updates

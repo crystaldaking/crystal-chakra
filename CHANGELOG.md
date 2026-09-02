@@ -5,6 +5,14 @@ version tags prefixed with `v`.
 
 ## [Unreleased]
 
+## [0.3.0-beta.1] - 2026-09-02
+
+Chakra v0.3.0-beta.1 is the first v0.3 prerelease. It adds isolated
+multi-worktree serving, a process-global bounded provider pool, and atomic
+`CommitSnapshot + WorktreeOverlay + WorkspaceEnrichment` composition with
+compatible process-local snapshot reuse. Persistent snapshot restore remains
+opt-in; release benchmarks rejected default restore and prebuilt import.
+
 ### Breaking
 
 - The status field `data.index_diagnostics.cache` is renamed to
@@ -594,7 +602,8 @@ record every pre-1.0 compatibility break explicitly (ADR-0043).
 - All development after this release follows the Gitflow policy in
   `CONTRIBUTING.md` and `AGENTS.md`.
 
-[Unreleased]: https://github.com/crystaldaking/crystal-chakra/compare/v0.2.0...develop
+[Unreleased]: https://github.com/crystaldaking/crystal-chakra/compare/v0.3.0-beta.1...develop
+[0.3.0-beta.1]: https://github.com/crystaldaking/crystal-chakra/compare/v0.2.0...v0.3.0-beta.1
 [0.2.0]: https://github.com/crystaldaking/crystal-chakra/compare/v0.1.3...v0.2.0
 [0.1.3]: https://github.com/crystaldaking/crystal-chakra/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/crystaldaking/crystal-chakra/compare/v0.1.1...v0.1.2
