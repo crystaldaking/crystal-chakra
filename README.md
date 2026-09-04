@@ -164,6 +164,9 @@ workspace before narrowing through symbols and relationships.
 Names are never guessed away. If a name is ambiguous, use the `id` and
 `revision` returned by `symbol_search`. All collections and source excerpts are
 bounded; truncated responses say which section and budget caused the cut.
+Successful tool calls return the same bounded JSON envelope in both typed
+`structuredContent` and a backwards-compatible JSON `TextContent` block, so
+clients consuming either MCP representation observe equivalent results.
 
 For branch review, `diff_context` supports direct base and merge-base scopes:
 

@@ -250,10 +250,16 @@ async fn status_tool_is_listed_and_callable() -> Result<(), Box<dyn Error + Send
         .call_tool(CallToolRequestParams::new("status"))
         .await?;
     assert_eq!(result.is_error, Some(false));
-    assert!(result.content.is_empty());
+    let text = result
+        .content
+        .first()
+        .and_then(rmcp::model::ContentBlock::as_text)
+        .ok_or("status must return backwards-compatible text content")?;
+    let text_value: serde_json::Value = serde_json::from_str(&text.text)?;
     let structured = result
         .structured_content
         .ok_or("status must return structured content")?;
+    assert_eq!(text_value, structured);
     assert_eq!(
         structured["schema_version"],
         chakra_domain::envelope::SCHEMA_VERSION

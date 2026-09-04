@@ -43,12 +43,14 @@ mentions both.
   deadlines are distinct. Provider requests have their own deadlines and
   active LSP cancellation.
 - Under ADR-024, serialize each typed query envelope once into rmcp's protocol
-  `Value`, compute its exact compact JSON length by walking that value, and
-  return a ready structured tool result. An oversized envelope is rejected
-  without constructing a full encoded buffer. This 1 MiB total guard is in
-  addition to per-section item and byte truncation; rmcp owns final transport
-  encoding because its supported API has no pre-encoded structured-result
-  path.
+  `Value`. Successful calls expose that same value as typed
+  `structuredContent` and as compact JSON in one backwards-compatible
+  `TextContent` block. Chakra computes the exact compact size of the complete
+  duplicated tool result structurally from both retained representations,
+  without constructing an additional full tool-result buffer; a result over
+  1 MiB is rejected. This total guard is in addition to per-section item and
+  byte truncation; rmcp owns final transport encoding because its supported API
+  has no pre-encoded structured-result path.
 - Stdout is owned by the protocol stream; logging goes to stderr only.
 
 ## Alternatives considered
@@ -83,9 +85,11 @@ mentions both.
 - Unit regressions exhaust both blocking-query permits, prove a cancelled queued
   request is never dispatched, then cancel two already-running requests and
   prove a third starts without waiting for their original deadline.
-- Unit regressions reject an envelope whose serialized representation exceeds
-  the transport budget, compare exact size accounting with serde_json escaping,
-  and prove the typed payload is serialized once at the budget boundary.
+- Unit regressions reject a complete duplicated result whose serialized
+  representation exceeds the transport budget, compare exact size accounting
+  with serde_json escaping, prove the text and structured representations are
+  equivalent, and prove the typed payload is serialized once at the budget
+  boundary.
 - All seven tools advertise read-only, non-destructive, idempotent, closed-world
   MCP annotations. A contract regression verifies these hints so
   non-interactive clients need not treat code-intelligence reads as writes.
