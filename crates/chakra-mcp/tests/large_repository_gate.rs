@@ -47,6 +47,7 @@ const DIFF_LIMIT: Duration = Duration::from_secs(5);
 const PROVIDER_LIMIT: Duration = Duration::from_secs(5);
 const MCP_LIMIT: Duration = Duration::from_secs(5);
 const MCP_RESPONSE_LIMIT: u64 = 1024 * 1024;
+const MCP_RESULT_TYPE_FIELD_BYTES: u64 = r#""resultType":"complete","#.len() as u64;
 
 type GateResult<T> = Result<T, Box<dyn Error + Send + Sync>>;
 
@@ -845,9 +846,21 @@ async fn generated_multi_language_release_gate() -> GateResult<()> {
             CallToolRequestParams::new("repo_map")
                 .with_arguments(serde_json::from_value(serde_json::json!({ "limit": 20 }))?),
         )
-        .await?
+        .await?;
+    let structured_content = mcp_response
         .structured_content
+        .as_ref()
         .ok_or("generated gate MCP response missing")?;
+    let text_content = mcp_response
+        .content
+        .first()
+        .and_then(rmcp::model::ContentBlock::as_text)
+        .ok_or("generated gate MCP text response missing")?;
+    let decoded_text: serde_json::Value = serde_json::from_str(&text_content.text)?;
+    require(
+        &decoded_text == structured_content,
+        "generated gate MCP text and structured responses differ",
+    )?;
     let mcp_round_trip = mcp_started.elapsed();
     metric_at_most(
         "mcp_round_trip_micros",
@@ -855,17 +868,23 @@ async fn generated_multi_language_release_gate() -> GateResult<()> {
         micros(MCP_LIMIT),
     )?;
     let mcp_response_bytes = serde_json::to_vec(&mcp_response)?.len() as u64;
-    metric_at_most("mcp_response_bytes", mcp_response_bytes, MCP_RESPONSE_LIMIT)?;
     let mcp_trace = traces
         .lock()
         .ok()
         .and_then(|store| store.mcp.last().cloned())
         .ok_or("MCP serialization instrumentation event missing")?;
+    metric_at_most(
+        "mcp_response_bytes",
+        mcp_trace.response_bytes,
+        MCP_RESPONSE_LIMIT,
+    )?;
     require(
-        mcp_trace.response_bytes == mcp_response_bytes,
+        mcp_trace.response_bytes == mcp_response_bytes
+            || mcp_trace.response_bytes
+                == mcp_response_bytes.saturating_add(MCP_RESULT_TYPE_FIELD_BYTES),
         format!(
-            "MCP response metric mismatch: trace={}, encoded={mcp_response_bytes}",
-            mcp_trace.response_bytes
+            "MCP response metric mismatch beyond the optional resultType field: trace={}, encoded={mcp_response_bytes}",
+            mcp_trace.response_bytes,
         ),
     )?;
     client.cancel().await?;

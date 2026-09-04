@@ -70,6 +70,7 @@ fn main() -> io::Result<()> {
     let hang = stem_contains("hang");
     let crash = stem_contains("crash");
     let no_hierarchy = stem_contains("no-hierarchy");
+    let overloads = stem_contains("overloads");
     let spawn_child = stem_contains("spawn-child");
     let _child: Option<Child> = if spawn_child {
         let child = std::process::Command::new("sh")
@@ -132,9 +133,19 @@ fn main() -> io::Result<()> {
             if let Some(uri) = request_uri(&body) {
                 last_uri = uri.to_owned();
             }
-            let item = format!(
-                "[{{\"name\":\"target\",\"kind\":12,\"uri\":\"{last_uri}\",\"range\":{{\"start\":{{\"line\":2,\"character\":4}},\"end\":{{\"line\":2,\"character\":27}}}},\"selectionRange\":{{\"start\":{{\"line\":2,\"character\":16}},\"end\":{{\"line\":2,\"character\":22}}}}}}]"
-            );
+            let item = if body.contains("\"line\":3") {
+                format!(
+                    "[{{\"name\":\"caller()\",\"kind\":12,\"uri\":\"{last_uri}\",\"range\":{{\"start\":{{\"line\":3,\"character\":4}},\"end\":{{\"line\":3,\"character\":38}}}},\"selectionRange\":{{\"start\":{{\"line\":3,\"character\":16}},\"end\":{{\"line\":3,\"character\":22}}}}}}]"
+                )
+            } else if overloads {
+                format!(
+                    "[{{\"name\":\"target()\",\"kind\":12,\"uri\":\"{last_uri}\",\"range\":{{\"start\":{{\"line\":2,\"character\":4}},\"end\":{{\"line\":2,\"character\":27}}}},\"selectionRange\":{{\"start\":{{\"line\":2,\"character\":16}},\"end\":{{\"line\":2,\"character\":22}}}}}},{{\"name\":\"target(int)\",\"kind\":12,\"uri\":\"{last_uri}\",\"range\":{{\"start\":{{\"line\":2,\"character\":4}},\"end\":{{\"line\":2,\"character\":27}}}},\"selectionRange\":{{\"start\":{{\"line\":2,\"character\":16}},\"end\":{{\"line\":2,\"character\":22}}}}}}]"
+                )
+            } else {
+                format!(
+                    "[{{\"name\":\"target()\",\"kind\":12,\"uri\":\"{last_uri}\",\"range\":{{\"start\":{{\"line\":2,\"character\":4}},\"end\":{{\"line\":2,\"character\":27}}}},\"selectionRange\":{{\"start\":{{\"line\":2,\"character\":16}},\"end\":{{\"line\":2,\"character\":22}}}}}}]"
+                )
+            };
             if let Some(id) = request_id(&body) {
                 send(id, &item)?;
             }
@@ -143,7 +154,7 @@ fn main() -> io::Result<()> {
                 continue;
             }
             let call = format!(
-                "[{{\"from\":{{\"name\":\"caller\",\"kind\":12,\"uri\":\"{last_uri}\",\"range\":{{\"start\":{{\"line\":3,\"character\":4}},\"end\":{{\"line\":3,\"character\":38}}}},\"selectionRange\":{{\"start\":{{\"line\":3,\"character\":16}},\"end\":{{\"line\":3,\"character\":22}}}}}},\"fromRanges\":[{{\"start\":{{\"line\":3,\"character\":27}},\"end\":{{\"line\":3,\"character\":33}}}}]}}]"
+                "[{{\"from\":{{\"name\":\"caller()\",\"kind\":12,\"uri\":\"{last_uri}\",\"range\":{{\"start\":{{\"line\":3,\"character\":4}},\"end\":{{\"line\":3,\"character\":38}}}},\"selectionRange\":{{\"start\":{{\"line\":3,\"character\":16}},\"end\":{{\"line\":3,\"character\":22}}}}}},\"fromRanges\":[{{\"start\":{{\"line\":3,\"character\":27}},\"end\":{{\"line\":3,\"character\":33}}}}]}}]"
             );
             if let Some(id) = request_id(&body) {
                 send(id, &call)?;
@@ -290,6 +301,20 @@ fn request(root: &Path, revision: Revision) -> Result<PreciseQueryRequest, Box<d
     })
 }
 
+fn caller_request(root: &Path, revision: Revision) -> Result<PreciseQueryRequest, Box<dyn Error>> {
+    let mut request = request(root, revision)?;
+    request.symbol = ProviderSymbol {
+        name: "caller".to_owned(),
+        declaration: SourceRange::new(
+            RepoRelativePath::new("src/index.cs")?,
+            TextPosition::new(4, 5)?,
+            TextPosition::new(4, 39)?,
+        )?,
+        language: Language::CSharp,
+    };
+    Ok(request)
+}
+
 fn config(executable: &Path) -> CsharpLsConfig {
     CsharpLsConfig {
         command: CsharpLsCommand::stdio(executable.as_os_str().to_owned()),
@@ -324,11 +349,38 @@ fn precise_incoming_call_carries_csharp_ls_provenance() -> Result<(), Box<dyn Er
     assert_eq!(result.revision, Revision(1));
     assert_eq!(result.incoming.len(), 1, "incoming: {:?}", result.incoming);
     let relation = &result.incoming[0];
-    assert_eq!(relation.name, "caller");
+    assert_eq!(relation.name, "caller()");
     assert_eq!(relation.provenance, Provenance::CsharpLs);
     assert_eq!(relation.occurrence_count, 1);
     assert_eq!(relation.call_sites.len(), 1);
     assert_eq!(provider.state_for(Revision(1)), ProviderState::Ready);
+    provider.shutdown()?;
+    Ok(())
+}
+
+#[test]
+fn ambiguous_overload_selection_falls_back_without_poisoning_the_provider()
+-> Result<(), Box<dyn Error>> {
+    let repository = tempfile::tempdir()?;
+    let executable = materialize_fake_server(repository.path(), "fake-csharp-ls-overloads")?;
+    let target = request(repository.path(), Revision(1))?;
+    let provider = CsharpLsProvider::start(target.workspace.clone(), config(&executable))?;
+
+    let ambiguous = provider.enrich(target);
+    assert_eq!(ambiguous.state, ProviderState::Degraded);
+    assert!(ambiguous.incoming.is_empty());
+    assert_eq!(provider.state_for(Revision(1)), ProviderState::Ready);
+    assert_eq!(provider.last_error(), None);
+
+    let subsequent = provider.enrich(caller_request(repository.path(), Revision(1))?);
+    assert_eq!(
+        subsequent.state,
+        ProviderState::Ready,
+        "last_error={:?}",
+        provider.last_error()
+    );
+    assert_eq!(provider.state_for(Revision(1)), ProviderState::Ready);
+    assert_eq!(provider.last_error(), None);
     provider.shutdown()?;
     Ok(())
 }

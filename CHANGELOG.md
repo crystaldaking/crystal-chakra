@@ -5,6 +5,27 @@ version tags prefixed with `v`.
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-09-04
+
+Chakra v0.3.1 is a compatibility and precise-provider correctness patch. It
+restores legacy MCP text results alongside structured content, reports malformed
+tool arguments at the JSON-RPC boundary, and fixes csharp-ls method hierarchy
+matching without weakening syntax fallback or provider-session health.
+
+### Fixed
+
+- Successful MCP tool calls now mirror their bounded structured JSON envelope
+  in a backwards-compatible `TextContent` block, keeping typed and legacy MCP
+  clients on an equivalent response contract (issue #151).
+- Schema-invalid MCP tool arguments now return top-level JSON-RPC `-32602
+  Invalid params` responses instead of successful `tools/call` results marked
+  with `isError`, while valid `by_id` and `by_name` symbol requests keep their
+  existing behavior (issue #176).
+- csharp-ls method call hierarchy now accepts signature-bearing display names
+  such as `MethodA(string)` after anchoring the provider item to the captured
+  file and declaration range. Ambiguous overload candidates fall back for that
+  query without degrading the healthy provider session (issue #178).
+
 ## [0.3.0] - 2026-09-02
 
 Chakra v0.3.0 is the first public beta. It adds isolated multi-worktree
@@ -612,7 +633,8 @@ record every pre-1.0 compatibility break explicitly (ADR-0043).
 - All development after this release follows the Gitflow policy in
   `CONTRIBUTING.md` and `AGENTS.md`.
 
-[Unreleased]: https://github.com/crystaldaking/crystal-chakra/compare/v0.3.0...develop
+[Unreleased]: https://github.com/crystaldaking/crystal-chakra/compare/v0.3.1...develop
+[0.3.1]: https://github.com/crystaldaking/crystal-chakra/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/crystaldaking/crystal-chakra/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/crystaldaking/crystal-chakra/compare/v0.1.3...v0.2.0
 [0.1.3]: https://github.com/crystaldaking/crystal-chakra/compare/v0.1.2...v0.1.3

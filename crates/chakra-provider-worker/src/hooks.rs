@@ -65,6 +65,17 @@ impl QueryOutcome {
             may_improve_when_ready: false,
         }
     }
+
+    fn query_local_fallback(revision: chakra_domain::revision::Revision) -> Self {
+        Self {
+            // The provider completed the synchronization barrier and remains
+            // healthy, but it could not identify one safe hierarchy item for
+            // this symbol. A non-ready query result keeps the syntax tier and
+            // reports fallback without poisoning the shared worker state.
+            result: PreciseQueryResult::unavailable(revision, ProviderState::Degraded),
+            may_improve_when_ready: false,
+        }
+    }
 }
 
 /// Per-query deadlines. `readiness` bounds the barrier-proving round-trips
@@ -148,21 +159,30 @@ impl CallHierarchyDriver {
         provenance: Provenance,
     ) -> Result<QueryOutcome, WorkerError> {
         let items = prepare_call_hierarchy(channel, request, deadlines.readiness)?;
-        let Some(item) = select_hierarchy_item(items, request)? else {
-            // No hierarchy item: the answer may improve while the provider is
-            // still loading; after readiness it is an honest empty result.
-            return Ok(QueryOutcome {
-                result: PreciseQueryResult {
-                    revision: request.workspace.revision,
-                    state: ProviderState::Ready,
-                    fallback_cause: None,
-                    incoming: Vec::new(),
-                    outgoing: Vec::new(),
-                    incoming_truncated: false,
-                    outgoing_truncated: false,
-                },
-                may_improve_when_ready: true,
-            });
+        let item = match select_hierarchy_item(items, request) {
+            Ok(item) => item,
+            Err(UnselectedHierarchyItem::Empty) => {
+                // No hierarchy item: the answer may improve while the
+                // provider is still loading; after readiness it is an honest
+                // empty result.
+                return Ok(QueryOutcome {
+                    result: PreciseQueryResult {
+                        revision: request.workspace.revision,
+                        state: ProviderState::Ready,
+                        fallback_cause: None,
+                        incoming: Vec::new(),
+                        outgoing: Vec::new(),
+                        incoming_truncated: false,
+                        outgoing_truncated: false,
+                    },
+                    may_improve_when_ready: true,
+                });
+            }
+            Err(UnselectedHierarchyItem::Mismatch) => {
+                return Ok(QueryOutcome::query_local_fallback(
+                    request.workspace.revision,
+                ));
+            }
         };
         let mut last_incoming = Vec::new();
         let mut last_outgoing = Vec::new();
@@ -272,28 +292,54 @@ fn prepare_call_hierarchy(
     Ok(serde_json::from_value::<Option<Vec<CallHierarchyItem>>>(value)?.unwrap_or_default())
 }
 
+enum UnselectedHierarchyItem {
+    Empty,
+    Mismatch,
+}
+
 fn select_hierarchy_item(
     items: Vec<CallHierarchyItem>,
     request: &PreciseQueryRequest,
-) -> Result<Option<CallHierarchyItem>, WorkerError> {
+) -> Result<CallHierarchyItem, UnselectedHierarchyItem> {
     if items.is_empty() {
-        return Ok(None);
+        return Err(UnselectedHierarchyItem::Empty);
     }
-    let mut matching = items.into_iter().filter(|item| {
-        if item.name != request.symbol.name {
-            return false;
+
+    let mut exact = None;
+    let mut exact_is_ambiguous = false;
+    let mut compatible = None;
+    let mut compatible_is_ambiguous = false;
+    for item in items {
+        let in_requested_declaration = convert::item_declaration(&item, &request.workspace)
+            .is_some_and(|(path, selection)| {
+                path == *request.symbol.declaration.file()
+                    && selection.start() >= request.symbol.declaration.start()
+                    && selection.end() <= request.symbol.declaration.end()
+            });
+        if !in_requested_declaration {
+            continue;
         }
-        convert::item_declaration(item, &request.workspace).is_some_and(|(path, selection)| {
-            path == *request.symbol.declaration.file()
-                && selection.start() >= request.symbol.declaration.start()
-                && selection.end() <= request.symbol.declaration.end()
-        })
-    });
-    let Some(item) = matching.next() else {
-        return Err(WorkerError::InvalidPosition);
-    };
-    if matching.next().is_some() {
-        return Err(WorkerError::InvalidPosition);
+
+        if item.name == request.symbol.name {
+            exact_is_ambiguous |= exact.is_some();
+            exact.get_or_insert(item);
+        } else if hierarchy_display_name_matches(&item.name, &request.symbol.name) {
+            compatible_is_ambiguous |= compatible.is_some();
+            compatible.get_or_insert(item);
+        }
     }
-    Ok(Some(item))
+
+    if !exact_is_ambiguous && let Some(item) = exact {
+        return Ok(item);
+    }
+    if exact_is_ambiguous || compatible_is_ambiguous {
+        return Err(UnselectedHierarchyItem::Mismatch);
+    }
+    compatible.ok_or(UnselectedHierarchyItem::Mismatch)
+}
+
+fn hierarchy_display_name_matches(display_name: &str, symbol_name: &str) -> bool {
+    display_name
+        .strip_prefix(symbol_name)
+        .is_some_and(|signature| signature.starts_with('('))
 }

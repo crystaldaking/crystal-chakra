@@ -63,6 +63,7 @@ run_in_container cargo test --locked --workspace
 REAL_PROVIDER_PACKAGES=(
     chakra-provider-rust-analyzer
     chakra-provider-clangd
+    chakra-provider-csharp-ls
     chakra-provider-gopls
     chakra-provider-terraform-ls
 )

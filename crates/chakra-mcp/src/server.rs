@@ -16,18 +16,19 @@ use chakra_domain::query::{
     WorkspaceCatalogData, WorkspaceQueryRouter,
 };
 use rmcp::handler::server::router::tool::ToolRouter;
-use rmcp::handler::server::tool::IntoCallToolResult;
+use rmcp::handler::server::tool::{IntoCallToolResult, ToolCallContext};
 use rmcp::handler::server::wrapper::Parameters;
-use rmcp::model::{CallToolResponse, CallToolResult};
+use rmcp::model::{CallToolResponse, CallToolResult, ContentBlock};
+use rmcp::service::RequestContext;
 use rmcp::transport::stdio;
-use rmcp::{ErrorData, ServerHandler, ServiceExt, tool, tool_handler, tool_router};
+use rmcp::{ErrorData, RoleServer, ServerHandler, ServiceExt, tool, tool_handler, tool_router};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::sync::Semaphore;
 
 const MAX_CONCURRENT_QUERIES: usize = 2;
-const MAX_MCP_ENVELOPE_BYTES: usize = 1024 * 1024;
+const MAX_MCP_TOOL_RESULT_BYTES: usize = 1024 * 1024;
 const QUERY_QUEUE_TIMEOUT: Duration = Duration::from_secs(5);
 const QUERY_EXECUTION_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_ERROR_MESSAGE_CHARS: usize = 1_024;
@@ -281,11 +282,12 @@ fn execution_error(kind: &'static str, message: impl Into<String>) -> ErrorData 
     ErrorData::internal_error(message, Some(serde_json::json!({ "kind": kind })))
 }
 
-/// Structured response already converted to the protocol's JSON value.
-/// Unlike rmcp's `Json<T>`, this wrapper lets Chakra validate the exact wire
-/// size without serializing the typed envelope into a counting writer first.
+/// Structured response and its backwards-compatible text representation.
+/// Both protocol fields are derived from the same JSON value before the
+/// complete tool result is admitted under the transport budget.
 struct BudgetedJson<T> {
     value: serde_json::Value,
+    text: String,
     marker: PhantomData<T>,
 }
 
@@ -302,6 +304,7 @@ impl<T: JsonSchema> JsonSchema for BudgetedJson<T> {
 impl<T: JsonSchema + 'static> IntoCallToolResult for BudgetedJson<T> {
     fn into_call_tool_result(self) -> Result<CallToolResponse, ErrorData> {
         let mut result = CallToolResult::default();
+        result.content = vec![ContentBlock::text(self.text)];
         result.structured_content = Some(self.value);
         result.is_error = Some(false);
         Ok(result.into())
@@ -345,6 +348,25 @@ fn encoded_json_len(value: &serde_json::Value) -> usize {
     }
 }
 
+/// Exact compact JSON length of the success result passed to rmcp. The
+/// `resultType` field is included conservatively: rmcp removes it for peers
+/// that negotiate an older protocol version, making their wire result only
+/// smaller. Optional metadata is absent from Chakra responses.
+fn encoded_success_result_len(structured: &serde_json::Value, text: &str) -> usize {
+    const RESULT_PREFIX: &str = r#"{"resultType":"complete","content":["#;
+    const TEXT_PREFIX: &str = r#"{"type":"text","text":"#;
+    const STRUCTURED_PREFIX: &str = r#"}],"structuredContent":"#;
+    const RESULT_SUFFIX: &str = r#","isError":false}"#;
+
+    RESULT_PREFIX
+        .len()
+        .saturating_add(TEXT_PREFIX.len())
+        .saturating_add(encoded_string_len(text))
+        .saturating_add(STRUCTURED_PREFIX.len())
+        .saturating_add(encoded_json_len(structured))
+        .saturating_add(RESULT_SUFFIX.len())
+}
+
 impl<T> BudgetedJson<T>
 where
     T: Serialize + JsonSchema + 'static,
@@ -357,29 +379,33 @@ where
                 None,
             )
         })?;
+        let text = serde_json::to_string(&value).map_err(|error| {
+            ErrorData::internal_error(format!("failed to serialize text response: {error}"), None)
+        })?;
         let serialization_micros =
             u64::try_from(serialization_started.elapsed().as_micros()).unwrap_or(u64::MAX);
         let budget_started = Instant::now();
-        let response_bytes = encoded_json_len(&value);
+        let response_bytes = encoded_success_result_len(&value, &text);
         let budget_check_micros =
             u64::try_from(budget_started.elapsed().as_micros()).unwrap_or(u64::MAX);
         tracing::debug!(
             response_bytes,
             serialization_micros,
             budget_check_micros,
-            transport_serialization = "rmcp_owned",
-            "MCP structured response prepared"
+            transport_serialization = "chakra_text_rmcp_result",
+            "MCP success response prepared"
         );
-        if response_bytes > MAX_MCP_ENVELOPE_BYTES {
+        if response_bytes > MAX_MCP_TOOL_RESULT_BYTES {
             return Err(ErrorData::internal_error(
                 format!(
-                    "query envelope exceeds the {MAX_MCP_ENVELOPE_BYTES}-byte MCP budget; lower the requested limit"
+                    "complete tool result exceeds the {MAX_MCP_TOOL_RESULT_BYTES}-byte MCP budget; lower the requested limit"
                 ),
                 None,
             ));
         }
         Ok(Self {
             value,
+            text,
             marker: PhantomData,
         })
     }
@@ -657,7 +683,32 @@ impl ChakraMcpServer {
     instructions = "Chakra multi-language code intelligence: inspect workspaces, status, and repo_map; search indexed source; resolve ambiguous names through symbol_search; request context or callers for one entity; and use diff_context for current worktree or branch-relative changes. When workspaces lists more than one worktree, pass its workspace_id to every workspace query. Results are bounded and carry language, revision, freshness, provider state and capabilities, provenance, and precision.",
     router = self.tool_router
 )]
-impl ServerHandler for ChakraMcpServer {}
+impl ServerHandler for ChakraMcpServer {
+    async fn call_tool(
+        &self,
+        request: rmcp::model::CallToolRequestParams,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResponse, ErrorData> {
+        let name = request.name.as_ref();
+        if !self.tool_router.has_route(name) {
+            return Err(ErrorData::invalid_params("tool not found", None));
+        }
+
+        let route = self
+            .tool_router
+            .map
+            .get(name)
+            .ok_or_else(|| ErrorData::invalid_params("tool not found", None))?;
+        let context = ToolCallContext::new(self, request, context);
+
+        // rmcp 3.x converts serde argument failures into successful tool
+        // results with `isError: true` (upstream #840 / SEP-1303). Chakra's
+        // negotiated 2025-06-18 contract classifies a malformed argument
+        // shape as JSON-RPC Invalid params, so dispatch the registered route
+        // directly and preserve its ErrorData at the protocol boundary.
+        (route.call)(context).await
+    }
+}
 
 /// Why the stdio server stopped with an error.
 #[derive(Debug, Error)]
@@ -846,6 +897,15 @@ mod tests {
         ];
         for value in values {
             assert_eq!(encoded_json_len(&value), serde_json::to_vec(&value)?.len());
+            let text = serde_json::to_string(&value)?;
+            let mut result = CallToolResult::default();
+            result.content = vec![ContentBlock::text(text.clone())];
+            result.structured_content = Some(value.clone());
+            result.is_error = Some(false);
+            assert_eq!(
+                encoded_success_result_len(&value, &text),
+                serde_json::to_vec(&result)?.len()
+            );
         }
         Ok(())
     }
@@ -856,7 +916,44 @@ mod tests {
         SERIALIZE_CALLS.store(0, Ordering::SeqCst);
         let response = BudgetedJson::<CountedPayload>::new(CountedPayload)?;
         assert_eq!(response.value, serde_json::json!("counted"));
+        assert_eq!(response.text, r#""counted""#);
         assert_eq!(SERIALIZE_CALLS.load(Ordering::SeqCst), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn success_result_text_is_equivalent_to_structured_content()
+    -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let response = BudgetedJson::<serde_json::Value>::new(serde_json::json!({
+            "escaped": "quote=\" slash=\\ line\nfeed",
+            "multibyte": "🦀 界"
+        }))?;
+        let result = response.into_call_tool_result()?;
+        let CallToolResponse::Complete(result) = result else {
+            return Err("successful response unexpectedly created a task".into());
+        };
+        let text = result
+            .content
+            .first()
+            .and_then(ContentBlock::as_text)
+            .ok_or("text result missing")?;
+        let decoded: serde_json::Value = serde_json::from_str(&text.text)?;
+        assert_eq!(Some(decoded), result.structured_content);
+        assert_eq!(result.is_error, Some(false));
+        Ok(())
+    }
+
+    #[test]
+    fn complete_result_budget_counts_both_representations()
+    -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let payload = "x".repeat(MAX_MCP_TOOL_RESULT_BYTES / 2);
+        let structured = serde_json::json!(payload);
+        assert!(encoded_json_len(&structured) < MAX_MCP_TOOL_RESULT_BYTES);
+        let result = BudgetedJson::<serde_json::Value>::new(structured);
+        let error = result
+            .err()
+            .ok_or("duplicated response unexpectedly fit the complete-result budget")?;
+        assert!(error.message.contains("complete tool result"));
         Ok(())
     }
 
@@ -909,7 +1006,7 @@ mod tests {
                     chakra_domain::state::WorkspaceStatus::Ready,
                     chakra_domain::state::ProviderState::NotConfigured,
                     Vec::new(),
-                    "x".repeat(MAX_MCP_ENVELOPE_BYTES),
+                    "x".repeat(MAX_MCP_TOOL_RESULT_BYTES),
                 ))
             })
             .await;
