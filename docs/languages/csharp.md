@@ -81,7 +81,12 @@ text-document changes.
 - Conformance: `docs/support/conformance/csharp.json` (14/14 scenarios).
 - Adapter tests: `crates/chakra-language-csharp/tests/fixture_index.rs` and
   parser/indexer unit tests.
-- Provider tests: `crates/chakra-provider-csharp-ls/tests/lifecycle.rs`.
+- Provider tests: hermetic lifecycle coverage in
+  `crates/chakra-provider-csharp-ls/tests/lifecycle.rs` and the ignored
+  csharp-ls 0.26.x smoke in
+  `crates/chakra-provider-csharp-ls/tests/real_provider.rs`. The real smoke
+  passed on 2026-09-04 with csharp-ls 0.26.0 and .NET SDK 10.0.400, resolving
+  one precise incoming caller for a signature-named method.
 - Discovery/classification: `crates/chakra-git/src/discovery.rs` and
   `crates/chakra-git/src/source_metadata.rs` tests.
 - Corpus: `docs/support/corpus/results/csharp-dotnet__runtime.json`.

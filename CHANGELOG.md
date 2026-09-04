@@ -14,6 +14,10 @@ version tags prefixed with `v`.
   Invalid params` responses instead of successful `tools/call` results marked
   with `isError`, while valid `by_id` and `by_name` symbol requests keep their
   existing behavior (issue #176).
+- csharp-ls method call hierarchy now accepts signature-bearing display names
+  such as `MethodA(string)` after anchoring the provider item to the captured
+  file and declaration range. Ambiguous overload candidates fall back for that
+  query without degrading the healthy provider session (issue #178).
 
 ## [0.3.0] - 2026-09-02
 
