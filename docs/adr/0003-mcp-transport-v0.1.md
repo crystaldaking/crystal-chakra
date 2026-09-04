@@ -2,7 +2,7 @@
 
 Status: accepted
 Date: 2026-08-15
-Last reviewed: 2026-08-18
+Last reviewed: 2026-09-04
 
 ## Context
 
@@ -51,6 +51,16 @@ mentions both.
   1 MiB is rejected. This total guard is in addition to per-section item and
   byte truncation; rmcp owns final transport encoding because its supported API
   has no pre-encoded structured-result path.
+- Schema-deserialization failures at the tool boundary remain JSON-RPC
+  `-32602 Invalid params`, matching Chakra's negotiated MCP 2025-06-18
+  contract. Locked `rmcp` 3.1.2 and upstream 3.2.0 deliberately convert these
+  failures to tool results for SEP-1303
+  ([modelcontextprotocol/rust-sdk#840](https://github.com/modelcontextprotocol/rust-sdk/issues/840)),
+  so there is no compatible upstream version to adopt. Chakra overrides only
+  `call_tool` and invokes the SDK-generated route directly to preserve its
+  original `ErrorData`. Domain validation happens after successful
+  deserialization and keeps its explicit `QueryError` mapping; neither policy
+  leaks into the domain layer.
 - Stdout is owned by the protocol stream; logging goes to stderr only.
 
 ## Alternatives considered
@@ -82,6 +92,9 @@ mentions both.
   transport verify server identity, all seven tools, a structured `status`
   call against a domain-only stub, and every high-level query against a real
   indexed Rust and PHP fixtures.
+- A raw NDJSON/stdio contract regression verifies the complete JSON-RPC
+  envelope for malformed enum variants, wrong argument types, missing nested
+  fields, and a post-deserialization domain validation failure.
 - Unit regressions exhaust both blocking-query permits, prove a cancelled queued
   request is never dispatched, then cancel two already-running requests and
   prove a third starts without waiting for their original deadline.

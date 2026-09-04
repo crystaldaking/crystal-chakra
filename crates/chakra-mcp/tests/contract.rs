@@ -30,6 +30,35 @@ use chakra_mcp::ChakraMcpServer;
 use rmcp::ServiceExt;
 use rmcp::model::CallToolRequestParams;
 use tempfile::TempDir;
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader};
+
+async fn write_json_line<W>(
+    writer: &mut W,
+    value: &serde_json::Value,
+) -> Result<(), Box<dyn Error + Send + Sync>>
+where
+    W: AsyncWrite + Unpin,
+{
+    let mut encoded = serde_json::to_vec(value)?;
+    encoded.push(b'\n');
+    writer.write_all(&encoded).await?;
+    writer.flush().await?;
+    Ok(())
+}
+
+async fn read_json_line<R>(
+    reader: &mut R,
+) -> Result<serde_json::Value, Box<dyn Error + Send + Sync>>
+where
+    R: AsyncBufRead + Unpin,
+{
+    let mut line = String::new();
+    let bytes = reader.read_line(&mut line).await?;
+    if bytes == 0 {
+        return Err("MCP transport closed before a JSON-RPC response arrived".into());
+    }
+    Ok(serde_json::from_str(&line)?)
+}
 
 /// Fixed-response domain service: the adapter must not care whether the
 /// engine or a stub answers.
@@ -321,6 +350,99 @@ async fn status_tool_is_listed_and_callable() -> Result<(), Box<dyn Error + Send
         .await
         .map_err(|error| std::io::Error::other(format!("server task join: {error}")))?
         .map_err(|error| std::io::Error::other(format!("server serve: {error}")))?;
+    running.cancel().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn schema_invalid_tool_arguments_are_raw_json_rpc_invalid_params()
+-> Result<(), Box<dyn Error + Send + Sync>> {
+    let (_repository, engine) = indexed_fixture_engine()?;
+    let server = ChakraMcpServer::new(Arc::new(engine));
+    let (server_transport, client_transport) = tokio::io::duplex(32 * 1024);
+    let server_task = tokio::spawn(async move { server.serve(server_transport).await });
+    let (client_read, mut client_write) = tokio::io::split(client_transport);
+    let mut client_read = BufReader::new(client_read);
+
+    write_json_line(
+        &mut client_write,
+        &serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-06-18",
+                "capabilities": {},
+                "clientInfo": { "name": "chakra-raw-contract", "version": "0" }
+            }
+        }),
+    )
+    .await?;
+    let initialize = read_json_line(&mut client_read).await?;
+    assert_eq!(initialize["id"], 1);
+    assert_eq!(initialize["result"]["protocolVersion"], "2025-06-18");
+
+    let running = server_task
+        .await
+        .map_err(|error| std::io::Error::other(format!("server task join: {error}")))?
+        .map_err(|error| std::io::Error::other(format!("server serve: {error}")))?;
+    write_json_line(
+        &mut client_write,
+        &serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/initialized"
+        }),
+    )
+    .await?;
+
+    let invalid_arguments = [
+        serde_json::json!({ "symbol": { "id": 1 } }),
+        serde_json::json!({ "symbol": { "by_name": 17 } }),
+        serde_json::json!({ "symbol": { "by_id": { "id": "0" } } }),
+    ];
+    for (offset, arguments) in invalid_arguments.into_iter().enumerate() {
+        let id = offset + 2;
+        write_json_line(
+            &mut client_write,
+            &serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "method": "tools/call",
+                "params": { "name": "context", "arguments": arguments }
+            }),
+        )
+        .await?;
+        let response = read_json_line(&mut client_read).await?;
+        assert_eq!(response["id"], id);
+        assert_eq!(response["error"]["code"], -32602);
+        assert!(
+            response["error"]["message"]
+                .as_str()
+                .is_some_and(|message| message.starts_with("failed to deserialize parameters:"))
+        );
+        assert!(response.get("result").is_none());
+    }
+
+    write_json_line(
+        &mut client_write,
+        &serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 5,
+            "method": "tools/call",
+            "params": { "name": "context", "arguments": {} }
+        }),
+    )
+    .await?;
+    let domain_invalid = read_json_line(&mut client_read).await?;
+    assert_eq!(domain_invalid["id"], 5);
+    assert_eq!(domain_invalid["error"]["code"], -32602);
+    assert!(
+        domain_invalid["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("symbol reference is required"))
+    );
+    assert!(domain_invalid.get("result").is_none());
+
     running.cancel().await?;
     Ok(())
 }
