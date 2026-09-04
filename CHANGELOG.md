@@ -5,6 +5,12 @@ version tags prefixed with `v`.
 
 ## [Unreleased]
 
+### Fixed
+
+- Successful MCP tool calls now mirror their bounded structured JSON envelope
+  in a backwards-compatible `TextContent` block, keeping typed and legacy MCP
+  clients on an equivalent response contract (issue #151).
+
 ## [0.3.0] - 2026-09-02
 
 Chakra v0.3.0 is the first public beta. It adds isolated multi-worktree
