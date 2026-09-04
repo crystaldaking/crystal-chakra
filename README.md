@@ -49,7 +49,7 @@ live under [docs/languages](docs/languages/).
 
 ### Prebuilt release archives
 
-[Chakra v0.3.0](https://github.com/crystaldaking/crystal-chakra/releases/tag/v0.3.0)
+[Chakra v0.3.1](https://github.com/crystaldaking/crystal-chakra/releases/tag/v0.3.1)
 ships native archives for:
 
 | Platform | Target | Archive |
@@ -59,13 +59,13 @@ ships native archives for:
 | macOS Intel | `x86_64-apple-darwin` | `.tar.gz` |
 | Windows x86-64 | `x86_64-pc-windows-msvc` | `.zip` |
 
-Archive names have the form `chakra-v0.3.0-<target>.<format>`. Each contains
+Archive names have the form `chakra-v0.3.1-<target>.<format>`. Each contains
 the `chakra` executable, this README, and the MIT license in a versioned
 directory. Download `SHA256SUMS` from the same release and verify the archive
 before installing it. For example, on Linux:
 
 ```sh
-version=v0.3.0
+version=v0.3.1
 target=x86_64-unknown-linux-gnu
 archive="chakra-${version}-${target}.tar.gz"
 base="https://github.com/crystaldaking/crystal-chakra/releases/download/${version}"
@@ -104,7 +104,7 @@ Requirements:
 ```sh
 git clone https://github.com/crystaldaking/crystal-chakra.git
 cd crystal-chakra
-git checkout v0.3.0
+git checkout v0.3.1
 cargo install --locked --path crates/chakra-cli
 chakra --version
 ```
@@ -236,14 +236,14 @@ gate, verifies support artifacts, and exercises the native macOS watcher path.
 
 ## Project status and limits
 
-Chakra v0.3.0 is the first public beta. One process serves one repository and
-a bounded set of isolated materialized worktrees. Compatible commit snapshots
-are shared in process and may be restored from an opt-in bounded local store;
-live provider enrichment remains tied to the materialized worktree. Chakra
-deliberately does not provide historical commit materialization,
-cross-repository graphs, semantic/vector search, prebuilt or network snapshot
-import, an eager complete precise call graph, arbitrary command execution, or
-a web UI.
+Chakra v0.3.1 is the current stable release in the v0.x line. One process
+serves one repository and a bounded set of isolated materialized worktrees.
+Compatible commit snapshots are shared in process and may be restored from an
+opt-in bounded local store; live provider enrichment remains tied to the
+materialized worktree. Chakra deliberately does not provide historical commit
+materialization, cross-repository graphs, semantic/vector search, prebuilt or
+network snapshot import, an eager complete precise call graph, arbitrary
+command execution, or a web UI.
 
 Syntax intelligence is intentionally conservative. Dynamic dispatch, macros,
 generated code, build-configuration selection, framework magic, and incomplete

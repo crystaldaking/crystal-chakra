@@ -5,6 +5,13 @@ version tags prefixed with `v`.
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-09-04
+
+Chakra v0.3.1 is a compatibility and precise-provider correctness patch. It
+restores legacy MCP text results alongside structured content, reports malformed
+tool arguments at the JSON-RPC boundary, and fixes csharp-ls method hierarchy
+matching without weakening syntax fallback or provider-session health.
+
 ### Fixed
 
 - Successful MCP tool calls now mirror their bounded structured JSON envelope
@@ -626,7 +633,8 @@ record every pre-1.0 compatibility break explicitly (ADR-0043).
 - All development after this release follows the Gitflow policy in
   `CONTRIBUTING.md` and `AGENTS.md`.
 
-[Unreleased]: https://github.com/crystaldaking/crystal-chakra/compare/v0.3.0...develop
+[Unreleased]: https://github.com/crystaldaking/crystal-chakra/compare/v0.3.1...develop
+[0.3.1]: https://github.com/crystaldaking/crystal-chakra/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/crystaldaking/crystal-chakra/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/crystaldaking/crystal-chakra/compare/v0.1.3...v0.2.0
 [0.1.3]: https://github.com/crystaldaking/crystal-chakra/compare/v0.1.2...v0.1.3
