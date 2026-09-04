@@ -78,13 +78,13 @@ Run the full suite, including the real-provider tests:
 ```
 
 Without arguments the wrapper first runs `cargo test --locked --workspace`,
-then runs each existing ignored real-provider smoke-test target (rust-analyzer,
-clangd, gopls, and terraform-ls) explicitly. This keeps the single command
-green without accidentally enabling unrelated ignored benchmarks and
-large-workspace gates that require external inputs. Provider adapters without
-a real-server test target are still covered by their hermetic lifecycle suites
-and by the image's executable/version checks. Any arguments replace the
-default test selection, so a selective provider run looks like:
+then runs each existing ignored real-provider smoke-test target
+(rust-analyzer, clangd, csharp-ls, gopls, and terraform-ls) explicitly. This
+keeps the single command green without accidentally enabling unrelated ignored
+benchmarks and large-workspace gates that require external inputs. Provider
+adapters without a real-server test target are still covered by their hermetic
+lifecycle suites and by the image's executable/version checks. Any arguments
+replace the default test selection, so a selective provider run looks like:
 
 ```sh
 ./tools/run_lsp_tests.sh -p chakra-provider-gopls -- --ignored
