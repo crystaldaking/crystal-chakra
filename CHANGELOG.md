@@ -10,6 +10,10 @@ version tags prefixed with `v`.
 - Successful MCP tool calls now mirror their bounded structured JSON envelope
   in a backwards-compatible `TextContent` block, keeping typed and legacy MCP
   clients on an equivalent response contract (issue #151).
+- Schema-invalid MCP tool arguments now return top-level JSON-RPC `-32602
+  Invalid params` responses instead of successful `tools/call` results marked
+  with `isError`, while valid `by_id` and `by_name` symbol requests keep their
+  existing behavior (issue #176).
 
 ## [0.3.0] - 2026-09-02
 

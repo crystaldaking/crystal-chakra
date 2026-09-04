@@ -16,11 +16,12 @@ use chakra_domain::query::{
     WorkspaceCatalogData, WorkspaceQueryRouter,
 };
 use rmcp::handler::server::router::tool::ToolRouter;
-use rmcp::handler::server::tool::IntoCallToolResult;
+use rmcp::handler::server::tool::{IntoCallToolResult, ToolCallContext};
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{CallToolResponse, CallToolResult, ContentBlock};
+use rmcp::service::RequestContext;
 use rmcp::transport::stdio;
-use rmcp::{ErrorData, ServerHandler, ServiceExt, tool, tool_handler, tool_router};
+use rmcp::{ErrorData, RoleServer, ServerHandler, ServiceExt, tool, tool_handler, tool_router};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -682,7 +683,32 @@ impl ChakraMcpServer {
     instructions = "Chakra multi-language code intelligence: inspect workspaces, status, and repo_map; search indexed source; resolve ambiguous names through symbol_search; request context or callers for one entity; and use diff_context for current worktree or branch-relative changes. When workspaces lists more than one worktree, pass its workspace_id to every workspace query. Results are bounded and carry language, revision, freshness, provider state and capabilities, provenance, and precision.",
     router = self.tool_router
 )]
-impl ServerHandler for ChakraMcpServer {}
+impl ServerHandler for ChakraMcpServer {
+    async fn call_tool(
+        &self,
+        request: rmcp::model::CallToolRequestParams,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResponse, ErrorData> {
+        let name = request.name.as_ref();
+        if !self.tool_router.has_route(name) {
+            return Err(ErrorData::invalid_params("tool not found", None));
+        }
+
+        let route = self
+            .tool_router
+            .map
+            .get(name)
+            .ok_or_else(|| ErrorData::invalid_params("tool not found", None))?;
+        let context = ToolCallContext::new(self, request, context);
+
+        // rmcp 3.x converts serde argument failures into successful tool
+        // results with `isError: true` (upstream #840 / SEP-1303). Chakra's
+        // negotiated 2025-06-18 contract classifies a malformed argument
+        // shape as JSON-RPC Invalid params, so dispatch the registered route
+        // directly and preserve its ErrorData at the protocol boundary.
+        (route.call)(context).await
+    }
+}
 
 /// Why the stdio server stopped with an error.
 #[derive(Debug, Error)]
