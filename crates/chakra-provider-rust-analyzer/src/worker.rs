@@ -232,6 +232,10 @@ pub(crate) enum ProviderError {
 }
 
 impl ProviderError {
+    fn is_content_modified(&self) -> bool {
+        matches!(self, Self::Request { code, .. } if *code == ErrorCode::ContentModified as i32)
+    }
+
     fn is_transport_failure(&self) -> bool {
         matches!(self, Self::Transport(_))
     }
@@ -239,6 +243,7 @@ impl ProviderError {
     fn fallback_state(&self) -> ProviderState {
         match self {
             Self::Timeout | Self::Cancelled | Self::CatchingUp => ProviderState::CatchingUp,
+            error if error.is_content_modified() => ProviderState::CatchingUp,
             _ => ProviderState::Degraded,
         }
     }
@@ -414,6 +419,20 @@ impl Worker {
     }
 
     fn fallback(&mut self, revision: Revision, error: ProviderError) -> PreciseQueryResult {
+        if error.is_content_modified() {
+            // The server invalidated in-flight work after an internal content
+            // change. Discard reusable facts and require a new request barrier
+            // on this session before accepting precision again (LSP -32801).
+            self.cache.clear();
+            self.barrier_generation = None;
+            self.quiescent_generation = None;
+            self.set_progress(ProviderProgress {
+                stage: ProviderProgressStage::DocumentSynchronization,
+                source: ProviderProgressSource::Chakra,
+                message: Some(error.to_string()),
+                percentage: None,
+            });
+        }
         let state = error.fallback_state();
         if state == ProviderState::Degraded {
             self.set_progress(ProviderProgress {

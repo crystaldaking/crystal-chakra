@@ -38,6 +38,13 @@ fn send(id: &str, result: &str) -> io::Result<()> {
     stdout.flush()
 }
 
+fn send_error(id: &str, code: i32) -> io::Result<()> {
+    let body = format!("{{\"jsonrpc\":\"2.0\",\"id\":{id},\"error\":{{\"code\":{code},\"message\":\"injected request error\"}}}}");
+    let mut stdout = io::stdout().lock();
+    write!(stdout, "Content-Length: {}\r\n\r\n{body}", body.len())?;
+    stdout.flush()
+}
+
 fn notify(method: &str, params: &str) -> io::Result<()> {
     let body = format!("{{\"jsonrpc\":\"2.0\",\"method\":\"{method}\",\"params\":{params}}}");
     let mut stdout = io::stdout().lock();
@@ -70,6 +77,12 @@ fn main() -> io::Result<()> {
         .file_stem()
         .and_then(|name| name.to_str())
         .is_some_and(|name| name.contains("spawn-child"));
+    let request_error = executable.file_stem().and_then(|name| name.to_str()).and_then(|name| {
+        if name.contains("content-modified") { Some(-32801) }
+        else if name.contains("request-error") { Some(-32603) }
+        else { None }
+    });
+    let mut prepare_count = 0;
     let cancelled_path: PathBuf = executable.with_extension("cancelled");
     let opened_path: PathBuf = executable.with_extension("opened");
     let prepared_path: PathBuf = executable.with_extension("prepared");
@@ -128,6 +141,13 @@ fn main() -> io::Result<()> {
             fs::write(&opened_path, opened.to_string())?;
         } else if body.contains("\"method\":\"textDocument/prepareCallHierarchy\"") {
             fs::write(&prepared_path, body.as_bytes())?;
+            prepare_count += 1;
+            if prepare_count == 2 {
+                if let (Some(code), Some(id)) = (request_error, request_id(&body)) {
+                    send_error(id, code)?;
+                    continue;
+                }
+            }
             if record_open {
                 if let Some(id) = request_id(&body) {
                     send(id, "[]")?;
@@ -304,6 +324,61 @@ fn transport_crash_restarts_once_then_degrades() -> Result<(), Box<dyn Error>> {
     assert_eq!(process_count, "2");
     assert_eq!(provider.state_for(Revision(1)), ProviderState::Degraded);
     assert!(provider.last_error().is_some());
+    provider.shutdown()?;
+    Ok(())
+}
+
+#[test]
+fn content_modified_clears_precise_cache_and_recovers_without_restart() -> Result<(), Box<dyn Error>>
+{
+    let repository = tempfile::tempdir()?;
+    let executable =
+        materialize_fake_server(repository.path(), "fake-ra-record-open-content-modified")?;
+    let request = request(repository.path(), Revision(1))?;
+    let provider = RustAnalyzerProvider::start(request.workspace.clone(), config(&executable))?;
+
+    assert_eq!(provider.enrich(request.clone()).state, ProviderState::Ready);
+    assert_eq!(
+        provider.metrics().ok_or("missing metrics")?.cache.entries,
+        1
+    );
+    // A distinct cache key forces a second provider request at the same
+    // revision. The scripted peer invalidates precisely this request.
+    let mut uncached = request.clone();
+    uncached.limit = 19;
+    let invalidated = provider.enrich(uncached);
+    assert_eq!(invalidated.state, ProviderState::CatchingUp);
+    assert_eq!(invalidated.revision, Revision(1));
+    assert!(invalidated.incoming.is_empty() && invalidated.outgoing.is_empty());
+    assert_eq!(provider.state_for(Revision(1)), ProviderState::CatchingUp);
+    assert_eq!(
+        provider.metrics().ok_or("missing metrics")?.cache.entries,
+        0
+    );
+
+    let recovered = provider.enrich(request);
+    assert_eq!(recovered.state, ProviderState::Ready);
+    assert_eq!(recovered.revision, Revision(1));
+    assert!(provider.last_error().is_none());
+    assert_eq!(provider.metrics().ok_or("missing metrics")?.cache.hits, 0);
+    assert_eq!(wait_for_file(&executable.with_extension("count"))?, "1");
+    provider.shutdown()?;
+    Ok(())
+}
+
+#[test]
+fn unrelated_server_request_errors_still_degrade() -> Result<(), Box<dyn Error>> {
+    let repository = tempfile::tempdir()?;
+    let executable =
+        materialize_fake_server(repository.path(), "fake-ra-record-open-request-error")?;
+    let mut request = request(repository.path(), Revision(1))?;
+    let provider = RustAnalyzerProvider::start(request.workspace.clone(), config(&executable))?;
+    assert_eq!(provider.enrich(request.clone()).state, ProviderState::Ready);
+    request.limit = 19;
+    let failed = provider.enrich(request);
+    assert_eq!(failed.state, ProviderState::Degraded);
+    assert!(failed.incoming.is_empty() && failed.outgoing.is_empty());
+    assert_eq!(provider.state_for(Revision(1)), ProviderState::Degraded);
     provider.shutdown()?;
     Ok(())
 }
