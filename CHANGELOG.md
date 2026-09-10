@@ -34,6 +34,10 @@ multi-worktree behavior are unchanged from v0.3.1.
 - The Docker test wrapper now runs without a TTY under macOS's bundled
   Bash 3.2. Its default test selection and explicit arguments are covered by
   hermetic checks on both macOS and Linux (issue #199).
+- The real rust-analyzer smoke test now waits for provider readiness within
+  an overall deadline before checking precise callers at each revision.
+  Cold toolchain loading may exceed one query's wait budget without causing
+  a false test failure; production query limits are unchanged (issue #200).
 
 ## [0.3.1] - 2026-09-04
 

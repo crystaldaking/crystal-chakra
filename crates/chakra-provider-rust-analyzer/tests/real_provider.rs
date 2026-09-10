@@ -7,13 +7,33 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use chakra_domain::location::{RepoRelativePath, SourceRange, TextPosition};
+use chakra_domain::operation::OperationContext;
 use chakra_domain::revision::Revision;
 use chakra_domain::state::ProviderState;
 use chakra_engine::{
-    CallHierarchyDirections, PreciseProvider, PreciseQueryRequest, ProviderDocument,
-    ProviderSymbol, ProviderWorkspace,
+    CallHierarchyDirections, PreciseProvider, PreciseQueryRequest, PreciseQueryResult,
+    ProviderDocument, ProviderSymbol, ProviderWorkspace,
 };
 use chakra_provider_rust_analyzer::{RustAnalyzerConfig, RustAnalyzerProvider};
+
+fn enrich_when_ready(
+    provider: &RustAnalyzerProvider,
+    request: PreciseQueryRequest,
+) -> Result<PreciseQueryResult, Box<dyn Error>> {
+    // Cold or emulated toolchains can outlast one bounded query while loading
+    // Cargo/sysroot data. Keep each query's production readiness proof and
+    // wait for the requested revision under one overall smoke-test deadline.
+    let operation = OperationContext::with_timeout(Duration::from_secs(90));
+    loop {
+        operation.check()?;
+        let result = provider.enrich_with_context(request.clone(), &operation);
+        if result.state != ProviderState::CatchingUp {
+            return Ok(result);
+        }
+        assert!(result.incoming.is_empty() && result.outgoing.is_empty());
+        std::thread::yield_now();
+    }
+}
 
 #[test]
 #[ignore = "requires rust-analyzer on PATH"]
@@ -46,24 +66,27 @@ fn current_rust_analyzer_returns_precise_incoming_call() -> Result<(), Box<dyn E
         },
     )?;
     let initial_started = Instant::now();
-    let result = provider.enrich(PreciseQueryRequest {
-        workspace,
-        symbol: ProviderSymbol {
-            name: "target".to_owned(),
-            declaration: SourceRange::new(
-                path.clone(),
-                TextPosition::new(1, 1)?,
-                TextPosition::new(1, 19)?,
-            )?,
-            language: chakra_domain::symbol::Language::Rust,
+    let result = enrich_when_ready(
+        &provider,
+        PreciseQueryRequest {
+            workspace,
+            symbol: ProviderSymbol {
+                name: "target".to_owned(),
+                declaration: SourceRange::new(
+                    path.clone(),
+                    TextPosition::new(1, 1)?,
+                    TextPosition::new(1, 19)?,
+                )?,
+                language: chakra_domain::symbol::Language::Rust,
+            },
+            directions: CallHierarchyDirections {
+                incoming: true,
+                outgoing: false,
+            },
+            limit: 20,
+            priority: chakra_engine::ProviderRequestPriority::Normal,
         },
-        directions: CallHierarchyDirections {
-            incoming: true,
-            outgoing: false,
-        },
-        limit: 20,
-        priority: chakra_engine::ProviderRequestPriority::Normal,
-    });
+    )?;
     let initial_elapsed = initial_started.elapsed();
     assert_eq!(
         result.state,
@@ -88,32 +111,35 @@ fn current_rust_analyzer_returns_precise_incoming_call() -> Result<(), Box<dyn E
         changed_source.as_ref(),
     )?;
     let changed_started = Instant::now();
-    let changed = provider.enrich(PreciseQueryRequest {
-        workspace: ProviderWorkspace::from_documents(
-            fs::canonicalize(repository.path())?,
-            Revision(2),
-            vec![ProviderDocument {
-                path: path.clone(),
-                source: changed_source,
+    let changed = enrich_when_ready(
+        &provider,
+        PreciseQueryRequest {
+            workspace: ProviderWorkspace::from_documents(
+                fs::canonicalize(repository.path())?,
+                Revision(2),
+                vec![ProviderDocument {
+                    path: path.clone(),
+                    source: changed_source,
+                    language: chakra_domain::symbol::Language::Rust,
+                }],
+            ),
+            symbol: ProviderSymbol {
+                name: "target".to_owned(),
+                declaration: SourceRange::new(
+                    path,
+                    TextPosition::new(1, 1)?,
+                    TextPosition::new(1, 19)?,
+                )?,
                 language: chakra_domain::symbol::Language::Rust,
-            }],
-        ),
-        symbol: ProviderSymbol {
-            name: "target".to_owned(),
-            declaration: SourceRange::new(
-                path,
-                TextPosition::new(1, 1)?,
-                TextPosition::new(1, 19)?,
-            )?,
-            language: chakra_domain::symbol::Language::Rust,
+            },
+            directions: CallHierarchyDirections {
+                incoming: true,
+                outgoing: false,
+            },
+            limit: 20,
+            priority: chakra_engine::ProviderRequestPriority::Normal,
         },
-        directions: CallHierarchyDirections {
-            incoming: true,
-            outgoing: false,
-        },
-        limit: 20,
-        priority: chakra_engine::ProviderRequestPriority::Normal,
-    });
+    )?;
     let changed_elapsed = changed_started.elapsed();
     assert_eq!(
         changed.state,
