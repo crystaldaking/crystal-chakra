@@ -5,6 +5,29 @@ version tags prefixed with `v`.
 
 ## [Unreleased]
 
+## [0.3.2] - 2026-09-10
+
+Chakra v0.3.2 is a reliability patch for the v0.3 line. It restores the
+reproducible language-provider test image and makes the one-file-edit
+incremental conformance assertion deterministic under watcher timing. The
+public query surface, freshness model, provenance, bounded degradation, and
+multi-worktree behavior are unchanged from v0.3.1.
+
+### Fixed
+
+- The shared language-server test image now retries the LLVM archive
+  download+checksum pair (deleting the failed archive between attempts)
+  instead of failing the cold build on a single in-transit corruption. The
+  pinned LLVM 21.1.8 digest was re-verified against authoritative upstream
+  GitHub release metadata and is unchanged; checksum enforcement is not
+  weakened (issue #183).
+- The one-file-edit, atomic-replace, and rename/delete conformance scenarios
+  now capture their live-metric baseline before the filesystem mutation and
+  keep the `RequireFresh` query as the explicit publication barrier, so a
+  background watcher reconcile can no longer hide the targeted reparse from
+  the measured delta. The one-targeted-refresh and zero-full-reindex
+  invariants are unchanged (issue #187).
+
 ## [0.3.1] - 2026-09-04
 
 Chakra v0.3.1 is a compatibility and precise-provider correctness patch. It
@@ -633,7 +656,8 @@ record every pre-1.0 compatibility break explicitly (ADR-0043).
 - All development after this release follows the Gitflow policy in
   `CONTRIBUTING.md` and `AGENTS.md`.
 
-[Unreleased]: https://github.com/crystaldaking/crystal-chakra/compare/v0.3.1...develop
+[Unreleased]: https://github.com/crystaldaking/crystal-chakra/compare/v0.3.2...develop
+[0.3.2]: https://github.com/crystaldaking/crystal-chakra/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/crystaldaking/crystal-chakra/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/crystaldaking/crystal-chakra/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/crystaldaking/crystal-chakra/compare/v0.1.3...v0.2.0
