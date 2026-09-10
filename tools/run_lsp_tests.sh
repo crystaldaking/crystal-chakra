@@ -39,13 +39,15 @@ if ! docker run --rm --platform "$PLATFORM" \
         -v "$TARGET_VOLUME:/seed" "$IMAGE" touch /seed/.keep
 fi
 
-TTY_OPTS=()
+# Keep this array non-empty: macOS Bash 3.2 treats an empty array as unset
+# when expanded under nounset, which breaks non-interactive runs (issue #199).
+RUN_OPTS=(--rm --init --platform "$PLATFORM")
 if [ -t 0 ] && [ -t 1 ]; then
-    TTY_OPTS=(-t)
+    RUN_OPTS+=(-t)
 fi
 
 run_in_container() {
-    docker run --rm --init --platform "$PLATFORM" "${TTY_OPTS[@]}" \
+    docker run "${RUN_OPTS[@]}" \
         -v "$REPO_ROOT:/workspace" \
         -v "$TARGET_VOLUME:/workspace/target" \
         -v "$REGISTRY_VOLUME:/usr/local/cargo/registry" \

@@ -28,13 +28,27 @@ RUN git config --system --add safe.directory /workspace
 
 # clangd 21+ (docs/languages/cpp.md): pinned LLVM 21.1.8 binary distribution.
 # Only the statically linked clangd binary and the clang builtin headers are
-# kept; the full distribution is ~11 GB.
+# kept; the full distribution is ~11 GB. The ~2 GB archive occasionally fails
+# its checksum in transit (issue #183), so the download+verify pair retries
+# with the failed archive deleted between attempts; the pinned digest itself
+# is verified against upstream release metadata and is never weakened.
 ARG LLVM_VERSION=21.1.8
 ARG LLVM_SHA256=b3b7f2801d15d50736acea3c73982994d025b01c2f035b91ae3b49d1b575732b
-RUN curl -fsSL "https://github.com/llvm/llvm-project/releases/download/llvmorg-${LLVM_VERSION}/LLVM-${LLVM_VERSION}-Linux-X64.tar.xz" \
-        -o /tmp/llvm.tar.xz \
-    && echo "${LLVM_SHA256}  /tmp/llvm.tar.xz" | sha256sum -c - \
-    && mkdir -p /tmp/llvm \
+RUN set -e; \
+    for attempt in 1 2 3; do \
+        rm -f /tmp/llvm.tar.xz; \
+        if curl -fsSL "https://github.com/llvm/llvm-project/releases/download/llvmorg-${LLVM_VERSION}/LLVM-${LLVM_VERSION}-Linux-X64.tar.xz" \
+                -o /tmp/llvm.tar.xz \
+            && echo "${LLVM_SHA256}  /tmp/llvm.tar.xz" | sha256sum -c -; then \
+            break; \
+        fi; \
+        if [ "${attempt}" -eq 3 ]; then \
+            echo "LLVM archive failed its pinned checksum after ${attempt} attempts" >&2; \
+            exit 1; \
+        fi; \
+        echo "LLVM archive download/checksum failed on attempt ${attempt}; retrying" >&2; \
+    done; \
+    mkdir -p /tmp/llvm \
     && tar -xJf /tmp/llvm.tar.xz -C /tmp/llvm --strip-components=1 \
     && mkdir -p /opt/llvm/bin /opt/llvm/lib \
     && cp /tmp/llvm/bin/clangd /opt/llvm/bin/clangd \
