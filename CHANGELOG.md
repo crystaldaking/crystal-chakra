@@ -31,6 +31,9 @@ multi-worktree behavior are unchanged from v0.3.1.
   provider readiness under a shared deadline. Delayed watcher events may
   still produce the required honest `CatchingUp` fallback; the test checks
   that fallback and then verifies precise facts remain isolated (issue #198).
+- The Docker test wrapper now runs without a TTY under macOS's bundled
+  Bash 3.2. Its default test selection and explicit arguments are covered by
+  hermetic checks on both macOS and Linux (issue #199).
 
 ## [0.3.1] - 2026-09-04
 

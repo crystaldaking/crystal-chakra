@@ -38,6 +38,8 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
+      # Exercise the non-interactive wrapper with macOS's bundled Bash 3.2.
+      - run: python3 tools/test_run_lsp_tests.py
       # Exercise Chakra's bounded polling selection and owned watcher lifecycle.
       - uses: dtolnay/rust-toolchain@1.97.1
       - run: cargo test --locked -p chakra-language --lib
@@ -71,6 +73,7 @@ jobs:
       # Hermetic corpus-fetcher retry tests; never touch the network.
       - run: python3 tools/test_fetch_corpus.py
       - run: python3 tools/test_extract_release_notes.py
+      - run: python3 tools/test_run_lsp_tests.py
 
   conformance:
     runs-on: ubuntu-latest
