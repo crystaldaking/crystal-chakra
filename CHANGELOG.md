@@ -27,6 +27,10 @@ multi-worktree behavior are unchanged from v0.3.1.
   background watcher reconcile can no longer hide the targeted reparse from
   the measured delta. The one-targeted-refresh and zero-full-reindex
   invariants are unchanged (issue #187).
+- The linked-worktree provider-isolation test now waits for revision-bound
+  provider readiness under a shared deadline. Delayed watcher events may
+  still produce the required honest `CatchingUp` fallback; the test checks
+  that fallback and then verifies precise facts remain isolated (issue #198).
 
 ## [0.3.1] - 2026-09-04
 

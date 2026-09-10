@@ -180,10 +180,27 @@ fn linked_worktrees_keep_files_revisions_and_provider_facts_isolated()
         caller: caller.location,
     }))?;
 
-    let primary_callers = primary_engine.callers(CallersRequest {
-        symbol: Some(chakra_domain::query::SymbolRef::ByName("target".to_owned())),
-        ..CallersRequest::default()
-    })?;
+    // A delayed watcher event can revoke the pinned revision during the
+    // post-provider freshness proof, even after the earlier fresh searches.
+    // Retry only that honest CatchingUp fallback; provider readiness for the
+    // returned revision is the condition, not an assumed watcher schedule.
+    let operation = OperationContext::with_timeout(Duration::from_secs(10));
+    let primary_callers = loop {
+        let response = primary_engine.callers_with_context(
+            CallersRequest {
+                symbol: Some(chakra_domain::query::SymbolRef::ByName("target".to_owned())),
+                ..CallersRequest::default()
+            },
+            &operation,
+        )?;
+        if response.provider_state != ProviderState::CatchingUp {
+            break response;
+        }
+        assert!(response.data.callers.is_empty());
+        assert_eq!(response.layers.workspace_enrichment.revision, None);
+        thread::yield_now();
+    };
+    assert_eq!(primary_callers.provider_state, ProviderState::Ready);
     assert_eq!(primary_callers.data.callers.len(), 1);
     assert_eq!(
         primary_callers.data.callers[0].provenance,
