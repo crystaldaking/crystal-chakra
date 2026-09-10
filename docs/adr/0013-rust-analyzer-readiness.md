@@ -56,6 +56,11 @@ stable completion barriers:
   publishes a new syntax revision. Otherwise retain syntax evidence and report
   `catching_up`. An `allow_stale` request skips precise enrichment rather than
   silently turning its low-latency syntax read into a fresh barrier.
+- A server `ContentModified` response (LSP `-32801`) invalidates cached precise
+  facts and the request/quiescence generation proof, returning `catching_up`
+  without restarting the owned session. The next bounded query must establish
+  the barrier again. Unrelated server request errors remain degraded; no
+  automatic unbounded retry is introduced (v0.3.2 release review, issue #201).
 - Measure each synchronization: workspace documents/bytes, open documents,
   created/changed/deleted counts, text messages/bytes, watched-file events,
   catalog entries examined, and source bodies compared. Retain cumulative text

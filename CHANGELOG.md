@@ -8,13 +8,17 @@ version tags prefixed with `v`.
 ## [0.3.2] - 2026-09-10
 
 Chakra v0.3.2 is a reliability patch for the v0.3 line. It restores the
-reproducible language-provider test image and makes the one-file-edit
-incremental conformance assertion deterministic under watcher timing. The
+reproducible language-provider test image, stabilizes readiness and watcher
+tests, and handles transient rust-analyzer content changes. The
 public query surface, freshness model, provenance, bounded degradation, and
 multi-worktree behavior are unchanged from v0.3.1.
 
 ### Fixed
 
+- rust-analyzer `ContentModified` responses now return `CatchingUp` with no
+  precise relations, invalidate cached precise facts and readiness evidence,
+  and allow the next bounded query to recover on the same server session.
+  Other server request errors still degrade honestly (issue #201).
 - The shared language-server test image now retries the LLVM archive
   download+checksum pair (deleting the failed archive between attempts)
   instead of failing the cold build on a single in-transit corruption. The
