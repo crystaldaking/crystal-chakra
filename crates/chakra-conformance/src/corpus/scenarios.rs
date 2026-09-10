@@ -1282,12 +1282,18 @@ fn run_mutation_scenarios(
         .any(|degradation| degradation.cause == IndexBudgetKind::WorkspaceSourceBytes);
 
     slots.run("one-file-edit", |scenario| {
+        // Capture the baseline BEFORE the mutation: the watcher may reconcile
+        // the edit in the background before a post-write baseline is taken,
+        // which would hide the reparse from the delta and make the count
+        // timing-dependent (issue #187). The freshness-barrier query below is
+        // the explicit publication condition, so the pre-write baseline makes
+        // the delta deterministically attribute exactly this edit's reparse.
+        let before = workspace.live.metrics();
         let original = fs::read_to_string(checkout.join(&plan.edit_file))?;
         fs::write(
             checkout.join(&plan.edit_file),
             format!("{original}{}", plan.declaration_one),
         )?;
-        let before = workspace.live.metrics();
         let started = Instant::now();
         reject(
             workspace.find_symbol(plan.symbol_one)?,
@@ -1307,6 +1313,10 @@ fn run_mutation_scenarios(
     });
 
     slots.run("atomic-replace", |scenario| {
+        // Baseline before the mutation for the same reason as one-file-edit
+        // (issue #187): a background reconcile between the rename and the
+        // metrics snapshot would zero the measured delta.
+        let before = workspace.live.metrics();
         let current = fs::read_to_string(checkout.join(&plan.edit_file))?;
         fs::write(
             checkout.join(&plan.swap_file),
@@ -1316,7 +1326,6 @@ fn run_mutation_scenarios(
             checkout.join(&plan.swap_file),
             checkout.join(&plan.edit_file),
         )?;
-        let before = workspace.live.metrics();
         let started = Instant::now();
         reject(
             workspace.find_symbol(plan.symbol_two)?,
@@ -1341,12 +1350,15 @@ fn run_mutation_scenarios(
 
     slots.run("rename-delete", |scenario| {
         let rename_symbol = facts.rename_symbol.clone();
+        // Baseline before the mutation (issue #187): the watcher may process
+        // the rename/delete before a post-mutation snapshot, zeroing the
+        // measured created/deleted deltas.
+        let before = workspace.live.metrics();
         fs::rename(
             checkout.join(&plan.rename_file),
             checkout.join(&plan.renamed_file),
         )?;
         fs::remove_file(checkout.join(&plan.edit_file))?;
-        let before = workspace.live.metrics();
         let started = Instant::now();
         reject(
             !workspace.find_symbol(plan.symbol_two)?,
