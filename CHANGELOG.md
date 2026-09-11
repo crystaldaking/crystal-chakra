@@ -5,6 +5,18 @@ version tags prefixed with `v`.
 
 ## [Unreleased]
 
+### Added
+
+- Shared project configuration (issue #206, ADR-0053). A committed
+  `chakra.toml` at the Git worktree root now carries provider enablement,
+  indexing limits, provider-pool limits, and startup budgets once for every
+  agent client, merging with the git-ignored private `chakra.local.toml` and
+  explicit CLI options in a documented precedence order (defaults < shared <
+  private < CLI). `chakra config show` prints the effective configuration
+  with the source layer of every key. Executable overrides live only in the
+  private file or CLI flags; invalid or unsupported configuration fails
+  startup with a file- and key-aware error and is never applied partially.
+
 ## [0.3.2] - 2026-09-10
 
 Chakra v0.3.2 is a reliability patch for the v0.3 line. It restores the
