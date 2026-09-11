@@ -1,0 +1,46 @@
+# Example shared project configuration (ADR-0053).
+#
+# Copy to the Git worktree root as `chakra.toml` and commit it. Everything
+# here is portable across contributors, operating systems, agent clients, and
+# linked worktrees. Provider executable paths are NOT allowed in this file;
+# put them in a sibling `chakra.local.toml` (git-ignored) or pass CLI flags.
+
+# Required. This chakra supports schema version 1.
+schema_version = 1
+
+[index]
+# max_files = 100000
+# max_source_file_bytes = 8388608
+# max_workspace_source_bytes = 134217728
+# max_symbols = 500000
+# max_edges = 1000000
+# max_call_sites = 1000000
+# max_workers = 8
+# startup_target_millis = 120000
+# memory_target_bytes = 268435456
+
+[startup]
+# max_workspaces = 4
+# live_index_startup_timeout_millis = 30000
+
+[providers]
+# max_active = 3
+# max_active_per_workspace = 3
+# max_reserved_memory_bytes = 2147483648
+# max_reserved_memory_bytes_per_workspace = 2147483648
+# max_concurrent_queries = 4
+# max_queued_queries = 16
+# queue_timeout_millis = 1000
+# idle_timeout_millis = 300000
+# jdtls_readiness_timeout_millis = 180000
+
+# Per-provider enablement. Example: run syntax-only for Go.
+# [providers.gopls]
+# enabled = false
+
+# Available provider tables: rust-analyzer, vtsls, pyright, jdtls,
+# csharp-ls, bash-language-server, clangd, terraform-ls, gopls.
+# In `chakra.local.toml` each table may additionally set `path`:
+#
+# [providers.clangd]
+# path = "/opt/llvm/bin/clangd"      # or a path relative to this file
