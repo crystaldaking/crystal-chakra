@@ -7,3 +7,6 @@ target/
 # Python bytecode caches produced by local tooling validation
 __pycache__/
 *.py[cod]
+
+# Private Chakra overrides; machine-specific and never committed (ADR-0053)
+chakra.local.toml
