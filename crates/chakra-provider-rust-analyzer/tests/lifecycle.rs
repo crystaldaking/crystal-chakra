@@ -86,6 +86,7 @@ fn main() -> io::Result<()> {
     let cancelled_path: PathBuf = executable.with_extension("cancelled");
     let opened_path: PathBuf = executable.with_extension("opened");
     let prepared_path: PathBuf = executable.with_extension("prepared");
+    let attempts_path: PathBuf = executable.with_extension("attempts");
     let child_path: PathBuf = executable.with_extension("child");
     let _child: Option<Child> = if spawn_child {
         let child = Command::new("sh")
@@ -153,6 +154,12 @@ fn main() -> io::Result<()> {
                     send(id, "[]")?;
                 }
             } else if !hang {
+                let attempts = fs::read_to_string(&attempts_path)
+                    .ok()
+                    .and_then(|value| value.parse::<u64>().ok())
+                    .unwrap_or(0)
+                    .saturating_add(1);
+                fs::write(&attempts_path, attempts.to_string())?;
                 std::process::exit(17);
             }
         } else if body.contains("\"method\":\"$/cancelRequest\"") {
@@ -315,13 +322,17 @@ fn transport_crash_restarts_once_then_degrades() -> Result<(), Box<dyn Error>> {
 
     let result = provider.enrich(request.clone());
     let process_count = wait_for_file(&executable.with_extension("count"))?;
+    let crash_attempts = wait_for_file(&executable.with_extension("attempts"))?;
     assert_eq!(
         result.state,
         ProviderState::Degraded,
-        "last_error={:?}, process_count={process_count}",
+        "last_error={:?}, process_count={process_count}, crash_attempts={crash_attempts}",
         provider.last_error()
     );
-    assert_eq!(process_count, "2");
+    assert_eq!(
+        crash_attempts, "2",
+        "one retry of the crash-inducing request"
+    );
     assert_eq!(provider.state_for(Revision(1)), ProviderState::Degraded);
     assert!(provider.last_error().is_some());
     provider.shutdown()?;
