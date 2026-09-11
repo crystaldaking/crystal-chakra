@@ -1,0 +1,252 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/crystaldaking/crystal-chakra/blob/develop/docs/evaluation/v0.4.0-paired/run-result.schema.json",
+  "title": "Chakra v0.4.0 paired evaluation run artifact",
+  "description": "One artifact per run, stored at docs/evaluation/v0.4.0-paired/runs/<task_id>/<condition>/run.json. Contains measured evidence only; reviewer judgment lives in the reviewer section. Paths are repository-relative; secrets, tokens, and absolute machine paths are forbidden.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "task_id",
+    "condition",
+    "order",
+    "environment_ref",
+    "timing",
+    "metrics",
+    "discovery",
+    "outcome"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": { "const": 1 },
+    "task_id": {
+      "type": "string",
+      "description": "Task identifier from corpus.json."
+    },
+    "condition": { "enum": ["baseline", "chakra"] },
+    "order": {
+      "type": "object",
+      "required": ["run_order_index", "assignment", "seed"],
+      "additionalProperties": false,
+      "properties": {
+        "run_order_index": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "1 when this run executed first for the task, 2 when second."
+        },
+        "assignment": {
+          "enum": ["baseline-first", "chakra-first"],
+          "description": "Order assignment drawn for this task."
+        },
+        "seed": {
+          "type": "string",
+          "description": "Seed used for the reproducible order shuffle."
+        }
+      }
+    },
+    "environment_ref": {
+      "type": "string",
+      "description": "Repository-relative path to the session environment.json."
+    },
+    "cache_state": {
+      "enum": ["cold", "warm"],
+      "description": "Chakra index cache state at run start; omit for baseline runs."
+    },
+    "timing": {
+      "type": "object",
+      "required": ["started_at", "wall_time_seconds"],
+      "additionalProperties": false,
+      "properties": {
+        "started_at": { "type": "string", "format": "date-time" },
+        "wall_time_seconds": { "type": "number", "minimum": 0 }
+      }
+    },
+    "budget": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "max_wall_time_minutes": { "type": "number" },
+        "max_turns": { "type": "integer" }
+      }
+    },
+    "metrics": {
+      "type": "object",
+      "required": ["turns", "tool_calls", "context_tokens"],
+      "additionalProperties": false,
+      "properties": {
+        "turns": { "type": "integer", "minimum": 0 },
+        "tool_calls": {
+          "type": "object",
+          "required": ["search", "read", "shell"],
+          "additionalProperties": false,
+          "properties": {
+            "search": { "type": "integer", "minimum": 0 },
+            "read": { "type": "integer", "minimum": 0 },
+            "shell": { "type": "integer", "minimum": 0 },
+            "chakra": {
+              "type": "object",
+              "description": "Per-tool Chakra call counts; chakra condition only.",
+              "additionalProperties": false,
+              "properties": {
+                "status": { "type": "integer", "minimum": 0 },
+                "repo_map": { "type": "integer", "minimum": 0 },
+                "search": { "type": "integer", "minimum": 0 },
+                "symbol_search": { "type": "integer", "minimum": 0 },
+                "context": { "type": "integer", "minimum": 0 },
+                "callers": { "type": "integer", "minimum": 0 },
+                "diff_context": { "type": "integer", "minimum": 0 }
+              }
+            }
+          }
+        },
+        "context_tokens": {
+          "type": "object",
+          "required": ["observable"],
+          "additionalProperties": false,
+          "properties": {
+            "observable": {
+              "type": "boolean",
+              "description": "False when the client does not expose token counts; never estimate."
+            },
+            "input": { "type": "integer", "minimum": 0 },
+            "output": { "type": "integer", "minimum": 0 }
+          }
+        }
+      }
+    },
+    "discovery": {
+      "type": "object",
+      "required": [
+        "relevant_files_found",
+        "relevant_files_missed",
+        "tests_found",
+        "tests_missed",
+        "stale_context_incidents"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "relevant_files_found": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Repository-relative paths from the task's expected_relevant_files the agent actually used."
+        },
+        "relevant_files_missed": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "tests_found": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "tests_missed": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "stale_context_incidents": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["description", "detected"],
+            "additionalProperties": false,
+            "properties": {
+              "description": { "type": "string" },
+              "detected": { "type": "boolean" },
+              "detected_by": {
+                "type": "string",
+                "description": "How the drift was detected, e.g. diff_context, test failure, manual re-read."
+              }
+            }
+          }
+        }
+      }
+    },
+    "chakra_observations": {
+      "type": "object",
+      "description": "Chakra condition only.",
+      "additionalProperties": false,
+      "properties": {
+        "initial_status": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "revision": { "type": "integer" },
+            "freshness": { "type": "string" },
+            "provider_state": { "type": "string" }
+          }
+        },
+        "final_status": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "revision": { "type": "integer" },
+            "freshness": { "type": "string" },
+            "provider_state": { "type": "string" }
+          }
+        },
+        "truncated_responses": { "type": "integer", "minimum": 0 },
+        "catching_up_responses": { "type": "integer", "minimum": 0 },
+        "degraded_responses": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "harness_mutation": {
+      "type": "object",
+      "description": "stale-worktree tasks only.",
+      "additionalProperties": false,
+      "properties": {
+        "file": { "type": "string" },
+        "applied_at": { "type": "string", "format": "date-time" },
+        "post_mutation_blob_sha": { "type": "string" }
+      }
+    },
+    "outcome": {
+      "type": "object",
+      "required": ["status", "correctness_evidence", "final_artifact_ref"],
+      "additionalProperties": false,
+      "properties": {
+        "status": { "enum": ["success", "partial", "failure", "inconclusive"] },
+        "correctness_evidence": {
+          "type": "string",
+          "description": "Checkable evidence: diff reference, validation output, or answer-review result against objective criteria."
+        },
+        "validation_executed": {
+          "type": "boolean",
+          "description": "Whether the task's required validation was actually executed."
+        },
+        "final_artifact_ref": {
+          "type": "string",
+          "description": "Repository-relative path to the final patch/answer artifact."
+        }
+      }
+    },
+    "failure": {
+      "type": "object",
+      "description": "Present when the run failed or was retried.",
+      "additionalProperties": false,
+      "properties": {
+        "classification": {
+          "enum": ["budget-exceeded", "agent-crash", "setup-void", "unverifiable"]
+        },
+        "reason": { "type": "string" },
+        "retry_of": { "type": "string" }
+      }
+    },
+    "reviewer": {
+      "type": "object",
+      "description": "Reviewer judgment, recorded separately from measured evidence. Must never override the objective outcome.",
+      "additionalProperties": false,
+      "properties": {
+        "scored_by": { "type": "string" },
+        "notes": { "type": "string" },
+        "unmet_needs": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "User problems observed in this run that context/diff_context do not solve well; feeds the impact go/no-go unmet-need gate."
+        }
+      }
+    },
+    "raw_artifacts": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Repository-relative paths to transcripts, diffs, and tool logs."
+    }
+  }
+}
