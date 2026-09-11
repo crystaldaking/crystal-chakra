@@ -5,17 +5,41 @@ version tags prefixed with `v`.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-09-11
+
+Chakra v0.4.0 adds shared project configuration with typed precedence and
+trust boundaries, and accepts the paired agent-evaluation protocol, task
+corpus, and run-result schema that gate the v0.4 line's impact measurement.
+It also hardens the provider crash-restart lifecycle harnesses against
+self-induced restarts. The public query surface, freshness model, provenance,
+bounded degradation, and multi-worktree behavior are unchanged from v0.3.2.
+
 ### Added
 
 - Shared project configuration (issue #206, ADR-0053). A committed
   `chakra.toml` at the Git worktree root now carries provider enablement,
   indexing limits, provider-pool limits, and startup budgets once for every
-  agent client, merging with the git-ignored private `chakra.local.toml` and
+  agent client, merging with the private, non-committed `chakra.local.toml`
+  (git-ignore it in your project) and
   explicit CLI options in a documented precedence order (defaults < shared <
   private < CLI). `chakra config show` prints the effective configuration
   with the source layer of every key. Executable overrides live only in the
   private file or CLI flags; invalid or unsupported configuration fails
   startup with a file- and key-aware error and is never applied partially.
+- The v0.4.0 paired agent-evaluation protocol, machine-readable task corpus,
+  and run-result JSON schema (issue #189). The protocol fixes paired
+  baseline/Chakra conditions, counterbalanced run order, correctness-first
+  scoring, and pre-registered decision rules for the v0.4.0 scope direction
+  and the standalone `impact` query go/no-go. The corpus pins five
+  repositories across four ecosystems (Rust, PHP, Python, Go) by immutable
+  commit SHA for local evaluation use only, per ADR-0029.
+
+### Fixed
+
+- Provider crash-restart lifecycle harnesses now count crash-inducing
+  requests explicitly, so a restart deliberately triggered by the harness
+  itself can no longer masquerade as a provider crash and inflate or hide
+  crash-restart evidence (issue #196).
 
 ## [0.3.2] - 2026-09-10
 
@@ -683,7 +707,8 @@ record every pre-1.0 compatibility break explicitly (ADR-0043).
 - All development after this release follows the Gitflow policy in
   `CONTRIBUTING.md` and `AGENTS.md`.
 
-[Unreleased]: https://github.com/crystaldaking/crystal-chakra/compare/v0.3.2...develop
+[Unreleased]: https://github.com/crystaldaking/crystal-chakra/compare/v0.4.0...develop
+[0.4.0]: https://github.com/crystaldaking/crystal-chakra/compare/v0.3.2...v0.4.0
 [0.3.2]: https://github.com/crystaldaking/crystal-chakra/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/crystaldaking/crystal-chakra/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/crystaldaking/crystal-chakra/compare/v0.2.0...v0.3.0

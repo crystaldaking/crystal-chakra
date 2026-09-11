@@ -847,6 +847,21 @@ mod tests {
     }
 
     #[test]
+    fn unknown_keys_in_provider_tables_are_rejected() -> TestResult {
+        let directory = tempfile::tempdir()?;
+        write(
+            directory.path(),
+            SHARED_CONFIG_FILENAME,
+            "schema_version = 1\n\n[providers]\nmax_actve = 2\n",
+        )?;
+        let error = ConfigLayers::load(directory.path(), None)
+            .err()
+            .ok_or("unknown providers key must be rejected")?;
+        assert!(error.to_string().contains("unknown field"), "{error}");
+        Ok(())
+    }
+
+    #[test]
     fn malformed_toml_is_rejected() -> TestResult {
         let directory = tempfile::tempdir()?;
         write(

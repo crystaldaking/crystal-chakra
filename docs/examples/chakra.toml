@@ -3,7 +3,7 @@
 # Copy to the Git worktree root as `chakra.toml` and commit it. Everything
 # here is portable across contributors, operating systems, agent clients, and
 # linked worktrees. Provider executable paths are NOT allowed in this file;
-# put them in a sibling `chakra.local.toml` (git-ignored) or pass CLI flags.
+# put them in a sibling `chakra.local.toml` (git-ignore it) or pass CLI flags.
 
 # Required. This chakra supports schema version 1.
 schema_version = 1
@@ -17,7 +17,7 @@ schema_version = 1
 # max_call_sites = 1000000
 # max_workers = 8
 # startup_target_millis = 120000
-# memory_target_bytes = 268435456
+# memory_target_bytes = 2147483648
 
 [startup]
 # max_workspaces = 4
