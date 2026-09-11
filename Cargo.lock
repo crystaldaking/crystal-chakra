@@ -161,7 +161,7 @@ checksum = "f079e83a288787bcd14a6aea84cee5c87a67c5a3e660c30f557a3d24761b3527"
 
 [[package]]
 name = "chakra-cli"
-version = "0.3.2"
+version = "0.4.0"
 dependencies = [
  "chakra-domain",
  "chakra-engine",
@@ -190,7 +190,7 @@ dependencies = [
 
 [[package]]
 name = "chakra-conformance"
-version = "0.3.2"
+version = "0.4.0"
 dependencies = [
  "blake3",
  "chakra-domain",
@@ -213,7 +213,7 @@ dependencies = [
 
 [[package]]
 name = "chakra-domain"
-version = "0.3.2"
+version = "0.4.0"
 dependencies = [
  "schemars",
  "serde",
@@ -223,7 +223,7 @@ dependencies = [
 
 [[package]]
 name = "chakra-engine"
-version = "0.3.2"
+version = "0.4.0"
 dependencies = [
  "arc-swap",
  "chakra-domain",
@@ -237,7 +237,7 @@ dependencies = [
 
 [[package]]
 name = "chakra-git"
-version = "0.3.2"
+version = "0.4.0"
 dependencies = [
  "chakra-domain",
  "chakra-engine",
@@ -249,7 +249,7 @@ dependencies = [
 
 [[package]]
 name = "chakra-language"
-version = "0.3.2"
+version = "0.4.0"
 dependencies = [
  "blake3",
  "chakra-domain",
@@ -278,7 +278,7 @@ dependencies = [
 
 [[package]]
 name = "chakra-language-cpp"
-version = "0.3.2"
+version = "0.4.0"
 dependencies = [
  "chakra-domain",
  "chakra-engine",
@@ -294,7 +294,7 @@ dependencies = [
 
 [[package]]
 name = "chakra-language-csharp"
-version = "0.3.2"
+version = "0.4.0"
 dependencies = [
  "chakra-domain",
  "chakra-engine",
@@ -310,7 +310,7 @@ dependencies = [
 
 [[package]]
 name = "chakra-language-go"
-version = "0.3.2"
+version = "0.4.0"
 dependencies = [
  "chakra-domain",
  "chakra-engine",
@@ -326,7 +326,7 @@ dependencies = [
 
 [[package]]
 name = "chakra-language-hcl"
-version = "0.3.2"
+version = "0.4.0"
 dependencies = [
  "chakra-domain",
  "chakra-engine",
@@ -344,7 +344,7 @@ dependencies = [
 
 [[package]]
 name = "chakra-language-index"
-version = "0.3.2"
+version = "0.4.0"
 dependencies = [
  "chakra-domain",
  "chakra-engine",
@@ -358,7 +358,7 @@ dependencies = [
 
 [[package]]
 name = "chakra-language-java"
-version = "0.3.2"
+version = "0.4.0"
 dependencies = [
  "chakra-domain",
  "chakra-engine",
@@ -374,7 +374,7 @@ dependencies = [
 
 [[package]]
 name = "chakra-language-javascript"
-version = "0.3.2"
+version = "0.4.0"
 dependencies = [
  "chakra-domain",
  "chakra-engine",
@@ -390,7 +390,7 @@ dependencies = [
 
 [[package]]
 name = "chakra-language-php"
-version = "0.3.2"
+version = "0.4.0"
 dependencies = [
  "chakra-domain",
  "chakra-engine",
@@ -407,7 +407,7 @@ dependencies = [
 
 [[package]]
 name = "chakra-language-python"
-version = "0.3.2"
+version = "0.4.0"
 dependencies = [
  "chakra-domain",
  "chakra-engine",
@@ -423,7 +423,7 @@ dependencies = [
 
 [[package]]
 name = "chakra-language-rust"
-version = "0.3.2"
+version = "0.4.0"
 dependencies = [
  "chakra-domain",
  "chakra-engine",
@@ -439,7 +439,7 @@ dependencies = [
 
 [[package]]
 name = "chakra-language-shell"
-version = "0.3.2"
+version = "0.4.0"
 dependencies = [
  "chakra-domain",
  "chakra-engine",
@@ -455,7 +455,7 @@ dependencies = [
 
 [[package]]
 name = "chakra-language-typescript"
-version = "0.3.2"
+version = "0.4.0"
 dependencies = [
  "chakra-domain",
  "chakra-engine",
@@ -471,7 +471,7 @@ dependencies = [
 
 [[package]]
 name = "chakra-lsp"
-version = "0.3.2"
+version = "0.4.0"
 dependencies = [
  "crossbeam-channel",
  "lsp-server",
@@ -485,7 +485,7 @@ dependencies = [
 
 [[package]]
 name = "chakra-mcp"
-version = "0.3.2"
+version = "0.4.0"
 dependencies = [
  "chakra-domain",
  "chakra-engine",
@@ -504,7 +504,7 @@ dependencies = [
 
 [[package]]
 name = "chakra-provider-bash-language-server"
-version = "0.3.2"
+version = "0.4.0"
 dependencies = [
  "chakra-domain",
  "chakra-engine",
@@ -522,7 +522,7 @@ dependencies = [
 
 [[package]]
 name = "chakra-provider-clangd"
-version = "0.3.2"
+version = "0.4.0"
 dependencies = [
  "chakra-domain",
  "chakra-engine",
@@ -540,7 +540,7 @@ dependencies = [
 
 [[package]]
 name = "chakra-provider-csharp-ls"
-version = "0.3.2"
+version = "0.4.0"
 dependencies = [
  "chakra-domain",
  "chakra-engine",
@@ -558,7 +558,7 @@ dependencies = [
 
 [[package]]
 name = "chakra-provider-gopls"
-version = "0.3.2"
+version = "0.4.0"
 dependencies = [
  "chakra-domain",
  "chakra-engine",
@@ -576,7 +576,7 @@ dependencies = [
 
 [[package]]
 name = "chakra-provider-jdtls"
-version = "0.3.2"
+version = "0.4.0"
 dependencies = [
  "chakra-domain",
  "chakra-engine",
@@ -594,7 +594,7 @@ dependencies = [
 
 [[package]]
 name = "chakra-provider-pool"
-version = "0.3.2"
+version = "0.4.0"
 dependencies = [
  "chakra-domain",
  "chakra-engine",
@@ -604,7 +604,7 @@ dependencies = [
 
 [[package]]
 name = "chakra-provider-pyright"
-version = "0.3.2"
+version = "0.4.0"
 dependencies = [
  "chakra-domain",
  "chakra-engine",
@@ -622,7 +622,7 @@ dependencies = [
 
 [[package]]
 name = "chakra-provider-rust-analyzer"
-version = "0.3.2"
+version = "0.4.0"
 dependencies = [
  "chakra-domain",
  "chakra-engine",
@@ -640,7 +640,7 @@ dependencies = [
 
 [[package]]
 name = "chakra-provider-terraform-ls"
-version = "0.3.2"
+version = "0.4.0"
 dependencies = [
  "chakra-domain",
  "chakra-engine",
@@ -658,7 +658,7 @@ dependencies = [
 
 [[package]]
 name = "chakra-provider-vtsls"
-version = "0.3.2"
+version = "0.4.0"
 dependencies = [
  "chakra-domain",
  "chakra-engine",
@@ -676,7 +676,7 @@ dependencies = [
 
 [[package]]
 name = "chakra-provider-worker"
-version = "0.3.2"
+version = "0.4.0"
 dependencies = [
  "chakra-domain",
  "chakra-engine",
@@ -693,7 +693,7 @@ dependencies = [
 
 [[package]]
 name = "chakra-workspace"
-version = "0.3.2"
+version = "0.4.0"
 dependencies = [
  "blake3",
  "chakra-domain",

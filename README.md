@@ -49,7 +49,7 @@ live under [docs/languages](docs/languages/).
 
 ### Prebuilt release archives
 
-[Chakra v0.3.2](https://github.com/crystaldaking/crystal-chakra/releases/tag/v0.3.2)
+[Chakra v0.4.0](https://github.com/crystaldaking/crystal-chakra/releases/tag/v0.4.0)
 ships native archives for:
 
 | Platform | Target | Archive |
@@ -59,13 +59,13 @@ ships native archives for:
 | macOS Intel | `x86_64-apple-darwin` | `.tar.gz` |
 | Windows x86-64 | `x86_64-pc-windows-msvc` | `.zip` |
 
-Archive names have the form `chakra-v0.3.2-<target>.<format>`. Each contains
+Archive names have the form `chakra-v0.4.0-<target>.<format>`. Each contains
 the `chakra` executable, this README, and the MIT license in a versioned
 directory. Download `SHA256SUMS` from the same release and verify the archive
 before installing it. For example, on Linux:
 
 ```sh
-version=v0.3.2
+version=v0.4.0
 target=x86_64-unknown-linux-gnu
 archive="chakra-${version}-${target}.tar.gz"
 base="https://github.com/crystaldaking/crystal-chakra/releases/download/${version}"
@@ -104,7 +104,7 @@ Requirements:
 ```sh
 git clone https://github.com/crystaldaking/crystal-chakra.git
 cd crystal-chakra
-git checkout v0.3.2
+git checkout v0.4.0
 cargo install --locked --path crates/chakra-cli
 chakra --version
 ```
@@ -162,7 +162,8 @@ this order, per key:
 
 1. built-in defaults,
 2. the shared `chakra.toml` at the worktree root,
-3. a private, non-committed `chakra.local.toml` next to it (git-ignored),
+3. a private, non-committed `chakra.local.toml` next to it (add it to your
+   project's `.gitignore`),
 4. explicit `chakra serve` CLI options.
 
 The shared file is portable: it is discovered at the Git worktree root (never
@@ -271,7 +272,7 @@ gate, verifies support artifacts, and exercises the native macOS watcher path.
 
 ## Project status and limits
 
-Chakra v0.3.2 is the current stable release in the v0.x line. One process
+Chakra v0.4.0 is the current stable release in the v0.x line. One process
 serves one repository and a bounded set of isolated materialized worktrees.
 Compatible commit snapshots are shared in process and may be restored from an
 opt-in bounded local store; live provider enrichment remains tied to the
