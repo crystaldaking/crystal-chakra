@@ -149,6 +149,41 @@ tool_timeout_sec = 60
 Start an agent session with `status`, then use `repo_map` to understand the
 workspace before narrowing through symbols and relationships.
 
+## Project configuration
+
+A project can keep one shared, committed `chakra.toml` at its Git worktree
+root instead of repeating Chakra flags in every client's MCP registration
+(ADR-0053). Every supported `serve` option for provider enablement, indexing
+limits, provider-pool limits, and startup budgets is configurable; see the
+commented example at `docs/examples/chakra.toml`.
+
+Configuration is loaded once at startup (restart to change it) and merges in
+this order, per key:
+
+1. built-in defaults,
+2. the shared `chakra.toml` at the worktree root,
+3. a private, non-committed `chakra.local.toml` next to it (git-ignored),
+4. explicit `chakra serve` CLI options.
+
+The shared file is portable: it is discovered at the Git worktree root (never
+above it, so nested directories cannot inherit an unrelated project's
+settings), and it cannot select provider executables — a `path` key there is
+rejected. Machine-specific executable overrides belong to
+`chakra.local.toml` or CLI flags; relative paths resolve against the
+directory of the file that declares them. `--config PATH` selects the shared
+file explicitly and takes its private sibling.
+
+Inspect the merged result and the source layer of every key without starting
+a server:
+
+```sh
+chakra config show --repo /path/to/worktree
+```
+
+Invalid configuration — malformed TOML, unknown keys, an unsupported
+`schema_version`, zero limits — fails startup with an actionable error naming
+the file and key; a partially parsed configuration is never applied.
+
 ## MCP tools
 
 | Tool | What it returns |
