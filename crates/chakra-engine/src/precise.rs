@@ -723,6 +723,7 @@ fn language_from_path(path: &str) -> Option<Language> {
         Some("cs") => Some(Language::CSharp),
         Some("sh" | "bash" | "zsh" | "ksh") => Some(Language::Shell),
         Some("go") => Some(Language::Go),
+        Some("kt" | "kts") => Some(Language::Kotlin),
         Some("c" | "h" | "cc" | "cpp" | "cxx" | "hh" | "hpp" | "hxx" | "ipp" | "tpp" | "inc") => {
             Some(Language::Cpp)
         }

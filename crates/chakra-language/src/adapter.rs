@@ -542,6 +542,7 @@ pub fn default_adapters() -> Vec<Box<dyn SyntaxLanguageAdapter>> {
         Box::new(chakra_language_cpp::CppSyntaxIndex::default()),
         Box::new(chakra_language_hcl::HclSyntaxIndex::default()),
         Box::new(chakra_language_go::GoSyntaxIndex::default()),
+        Box::new(chakra_language_kotlin::KotlinSyntaxIndex::default()),
     ]
 }
 
@@ -1453,6 +1454,86 @@ impl SyntaxLanguageAdapter for chakra_language_go::GoSyntaxIndex {
     }
 
     snapshot_codec_methods!(chakra_language_go::GoSyntaxIndex, "go:s1");
+}
+
+impl SyntaxLanguageAdapter for chakra_language_kotlin::KotlinSyntaxIndex {
+    fn language(&self) -> Language {
+        Language::Kotlin
+    }
+
+    fn clone_box(&self) -> Box<dyn SyntaxLanguageAdapter> {
+        Box::new(self.clone())
+    }
+
+    fn cold_build(
+        &self,
+        sources: LanguageSources,
+        graph_limits: GraphBuildLimits,
+        worker_limit: usize,
+        parallel_file_threshold: usize,
+        _dependencies: DependencyEvidence,
+        cancellation: &IndexCancellation,
+    ) -> Result<AdapterColdBuild, WorkspaceIndexError> {
+        let (index, graph, metrics) = Self::from_classified_sources_scheduled(
+            sources.into(),
+            graph_limits,
+            worker_limit,
+            parallel_file_threshold,
+            cancellation,
+        )?;
+        Ok(AdapterColdBuild {
+            index: Box::new(index),
+            graph,
+            metrics: AdapterBuildMetrics {
+                facts: metrics.facts.into(),
+                graph: metrics.graph,
+                framework: AdapterFrameworkMetrics::default(),
+                phases: metrics.phases,
+            },
+        })
+    }
+
+    fn reconcile(
+        &self,
+        sources: LanguageSources,
+        graph_limits: GraphBuildLimits,
+        _dependencies: DependencyEvidence,
+        cancellation: &IndexCancellation,
+    ) -> Result<AdapterReconcile, WorkspaceIndexError> {
+        let report =
+            self.reconcile_classified_sources_bounded(sources.into(), graph_limits, cancellation)?;
+        Ok(AdapterReconcile {
+            graph: report.graph,
+            metrics: report.metrics.into(),
+            next_index: report
+                .next_index
+                .map(|index| Box::new(index) as Box<dyn SyntaxLanguageAdapter>),
+            build_metrics: report.build_metrics.map(|metrics| AdapterBuildMetrics {
+                facts: metrics.facts.into(),
+                graph: metrics.graph,
+                framework: AdapterFrameworkMetrics::default(),
+                phases: metrics.phases,
+            }),
+        })
+    }
+
+    fn paths(&self) -> Vec<RepoRelativePath> {
+        self.paths()
+    }
+
+    fn graph(&self) -> &SymbolGraph {
+        self.graph()
+    }
+
+    fn graph_report(&self) -> GraphBuildReport {
+        self.graph_report()
+    }
+
+    fn fact_counts(&self) -> AdapterFactCounts {
+        self.fact_counts().into()
+    }
+
+    snapshot_codec_methods!(chakra_language_kotlin::KotlinSyntaxIndex, "kotlin:s1");
 }
 
 #[cfg(test)]
