@@ -77,5 +77,6 @@ Accepted decisions:
 - ADR-052: no default shared or prebuilt indexes after complete-snapshot evaluation
 - ADR-053: shared project configuration with typed precedence and trust boundaries
 - ADR-054: bounded GitHub update checks with offline-first operation
+- ADR-055: agent-client setup ownership, worktree resolution, and instruction blocks
 
 Do not pre-create empty ADRs merely to satisfy a list.
