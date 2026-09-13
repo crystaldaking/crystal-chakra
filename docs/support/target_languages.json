@@ -1,17 +1,18 @@
 {
-  "source": "GitHub Octoverse 2025 top languages plus pre-existing Chakra support",
-  "reviewed_at": "2026-08",
+  "source": "GitHub Octoverse 2025 top languages plus pre-existing Chakra support; kotlin is a maintainer-accepted v0.4.0 addition (issue #209), not a top-10 claim",
+  "reviewed_at": "2026-09",
   "languages": [
-    "typescript",
-    "javascript",
-    "python",
-    "java",
-    "csharp",
-    "php",
-    "shell",
     "cpp",
-    "hcl",
+    "csharp",
     "go",
-    "rust"
+    "hcl",
+    "java",
+    "javascript",
+    "kotlin",
+    "php",
+    "python",
+    "rust",
+    "shell",
+    "typescript"
   ]
 }
