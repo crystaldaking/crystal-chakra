@@ -174,6 +174,18 @@ rejected. Machine-specific executable overrides belong to
 directory of the file that declares them. `--config PATH` selects the shared
 file explicitly and takes its private sibling.
 
+When several worktrees are registered, each one reads its own checked-out
+`chakra.toml` for workspace-scoped settings (index budgets and the live
+startup timeout); process-global settings (provider-pool limits, provider
+enablement and paths, the workspace limit) come from the primary `--repo`
+worktree, and an explicit `--config` applies to every registered worktree.
+
+The private file must stay out of version control: if Git tracks
+`chakra.local.toml`, startup fails, because a committed repository must never
+select provider executables. Configuration files must be regular files (no
+FIFOs or device links), at most 1 MiB, and a dangling configuration symlink
+is an error — never a silent fallback to defaults.
+
 Inspect the merged result and the source layer of every key without starting
 a server:
 

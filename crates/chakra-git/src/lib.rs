@@ -19,9 +19,10 @@ pub use diff::GitWorkspaceDiff;
 pub use discovery::{
     DiscoveryError, WorkspaceInventory, discover_language_files, discover_source_files,
     discover_source_files_in_worktree, discover_source_files_in_worktree_with_context,
-    discover_workspace_inventory_in_worktree_with_context, metadata_languages,
-    resolve_git_administrative_paths, resolve_repository_identity, resolve_repository_root,
-    resolve_repository_root_with_context, resolve_workspace_identity, source_language,
+    discover_workspace_inventory_in_worktree_with_context, is_worktree_path_tracked,
+    metadata_languages, resolve_git_administrative_paths, resolve_repository_identity,
+    resolve_repository_root, resolve_repository_root_with_context, resolve_workspace_identity,
+    source_language,
 };
 pub use project_model::discover_project_model_with_context;
 pub use source_metadata::{

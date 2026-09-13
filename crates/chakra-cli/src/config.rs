@@ -8,6 +8,7 @@
 use std::collections::BTreeMap;
 use std::fmt;
 use std::fs;
+use std::io::Read as _;
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
@@ -25,6 +26,11 @@ pub const SHARED_CONFIG_FILENAME: &str = "chakra.toml";
 pub const PRIVATE_CONFIG_FILENAME: &str = "chakra.local.toml";
 /// The only configuration schema this binary accepts.
 pub const SUPPORTED_SCHEMA_VERSION: u32 = 1;
+/// Maximum accepted size of one configuration file. Configuration is
+/// hand-written and orders of magnitude smaller; the cap only stops
+/// accidental or hostile floods, and special files (FIFOs, devices) are
+/// rejected before reading so they cannot block startup.
+pub const MAX_CONFIG_FILE_BYTES: u64 = 1024 * 1024;
 
 /// Process startup defaults previously hardcoded as clap default values.
 /// They live here so built-in defaults, files, and CLI overrides share one
@@ -369,11 +375,48 @@ fn validate_raw(path: &Path, raw: &RawConfig, allow_paths: bool) -> Result<(), C
     Ok(())
 }
 
-fn load_layer(path: &Path, source: ConfigSource, allow_paths: bool) -> Result<Layer, ConfigError> {
-    let text = fs::read_to_string(path).map_err(|error| ConfigError::Io {
+/// Read one configuration file as text.
+///
+/// Metadata follows symlinks: a FIFO, device, socket, or directory is
+/// rejected before `open`, so a special file cannot block startup reading
+/// (for example a committed FIFO or a symlink to `/dev/stdin`). The byte cap
+/// is enforced while reading, so a file that grows between the metadata
+/// check and the read stays bounded.
+fn read_config_text(path: &Path) -> Result<String, ConfigError> {
+    let metadata = fs::metadata(path).map_err(|source| ConfigError::Io {
         path: path.to_owned(),
-        source: error,
+        source,
     })?;
+    if !metadata.file_type().is_file() {
+        return Err(ConfigError::Validation {
+            path: path.to_owned(),
+            message: "configuration must be a regular file; FIFOs, devices, sockets, and directories are not accepted"
+                .to_owned(),
+        });
+    }
+    let file = fs::File::open(path).map_err(|source| ConfigError::Io {
+        path: path.to_owned(),
+        source,
+    })?;
+    let mut limited = file.take(MAX_CONFIG_FILE_BYTES + 1);
+    let mut text = String::new();
+    limited
+        .read_to_string(&mut text)
+        .map_err(|source| ConfigError::Io {
+            path: path.to_owned(),
+            source,
+        })?;
+    if text.len() as u64 > MAX_CONFIG_FILE_BYTES {
+        return Err(ConfigError::Validation {
+            path: path.to_owned(),
+            message: format!("configuration exceeds the {MAX_CONFIG_FILE_BYTES}-byte limit"),
+        });
+    }
+    Ok(text)
+}
+
+fn load_layer(path: &Path, source: ConfigSource, allow_paths: bool) -> Result<Layer, ConfigError> {
+    let text = read_config_text(path)?;
     let raw: RawConfig = toml::from_str(&text).map_err(|error| ConfigError::Parse {
         path: path.to_owned(),
         message: error.to_string(),
@@ -386,6 +429,61 @@ fn load_layer(path: &Path, source: ConfigSource, allow_paths: bool) -> Result<La
     Ok(Layer { source, base, raw })
 }
 
+/// Absolute form of `path` without resolving symlinks or requiring
+/// existence, so a relative `--config` value still anchors relative paths at
+/// the declaring file's real directory instead of the process working
+/// directory (ADR-0053).
+fn absolute_path(path: &Path) -> Result<PathBuf, ConfigError> {
+    std::path::absolute(path).map_err(|source| ConfigError::Io {
+        path: path.to_owned(),
+        source,
+    })
+}
+
+/// True when `path` names any directory entry, including a dangling symlink.
+/// Unlike `Path::exists`, a broken symlink counts as present so it fails
+/// loudly instead of silently restoring built-in defaults.
+fn path_present(path: &Path) -> bool {
+    fs::symlink_metadata(path).is_ok()
+}
+
+/// A committed `chakra.local.toml` would let a repository clone select
+/// provider executables, defeating the ADR-0053 trust boundary. Reject the
+/// private override when Git tracks it. Outside a Git worktree there is no
+/// tracking to enforce: the file is the user's own machine configuration.
+fn ensure_untracked_private(private: &Path) -> Result<(), ConfigError> {
+    let Some(parent) = private.parent() else {
+        return Ok(());
+    };
+    let Some(file_name) = private.file_name() else {
+        return Ok(());
+    };
+    // Canonicalize the parent so the comparison matches the canonical root
+    // Git reports (for example macOS `/var` versus `/private/var`). The
+    // parent directory exists whenever the file does.
+    let Ok(canonical_parent) = fs::canonicalize(parent) else {
+        return Ok(());
+    };
+    let Ok(root) = chakra_git::resolve_repository_root(&canonical_parent) else {
+        return Ok(());
+    };
+    let Ok(relative_dir) = canonical_parent.strip_prefix(&root) else {
+        return Ok(());
+    };
+    let relative = relative_dir.join(file_name);
+    match chakra_git::is_worktree_path_tracked(&root, &relative) {
+        Ok(true) => Err(ConfigError::Validation {
+            path: private.to_owned(),
+            message: format!(
+                "{PRIVATE_CONFIG_FILENAME} is tracked by Git; a committed repository must not select provider executables — remove it from version control and keep it git-ignored"
+            ),
+        }),
+        // When Git cannot answer, workspace registration will surface the
+        // repository problem later; do not hard-fail configuration here.
+        Ok(false) | Err(_) => Ok(()),
+    }
+}
+
 impl ConfigLayers {
     /// Load the shared and private configuration for one worktree root.
     ///
@@ -393,14 +491,15 @@ impl ConfigLayers {
     /// disabled; the private override is its `chakra.local.toml` sibling.
     /// Without `explicit`, the shared file is `chakra.toml` at the worktree
     /// root and the private file is its sibling. Missing files contribute no
-    /// layer. Existing but unreadable or invalid files are hard errors.
+    /// layer. Existing but unreadable or invalid files — including dangling
+    /// symlinks, special files, and oversized documents — are hard errors.
     pub fn load(root: &Path, explicit: Option<&Path>) -> Result<Self, ConfigError> {
         let mut layers = Vec::new();
         let shared = match explicit {
-            Some(path) => Some(path.to_owned()),
+            Some(path) => Some(absolute_path(path)?),
             None => {
-                let candidate = root.join(SHARED_CONFIG_FILENAME);
-                candidate.exists().then_some(candidate)
+                let candidate = absolute_path(&root.join(SHARED_CONFIG_FILENAME))?;
+                path_present(&candidate).then_some(candidate)
             }
         };
         if let Some(shared_path) = shared {
@@ -413,7 +512,8 @@ impl ConfigLayers {
                 .parent()
                 .unwrap_or_else(|| Path::new("."))
                 .join(PRIVATE_CONFIG_FILENAME);
-            if private.exists() {
+            if path_present(&private) {
+                ensure_untracked_private(&private)?;
                 layers.push(load_layer(
                     &private,
                     ConfigSource::Private(private.clone()),
@@ -899,6 +999,132 @@ mod tests {
         effective.budgets.max_files = 7;
         effective.record_cli_override("index.max_files");
         assert_eq!(effective.sources()["index.max_files"], ConfigSource::Cli);
+        Ok(())
+    }
+
+    fn run_git(root: &Path, args: &[&str]) -> TestResult {
+        let status = std::process::Command::new("git")
+            .current_dir(root)
+            .args(args)
+            .status()?;
+        assert!(status.success(), "git {args:?} failed");
+        Ok(())
+    }
+
+    #[test]
+    fn tracked_private_override_is_rejected() -> TestResult {
+        // A committed `chakra.local.toml` would let a repository clone select
+        // provider executables; Git-tracked private files are hard errors
+        // (ADR-0053 trust boundary, issue #212).
+        let directory = tempfile::tempdir()?;
+        let root = directory.path();
+        run_git(root, &["init", "--quiet"])?;
+        write(root, SHARED_CONFIG_FILENAME, "schema_version = 1\n")?;
+        write(
+            root,
+            PRIVATE_CONFIG_FILENAME,
+            "schema_version = 1\n\n[providers.clangd]\npath = \"/opt/clangd\"\n",
+        )?;
+        run_git(root, &["add", PRIVATE_CONFIG_FILENAME])?;
+        let error = ConfigLayers::load(root, None)
+            .err()
+            .ok_or("tracked private override must be rejected")?;
+        assert!(error.to_string().contains("tracked by Git"), "{error}");
+        Ok(())
+    }
+
+    #[test]
+    fn untracked_private_override_is_accepted_in_a_repository() -> TestResult {
+        let directory = tempfile::tempdir()?;
+        let root = directory.path();
+        run_git(root, &["init", "--quiet"])?;
+        write(root, SHARED_CONFIG_FILENAME, "schema_version = 1\n")?;
+        write(
+            root,
+            PRIVATE_CONFIG_FILENAME,
+            "schema_version = 1\n\n[providers]\nmax_active = 2\n",
+        )?;
+        let effective = ConfigLayers::load(root, None)?.merge();
+        assert_eq!(effective.max_active_providers, 2);
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dangling_symlink_shared_config_is_a_hard_error() -> TestResult {
+        // `Path::exists` would silently restore defaults; presence is
+        // symlink-aware so a broken link fails loudly (issue #216).
+        let directory = tempfile::tempdir()?;
+        std::os::unix::fs::symlink(
+            directory.path().join("missing-target"),
+            directory.path().join(SHARED_CONFIG_FILENAME),
+        )?;
+        let error = ConfigLayers::load(directory.path(), None)
+            .err()
+            .ok_or("dangling symlink must be a hard error")?;
+        assert!(matches!(error, ConfigError::Io { .. }), "{error}");
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fifo_shared_config_is_rejected_without_blocking() -> TestResult {
+        // A FIFO must be refused before `open`, so startup cannot block on a
+        // special file (issue #215).
+        let directory = tempfile::tempdir()?;
+        let status = std::process::Command::new("mkfifo")
+            .arg(directory.path().join(SHARED_CONFIG_FILENAME))
+            .status()?;
+        assert!(status.success(), "mkfifo failed");
+        let error = ConfigLayers::load(directory.path(), None)
+            .err()
+            .ok_or("FIFO must be rejected")?;
+        assert!(error.to_string().contains("regular file"), "{error}");
+        Ok(())
+    }
+
+    #[test]
+    fn oversized_config_is_rejected() -> TestResult {
+        let directory = tempfile::tempdir()?;
+        fs::write(
+            directory.path().join(SHARED_CONFIG_FILENAME),
+            "x".repeat((MAX_CONFIG_FILE_BYTES + 1) as usize),
+        )?;
+        let error = ConfigLayers::load(directory.path(), None)
+            .err()
+            .ok_or("oversized configuration must be rejected")?;
+        assert!(error.to_string().contains("byte limit"), "{error}");
+        Ok(())
+    }
+
+    #[test]
+    fn relative_explicit_config_anchors_relative_paths_at_the_file() -> TestResult {
+        // A relative `--config` must resolve relative provider paths against
+        // the file's real directory, not the process working directory
+        // (issue #214). Changing the process directory is process-global, so
+        // this test holds a lock and restores the previous directory.
+        static CURRENT_DIR_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _guard = CURRENT_DIR_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let directory = tempfile::tempdir()?;
+        let canonical = directory.path().canonicalize()?;
+        write(&canonical, "custom.toml", "schema_version = 1\n")?;
+        write(
+            &canonical,
+            PRIVATE_CONFIG_FILENAME,
+            "schema_version = 1\n\n[providers.clangd]\npath = \"tools/clangd\"\n",
+        )?;
+        let previous = std::env::current_dir()?;
+        std::env::set_current_dir(&canonical)?;
+        let result = ConfigLayers::load(Path::new("."), Some(Path::new("custom.toml")));
+        std::env::set_current_dir(previous)?;
+        let effective = result?.merge();
+        assert_eq!(
+            effective.provider(ProviderKey::Clangd).path,
+            Some(canonical.join("tools/clangd")),
+            "relative executable paths resolve against the declaring file"
+        );
         Ok(())
     }
 
