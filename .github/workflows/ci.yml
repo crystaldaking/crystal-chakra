@@ -94,6 +94,34 @@ jobs:
       # diffed, and nothing is fetched from the network.
       - run: cargo run --locked -p chakra-conformance -- corpus --verify
 
+  installer-tests:
+    name: Installer tests (${{ matrix.runner }})
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-latest, macos-15, macos-15-intel, windows-2022]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - name: Run hermetic Unix installer tests
+        if: runner.os != 'Windows'
+        shell: bash
+        run: python3 tools/test_install.py
+      - name: Validate the PowerShell installer parses
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $errors = $null
+          [void][System.Management.Automation.Language.Parser]::ParseFile(
+            (Join-Path $pwd "tools/install.ps1"),
+            [ref]$null,
+            [ref]$errors)
+          if ($errors.Count -gt 0) {
+            $errors | ForEach-Object { Write-Host $_.Message }
+            throw "install.ps1 has syntax errors"
+          }
+
   large-repository-gate:
     runs-on: ubuntu-latest
     timeout-minutes: 30

@@ -47,6 +47,38 @@ live under [docs/languages](docs/languages/).
 
 ## Install
 
+### Installer (recommended)
+
+One command installs the latest stable release and puts `chakra` on your
+PATH, after verifying the archive against the release `SHA256SUMS`
+(issue #203):
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/crystaldaking/crystal-chakra/main/tools/install.sh | sh
+```
+
+```powershell
+irm https://raw.githubusercontent.com/crystaldaking/crystal-chakra/main/tools/install.ps1 | iex
+```
+
+The installer covers Linux x86-64, macOS Apple silicon and Intel, and
+Windows x86-64, and rejects other platforms before changing anything. It
+installs into a user-owned directory (`~/.local/bin`,
+`%LOCALAPPDATA%\Programs\chakra`) — no administrator rights needed.
+Options: `--version vX.Y.Z` (explicit version; required for downgrades),
+`--dir PATH`, `--no-path-modify`. PATH changes are idempotent (a managed
+shell block on Unix, the user PATH on Windows) and take effect in a new
+terminal; the installer never claims to modify the parent shell. Re-running
+upgrades through the same verified download flow, and a failed download or
+checksum check leaves any previous installation usable.
+
+Removal: delete the installed binary (`chakra`/`chakra.exe`), remove the
+`# >>> chakra path >>>` block from your shell startup file or the install
+directory from the Windows user PATH, and re-run `chakra init --agent
+<client> --remove` per project if you set up agent integration. Already
+registered MCP clients pick up a replaced binary automatically because the
+registration points at the install path, not a versioned file.
+
 ### Prebuilt release archives
 
 [Chakra v0.4.0](https://github.com/crystaldaking/crystal-chakra/releases/tag/v0.4.0)
