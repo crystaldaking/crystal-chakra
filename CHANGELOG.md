@@ -5,6 +5,22 @@ version tags prefixed with `v`.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-09-13
+
+Chakra v0.4.0 is the setup-and-diagnostics release with first-class Kotlin.
+It adds shared project configuration with typed precedence and trust
+boundaries; one-time agent-client setup for Codex, Claude Code, Cursor, and
+OpenCode; an actionable doctor with provider and analysis diagnostics plus
+bounded sanitized local reports; offline-first GitHub update checks; and
+verified cross-platform installers with automatic PATH setup. Kotlin joins
+the language matrix with offline syntax intelligence, a kotlin-lsp precise
+adapter (Alpha, adapter-ready), 14/14 conformance scenarios, and a pinned
+public-corpus evaluation. The v0.4.0 paired agent-evaluation protocol is
+accepted and waits for its recorded runs. The public query surface,
+freshness model, provenance, bounded degradation, and multi-worktree
+behavior are unchanged from v0.3.2. Provider test-image rebuilds and the
+real kotlin-lsp smoke run are release-gate items (#195).
+
 ### Added
 
 - Kotlin public-corpus evaluation (issue #209, continued). Pinned
@@ -123,24 +139,7 @@ version tags prefixed with `v`.
   `[update] automatic = false` setting. Checks send no repository data,
   require no authentication, and never download or replace the binary.
 
-## [0.4.0] - 2026-09-11
-
-Chakra v0.4.0 adds shared project configuration with typed precedence and
-trust boundaries, and accepts the paired agent-evaluation protocol, task
-corpus, and run-result schema that gate the v0.4 line's impact measurement.
-It also hardens the provider crash-restart lifecycle harnesses against
-self-induced restarts. The public query surface, freshness model, provenance,
-bounded degradation, and multi-worktree behavior are unchanged from v0.3.2.
-
-### Added
-
-- Shared project configuration (issue #206, ADR-0053). A committed
-  `chakra.toml` at the Git worktree root now carries provider enablement,
-  indexing limits, provider-pool limits, and startup budgets once for every
-  agent client, merging with the private, non-committed `chakra.local.toml`
-  (git-ignore it in your project) and
-  explicit CLI options in a documented precedence order (defaults < shared <
-  private < CLI). `chakra config show` prints the effective configuration
+ints the effective configuration
   with the source layer of every key. Executable overrides live only in the
   private file or CLI flags; invalid or unsupported configuration fails
   startup with a file- and key-aware error and is never applied partially.
