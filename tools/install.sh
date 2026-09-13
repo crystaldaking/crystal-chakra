@@ -64,15 +64,22 @@ case "${VERSION}" in
 esac
 
 # --- downgrade guard: re-installs upgrade; downgrades need --version ---
-version_key() { # numeric compare key: v0.4.10 -> 000000004010
-    printf '%03d%03d%03d' $(printf '%s' "${1#v}" | tr '.' ' ')
+version_key() { # numeric compare key: v0.4.10 -> 000000004010; empty when unparseable
+    case "${1#v}" in
+        *[!0-9.]*) printf '' ;;
+        *) printf '%03d%03d%03d' $(printf '%s' "${1#v}" | tr '.' ' ') ;;
+    esac
 }
 if [ -x "${INSTALL_DIR}/chakra" ]; then
     installed="$("${INSTALL_DIR}/chakra" --version 2>/dev/null | awk '{print $2}')"
-    if [ -n "${installed}" ] \
-        && [ "$(version_key "${installed}")" -gt "$(version_key "${VERSION}")" ] \
+    installed_key="$(version_key "${installed}")"
+    if [ -n "${installed}" ] && [ -n "${installed_key}" ] \
+        && [ "${installed_key}" -gt "$(version_key "${VERSION}")" ] \
         && [ "${VERSION_EXPLICIT}" != "1" ]; then
         fail "installed chakra ${installed} is newer than ${VERSION}; pass --version explicitly to downgrade"
+    fi
+    if [ -n "${installed}" ] && [ -z "${installed_key}" ]; then
+        log "note: installed version '${installed}' is not a strict vX.Y.Z release; skipping the downgrade guard"
     fi
 fi
 
