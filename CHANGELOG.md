@@ -40,6 +40,22 @@ bounded degradation, and multi-worktree behavior are unchanged from v0.3.2.
   requests explicitly, so a restart deliberately triggered by the harness
   itself can no longer masquerade as a provider crash and inflate or hide
   crash-restart evidence (issue #196).
+- A `chakra.local.toml` tracked by Git is now a hard startup error, closing
+  the trust-boundary bypass where a committed repository could select
+  provider executables through the private override (issue #212).
+- Registered secondary worktrees now read their own checked-out
+  `chakra.toml` for workspace-scoped settings (index budgets, live startup
+  timeout) instead of inheriting the primary worktree's configuration
+  (issue #213).
+- A relative `--config` path is made absolute before use, so relative
+  provider paths resolve against the declaring file's real directory instead
+  of the process working directory (issue #214).
+- Configuration files must be regular files and at most 1 MiB; FIFOs and
+  device links are rejected before `open` and can no longer block startup
+  (issue #215).
+- A dangling `chakra.toml` or `chakra.local.toml` symlink is now a hard
+  error instead of silently restoring built-in defaults, including provider
+  enablement (issue #216).
 
 ## [0.3.2] - 2026-09-10
 
