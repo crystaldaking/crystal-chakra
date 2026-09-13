@@ -1,0 +1,160 @@
+{
+  "language": "kotlin",
+  "scenarios": [
+    {
+      "id": "declarations-containers",
+      "description": "Kotlin classes and properties retain deterministic package containers and prefix filtering.",
+      "capability_ids": [
+        "SYNTAX-02",
+        "SYNTAX-03",
+        "QUERY-01",
+        "PROV-01"
+      ]
+    },
+    {
+      "id": "imports-aliases",
+      "description": "Kotlin import aliases are recorded as syntax import facts.",
+      "capability_ids": [
+        "SYNTAX-04",
+        "PROV-01"
+      ]
+    },
+    {
+      "id": "source-roles",
+      "description": "Production and src/test/kotlin files use module-aware source roles.",
+      "capability_ids": [
+        "DISC-03"
+      ]
+    },
+    {
+      "id": "ambiguity",
+      "description": "Duplicate function names across packages yield candidates and typed ambiguity.",
+      "capability_ids": [
+        "AMBIG-01",
+        "PROV-01"
+      ]
+    },
+    {
+      "id": "syntax-callers",
+      "description": "Static Kotlin function calls provide bounded callers without a precise provider.",
+      "capability_ids": [
+        "SYNTAX-08",
+        "QUERY-01",
+        "PROV-01"
+      ]
+    },
+    {
+      "id": "test-hints",
+      "description": "Kotlin @Test functions in test sources are identified as tests.",
+      "capability_ids": [
+        "SYNTAX-06",
+        "DISC-03"
+      ]
+    },
+    {
+      "id": "text-search",
+      "description": "Text search remains textual.",
+      "capability_ids": [
+        "QUERY-01",
+        "PROV-01"
+      ]
+    },
+    {
+      "id": "bounded-responses",
+      "description": "Limited responses report truncation.",
+      "capability_ids": [
+        "BUDGET-01"
+      ]
+    },
+    {
+      "id": "syntax-error-recovery",
+      "description": "Malformed Kotlin publishes diagnostics while valid declarations remain.",
+      "capability_ids": [
+        "SYNTAX-07",
+        "FRESH-01",
+        "FRESH-02"
+      ]
+    },
+    {
+      "id": "file-lifecycle",
+      "description": "Create, modify, atomic save, rename, and delete are fresh.",
+      "capability_ids": [
+        "FRESH-01",
+        "FRESH-02",
+        "DISC-01"
+      ]
+    },
+    {
+      "id": "diff-context-scopes",
+      "description": "diff_context attributes Kotlin worktree and base-ref changes.",
+      "capability_ids": [
+        "QUERY-03"
+      ]
+    },
+    {
+      "id": "provider-absent-degradation",
+      "description": "Missing Kotlin precise providers degrade honestly to syntax.",
+      "capability_ids": [
+        "DEGRADE-01",
+        "PROV-01"
+      ]
+    },
+    {
+      "id": "provider-crash-recovery",
+      "description": "A crashing Kotlin precise provider degrades with explicit fallback and recovers honestly.",
+      "capability_ids": [
+        "DEGRADE-01",
+        "PROV-01"
+      ]
+    },
+    {
+      "id": "high-degree-callers",
+      "description": "High fan-in stays bounded and complete at the syntax tier.",
+      "capability_ids": [
+        "BUDGET-01",
+        "SYNTAX-08"
+      ]
+    }
+  ],
+  "expectations": {
+    "production_file": "src/main/kotlin/service.kt",
+    "test_file": "src/test/kotlin/conformance_flow_test.kt",
+    "breakable_file": "src/main/kotlin/service.kt",
+    "ambiguous_name": "collidingHelper",
+    "ambiguous_qualified": [
+      "dupa::collidingHelper",
+      "dupb::collidingHelper"
+    ],
+    "nested_prefix": "conformance::Outer",
+    "nested_containers": [
+      {
+        "qualified_name": "conformance::Outer",
+        "kind": "class"
+      }
+    ],
+    "nested_symbol": {
+      "qualified_name": "conformance::Outer::deeplyNestedMarker",
+      "kind": "property"
+    },
+    "import_alias": "sharedalias",
+    "caller": "conformance::dispatchConformanceRequest",
+    "caller_simple": "dispatchConformanceRequest",
+    "callee": "conformance::sharedUniqueTarget",
+    "test_symbol": "conformance::ConformanceFlowTest::TestConformanceEndToEndMarker",
+    "text_needle": "CONFORMANCE_TEXT_NEEDLE",
+    "text_needle_file": "src/main/kotlin/service.kt",
+    "fan_in_target": "conformance::recordConformanceEvent",
+    "fan_in_callers": 56,
+    "diff_second_commit_file": "src/main/kotlin/shared.kt",
+    "diff_worktree_file": "src/main/kotlin/service.kt",
+    "lifecycle_file": "src/lifecycle_created.kt",
+    "lifecycle_renamed_file": "src/lifecycle_renamed.kt",
+    "lifecycle_symbol_prefix": "lifecycleMarker",
+    "lifecycle_decl_prefix": "package conformance\nfun ",
+    "lifecycle_decl_suffix": "() {}\n",
+    "snippet_prefix": "fun ",
+    "snippet_suffix": "() {}\n",
+    "broken_content": "package conformance\nfun conformanceRetainedMarker(): Int = 1\nclass ConformanceBroken {\n",
+    "retained_symbol": "conformanceRetainedMarker"
+  }
+}

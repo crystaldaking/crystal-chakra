@@ -7,6 +7,17 @@ version tags prefixed with `v`.
 
 ### Added
 
+- Kotlin conformance, matrix, and language documentation (issue #209,
+  continued). The Kotlin conformance fixture (Gradle-shaped project under
+  `fixtures/conformance/kotlin/`) passes all 14 shared scenarios with
+  deterministic emitted results. The support matrix records Kotlin as a
+  maintainer-accepted, `in-progress` language: every syntax, discovery,
+  query, freshness, provenance, ambiguity, budget, cancellation,
+  degradation, conformance, and documentation capability passes with
+  evidence; precise-provider and public-corpus capabilities stay
+  explicitly `missing` until the kotlin-lsp adapter and corpus evaluation
+  land, so Kotlin is not yet advertised.
+
 - Kotlin syntax intelligence (issue #209, ADR-0056). `.kt` and `.kts`
   sources — including `build.gradle.kts` as both Kotlin syntax and Gradle
   project metadata — are discovered through the Git-aware inventory and
