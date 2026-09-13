@@ -12,7 +12,8 @@ use std::path::{Path, PathBuf};
 use crate::setup::{AgentClient, BLOCK_BEGIN, registration_command_for};
 
 /// Finding severity; `Error` drives the non-zero exit status.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Severity {
     Info,
     Warning,
@@ -30,44 +31,60 @@ impl fmt::Display for Severity {
 }
 
 /// One diagnostic observation with evidence and a scoped next step.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct Finding {
     pub code: &'static str,
     pub severity: Severity,
     pub subject: String,
+    /// What the finding applies to (client, provider language, project).
+    pub applicability: String,
     pub evidence: String,
     pub advice: String,
 }
 
 impl Finding {
-    fn info(code: &'static str, subject: String, evidence: String) -> Self {
+    pub fn new(
+        code: &'static str,
+        severity: Severity,
+        subject: String,
+        evidence: String,
+        advice: String,
+    ) -> Self {
         Self {
             code,
-            severity: Severity::Info,
+            severity,
             subject,
-            evidence,
-            advice: String::new(),
-        }
-    }
-
-    fn warning(code: &'static str, subject: String, evidence: String, advice: String) -> Self {
-        Self {
-            code,
-            severity: Severity::Warning,
-            subject,
+            applicability: String::new(),
             evidence,
             advice,
         }
     }
 
-    fn error(code: &'static str, subject: String, evidence: String, advice: String) -> Self {
-        Self {
-            code,
-            severity: Severity::Error,
-            subject,
-            evidence,
-            advice,
-        }
+    pub fn with_applicability(mut self, applicability: impl Into<String>) -> Self {
+        self.applicability = applicability.into();
+        self
+    }
+
+    pub(crate) fn info(code: &'static str, subject: String, evidence: String) -> Self {
+        Self::new(code, Severity::Info, subject, evidence, String::new())
+    }
+
+    pub(crate) fn warning(
+        code: &'static str,
+        subject: String,
+        evidence: String,
+        advice: String,
+    ) -> Self {
+        Self::new(code, Severity::Warning, subject, evidence, advice)
+    }
+
+    pub(crate) fn error(
+        code: &'static str,
+        subject: String,
+        evidence: String,
+        advice: String,
+    ) -> Self {
+        Self::new(code, Severity::Error, subject, evidence, advice)
     }
 }
 
@@ -76,7 +93,7 @@ pub fn find_on_path(executable: &str) -> Option<PathBuf> {
     let path_var = std::env::var_os("PATH")?;
     for directory in std::env::split_paths(&path_var) {
         let candidate = directory.join(executable);
-        if is_executable(&candidate) {
+        if is_executable_file(&candidate) {
             return Some(candidate);
         }
         #[cfg(windows)]
@@ -91,7 +108,7 @@ pub fn find_on_path(executable: &str) -> Option<PathBuf> {
 }
 
 #[cfg(unix)]
-fn is_executable(path: &Path) -> bool {
+pub fn is_executable_file(path: &Path) -> bool {
     use std::os::unix::fs::PermissionsExt as _;
     path.is_file()
         && path
@@ -101,14 +118,24 @@ fn is_executable(path: &Path) -> bool {
 }
 
 #[cfg(not(unix))]
-fn is_executable(path: &Path) -> bool {
+pub fn is_executable_file(path: &Path) -> bool {
     path.is_file()
 }
 
-/// Run the #205 registration diagnostics for the selected clients against
-/// the resolved worktree root.
-pub fn diagnose(root: &Path, exe: &Path, clients: &[AgentClient]) -> Vec<Finding> {
+/// Run the registration diagnostics (#205) plus provider/project analysis
+/// (#207) for the selected clients against the resolved worktree root. When
+/// `effective` is `None` (invalid configuration), analysis is skipped and
+/// the configuration error is the finding. `probe` enables bounded
+/// `--version` executions (isolated probe mode).
+pub fn diagnose(
+    root: &Path,
+    exe: &Path,
+    clients: &[AgentClient],
+    effective: Option<&crate::config::EffectiveConfig>,
+    probe: bool,
+) -> Vec<Finding> {
     let mut findings = Vec::new();
+    findings.push(crate::analysis::isolation_note());
     for client in clients {
         let name = client.as_str();
         match find_on_path(client.executable_name()) {
@@ -162,15 +189,8 @@ pub fn diagnose(root: &Path, exe: &Path, clients: &[AgentClient]) -> Vec<Finding
     }
 
     let shared = root.join(crate::config::SHARED_CONFIG_FILENAME);
-    match crate::config::ConfigLayers::load(root, None) {
-        Ok(layers) => {
-            let effective = layers.merge();
-            let source = effective
-                .sources()
-                .get("index.max_files")
-                .map(ToString::to_string)
-                .unwrap_or_else(|| "default".to_owned());
-            let _ = source;
+    match effective {
+        Some(effective) => {
             findings.push(Finding::info(
                 "project-config",
                 "project".to_owned(),
@@ -180,13 +200,21 @@ pub fn diagnose(root: &Path, exe: &Path, clients: &[AgentClient]) -> Vec<Finding
                     "no chakra.toml; built-in defaults apply".to_owned()
                 },
             ));
+            findings.extend(crate::analysis::analyze_providers(
+                root, effective, probe, None,
+            ));
+            if let Some(finding) = crate::analysis::analyze_index_budget(root, effective) {
+                findings.push(finding);
+            }
         }
-        Err(error) => findings.push(Finding::error(
-            "project-config",
-            "project".to_owned(),
-            format!("configuration error: {error}"),
-            "fix the reported file/key; startup fails on invalid configuration".to_owned(),
-        )),
+        None => {
+            findings.push(Finding::warning(
+                "project-config",
+                "project".to_owned(),
+                "configuration could not be loaded (see the error above); provider and budget analysis skipped".to_owned(),
+                "fix the configuration, then re-run doctor".to_owned(),
+            ));
+        }
     }
     findings
 }
@@ -296,6 +324,30 @@ fn check_registration(
     }
 }
 
+/// Versioned JSON representation of a doctor run (issue #207; consumed by
+/// the #208 report export). The scope field marks the output as an isolated
+/// inspection, never the agent's live session.
+pub fn report_json(findings: &[Finding], worktree: &Path) -> Result<String, serde_json::Error> {
+    #[derive(serde::Serialize)]
+    struct DoctorDocument<'a> {
+        schema_version: u32,
+        kind: &'static str,
+        scope: &'static str,
+        chakra_version: &'static str,
+        worktree: String,
+        findings: &'a [Finding],
+    }
+    let document = DoctorDocument {
+        schema_version: 1,
+        kind: "chakra-doctor",
+        scope: "isolated-inspection",
+        chakra_version: env!("CARGO_PKG_VERSION"),
+        worktree: worktree.to_string_lossy().into_owned(),
+        findings,
+    };
+    serde_json::to_string_pretty(&document)
+}
+
 /// Print findings and derive the exit status (1 when any error exists).
 pub fn report(findings: &[Finding]) -> u8 {
     let mut failed = false;
@@ -323,10 +375,22 @@ mod tests {
         PathBuf::from("/usr/local/bin/chakra")
     }
 
+    fn effective(
+        directory: &Path,
+    ) -> Result<crate::config::EffectiveConfig, Box<dyn std::error::Error>> {
+        Ok(crate::config::ConfigLayers::load(directory, None)?.merge())
+    }
+
     #[test]
     fn fresh_project_reports_unconfigured_without_errors() -> TestResult {
         let directory = tempfile::tempdir()?;
-        let findings = diagnose(directory.path(), &exe(), &[AgentClient::Claude]);
+        let findings = diagnose(
+            directory.path(),
+            &exe(),
+            &[AgentClient::Claude],
+            Some(&effective(directory.path())?),
+            false,
+        );
         assert!(findings.iter().any(
             |finding| finding.code == "mcp-registration" && finding.severity == Severity::Info
         ));
@@ -345,7 +409,13 @@ mod tests {
         let directory = tempfile::tempdir()?;
         let plan = plan_setup(directory.path(), &exe(), &[AgentClient::Claude])?;
         apply_plan(&plan)?;
-        let findings = diagnose(directory.path(), &exe(), &[AgentClient::Claude]);
+        let findings = diagnose(
+            directory.path(),
+            &exe(),
+            &[AgentClient::Claude],
+            Some(&effective(directory.path())?),
+            false,
+        );
         let registration = findings
             .iter()
             .find(|finding| finding.code == "mcp-registration")
@@ -367,7 +437,13 @@ mod tests {
             directory.path().join(".mcp.json"),
             "{\"mcpServers\":{\"chakra\":{\"command\":\"/moved/chakra\",\"args\":[\"serve\",\"--repo\",\"/elsewhere\"]}}}",
         )?;
-        let findings = diagnose(directory.path(), &exe(), &[AgentClient::Claude]);
+        let findings = diagnose(
+            directory.path(),
+            &exe(),
+            &[AgentClient::Claude],
+            Some(&effective(directory.path())?),
+            false,
+        );
         let registration = findings
             .iter()
             .find(|finding| finding.code == "mcp-registration")
@@ -388,13 +464,39 @@ mod tests {
             directory.path().join(crate::config::SHARED_CONFIG_FILENAME),
             "schema_version = 99\n",
         )?;
-        let findings = diagnose(directory.path(), &exe(), &[AgentClient::Claude]);
-        let config = findings
-            .iter()
-            .find(|finding| finding.code == "project-config")
-            .ok_or("config finding")?;
-        assert_eq!(config.severity, Severity::Error, "{config:?}");
-        assert_eq!(report(&findings), 1);
+        let findings = diagnose(
+            directory.path(),
+            &exe(),
+            &[AgentClient::Claude],
+            None,
+            false,
+        );
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.code == "project-config"
+                    && finding.severity == Severity::Warning),
+            "{findings:?}"
+        );
+        assert_eq!(report(&findings), 0);
+        Ok(())
+    }
+
+    #[test]
+    fn json_document_is_versioned_and_marked_isolated() -> TestResult {
+        let directory = tempfile::tempdir()?;
+        let findings = diagnose(
+            directory.path(),
+            &exe(),
+            &[AgentClient::Claude],
+            Some(&effective(directory.path())?),
+            false,
+        );
+        let json = report_json(&findings, directory.path())?;
+        let parsed: serde_json::Value = serde_json::from_str(&json)?;
+        assert_eq!(parsed["schema_version"], 1);
+        assert_eq!(parsed["scope"], "isolated-inspection");
+        assert!(parsed["findings"].is_array());
         Ok(())
     }
 }
