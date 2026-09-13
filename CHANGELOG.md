@@ -7,6 +7,21 @@ version tags prefixed with `v`.
 
 ### Added
 
+- Cross-platform installers with automatic PATH setup (issue #203).
+  `tools/install.sh` (Linux/macOS) and `tools/install.ps1` (Windows)
+  install the latest stable release — or an explicit `--version` — into a
+  user-owned directory after verifying the archive against the release
+  `SHA256SUMS`, with unsupported platforms rejected before any change, an
+  idempotent managed PATH block (Unix shells) or user-PATH entry
+  (Windows), a downgrade guard that requires an explicit version, and
+  failure preservation that keeps a previous installation usable.
+  `--no-path-modify` skips PATH changes; unrecognized shells get exact
+  manual instructions; conflicting earlier PATH entries produce a warning.
+  Hermetic fixture tests cover install, repeat, upgrade, downgrade,
+  checksum failure, custom dirs, and shell variants; CI runs them on all
+  four release targets plus a native installer smoke job on the real
+  release archives.
+
 - Bounded local diagnostic reports (issue #208). `chakra doctor --report
   <path>` exports a versioned (`schema_version = 1`) JSON report built from
   an explicit allowlist: doctor findings, platform identity, non-sensitive
