@@ -59,7 +59,7 @@ pub const PROVIDER_SPECS: &[ProviderSpec] = &[
         language: "TypeScript/JavaScript",
         default_executable: "vtsls",
         version_args: Some(&["--version"]),
-        expected: "vtsls with a resolvable TypeScript (docs/languages/typescript.md)",
+        expected: "vtsls with a resolvable TypeScript",
         expected_prefix: None,
         language_doc: "docs/languages/typescript.md",
         metadata_markers: &[
@@ -72,7 +72,7 @@ pub const PROVIDER_SPECS: &[ProviderSpec] = &[
         language: "Python",
         default_executable: "pyright-langserver",
         version_args: Some(&["--version"]),
-        expected: "pyright per docs/languages/python.md",
+        expected: "pyright (see the pinned version guidance)",
         expected_prefix: None,
         language_doc: "docs/languages/python.md",
         metadata_markers: &[
