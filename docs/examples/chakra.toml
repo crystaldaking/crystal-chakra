@@ -44,3 +44,9 @@ schema_version = 1
 #
 # [providers.clangd]
 # path = "/opt/llvm/bin/clangd"      # or a path relative to this file
+
+# Network-affecting settings are private-only (ADR-0054): they belong in
+# `chakra.local.toml`, never in this committed file. Example:
+#
+# [update]
+# automatic = false    # disable the gated background update check
