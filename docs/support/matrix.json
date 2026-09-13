@@ -1678,8 +1678,13 @@
           ]
         },
         "CORPUS-01": {
-          "status": "missing",
-          "mechanism": "pinned public Kotlin corpus evaluation pending in issue #209"
+          "status": "pass",
+          "mechanism": "pinned Kotlin/kotlinx.coroutines and square/okhttp evaluation, 12/12 scenarios each including a mixed Kotlin/Java project",
+          "evidence": [
+            "docs/support/corpus/results/kotlin-Kotlin__kotlinx.coroutines.json",
+            "docs/support/corpus/results/kotlin-square__okhttp.json",
+            "docs/support/corpus/RESULTS.md"
+          ]
         },
         "DOCS-01": {
           "status": "pass",
@@ -1690,7 +1695,7 @@
         }
       },
       "conformance_results": "docs/support/conformance/kotlin.json",
-      "corpus_results": "",
+      "corpus_results": "docs/support/corpus/results/kotlin-Kotlin__kotlinx.coroutines.json",
       "docs": "docs/languages/kotlin.md"
     },
     {

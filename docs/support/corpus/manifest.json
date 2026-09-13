@@ -247,6 +247,30 @@
           "rationale": "Very large staging-module monorepo; exercises vendor boundaries and extreme symbol counts."
         }
       ]
+    },
+    "kotlin": {
+      "repositories": [
+        {
+          "name": "Kotlin/kotlinx.coroutines",
+          "url": "https://github.com/Kotlin/kotlinx.coroutines",
+          "branch": "master",
+          "sha": "7e8b5a405c834a5e50ee20e90449d0c492db8601",
+          "license": "Apache-2.0",
+          "size_kb": 40079,
+          "primary_language": "Kotlin",
+          "rationale": "Large JetBrains coroutines library with deep cross-module call surfaces and extensive test trees."
+        },
+        {
+          "name": "square/okhttp",
+          "url": "https://github.com/square/okhttp",
+          "branch": "main",
+          "sha": "1402451779106b1e6d3e78f629e1dbfb79317f21",
+          "license": "Apache-2.0",
+          "size_kb": 68340,
+          "primary_language": "Kotlin",
+          "rationale": "Mixed Kotlin/Java Gradle project; exercises mixed-language indexing and Kotlin/JVM project-model reuse."
+        }
+      ]
     }
   }
 }
