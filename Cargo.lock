@@ -179,6 +179,7 @@ dependencies = [
  "chakra-provider-csharp-ls",
  "chakra-provider-gopls",
  "chakra-provider-jdtls",
+ "chakra-provider-kotlin-lsp",
  "chakra-provider-pool",
  "chakra-provider-pyright",
  "chakra-provider-rust-analyzer",
@@ -602,6 +603,24 @@ dependencies = [
 
 [[package]]
 name = "chakra-provider-jdtls"
+version = "0.4.0"
+dependencies = [
+ "chakra-domain",
+ "chakra-engine",
+ "chakra-lsp",
+ "chakra-provider-worker",
+ "crossbeam-channel",
+ "lsp-types",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tracing",
+ "url",
+]
+
+[[package]]
+name = "chakra-provider-kotlin-lsp"
 version = "0.4.0"
 dependencies = [
  "chakra-domain",
