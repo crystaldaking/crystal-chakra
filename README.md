@@ -197,6 +197,28 @@ Invalid configuration — malformed TOML, unknown keys, an unsupported
 `schema_version`, zero limits — fails startup with an actionable error naming
 the file and key; a partially parsed configuration is never applied.
 
+## Agent setup
+
+One-time project setup registers Chakra as a local stdio MCP server and
+installs a concise instruction block for a supported coding-agent client
+(ADR-0055):
+
+```sh
+chakra init --agent claude          # also: codex, cursor, opencode
+chakra init --agent codex --agent cursor   # name each client explicitly
+chakra init --agent claude --dry-run       # preview every planned write
+chakra init --agent claude --remove        # revert Chakra-owned setup
+```
+
+Setup is idempotent and preserves user work: it owns only the `chakra` MCP
+entry, a delimited `<!-- chakra:begin/end -->` instruction block, and a
+minimal `chakra.toml` created only when none exists. Conflicting
+registrations and malformed blocks stop setup with an actionable message
+instead of overwriting anything. See `docs/support/agent-clients.md` for
+the pinned per-client formats and current evidence status, and run
+`chakra doctor --agent <client>` to diagnose registration, instructions,
+and project configuration.
+
 ## Update checks
 
 `chakra update --check` queries GitHub for the latest stable release and

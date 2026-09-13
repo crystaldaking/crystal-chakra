@@ -19,9 +19,12 @@ use chakra_workspace::{WorkspaceRegistry, WorkspaceRegistryConfig, WorkspaceStar
 use clap::{Args, CommandFactory, Parser, Subcommand};
 
 mod config;
+mod doctor;
+mod setup;
 mod update;
 
 use config::{ConfigLayers, ConfigSource, EffectiveConfig, ProviderKey};
+use setup::AgentClient;
 
 /// Local code intelligence layer for AI coding agents.
 #[derive(Debug, Parser)]
@@ -39,6 +42,41 @@ enum Commands {
     Config(ConfigArgs),
     /// Check GitHub for a newer stable Chakra release (ADR-0054).
     Update(UpdateArgs),
+    /// One-time agent-client project setup: MCP registration, instruction
+    /// block, and a minimal chakra.toml (issue #205, ADR-0055).
+    Init(InitArgs),
+    /// Diagnose client registration and project configuration (issue #205).
+    Doctor(DoctorArgs),
+}
+
+#[derive(Debug, Args)]
+struct InitArgs {
+    /// Client to configure; repeat for several. No all-clients default.
+    #[arg(long, value_enum, required = true)]
+    agent: Vec<AgentClient>,
+
+    /// Project path; the Git worktree root is resolved through Git.
+    #[arg(long, value_name = "PATH", default_value = ".")]
+    repo: PathBuf,
+
+    /// Print the planned writes without touching disk.
+    #[arg(long)]
+    dry_run: bool,
+
+    /// Remove Chakra-owned setup instead of installing it.
+    #[arg(long)]
+    remove: bool,
+}
+
+#[derive(Debug, Args)]
+struct DoctorArgs {
+    /// Limit diagnostics to one client (default: all supported clients).
+    #[arg(long, value_enum)]
+    agent: Option<Vec<AgentClient>>,
+
+    /// Project path; the Git worktree root is resolved through Git.
+    #[arg(long, value_name = "PATH", default_value = ".")]
+    repo: PathBuf,
 }
 
 #[derive(Debug, Args)]
@@ -256,7 +294,110 @@ async fn main() -> ExitCode {
             let _ = args;
             ExitCode::from(update::run_manual_check(update::GITHUB_API_BASE))
         }
+        Some(Commands::Init(args)) => init_command(args),
+        Some(Commands::Doctor(args)) => doctor_command(args),
     }
+}
+
+/// Resolve the Git worktree root for setup/doctor, or fail with an
+/// actionable message (ADR-0055: Git-aware resolution, invariant 7).
+fn resolve_project_root(repo: &std::path::Path) -> Result<PathBuf, String> {
+    chakra_git::resolve_repository_root(repo).map_err(|error| {
+        format!(
+            "{} is not inside a Git worktree ({error}); agent setup requires a Git worktree",
+            repo.display()
+        )
+    })
+}
+
+fn init_command(args: InitArgs) -> ExitCode {
+    let root = match resolve_project_root(&args.repo) {
+        Ok(root) => root,
+        Err(message) => {
+            eprintln!("chakra: {message}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let exe = match std::env::current_exe() {
+        Ok(exe) => exe,
+        Err(error) => {
+            eprintln!("chakra: cannot resolve this executable: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let plan = if args.remove {
+        setup::plan_removal(&root, &args.agent)
+    } else {
+        setup::plan_setup(&root, &exe, &args.agent)
+    };
+    let plan = match plan {
+        Ok(plan) => plan,
+        Err(error) => {
+            eprintln!("chakra: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    for write in &plan.writes {
+        println!(
+            "{} {} — {}",
+            write.action,
+            write.path.display(),
+            write.summary
+        );
+    }
+    for note in &plan.notes {
+        println!("note: {note}");
+    }
+    if args.dry_run {
+        for write in &plan.writes {
+            if let Some(content) = &write.content {
+                println!("--- {} would contain ---", write.path.display());
+                print!("{content}");
+            }
+        }
+        return ExitCode::SUCCESS;
+    }
+    match setup::apply_plan(&plan) {
+        Ok(()) => {
+            for client in &plan_clients(&args.agent) {
+                println!(
+                    "chakra: {client} setup written; restart the client session to pick up the registration"
+                );
+            }
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("chakra: {error}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn plan_clients(clients: &[AgentClient]) -> Vec<String> {
+    clients
+        .iter()
+        .map(|client| client.as_str().to_owned())
+        .collect()
+}
+
+fn doctor_command(args: DoctorArgs) -> ExitCode {
+    let root = match resolve_project_root(&args.repo) {
+        Ok(root) => root,
+        Err(message) => {
+            eprintln!("chakra: {message}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let exe = match std::env::current_exe() {
+        Ok(exe) => exe,
+        Err(error) => {
+            eprintln!("chakra: cannot resolve this executable: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let clients = args.agent.unwrap_or_else(|| AgentClient::ALL.to_vec());
+    let findings = doctor::diagnose(&root, &exe, &clients);
+    ExitCode::from(doctor::report(&findings))
 }
 
 /// Resolve the configuration layers for the primary worktree (ADR-0053).

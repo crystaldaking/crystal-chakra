@@ -7,6 +7,20 @@ version tags prefixed with `v`.
 
 ### Added
 
+- One-time agent-client project setup (issue #205, ADR-0055). `chakra init
+  --agent <codex|claude|cursor|opencode>` registers the Chakra MCP server in
+  the client's project-scope configuration, installs a delimited managed
+  instruction block (AGENTS.md / CLAUDE.md), and creates a minimal
+  `chakra.toml` only when none exists. Setup is idempotent, comment- and
+  content-preserving, stops on conflicting registrations or malformed
+  blocks, and supports `--dry-run` and `--remove`. `chakra doctor` reports
+  client executable availability, registration accuracy for the current
+  install and worktree, instruction-block discovery, and project-config
+  health with deterministic finding codes and an error-aware exit status.
+  Per-client pinned formats and evidence status live in
+  `docs/support/agent-clients.md`; real-session evidence remains a release
+  gate.
+
 - GitHub release update checks (issue #204, ADR-0054). `chakra update
   --check` reports the installed version, the latest stable release with
   notes link, platform-asset availability, and the installer upgrade path,
