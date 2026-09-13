@@ -293,6 +293,35 @@ pub fn resolve_repository_root_with_context(
         .map_err(|source| DiscoveryError::Canonicalize { path: root, source })
 }
 
+/// Returns whether `relative` is tracked in the index of the worktree at
+/// `root`, asking Git itself rather than assuming any administrative layout.
+///
+/// The path travels as a command argument after `--`, never through a shell.
+/// Exit status 1 means "not tracked"; any other non-zero status is an error.
+pub fn is_worktree_path_tracked(root: &Path, relative: &Path) -> Result<bool, DiscoveryError> {
+    let command = "ls-files --error-unmatch";
+    let output = capture_git(
+        root,
+        command,
+        &[
+            OsStr::new("ls-files"),
+            OsStr::new("--error-unmatch"),
+            OsStr::new("--"),
+            relative.as_os_str(),
+        ],
+        &OperationContext::unbounded(),
+    )?;
+    match output.status.code() {
+        Some(0) => Ok(true),
+        Some(1) => Ok(false),
+        code => Err(DiscoveryError::Git {
+            command,
+            status: code.unwrap_or(-1),
+            stderr: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+        }),
+    }
+}
+
 /// Resolves a repository identity from Git object history rather than an
 /// absolute worktree path.
 ///

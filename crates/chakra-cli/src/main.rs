@@ -387,6 +387,35 @@ fn apply_cli_overrides(effective: &mut EffectiveConfig, args: &ServeArgs) {
     }
 }
 
+/// Resolve the workspace-scoped settings (index budgets, live startup
+/// timeout) for one registered worktree.
+///
+/// Every worktree reads its own checked-out `chakra.toml` (ADR-0053). An
+/// explicit `--config` disables discovery and applies to every registered
+/// worktree; explicit CLI options always win. Process-global settings
+/// (provider pool, provider enablement, registry limits) are not resolved
+/// here — they come from the primary worktree's configuration.
+fn workspace_scoped_settings(
+    effective: &EffectiveConfig,
+    args: &ServeArgs,
+    root: &std::path::Path,
+    primary_repo: &std::path::Path,
+) -> Result<(chakra_domain::indexing::IndexBudgets, u64), config::ConfigError> {
+    if args.config.is_some() || root == primary_repo {
+        return Ok((
+            effective.budgets,
+            effective.live_index_startup_timeout_millis,
+        ));
+    }
+    let workspace_layers = resolve_config(root, None)?;
+    let mut workspace_effective = workspace_layers.merge();
+    apply_cli_overrides(&mut workspace_effective, args);
+    Ok((
+        workspace_effective.budgets,
+        workspace_effective.live_index_startup_timeout_millis,
+    ))
+}
+
 fn push_rendered(
     out: &mut String,
     effective: &EffectiveConfig,
@@ -590,15 +619,7 @@ async fn serve(args: ServeArgs) -> ExitCode {
     };
     let mut effective = layers.merge();
     apply_cli_overrides(&mut effective, &args);
-    let repo = args.repo;
-    let options =
-        match chakra_language::IndexOptions::new(effective.budgets, IndexCancellation::default()) {
-            Ok(options) => options,
-            Err(error) => {
-                eprintln!("chakra: invalid index budget: {error}");
-                return ExitCode::FAILURE;
-            }
-        };
+    let repo = args.repo.clone();
     let registry = match WorkspaceRegistry::new(WorkspaceRegistryConfig {
         max_workspaces: effective.max_workspaces,
     }) {
@@ -610,11 +631,33 @@ async fn serve(args: ServeArgs) -> ExitCode {
     };
     let mut registered_workspaces = Vec::with_capacity(repo.len());
     for root in repo {
+        let (workspace_budgets, workspace_live_timeout) =
+            match workspace_scoped_settings(&effective, &args, &root, &primary_repo) {
+                Ok(settings) => settings,
+                Err(error) => {
+                    eprintln!("chakra: {error}");
+                    let registry = registry.clone();
+                    let _ = tokio::task::spawn_blocking(move || registry.shutdown()).await;
+                    return ExitCode::FAILURE;
+                }
+            };
+        let options = match chakra_language::IndexOptions::new(
+            workspace_budgets,
+            IndexCancellation::default(),
+        ) {
+            Ok(options) => options,
+            Err(error) => {
+                eprintln!("chakra: invalid index budget: {error}");
+                let registry = registry.clone();
+                let _ = tokio::task::spawn_blocking(move || registry.shutdown()).await;
+                return ExitCode::FAILURE;
+            }
+        };
         let start_registry = registry.clone();
         let workspace_options = WorkspaceStartOptions {
-            index: options.clone(),
+            index: options,
             live: chakra_language::LiveIndexOptions {
-                startup_timeout: Duration::from_millis(effective.live_index_startup_timeout_millis),
+                startup_timeout: Duration::from_millis(workspace_live_timeout),
                 ..chakra_language::LiveIndexOptions::default()
             },
         };
@@ -1330,6 +1373,43 @@ mod tests {
             effective.sources()["providers.clangd.enabled"],
             ConfigSource::Shared(_)
         ));
+        Ok(())
+    }
+
+    #[test]
+    fn secondary_worktree_reads_its_own_configuration() -> TestResult {
+        // Each registered worktree reads its own checked-out chakra.toml for
+        // workspace-scoped settings instead of inheriting the primary's
+        // (ADR-0053, issue #213).
+        let primary = tempfile::tempdir()?;
+        let secondary = tempfile::tempdir()?;
+        std::fs::write(
+            primary.path().join(config::SHARED_CONFIG_FILENAME),
+            "schema_version = 1\n\n[index]\nmax_files = 1\n",
+        )?;
+        std::fs::write(
+            secondary.path().join(config::SHARED_CONFIG_FILENAME),
+            "schema_version = 1\n\n[index]\nmax_files = 25\n",
+        )?;
+        let primary_root = primary.path().to_string_lossy().into_owned();
+        let secondary_root = secondary.path().to_string_lossy().into_owned();
+        let cli = Cli::try_parse_from(["chakra", "serve", "--repo", &primary_root]);
+        let args = match cli {
+            Ok(Cli {
+                command: Some(Commands::Serve(args)),
+            }) => args,
+            other => return Err(format!("unexpected parse result: {other:?}").into()),
+        };
+        let primary_path = std::path::Path::new(&primary_root);
+        let secondary_path = std::path::Path::new(&secondary_root);
+        let mut effective = resolve_config(primary_path, None)?.merge();
+        apply_cli_overrides(&mut effective, &args);
+        let (primary_budgets, _) =
+            workspace_scoped_settings(&effective, &args, primary_path, primary_path)?;
+        let (secondary_budgets, _) =
+            workspace_scoped_settings(&effective, &args, secondary_path, primary_path)?;
+        assert_eq!(primary_budgets.max_files, 1);
+        assert_eq!(secondary_budgets.max_files, 25);
         Ok(())
     }
 

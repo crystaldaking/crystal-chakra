@@ -141,3 +141,33 @@ clients because clients no longer carry Chakra flags at all.
   file, executable path in the shared file).
 - README, CLI help, an example configuration, and release notes are updated
   with the precedence and trust rules.
+
+## Addendum 2026-09-13: release-audit hardening (issues #212–#216)
+
+The v0.4.0 release audit found five defects in the initial implementation;
+this addendum records the enforced behavior.
+
+- **Tracked private overrides are rejected (#212).** The trust boundary is
+  only real if the private file stays out of version control. When the
+  private override lives inside a Git worktree, Chakra asks Git whether the
+  file is tracked and fails startup if it is: a committed repository must
+  never select provider executables. Outside a Git worktree there is no
+  tracking to enforce and the file is the user's own.
+- **Workspace-scoped settings are per-worktree (#213).** Index budgets and
+  the live startup timeout resolve from each registered worktree's own
+  checked-out `chakra.toml` (plus its private sibling and CLI overrides), as
+  this ADR's discovery section always required. Process-global settings —
+  provider-pool limits, provider enablement and executable paths, and the
+  registry workspace limit — come from the primary worktree's configuration;
+  per-worktree provider policies remain deferred. An explicit `--config`
+  disables discovery and applies to every registered worktree.
+- **`--config` is absolutized (#214).** The explicit path is made absolute
+  without resolving symlinks, so relative provider paths always anchor at
+  the declaring file's real directory, never the process working directory.
+- **Only regular files are read, with a size cap (#215).** Configuration
+  metadata is checked before `open`; FIFOs, devices, sockets, and
+  directories are rejected so they cannot block startup, and reads are
+  capped at 1 MiB enforced during the read.
+- **Dangling links are hard errors (#216).** File presence is
+  symlink-metadata based: a broken `chakra.toml` or `chakra.local.toml`
+  symlink fails startup instead of silently restoring built-in defaults.
