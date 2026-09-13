@@ -7,6 +7,18 @@ version tags prefixed with `v`.
 
 ### Added
 
+- Kotlin syntax intelligence (issue #209, ADR-0056). `.kt` and `.kts`
+  sources — including `build.gradle.kts` as both Kotlin syntax and Gradle
+  project metadata — are discovered through the Git-aware inventory and
+  parsed with the pinned `tree-sitter-kotlin-ng` grammar into the shared
+  graph: packages, imports and aliases, classes, interfaces, objects,
+  companions, enum entries, properties, constructors, type aliases,
+  extension receivers, annotations, inheritance delegation, JUnit test
+  hints, diagnostics, and bounded call candidates. Kotlin/JVM reuses the
+  Gradle/Maven project model; `src/test/kotlin` sources classify as tests.
+  Precise-provider integration and full parity evidence continue in the
+  same issue.
+
 - Cross-platform installers with automatic PATH setup (issue #203).
   `tools/install.sh` (Linux/macOS) and `tools/install.ps1` (Windows)
   install the latest stable release — or an explicit `--version` — into a

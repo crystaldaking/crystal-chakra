@@ -52,6 +52,7 @@ const ENTITY_SLOT_LANGUAGES: &[Language] = &[
     Language::Cpp,
     Language::Hcl,
     Language::Go,
+    Language::Kotlin,
 ];
 
 /// The entity-id slot a language owns; see the slot registry above.
@@ -68,6 +69,7 @@ fn language_entity_slot(language: Language) -> usize {
         Language::Cpp => 8,
         Language::Hcl => 9,
         Language::Go => 10,
+        Language::Kotlin => 11,
     }
 }
 

@@ -542,6 +542,8 @@ const SOURCE_EXTENSIONS: &[(&str, Language)] = &[
     ("tfvars", Language::Hcl),
     ("hcl", Language::Hcl),
     ("go", Language::Go),
+    ("kt", Language::Kotlin),
+    ("kts", Language::Kotlin),
 ];
 
 pub(crate) fn raw_may_be_source(raw: &[u8]) -> bool {
@@ -701,13 +703,16 @@ fn workspace_inventory_from_git_output(
             inventory.sources.push(path.clone());
         }
         // A `setup.py` is both a Python source and a project-scope manifest:
-        // it joins the source inventory and is still a metadata input.
+        // it joins the source inventory and is still a metadata input. A
+        // `*.gradle.kts` build script is likewise both a Kotlin source and a
+        // Gradle project manifest (ADR-0056).
         if metadata_input
             && (!is_source
                 || raw == "setup.py"
                 || raw
                     .strip_suffix("setup.py")
-                    .is_some_and(|p| p.ends_with('/')))
+                    .is_some_and(|p| p.ends_with('/'))
+                || raw.ends_with(".gradle.kts"))
         {
             inventory.metadata_inputs.push(path);
         }
@@ -725,7 +730,9 @@ const TYPESCRIPT_METADATA_LANGUAGES: &[Language] = &[Language::TypeScript];
 const JAVASCRIPT_METADATA_LANGUAGES: &[Language] = &[Language::JavaScript];
 const WEB_METADATA_LANGUAGES: &[Language] = &[Language::TypeScript, Language::JavaScript];
 const PYTHON_METADATA_LANGUAGES: &[Language] = &[Language::Python];
-const JAVA_METADATA_LANGUAGES: &[Language] = &[Language::Java];
+/// JVM build metadata feeds both the Java and the Kotlin provider routes:
+/// Gradle/Maven model changes affect Kotlin sources too (ADR-0056).
+const JVM_METADATA_LANGUAGES: &[Language] = &[Language::Java, Language::Kotlin];
 const CSHARP_METADATA_LANGUAGES: &[Language] = &[Language::CSharp];
 const SHELL_METADATA_LANGUAGES: &[Language] = &[Language::Shell];
 const CPP_METADATA_LANGUAGES: &[Language] = &[Language::Cpp];
@@ -798,7 +805,7 @@ fn raw_metadata_languages(raw: &[u8]) -> &'static [Language] {
                 b"settings.gradle".as_slice(),
                 b"settings.gradle.kts".as_slice(),
             ][..],
-            JAVA_METADATA_LANGUAGES,
+            JVM_METADATA_LANGUAGES,
         ),
         (
             &[

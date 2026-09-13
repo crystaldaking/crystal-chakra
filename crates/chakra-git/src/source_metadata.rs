@@ -1070,6 +1070,39 @@ fn java_path_role(path: &RepoRelativePath) -> SourceRole {
     }
 }
 
+/// Kotlin source role: the Java conventions plus `src/test/kotlin` and
+/// Kotlin test stems (ADR-0056).
+fn kotlin_path_role(path: &RepoRelativePath) -> SourceRole {
+    let fallback = SourceMetadata::path_fallback(path);
+    if fallback.role != SourceRole::Production {
+        return fallback.role;
+    }
+    let components: Vec<&str> = path.as_str().split('/').collect();
+    if components.starts_with(&["src", "test", "kotlin"]) {
+        return SourceRole::Test;
+    }
+    let is_test_stem = path
+        .as_str()
+        .rsplit('/')
+        .next()
+        .and_then(|file| {
+            file.strip_suffix(".kt")
+                .or_else(|| file.strip_suffix(".kts"))
+        })
+        .is_some_and(|stem| stem.ends_with("Test") || stem.ends_with("Tests"));
+    if is_test_stem {
+        SourceRole::Test
+    } else {
+        SourceRole::Production
+    }
+}
+
+fn classify_kotlin(path: &RepoRelativePath, packages: &[JavaRoot]) -> SourceMetadata {
+    let mut metadata = classify_java(path, packages);
+    metadata.role = kotlin_path_role(path);
+    metadata
+}
+
 fn classify_java(path: &RepoRelativePath, packages: &[JavaRoot]) -> SourceMetadata {
     let role = java_path_role(path);
     let package = packages
@@ -1745,6 +1778,8 @@ pub fn classify_discovered_sources_with_context(
                 Language::Cpp => classify_cpp(&path, cpp.as_deref().unwrap_or_default()),
                 Language::Hcl => classify_hcl(&path, hcl.as_deref().unwrap_or_default()),
                 Language::Go => classify_go(&path, go.as_deref().unwrap_or_default()),
+                // Kotlin/JVM reuses the Gradle/Maven project model (ADR-0056).
+                Language::Kotlin => classify_kotlin(&path, java.as_deref().unwrap_or_default()),
             },
             path,
             language,
