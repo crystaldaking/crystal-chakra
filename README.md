@@ -219,6 +219,18 @@ the pinned per-client formats and current evidence status, and run
 `chakra doctor --agent <client>` to diagnose registration, instructions,
 and project configuration.
 
+`chakra doctor` also explains analysis quality (issue #207): per provider
+it reports intentional syntax-only disablement, missing or misconfigured
+executables with install guidance per `docs/languages/*.md`, missing
+project metadata at the worktree root, and index-budget pressure from the
+tracked source inventory — always labeled as an *isolated inspection*,
+never as the agent's live session (dormant/catching-up/ready/degraded
+states and live counters belong to the session's `status` tool). The
+default run spawns no processes; `--probe` adds bounded `--version`
+executions with hard deadlines and pinned-version compatibility findings,
+and `--json` emits the versioned machine-readable document. Exit status
+`1` marks broken setup; an intentionally disabled provider is healthy.
+
 ## Update checks
 
 `chakra update --check` queries GitHub for the latest stable release and

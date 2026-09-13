@@ -7,6 +7,19 @@ version tags prefixed with `v`.
 
 ### Added
 
+- Actionable provider and analysis diagnostics in `chakra doctor`
+  (issue #207). Per provider, doctor reports intentional disablement
+  (healthy syntax-only), missing executables with pinned install guidance,
+  misconfigured private paths, missing project metadata at the worktree
+  root, and tracked-inventory pressure against `index.max_files`, each
+  with deterministic finding codes, applicability, evidence, and scoped
+  next steps. Every run is labeled an isolated inspection; session states
+  (dormant, catching up, ready, degraded) are pointed to the session
+  `status` tool rather than guessed. The default inspection spawns no
+  processes; `--probe` runs bounded `--version` executions (2 s deadline,
+  reaped children) with pinned-version compatibility findings, and
+  `--json` emits the versioned `schema_version = 1` document.
+
 - One-time agent-client project setup (issue #205, ADR-0055). `chakra init
   --agent <codex|claude|cursor|opencode>` registers the Chakra MCP server in
   the client's project-scope configuration, installs a delimited managed

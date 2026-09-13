@@ -18,6 +18,7 @@ use chakra_provider_pool::{
 use chakra_workspace::{WorkspaceRegistry, WorkspaceRegistryConfig, WorkspaceStartOptions};
 use clap::{Args, CommandFactory, Parser, Subcommand};
 
+mod analysis;
 mod config;
 mod doctor;
 mod setup;
@@ -77,6 +78,15 @@ struct DoctorArgs {
     /// Project path; the Git worktree root is resolved through Git.
     #[arg(long, value_name = "PATH", default_value = ".")]
     repo: PathBuf,
+
+    /// Emit the versioned JSON representation instead of human-readable text.
+    #[arg(long)]
+    json: bool,
+
+    /// Run bounded isolated probes (provider --version executions with hard
+    /// deadlines). Default inspection spawns no processes (issue #207).
+    #[arg(long)]
+    probe: bool,
 }
 
 #[derive(Debug, Args)]
@@ -396,7 +406,38 @@ fn doctor_command(args: DoctorArgs) -> ExitCode {
         }
     };
     let clients = args.agent.unwrap_or_else(|| AgentClient::ALL.to_vec());
-    let findings = doctor::diagnose(&root, &exe, &clients);
+    // Invalid configuration is itself a finding; analysis still reports
+    // what it honestly can without it.
+    let (effective, config_error) = match resolve_config(&root, None) {
+        Ok(layers) => (Some(layers.merge()), None),
+        Err(error) => (None, Some(error.to_string())),
+    };
+    let mut findings = Vec::new();
+    if let Some(message) = config_error {
+        findings.push(doctor::Finding::new(
+            "project-config",
+            doctor::Severity::Error,
+            "project".to_owned(),
+            format!("configuration error: {message}"),
+            "fix the reported file/key; startup fails on invalid configuration".to_owned(),
+        ));
+    }
+    findings.extend(doctor::diagnose(
+        &root,
+        &exe,
+        &clients,
+        effective.as_ref(),
+        args.probe,
+    ));
+    if args.json {
+        match doctor::report_json(&findings, &root) {
+            Ok(json) => println!("{json}"),
+            Err(error) => {
+                eprintln!("chakra: cannot render doctor JSON: {error}");
+                return ExitCode::FAILURE;
+            }
+        }
+    }
     ExitCode::from(doctor::report(&findings))
 }
 
