@@ -1034,10 +1034,7 @@ val имя = "привет"
 "#,
         )?;
         assert_eq!(names(&script, SymbolKind::Property), ["имя"]);
-        let broken = parse(
-            "class Broken { fun oops( 
-",
-        )?;
+        let broken = parse("class Broken { fun oops( \n")?;
         assert!(broken.has_errors);
         assert!(broken.diagnostic_count >= 1);
         assert!(!broken.diagnostics.is_empty());
