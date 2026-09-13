@@ -460,7 +460,9 @@ pub fn write_report(path: &Path, json: &str, force: bool) -> Result<(), ReportEr
         fs::create_dir_all(parent)
             .map_err(|io| error(format!("cannot create {}: {io}", parent.display())))?;
     }
-    let temporary = path.with_extension("chakra-report-tmp");
+    // Per-process temporary name: concurrent report exports must not
+    // interleave writes into one shared staging file.
+    let temporary = path.with_extension(format!("chakra-report-tmp-{}", std::process::id()));
     let write_result = (|| -> Result<(), ReportError> {
         fs::write(&temporary, json)
             .map_err(|io| error(format!("cannot write {}: {io}", path.display())))?;
