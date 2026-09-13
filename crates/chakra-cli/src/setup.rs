@@ -655,7 +655,11 @@ pub fn apply_plan(plan: &SetupPlan) -> Result<(), SetupError> {
                     fs::create_dir_all(parent)
                         .map_err(|io| error(format!("cannot create {}: {io}", parent.display())))?;
                 }
-                let temporary = write.path.with_extension("chakra-tmp");
+                // Per-process temporary name: concurrent init runs must not
+                // interleave writes into one shared staging file.
+                let temporary = write
+                    .path
+                    .with_extension(format!("chakra-tmp-{}", std::process::id()));
                 fs::write(&temporary, content)
                     .map_err(|io| error(format!("cannot write {}: {io}", write.path.display())))?;
                 fs::rename(&temporary, &write.path).map_err(|io| {

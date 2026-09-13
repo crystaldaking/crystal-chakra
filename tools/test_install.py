@@ -184,6 +184,20 @@ def test_unsupported_platform_fails_early(tmp: Path) -> None:
     assert not env.rc().exists()
 
 
+def test_foreign_binary_with_non_release_version_does_not_crash(tmp: Path) -> None:
+    target = host_target()
+    fixture = make_fixture(tmp / "fixture", "v0.4.0", target)
+    env = InstallEnv(tmp)
+    env.install_dir.mkdir(parents=True)
+    foreign = env.binary
+    foreign.write_text("#!/bin/sh\necho 'chakra 0.4.0-beta-local'\n")
+    foreign.chmod(0o755)
+    result = env.run(fixture)
+    assert result.returncode == 0, result.stderr
+    assert "downgrade guard" in result.stdout
+    assert env.version() == "chakra 0.4.0"
+
+
 def test_no_path_modify(tmp: Path) -> None:
     target = host_target()
     fixture = make_fixture(tmp / "fixture", "v0.4.0", target)
