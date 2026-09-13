@@ -21,6 +21,7 @@ use clap::{Args, CommandFactory, Parser, Subcommand};
 mod analysis;
 mod config;
 mod doctor;
+mod report;
 mod setup;
 mod update;
 
@@ -87,6 +88,14 @@ struct DoctorArgs {
     /// deadlines). Default inspection spawns no processes (issue #207).
     #[arg(long)]
     probe: bool,
+
+    /// Export a bounded, sanitized local diagnostic report (issue #208).
+    #[arg(long, value_name = "PATH")]
+    report: Option<PathBuf>,
+
+    /// Allow --report to replace an existing file.
+    #[arg(long)]
+    force: bool,
 }
 
 #[derive(Debug, Args)]
@@ -437,6 +446,34 @@ fn doctor_command(args: DoctorArgs) -> ExitCode {
                 return ExitCode::FAILURE;
             }
         }
+    }
+    let mut failure = false;
+    if let Some(path) = &args.report {
+        match report::build_report(&root, effective.as_ref(), &findings)
+            .and_then(|built| report::write_report(path, &built.json, args.force).map(|()| built))
+        {
+            Ok(built) => {
+                println!(
+                    "report written to {} ({} findings, {} bytes)",
+                    path.display(),
+                    built.finding_count,
+                    built.json.len()
+                );
+                for section in &built.truncated_sections {
+                    println!("note: {section}");
+                }
+                println!(
+                    "the report is an isolated inspection with an explicit allowlist (no source, secrets, or machine paths); review it and attach it to a GitHub issue manually"
+                );
+            }
+            Err(error) => {
+                eprintln!("chakra: {error}");
+                failure = true;
+            }
+        }
+    }
+    if failure {
+        return ExitCode::FAILURE;
     }
     ExitCode::from(doctor::report(&findings))
 }
