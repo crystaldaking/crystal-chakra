@@ -1,0 +1,490 @@
+{
+  "schema_version": 2,
+  "language": "kotlin",
+  "repository": "square/okhttp",
+  "sha": "1402451779106b1e6d3e78f629e1dbfb79317f21",
+  "status": "evaluated",
+  "skip_reason": "",
+  "provider_phase": "hermetic-startup-failure-restart",
+  "scenario_count": 12,
+  "passed": 12,
+  "failed": 0,
+  "skipped": 0,
+  "scenarios": [
+    {
+      "id": "cold-index",
+      "status": "pass",
+      "details": "no budget configured for cold_index_peak_rss_bytes; no budget configured for cold_index_wall_micros; full index from scratch; coverage counts recorded",
+      "phases": [
+        {
+          "name": "GitInventory",
+          "wall_micros": 22051
+        },
+        {
+          "name": "SourceRead",
+          "wall_micros": 16258
+        },
+        {
+          "name": "ParseExtraction/Rust",
+          "wall_micros": 1
+        },
+        {
+          "name": "SymbolCatalog/Rust",
+          "wall_micros": 1
+        },
+        {
+          "name": "Relationships/Rust",
+          "wall_micros": 0
+        },
+        {
+          "name": "GraphMaterialization/Rust",
+          "wall_micros": 5
+        },
+        {
+          "name": "ParseExtraction/Php",
+          "wall_micros": 2
+        },
+        {
+          "name": "SymbolCatalog/Php",
+          "wall_micros": 2
+        },
+        {
+          "name": "Relationships/Php",
+          "wall_micros": 0
+        },
+        {
+          "name": "GraphMaterialization/Php",
+          "wall_micros": 3
+        },
+        {
+          "name": "ParseExtraction/TypeScript",
+          "wall_micros": 0
+        },
+        {
+          "name": "SymbolCatalog/TypeScript",
+          "wall_micros": 0
+        },
+        {
+          "name": "Relationships/TypeScript",
+          "wall_micros": 0
+        },
+        {
+          "name": "GraphMaterialization/TypeScript",
+          "wall_micros": 2
+        },
+        {
+          "name": "ParseExtraction/Python",
+          "wall_micros": 0
+        },
+        {
+          "name": "SymbolCatalog/Python",
+          "wall_micros": 0
+        },
+        {
+          "name": "Relationships/Python",
+          "wall_micros": 0
+        },
+        {
+          "name": "GraphMaterialization/Python",
+          "wall_micros": 1
+        },
+        {
+          "name": "ParseExtraction/JavaScript",
+          "wall_micros": 0
+        },
+        {
+          "name": "SymbolCatalog/JavaScript",
+          "wall_micros": 0
+        },
+        {
+          "name": "Relationships/JavaScript",
+          "wall_micros": 0
+        },
+        {
+          "name": "GraphMaterialization/JavaScript",
+          "wall_micros": 0
+        },
+        {
+          "name": "ParseExtraction/Java",
+          "wall_micros": 3080
+        },
+        {
+          "name": "SymbolCatalog/Java",
+          "wall_micros": 137
+        },
+        {
+          "name": "Relationships/Java",
+          "wall_micros": 59
+        },
+        {
+          "name": "GraphMaterialization/Java",
+          "wall_micros": 2764
+        },
+        {
+          "name": "ParseExtraction/CSharp",
+          "wall_micros": 1
+        },
+        {
+          "name": "SymbolCatalog/CSharp",
+          "wall_micros": 1
+        },
+        {
+          "name": "Relationships/CSharp",
+          "wall_micros": 0
+        },
+        {
+          "name": "GraphMaterialization/CSharp",
+          "wall_micros": 2
+        },
+        {
+          "name": "ParseExtraction/Shell",
+          "wall_micros": 242
+        },
+        {
+          "name": "SymbolCatalog/Shell",
+          "wall_micros": 2
+        },
+        {
+          "name": "Relationships/Shell",
+          "wall_micros": 2
+        },
+        {
+          "name": "GraphMaterialization/Shell",
+          "wall_micros": 12
+        },
+        {
+          "name": "ParseExtraction/Cpp",
+          "wall_micros": 0
+        },
+        {
+          "name": "SymbolCatalog/Cpp",
+          "wall_micros": 0
+        },
+        {
+          "name": "Relationships/Cpp",
+          "wall_micros": 0
+        },
+        {
+          "name": "GraphMaterialization/Cpp",
+          "wall_micros": 1
+        },
+        {
+          "name": "ParseExtraction/Hcl",
+          "wall_micros": 0
+        },
+        {
+          "name": "SymbolCatalog/Hcl",
+          "wall_micros": 0
+        },
+        {
+          "name": "Relationships/Hcl",
+          "wall_micros": 0
+        },
+        {
+          "name": "GraphMaterialization/Hcl",
+          "wall_micros": 0
+        },
+        {
+          "name": "ParseExtraction/Go",
+          "wall_micros": 0
+        },
+        {
+          "name": "SymbolCatalog/Go",
+          "wall_micros": 0
+        },
+        {
+          "name": "Relationships/Go",
+          "wall_micros": 0
+        },
+        {
+          "name": "GraphMaterialization/Go",
+          "wall_micros": 0
+        },
+        {
+          "name": "ParseExtraction/Kotlin",
+          "wall_micros": 101948
+        },
+        {
+          "name": "SymbolCatalog/Kotlin",
+          "wall_micros": 2937
+        },
+        {
+          "name": "Relationships/Kotlin",
+          "wall_micros": 1982
+        },
+        {
+          "name": "GraphMaterialization/Kotlin",
+          "wall_micros": 120175
+        },
+        {
+          "name": "LanguageComposition",
+          "wall_micros": 10
+        },
+        {
+          "name": "GraphValidation",
+          "wall_micros": 64068
+        },
+        {
+          "name": "total",
+          "wall_micros": 392853
+        }
+      ],
+      "measurements": {
+        "ambiguous_call_sites": 3925,
+        "call_sites": 54970,
+        "cpp_files": 0,
+        "csharp_files": 0,
+        "degradations": 0,
+        "degraded": false,
+        "discovered_files": 692,
+        "edges": 22038,
+        "go_files": 0,
+        "hcl_files": 0,
+        "java_files": 71,
+        "javascript_files": 0,
+        "parsed_files": 692,
+        "peak_rss_bytes": 164610048,
+        "php_files": 0,
+        "python_files": 0,
+        "rust_files": 0,
+        "shell_files": 4,
+        "source_bytes": 4671325,
+        "symbols": 18217,
+        "syntax_error_files": 7,
+        "typescript_files": 0,
+        "unresolved_call_sites": 47512,
+        "wall_micros": 392853
+      },
+      "budget_verdicts": []
+    },
+    {
+      "id": "warm-noop",
+      "status": "pass",
+      "details": "no budget configured for warm_noop_wall_micros; unchanged checkout: no reindex work behind the freshness barrier",
+      "phases": [
+        {
+          "name": "fresh_barrier",
+          "wall_micros": 253942
+        }
+      ],
+      "measurements": {
+        "files_inspected": 1346,
+        "git_subprocesses": 2,
+        "no_op_reconciliations": 1,
+        "wall_micros": 253943
+      },
+      "budget_verdicts": []
+    },
+    {
+      "id": "fingerprint",
+      "status": "pass",
+      "details": "two cold indexes produce identical fingerprints and counts",
+      "phases": [
+        {
+          "name": "reindex",
+          "wall_micros": 377672
+        }
+      ],
+      "measurements": {
+        "fingerprint": "b0d85d8a83e8f5a7",
+        "rerun_edges": 22038,
+        "rerun_symbols": 18217
+      },
+      "budget_verdicts": []
+    },
+    {
+      "id": "one-file-edit",
+      "status": "pass",
+      "details": "one-file edit: targeted reconcile, fresh query sees the change",
+      "phases": [
+        {
+          "name": "edit_and_barrier",
+          "wall_micros": 301524
+        }
+      ],
+      "measurements": {
+        "files_reparsed": 1,
+        "full_reconciliations": 0,
+        "wall_micros": 301525
+      },
+      "budget_verdicts": []
+    },
+    {
+      "id": "atomic-replace",
+      "status": "pass",
+      "details": "write-temp-then-rename: targeted reconcile, fresh query sees the change",
+      "phases": [
+        {
+          "name": "replace_and_barrier",
+          "wall_micros": 552434
+        }
+      ],
+      "measurements": {
+        "files_reparsed": 1,
+        "full_reconciliations": 0,
+        "wall_micros": 552434
+      },
+      "budget_verdicts": []
+    },
+    {
+      "id": "rename-delete",
+      "status": "pass",
+      "details": "rename + delete: inventory correct after the freshness barrier",
+      "phases": [
+        {
+          "name": "rename_delete_and_barrier",
+          "wall_micros": 345047
+        }
+      ],
+      "measurements": {
+        "created_files": 1,
+        "deleted_files": 2,
+        "wall_micros": 345047
+      },
+      "budget_verdicts": []
+    },
+    {
+      "id": "syntax-error",
+      "status": "pass",
+      "details": "last-good revision: `headersOf` stays queryable; temporary syntax error: attributed diagnostics; restore returns to baseline on a newer revision",
+      "phases": [
+        {
+          "name": "break_and_barrier",
+          "wall_micros": 261035
+        }
+      ],
+      "measurements": {
+        "baseline_total_diagnostics": 20
+      },
+      "budget_verdicts": []
+    },
+    {
+      "id": "diff-context",
+      "status": "pass",
+      "details": "clean tree: empty diff; after edits: correct changed-file attribution",
+      "phases": [
+        {
+          "name": "clean_diff",
+          "wall_micros": 1963723
+        },
+        {
+          "name": "dirty_diff",
+          "wall_micros": 876550
+        }
+      ],
+      "measurements": {
+        "changed_files": [
+          {
+            "change": "Deleted",
+            "path": "android-test-app/build.gradle.kts",
+            "previous_path": null
+          },
+          {
+            "change": "Deleted",
+            "path": "android-test-app/src/androidTest/kotlin/okhttp/android/testapp/IdnaTest.kt",
+            "previous_path": null
+          },
+          {
+            "change": "Added",
+            "path": "android-test-app/src/androidTest/kotlin/okhttp/android/testapp/IdnaTest__chakra_moved.kt",
+            "previous_path": null
+          }
+        ],
+        "clean_diff_wall_micros": 763369
+      },
+      "budget_verdicts": []
+    },
+    {
+      "id": "queries",
+      "status": "pass",
+      "details": "high-degree targets chosen from the index; bounded responses with explicit truncation",
+      "phases": [
+        {
+          "name": "symbol_search",
+          "wall_micros": 138
+        },
+        {
+          "name": "callers",
+          "wall_micros": 364
+        },
+        {
+          "name": "context",
+          "wall_micros": 389
+        }
+      ],
+      "measurements": {
+        "callers_returned": 5,
+        "target": "okhttp3::Companion::headersOf",
+        "target_incoming_calls": 163,
+        "target_precision": "TreeSitter/Syntax",
+        "targets": [
+          {
+            "incoming_calls": 163,
+            "qualified_name": "okhttp3::Companion::headersOf"
+          },
+          {
+            "incoming_calls": 128,
+            "qualified_name": "okhttp3::Companion::init"
+          },
+          {
+            "incoming_calls": 87,
+            "qualified_name": "okhttp3::TestUtil::headerEntries"
+          }
+        ]
+      },
+      "budget_verdicts": []
+    },
+    {
+      "id": "cancellation",
+      "status": "pass",
+      "details": "cancelled index and query stop promptly; no partial publication",
+      "phases": [
+        {
+          "name": "cancelled_cold_index",
+          "wall_micros": 0
+        },
+        {
+          "name": "cancelled_query",
+          "wall_micros": 1
+        }
+      ],
+      "measurements": {
+        "cancelled_index_wall_micros": 0
+      },
+      "budget_verdicts": []
+    },
+    {
+      "id": "cache-restore",
+      "status": "pass",
+      "details": "checkout restored to the pinned SHA with a clean worktree",
+      "phases": [],
+      "measurements": {},
+      "budget_verdicts": []
+    },
+    {
+      "id": "provider-lifecycle",
+      "status": "pass",
+      "details": "real corpus graph: provider absent, failed start with explicit fallback, then provenance-tagged precise restart",
+      "phases": [
+        {
+          "name": "provider_absent",
+          "wall_micros": 40
+        },
+        {
+          "name": "provider_failure",
+          "wall_micros": 257540
+        },
+        {
+          "name": "provider_restart",
+          "wall_micros": 1222244
+        }
+      ],
+      "measurements": {
+        "fallback_callers": 20,
+        "precise_callers": 1,
+        "target": "okhttp3::Companion::headersOf"
+      },
+      "budget_verdicts": []
+    }
+  ]
+}

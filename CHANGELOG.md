@@ -7,6 +7,15 @@ version tags prefixed with `v`.
 
 ### Added
 
+- Kotlin public-corpus evaluation (issue #209, continued). Pinned
+  `Kotlin/kotlinx.coroutines` (7e8b5a4) and `square/okhttp` (1402451, mixed
+  Kotlin/Java) pass all 12 corpus scenarios each — cold index, warm no-op,
+  one-file edit, atomic replace, rename/delete, syntax error, diff context,
+  queries, cancellation, cache restore, and provider lifecycle — with
+  results and budgets recorded (`docs/support/corpus/RESULTS.md`,
+  `budgets.json`). Only the real kotlin-lsp image run remains before
+  Kotlin can be advertised.
+
 - Kotlin precise enrichment via kotlin-lsp (issue #209, ADR-0056). The new
   `chakra-provider-kotlin-lsp` adapter integrates JetBrains' official
   standalone `kotlin-server` distribution (Alpha) for precise incoming and

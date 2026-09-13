@@ -83,4 +83,6 @@ never interpreted as source.
 - Real kotlin-lsp smoke test in the pinned provider image:
   `crates/chakra-provider-kotlin-lsp/tests/real_provider.rs` (ignored by
   default; runs under `tools/run_lsp_tests.sh`).
-- Public-corpus evaluation: pending in issue #209.
+- Public-corpus evaluation: pinned `Kotlin/kotlinx.coroutines` and
+  `square/okhttp` (mixed Kotlin/Java), 12/12 scenarios each
+  (`docs/support/corpus/results/kotlin-*.json`, `docs/support/corpus/RESULTS.md`).

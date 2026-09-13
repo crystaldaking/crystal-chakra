@@ -236,7 +236,7 @@ Target list reviewed: 2026-09 (GitHub Octoverse 2025 top languages plus pre-exis
 | BUDGET-01 | pass | query/index work budgets; public-corpus calibration pending |
 | CANCEL-01 | pass | cooperative syntax cancellation through the shared driver |
 | CONFORM-01 | pass | chakra-conformance shared scenario harness, 14/14 |
-| CORPUS-01 | missing | pinned public Kotlin corpus evaluation pending in issue #209 |
+| CORPUS-01 | pass | pinned Kotlin/kotlinx.coroutines and square/okhttp evaluation, 12/12 scenarios each including a mixed Kotlin/Java project |
 | DEGRADE-01 | pass | bounded degradation with syntax fallback |
 | DISC-01 | pass | chakra-git discovery for Git-visible .kt and .kts files, including *.gradle.kts as Kotlin source and Gradle manifest |
 | DISC-02 | pass | shared Gradle/Maven JVM project model scoping (ADR-0056) |
