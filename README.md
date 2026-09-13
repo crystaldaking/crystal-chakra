@@ -231,6 +231,15 @@ executions with hard deadlines and pinned-version compatibility findings,
 and `--json` emits the versioned machine-readable document. Exit status
 `1` marks broken setup; an intentionally disabled provider is healthy.
 
+For reproducible issue reports, `chakra doctor --report <path>` writes a
+bounded, sanitized JSON document (issue #208): findings, platform,
+non-sensitive effective limits, provider readiness, and the HEAD revision,
+built from an explicit allowlist — no source text, environment values,
+credentials, remote URLs, or absolute machine paths — with unavailable
+values marked as such and truncation recorded explicitly. The file is
+written owner-only and is never uploaded; review it and attach it to a
+GitHub issue manually. It describes observed health, not model behavior.
+
 ## Update checks
 
 `chakra update --check` queries GitHub for the latest stable release and

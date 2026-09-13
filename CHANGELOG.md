@@ -7,6 +7,21 @@ version tags prefixed with `v`.
 
 ### Added
 
+- Bounded local diagnostic reports (issue #208). `chakra doctor --report
+  <path>` exports a versioned (`schema_version = 1`) JSON report built from
+  an explicit allowlist: doctor findings, platform identity, non-sensitive
+  effective limits with their source layers, provider readiness, and the
+  observed HEAD revision — with unavailable values marked `unavailable`,
+  never fabricated. Free-text fields pass a sanitizer that replaces
+  worktree/home/config/provider paths and scrubs residual absolute paths,
+  URLs, and token-like strings; source contents, environment values,
+  credentials, remote URLs, and raw logs are excluded by construction and
+  recorded under `omissions`. Reports are bounded (200 findings, 2 KiB per
+  field, 256 KiB total, with explicit truncation records), written with
+  owner-only permissions through an atomic rename, never overwrite an
+  existing file without `--force`, and are never uploaded — review and
+  attach them to an issue manually.
+
 - Actionable provider and analysis diagnostics in `chakra doctor`
   (issue #207). Per provider, doctor reports intentional disablement
   (healthy syntax-only), missing executables with pinned install guidance,
