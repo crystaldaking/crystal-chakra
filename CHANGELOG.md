@@ -7,6 +7,22 @@ version tags prefixed with `v`.
 
 ### Added
 
+- Kotlin precise enrichment via kotlin-lsp (issue #209, ADR-0056). The new
+  `chakra-provider-kotlin-lsp` adapter integrates JetBrains' official
+  standalone `kotlin-server` distribution (Alpha) for precise incoming and
+  outgoing call hierarchy over the shared bounded worker: revision-scoped
+  document synchronization, the call-hierarchy capability gate, restart and
+  backoff, cancellation, orphan-free shutdown, and honest syntax fallback.
+  The server registers as the `kotlin-lsp` provider key in `chakra.toml`
+  configuration, `--no-kotlin-lsp` / `--kotlin-ls-path` CLI options, and a
+  doctor row; the provider test image pins `kotlin-server 262.9593.0` with
+  SHA-256 verification (the distribution bundles its own runtime and is
+  Apache-2.0). Hermetic lifecycle tests cover readiness, delta sync,
+  timeout cancellation, crash-restart counting, capability absence, and
+  process-group reaping; the real-server smoke test runs in the pinned
+  image. Public-corpus evidence remains pending in the same issue, so
+  Kotlin is still not advertised.
+
 - Kotlin conformance, matrix, and language documentation (issue #209,
   continued). The Kotlin conformance fixture (Gradle-shaped project under
   `fixtures/conformance/kotlin/`) passes all 14 shared scenarios with

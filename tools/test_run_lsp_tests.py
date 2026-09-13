@@ -62,6 +62,7 @@ class WrapperTests(unittest.TestCase):
             "chakra-provider-csharp-ls",
             "chakra-provider-gopls",
             "chakra-provider-terraform-ls",
+            "chakra-provider-kotlin-lsp",
         ]
         self.assertEqual(tests[1:], [
             ["cargo", "test", "--locked", "-p", package, "--test", "real_provider", "--", "--ignored"]

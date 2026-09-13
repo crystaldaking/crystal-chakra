@@ -161,6 +161,7 @@ provider_table! {
     clangd: Clangd => "clangd",
     terraform_ls: TerraformLs => "terraform-ls",
     gopls: Gopls => "gopls",
+    kotlin_lsp: KotlinLsp => "kotlin-lsp",
 }
 
 #[derive(Debug, Default, Clone, Deserialize)]
@@ -1174,6 +1175,7 @@ mod tests {
                 "clangd",
                 "terraform-ls",
                 "gopls",
+                "kotlin-lsp",
             ]
         );
         Ok(())

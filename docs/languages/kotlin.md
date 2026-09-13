@@ -36,18 +36,23 @@ Syntax intelligence is fully offline: a JDK, Gradle, Maven, Kotlin
 toolchain, and network access are not required, and Chakra never runs
 Gradle, Maven, or scripts during discovery or indexing.
 
-Precise enrichment is **not yet integrated** (issue #209). ADR-0056 records
-the selection of JetBrains' official `Kotlin/kotlin-lsp`; upstream currently
-marks it Alpha, with Android Gradle Plugin support experimental and
-Multiplatform support under development. The adapter, pinned test-image
-distribution, license verification of the downloaded components, and the
-real-server smoke test land with the same issue before Kotlin is
-advertised. Until then, Kotlin precise queries report honest syntax
-fallback — a healthy, intentional mode, not an error.
+Precise enrichment uses JetBrains' official standalone `kotlin-server`
+distribution (Alpha), selected in ADR-0056. The pinned evaluation target is
+`kotlin-server 262.9593.0` (SHA-256-verified in `tools/Dockerfile.lsp`);
+the distribution bundles its own runtime and launches through
+`bin/intellij-server stdio`. Put a `kotlin-lsp` wrapper executable on
+`PATH`, or set `providers.kotlin-lsp.path` in `chakra.local.toml` /
+`--kotlin-ls-path`; use `--no-kotlin-lsp` or
+`providers.kotlin-lsp.enabled = false` for deterministic syntax-only
+operation. Upstream caveats: Android Gradle Plugin support is experimental
+and Multiplatform is under development, and weekly pre-alpha builds move
+fast — only the pinned version is a supported evaluation target. An absent
+or failing server degrades honestly to syntax.
 
 ## Precision tiers and limitations
 
-- Precise: none yet (provider integration pending; see above).
+- Precise: incoming and outgoing call hierarchy confirmed by the pinned
+  kotlin-lsp for the synchronized workspace revision.
 - Syntax: declarations, containers, imports, ranges, diagnostics,
   annotations, delegation, test hints, and call candidates.
 - Heuristic: uniquely resolved local syntax call relations.
@@ -73,5 +78,9 @@ never interpreted as source.
   input (`crates/chakra-language-kotlin/src/parser.rs`).
 - Conformance fixture and emitted results:
   `fixtures/conformance/kotlin/`, `docs/support/conformance/kotlin.json`.
-- Public-corpus evaluation and the real kotlin-lsp smoke test: pending in
-  issue #209.
+- Hermetic lifecycle regressions with a scripted stdio peer:
+  `crates/chakra-provider-kotlin-lsp/tests/lifecycle.rs`.
+- Real kotlin-lsp smoke test in the pinned provider image:
+  `crates/chakra-provider-kotlin-lsp/tests/real_provider.rs` (ignored by
+  default; runs under `tools/run_lsp_tests.sh`).
+- Public-corpus evaluation: pending in issue #209.

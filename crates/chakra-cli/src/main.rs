@@ -224,6 +224,14 @@ struct ServeArgs {
     #[arg(long, value_name = "PATH")]
     gopls_path: Option<OsString>,
 
+    /// Run without the optional kotlin-lsp Kotlin provider.
+    #[arg(long)]
+    no_kotlin_lsp: bool,
+
+    /// Explicit kotlin-lsp executable; omit for side-effect-free PATH discovery.
+    #[arg(long, value_name = "PATH")]
+    kotlin_ls_path: Option<OsString>,
+
     /// Maximum simultaneously active precise providers.
     #[arg(long)]
     max_active_providers: Option<usize>,
@@ -592,6 +600,7 @@ fn apply_cli_overrides(effective: &mut EffectiveConfig, args: &ServeArgs) {
         (ProviderKey::Clangd, args.no_clangd),
         (ProviderKey::TerraformLs, args.no_terraform_ls),
         (ProviderKey::Gopls, args.no_gopls),
+        (ProviderKey::KotlinLsp, args.no_kotlin_lsp),
     ];
     for (key, disabled) in disables {
         if disabled {
@@ -612,6 +621,7 @@ fn apply_cli_overrides(effective: &mut EffectiveConfig, args: &ServeArgs) {
         (ProviderKey::Clangd, &args.clangd_path),
         (ProviderKey::TerraformLs, &args.terraform_ls_path),
         (ProviderKey::Gopls, &args.gopls_path),
+        (ProviderKey::KotlinLsp, &args.kotlin_ls_path),
     ];
     for (key, value) in paths {
         if let Some(path) = value {
@@ -996,6 +1006,11 @@ async fn serve(args: ServeArgs) -> ExitCode {
         .path
         .clone()
         .map(PathBuf::into_os_string);
+    let kotlin_ls_path = effective
+        .provider(ProviderKey::KotlinLsp)
+        .path
+        .clone()
+        .map(PathBuf::into_os_string);
     let jdtls_readiness_timeout_millis = effective.jdtls_readiness_timeout_millis;
     if effective.provider(ProviderKey::RustAnalyzer).enabled {
         let query_wait_budget = chakra_provider_rust_analyzer::DEFAULT_QUERY_WAIT_TIMEOUT;
@@ -1320,6 +1335,42 @@ async fn serve(args: ServeArgs) -> ExitCode {
         );
     } else {
         tracing::info!("gopls precise enrichment is disabled");
+    }
+    if effective.provider(ProviderKey::KotlinLsp).enabled {
+        let command: OnceLock<chakra_provider_kotlin_lsp::KotlinLspCommand> = OnceLock::new();
+        let query_wait_budget = chakra_provider_kotlin_lsp::DEFAULT_QUERY_WAIT_TIMEOUT;
+        registrations.push(
+            ProviderRegistration::new(
+                "kotlin-lsp",
+                vec![Language::Kotlin],
+                1024 * 1024 * 1024,
+                move |workspace,
+                      operation|
+                      -> Result<Arc<dyn PreciseProvider>, ProviderStartError> {
+                    let resolved_command = if let Some(command) = command.get() {
+                        command.clone()
+                    } else {
+                        let resolved = chakra_provider_kotlin_lsp::resolve_command_with_context(
+                            kotlin_ls_path.as_deref(),
+                            operation,
+                        )
+                        .map_err(ProviderStartError::from)?;
+                        let _ = command.set(resolved.clone());
+                        resolved
+                    };
+                    let config = chakra_provider_kotlin_lsp::KotlinLspConfig {
+                        command: resolved_command,
+                        ..chakra_provider_kotlin_lsp::KotlinLspConfig::default()
+                    };
+                    chakra_provider_kotlin_lsp::KotlinLspProvider::start(workspace, config)
+                        .map(|provider| provider as Arc<dyn PreciseProvider>)
+                        .map_err(|error| ProviderStartError::new(error.to_string()))
+                },
+            )
+            .with_additional_wait_budget(query_wait_budget),
+        );
+    } else {
+        tracing::info!("kotlin-lsp precise enrichment is disabled");
     }
     let provider_pool = match ProviderPool::start(
         ProviderPoolConfig {

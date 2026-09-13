@@ -2662,6 +2662,7 @@ fn provenance_rank(provenance: Provenance) -> u8 {
         Provenance::Clangd => 0,
         Provenance::TerraformLs => 0,
         Provenance::Gopls => 0,
+        Provenance::KotlinLsp => 0,
         Provenance::ChakraResolver => 0,
         Provenance::TreeSitter => 1,
         Provenance::Git => 2,

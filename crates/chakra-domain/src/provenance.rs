@@ -57,6 +57,8 @@ pub enum Provenance {
     TerraformLs,
     /// gopls (live precise provider for Go, ADR-0027).
     Gopls,
+    /// kotlin-lsp (live precise provider for Kotlin, ADR-0056).
+    KotlinLsp,
     /// Chakra-owned static resolver producing precise-tier facts from an
     /// explicit, deterministic evidence rule (ADR-0030).
     ChakraResolver,

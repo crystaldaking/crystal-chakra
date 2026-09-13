@@ -92,3 +92,31 @@ recorded capability evidence.
   Unicode, malformed input), deterministic emitted conformance results, a
   pinned real-server smoke test in the provider image, and public-corpus
   evaluation records in `docs/languages/kotlin.md`.
+
+## Addendum 2026-09-13: verified kotlin-lsp distribution and pin
+
+Distribution facts re-checked against the official `Kotlin/kotlin-lsp`
+RELEASES.md and the repository LICENSE:
+
+- The standalone server is Apache-2.0 (the VS Code *extension* moved to the
+  JetBrains Free Plugin License; the standalone archive remains Apache-2.0).
+  Weekly pre-alpha builds are published per platform with SHA-256
+  checksums.
+- Pinned for the provider test image: `kotlin-server 262.9593.0`,
+  linux-x64 `kotlin-server-262.9593.0.tar.gz`, SHA-256
+  `2d99d8e198fbe4aa8f4481e37799724ce94803b4ea12a60b416040e3fcd7cc5e`
+  (fetched from download-cdn.jetbrains.com on 2026-09-13).
+- The distribution bundles its own runtime (no host JDK required);
+  `bin/intellij-server` is the documented launcher (the legacy
+  `kotlin-lsp.sh` is deprecated). Call hierarchy
+  (`prepareCallHierarchy` + incoming/outgoing) is supported since
+  v262.4739.0 and matches Chakra's call-hierarchy trio exactly.
+- Alpha caveats recorded for the release notes: Android Gradle Plugin
+  support is experimental, Multiplatform is under development, and weekly
+  pre-alpha builds move fast, so the pinned version — not "latest" — is the
+  only supported evaluation target.
+- The Chakra adapter (`chakra-provider-kotlin-lsp`) follows the shared
+  worker pattern with the `kotlin` language id, `Provenance::KotlinLsp`,
+  one `kotlin-lsp` provider key in configuration (ADR-0053), and discovery
+  of a `kotlin-lsp` executable wrapper on PATH. Kotlin precise requests are
+  never routed to jdtls.
