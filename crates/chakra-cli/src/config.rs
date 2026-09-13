@@ -184,6 +184,14 @@ struct RawStartup {
     live_index_startup_timeout_millis: Option<u64>,
 }
 
+/// Network-affecting settings. Private layer only (ADR-0053/ADR-0054): a
+/// committed repository must not re-enable checks the user opted out of.
+#[derive(Debug, Default, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawUpdate {
+    automatic: Option<bool>,
+}
+
 #[derive(Debug, Default, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawProviders {
@@ -207,6 +215,7 @@ struct RawConfig {
     index: Option<RawIndex>,
     providers: Option<RawProviders>,
     startup: Option<RawStartup>,
+    update: Option<RawUpdate>,
 }
 
 /// One parsed configuration file with its layer and origin directory.
@@ -251,6 +260,9 @@ pub struct EffectiveConfig {
     pub provider_queue_timeout_millis: u64,
     pub provider_idle_timeout_millis: u64,
     pub jdtls_readiness_timeout_millis: u64,
+    /// Whether `chakra serve` may run the gated background update check
+    /// (ADR-0054). Private layer only; default on.
+    pub update_automatic: bool,
     providers: BTreeMap<ProviderKey, ProviderSettings>,
     sources: BTreeMap<String, ConfigSource>,
 }
@@ -370,6 +382,16 @@ fn validate_raw(path: &Path, raw: &RawConfig, allow_paths: bool) -> Result<(), C
         return Err(ConfigError::Validation {
             path: path.to_owned(),
             message: "startup.max_workspaces must be at least 1".to_owned(),
+        });
+    }
+    if !allow_paths && raw.update.is_some() {
+        return Err(ConfigError::Validation {
+            path: path.to_owned(),
+            message: format!(
+                "[update] is network-affecting and is not portable; move it to {} or set {} (ADR-0054)",
+                PRIVATE_CONFIG_FILENAME,
+                crate::update::DISABLE_ENV
+            ),
         });
     }
     Ok(())
@@ -552,6 +574,7 @@ impl ConfigLayers {
         let mut provider_queue_timeout_millis = DEFAULT_PROVIDER_QUEUE_TIMEOUT_MILLIS;
         let mut provider_idle_timeout_millis = DEFAULT_PROVIDER_IDLE_TIMEOUT_MILLIS;
         let mut jdtls_readiness_timeout_millis = DEFAULT_JDTLS_READINESS_TIMEOUT_MILLIS;
+        let mut update_automatic = true;
         let mut providers: BTreeMap<ProviderKey, ProviderSettings> = ProviderKey::ALL
             .iter()
             .map(|key| {
@@ -595,6 +618,7 @@ impl ConfigLayers {
             "providers.queue_timeout_millis",
             "providers.idle_timeout_millis",
             "providers.jdtls_readiness_timeout_millis",
+            "update.automatic",
         ] {
             sources.insert(key.to_owned(), ConfigSource::Default);
         }
@@ -657,6 +681,12 @@ impl ConfigLayers {
                         source(),
                     );
                 }
+            }
+            if let Some(update) = &layer.raw.update
+                && let Some(automatic) = update.automatic
+            {
+                update_automatic = automatic;
+                sources.insert("update.automatic".to_owned(), source());
             }
             if let Some(raw_providers) = &layer.raw.providers {
                 if let Some(value) = raw_providers.max_active {
@@ -739,6 +769,7 @@ impl ConfigLayers {
             provider_queue_timeout_millis,
             provider_idle_timeout_millis,
             jdtls_readiness_timeout_millis,
+            update_automatic,
             providers,
             sources,
         }

@@ -197,6 +197,23 @@ Invalid configuration — malformed TOML, unknown keys, an unsupported
 `schema_version`, zero limits — fails startup with an actionable error naming
 the file and key; a partially parsed configuration is never applied.
 
+## Update checks
+
+`chakra update --check` queries GitHub for the latest stable release and
+prints the installed version, the newest version with its release notes, and
+the supported upgrade path (ADR-0054). Exit status is part of the contract:
+`0` up to date, `1` check unavailable, `2` update available with a matching
+platform asset.
+
+While `chakra serve` runs, one gated background check runs at most once per
+24 hours per state directory (with failure backoff) and reports an available
+update to stderr only — never to MCP clients, never blocking startup or
+queries. Disable automatic checks completely with
+`CHAKRA_UPDATE_CHECK=0` or `[update] automatic = false` in
+`chakra.local.toml` (private-only, so a committed repository cannot
+re-enable them). Checking never downloads or replaces the binary; upgrades
+happen only through the explicit installer flow.
+
 ## MCP tools
 
 | Tool | What it returns |

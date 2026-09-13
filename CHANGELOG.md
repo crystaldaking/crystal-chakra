@@ -5,6 +5,19 @@ version tags prefixed with `v`.
 
 ## [Unreleased]
 
+### Added
+
+- GitHub release update checks (issue #204, ADR-0054). `chakra update
+  --check` reports the installed version, the latest stable release with
+  notes link, platform-asset availability, and the installer upgrade path,
+  with a documented exit-status contract (0 current, 1 unavailable, 2
+  update available). While `chakra serve` runs, one bounded background
+  check runs at most once per 24 hours per state directory with failure
+  backoff; it never delays startup, never writes to MCP stdout, and is
+  disabled completely by `CHAKRA_UPDATE_CHECK=0` or the private-only
+  `[update] automatic = false` setting. Checks send no repository data,
+  require no authentication, and never download or replace the binary.
+
 ## [0.4.0] - 2026-09-11
 
 Chakra v0.4.0 adds shared project configuration with typed precedence and

@@ -19,6 +19,7 @@ use chakra_workspace::{WorkspaceRegistry, WorkspaceRegistryConfig, WorkspaceStar
 use clap::{Args, CommandFactory, Parser, Subcommand};
 
 mod config;
+mod update;
 
 use config::{ConfigLayers, ConfigSource, EffectiveConfig, ProviderKey};
 
@@ -36,6 +37,16 @@ enum Commands {
     Serve(Box<ServeArgs>),
     /// Inspect the effective configuration (ADR-0053).
     Config(ConfigArgs),
+    /// Check GitHub for a newer stable Chakra release (ADR-0054).
+    Update(UpdateArgs),
+}
+
+#[derive(Debug, Args)]
+struct UpdateArgs {
+    /// Query the latest stable release and report the result. Exit status:
+    /// 0 up to date, 1 check unavailable, 2 update available (ADR-0054).
+    #[arg(long, required = true)]
+    check: bool,
 }
 
 #[derive(Debug, Args)]
@@ -241,6 +252,10 @@ async fn main() -> ExitCode {
         }
         Some(Commands::Serve(args)) => serve(*args).await,
         Some(Commands::Config(args)) => config_command(args),
+        Some(Commands::Update(args)) => {
+            let _ = args;
+            ExitCode::from(update::run_manual_check(update::GITHUB_API_BASE))
+        }
     }
 }
 
@@ -553,6 +568,12 @@ fn render_effective(effective: &EffectiveConfig) -> String {
         effective,
         "providers.jdtls_readiness_timeout_millis",
         effective.jdtls_readiness_timeout_millis,
+    );
+    push_rendered(
+        &mut out,
+        effective,
+        "update.automatic",
+        effective.update_automatic,
     );
     for key in ProviderKey::ALL {
         let settings = effective.provider(*key);
@@ -1123,7 +1144,13 @@ async fn serve(args: ServeArgs) -> ExitCode {
             }
         }
     }
+    let update_task = crate::update::spawn_automatic_check(effective.update_automatic);
     let serve_result = chakra_mcp::serve_stdio_router(registry.clone()).await;
+    // The update task is bounded by its own deadline; aborting guarantees no
+    // orphaned work outlives the server (ADR-0054).
+    if let Some(handle) = update_task {
+        handle.abort();
+    }
     match tokio::task::spawn_blocking(move || provider_pool.shutdown()).await {
         Ok(Ok(())) => {}
         Ok(Err(error)) => {
