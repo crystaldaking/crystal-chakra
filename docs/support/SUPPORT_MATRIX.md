@@ -15,7 +15,7 @@ Target list reviewed: 2026-09 (GitHub Octoverse 2025 top languages plus pre-exis
 | hcl | first-class | yes | tree-sitter-hcl 1.1.0 | terraform-ls (runtime-integrated) |
 | java | first-class | yes | tree-sitter-java 0.23.5 | jdtls (runtime-integrated) |
 | javascript | first-class | yes | tree-sitter-javascript 0.25.0 | vtsls (runtime-integrated) |
-| kotlin | in-progress | no | tree-sitter-kotlin-ng 1.1.0 | kotlin-lsp (deferred) |
+| kotlin | in-progress | no | tree-sitter-kotlin-ng 1.1.0 | kotlin-lsp (adapter-ready) |
 | php | first-class | yes | tree-sitter-php 0.24.2 | none (deferred) |
 | python | first-class | yes | tree-sitter-python 0.25.0 | pyright (runtime-integrated) |
 | rust | first-class | yes | tree-sitter-rust 0.24 | rust-analyzer (runtime-integrated) |
@@ -245,10 +245,10 @@ Target list reviewed: 2026-09 (GitHub Octoverse 2025 top languages plus pre-exis
 | FRESH-01 | pass | atomic revision publication and targeted language partitions |
 | FRESH-02 | pass | shared-driver live reconciliation for Kotlin sources |
 | PRECISE-01 | pass | recorded JetBrains kotlin-lsp selection with Alpha status notes (ADR-0056) |
-| PRECISE-02 | missing | kotlin-lsp call-hierarchy integration pending in issue #209 |
-| PRECISE-03 | missing | owned lifecycle and revision-bound synchronization pending in issue #209 |
-| PRECISE-04 | missing | capability gate pending in issue #209 |
-| PRECISE-05 | missing | degradation evidence pending in issue #209 |
+| PRECISE-02 | missing | adapter integrated with hermetic lifecycle evidence; real-server image run pending (#195) |
+| PRECISE-03 | missing | adapter integrated with hermetic lifecycle evidence; real-server image run pending (#195) |
+| PRECISE-04 | missing | adapter integrated with hermetic lifecycle evidence; real-server image run pending (#195) |
+| PRECISE-05 | missing | adapter integrated with hermetic lifecycle evidence; real-server image run pending (#195) |
 | PROV-01 | pass | domain provenance model including TreeSitter and Git |
 | QUERY-01 | pass | chakra-engine QueryService over Kotlin syntax relations |
 | QUERY-02 | pass | chakra-mcp structured tools |

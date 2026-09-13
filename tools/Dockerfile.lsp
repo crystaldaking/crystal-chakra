@@ -165,9 +165,24 @@ RUN curl -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-l
     && vtsls --version \
     && bash-language-server --version
 
+# kotlin-server (Kotlin LSP) 262.9593.0 (docs/languages/kotlin.md): the
+# standalone Apache-2.0 distribution bundles its own runtime; the pinned
+# linux-x64 archive is checksum-verified and exposed as `kotlin-lsp` with
+# `bin/intellij-server` as the launch target (ADR-0056).
+ARG KOTLIN_LSP_VERSION=262.9593.0
+ARG KOTLIN_LSP_SHA256=2d99d8e198fbe4aa8f4481e37799724ce94803b4ea12a60b416040e3fcd7cc5e
+RUN curl -fsSL "https://download-cdn.jetbrains.com/language-server/kotlin-server/${KOTLIN_LSP_VERSION}/kotlin-server-${KOTLIN_LSP_VERSION}.tar.gz" -o /tmp/kotlin-server.tar.gz \
+    && echo "${KOTLIN_LSP_SHA256}  /tmp/kotlin-server.tar.gz" | sha256sum -c - \
+    && mkdir -p /opt/kotlin-lsp \
+    && tar -xzf /tmp/kotlin-server.tar.gz -C /opt/kotlin-lsp --strip-components=1 \
+    && rm /tmp/kotlin-server.tar.gz \
+    && printf '#!/bin/sh\nexec /opt/kotlin-lsp/bin/intellij-server stdio "$@"\n' > /usr/local/bin/kotlin-lsp \
+    && chmod 0755 /usr/local/bin/kotlin-lsp \
+    && /usr/local/bin/kotlin-lsp --version || true
+
 # Final resolvability check for every provider executable Chakra discovers.
 RUN for exe in rust-analyzer clangd gopls pyright-langserver vtsls \
-        bash-language-server jdtls csharp-ls terraform-ls; do \
+        bash-language-server jdtls csharp-ls terraform-ls kotlin-lsp; do \
         command -v "$exe" >/dev/null || { echo "missing: $exe"; exit 1; }; \
     done \
     && rust-analyzer --version \

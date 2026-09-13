@@ -22,6 +22,7 @@ chakra-provider-csharp-ls = { path = "../chakra-provider-csharp-ls", version = "
 chakra-provider-bash-language-server = { path = "../chakra-provider-bash-language-server", version = "0.4.0" }
 chakra-provider-clangd = { path = "../chakra-provider-clangd", version = "0.4.0" }
 chakra-provider-jdtls = { path = "../chakra-provider-jdtls", version = "0.4.0" }
+chakra-provider-kotlin-lsp = { path = "../chakra-provider-kotlin-lsp", version = "0.4.0" }
 chakra-provider-pool = { path = "../chakra-provider-pool", version = "0.4.0" }
 chakra-provider-pyright = { path = "../chakra-provider-pyright", version = "0.4.0" }
 chakra-provider-rust-analyzer = { path = "../chakra-provider-rust-analyzer", version = "0.4.0" }

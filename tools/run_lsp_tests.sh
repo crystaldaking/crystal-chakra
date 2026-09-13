@@ -68,6 +68,7 @@ REAL_PROVIDER_PACKAGES=(
     chakra-provider-csharp-ls
     chakra-provider-gopls
     chakra-provider-terraform-ls
+    chakra-provider-kotlin-lsp
 )
 for package in "${REAL_PROVIDER_PACKAGES[@]}"; do
     run_in_container cargo test --locked -p "$package" --test real_provider -- --ignored

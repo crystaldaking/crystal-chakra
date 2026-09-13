@@ -10,8 +10,11 @@
   "precise_provider": {
     "name": "kotlin-lsp",
     "adr": "docs/adr/0056-kotlin-grammar-and-provider.md",
-    "status": "deferred",
-    "runtime_evidence": []
+    "status": "adapter-ready",
+    "runtime_evidence": [
+      "crates/chakra-cli/src/main.rs",
+      "crates/chakra-provider-kotlin-lsp/tests/lifecycle.rs"
+    ]
   },
   "capabilities": {
     "DISC-01": {
@@ -108,19 +111,19 @@
     },
     "PRECISE-02": {
       "status": "missing",
-      "mechanism": "kotlin-lsp call-hierarchy integration pending in issue #209"
+      "mechanism": "adapter integrated with hermetic lifecycle evidence; real-server image run pending (#195)"
     },
     "PRECISE-03": {
       "status": "missing",
-      "mechanism": "owned lifecycle and revision-bound synchronization pending in issue #209"
+      "mechanism": "adapter integrated with hermetic lifecycle evidence; real-server image run pending (#195)"
     },
     "PRECISE-04": {
       "status": "missing",
-      "mechanism": "capability gate pending in issue #209"
+      "mechanism": "adapter integrated with hermetic lifecycle evidence; real-server image run pending (#195)"
     },
     "PRECISE-05": {
       "status": "missing",
-      "mechanism": "degradation evidence pending in issue #209"
+      "mechanism": "adapter integrated with hermetic lifecycle evidence; real-server image run pending (#195)"
     },
     "QUERY-01": {
       "status": "pass",
