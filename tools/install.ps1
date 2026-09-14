@@ -69,13 +69,14 @@ if (Test-Path $existing) {
 
 $archive = "chakra-$Version-$Target.zip"
 $work = New-Item -ItemType Directory -Path (Join-Path $env:TEMP "chakra-install-$PID")
+$tmpBinary = $null
 try {
     Fetch "$BaseUrl/download/$Version/$archive" (Join-Path $work $archive)
     Fetch "$BaseUrl/download/$Version/SHA256SUMS" (Join-Path $work "SHA256SUMS")
 
     $expected = $null
     foreach ($line in Get-Content (Join-Path $work "SHA256SUMS")) {
-        if ($line -match "^([0-9a-f]{64})\s+\Q$archive\E$") { $expected = $Matches[1]; break }
+        if ($line -match ("^([0-9a-f]{64})\s+" + [Regex]::Escape($archive) + '$')) { $expected = $Matches[1]; break }
     }
     if (-not $expected) { Fail "no checksum entry for $archive; nothing was installed" }
     $actual = (Get-FileHash (Join-Path $work $archive) -Algorithm SHA256).Hash.ToLower()
@@ -88,15 +89,18 @@ try {
     if (-not (Test-Path $binary)) { Fail "archive does not contain chakra.exe; nothing was installed" }
 
     New-Item -ItemType Directory -Force -Path $Dir | Out-Null
-    $tmpBinary = Join-Path $Dir ".chakra.new.$PID.exe"
+    $tmpBinary = Join-Path $Dir (".chakra.new." + [Guid]::NewGuid().ToString('N') + ".exe")
     Copy-Item $binary $tmpBinary
-    # Atomic-ish swap: the previous binary stays usable until this move.
-    Move-Item -Force $tmpBinary $existing
-
-    $installedVersion = (& $existing --version).Split(' ')[1]
-    if ($installedVersion -ne $Version.TrimStart('v')) {
-        Fail "installed binary reports $installedVersion, expected $($Version.TrimStart('v'))"
+    # Verify runtime compatibility before touching the previous installation.
+    $versionOutput = (& $tmpBinary --version) -join "`n"
+    if ($LASTEXITCODE -ne 0) {
+        Fail "downloaded binary cannot run on this machine; previous installation untouched"
     }
+    $installedVersion = $Version.TrimStart('v')
+    if ($versionOutput -ne "chakra $installedVersion") {
+        Fail "downloaded binary reports $versionOutput, expected chakra $installedVersion; previous installation untouched"
+    }
+    Move-Item -Force $tmpBinary $existing
 
     $pathNote = ""
     if (-not $NoPathModify) {
@@ -122,5 +126,8 @@ try {
     Write-Host $pathNote
     Write-Host "next: open a new terminal, then run 'chakra init --agent <client>' to set up your agent (see README)"
 } finally {
+    if ($tmpBinary -and (Test-Path $tmpBinary)) {
+        Remove-Item -Force $tmpBinary -ErrorAction SilentlyContinue
+    }
     Remove-Item -Recurse -Force $work -ErrorAction SilentlyContinue
 }

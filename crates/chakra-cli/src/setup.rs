@@ -250,30 +250,41 @@ fn codex_upsert(
         .parse::<toml_edit::DocumentMut>()
         .map_err(|parse| error(format!("{} is not valid TOML: {parse}", path.display())))?;
     let (command, args) = registration_command_for(exe, root);
-    let servers = document["mcp_servers"].or_insert(toml_edit::table());
-    let server = servers["chakra"].or_insert(toml_edit::table());
-    if let Some(existing_table) = server.as_table_like() {
-        let existing_command = existing_table
-            .get("command")
-            .and_then(toml_edit::Item::as_str)
-            .unwrap_or_default()
-            .to_owned();
-        let existing_args: Vec<String> = existing_table
-            .get("args")
-            .and_then(toml_edit::Item::as_array)
-            .map(|array| {
-                array
-                    .iter()
-                    .filter_map(|value| value.as_str().map(str::to_owned))
-                    .collect()
-            })
-            .unwrap_or_default();
-        if !existing_command.is_empty()
-            && !same_registration(&existing_command, &existing_args, exe, root)
-        {
-            return Err(conflict(path, "codex"));
+    if let Some(servers) = document.get("mcp_servers") {
+        let servers = servers
+            .as_table_like()
+            .ok_or_else(|| error("mcp_servers is not a table"))?;
+        if let Some(server) = servers.get("chakra") {
+            let existing_table = server
+                .as_table_like()
+                .ok_or_else(|| conflict(path, "codex"))?;
+            let existing_command = existing_table
+                .get("command")
+                .and_then(toml_edit::Item::as_str)
+                .unwrap_or_default()
+                .to_owned();
+            let existing_args: Option<Vec<String>> = existing_table
+                .get("args")
+                .and_then(toml_edit::Item::as_array)
+                .and_then(|array| {
+                    array
+                        .iter()
+                        .map(|value| value.as_str().map(str::to_owned))
+                        .collect::<Option<Vec<_>>>()
+                });
+            if existing_table.get("url").is_some()
+                || !existing_args
+                    .as_ref()
+                    .is_some_and(|args| same_registration(&existing_command, args, exe, root))
+            {
+                return Err(conflict(path, "codex"));
+            }
+            // Matching registrations belong to the user too: preserve enabled,
+            // environment, timeouts, comments, and every other existing option.
+            return Ok(existing.unwrap_or_default().to_owned());
         }
     }
+    let servers = document["mcp_servers"].or_insert(toml_edit::table());
     let server = servers["chakra"].or_insert(toml_edit::table());
     let table = server
         .as_table_like_mut()
@@ -344,24 +355,19 @@ fn json_upsert(
         .as_object_mut()
         .ok_or_else(|| error(format!("{}.mcpServers must be an object", path.display())))?;
     if let Some(existing_entry) = servers.get("chakra") {
-        let existing_command = existing_entry["command"]
-            .as_str()
-            .unwrap_or_default()
-            .to_owned();
-        let existing_args: Vec<String> = existing_entry["args"]
-            .as_array()
-            .map(|array| {
-                array
-                    .iter()
-                    .filter_map(|value| value.as_str().map(str::to_owned))
-                    .collect()
-            })
-            .unwrap_or_default();
-        if !existing_command.is_empty()
-            && !same_registration(&existing_command, &existing_args, exe, root)
+        if existing_entry
+            .get("command")
+            .and_then(serde_json::Value::as_str)
+            != Some(command.as_str())
+            || existing_entry.get("args") != Some(&serde_json::json!(args))
+            || existing_entry.get("url").is_some()
+            || existing_entry
+                .get("type")
+                .is_some_and(|kind| kind != "stdio")
         {
             return Err(conflict(path, client));
         }
+        return Ok(existing.unwrap_or_default().to_owned());
     }
     servers.insert(
         "chakra".to_owned(),
@@ -430,21 +436,13 @@ fn opencode_upsert(
         .as_object_mut()
         .ok_or_else(|| error(format!("{}.mcp must be an object", path.display())))?;
     if let Some(existing_entry) = servers.get("chakra") {
-        let existing_command: Vec<String> = existing_entry["command"]
-            .as_array()
-            .map(|array| {
-                array
-                    .iter()
-                    .filter_map(|value| value.as_str().map(str::to_owned))
-                    .collect()
-            })
-            .unwrap_or_default();
-        let (want_command, want_args) = registration_command_for(exe, root);
-        let mut want = vec![want_command];
-        want.extend(want_args);
-        if !existing_command.is_empty() && existing_command != want {
+        if existing_entry.get("type") != Some(&serde_json::json!("local"))
+            || existing_entry.get("command") != Some(&serde_json::json!(command_line))
+            || existing_entry.get("url").is_some()
+        {
             return Err(conflict(path, "opencode"));
         }
+        return Ok(existing.unwrap_or_default().to_owned());
     }
     servers.insert(
         "chakra".to_owned(),
@@ -588,6 +586,47 @@ fn existing_differs(path: &Path, content: &str) -> Result<bool, SetupError> {
     Ok(read_optional(path)?.as_deref() != Some(content))
 }
 
+/// A shared instruction block remains owned by any registration that is
+/// not being removed, including intentionally disabled registrations.
+fn other_client_uses_instructions(
+    root: &Path,
+    removed: &[AgentClient],
+    instructions: &Path,
+) -> Result<bool, SetupError> {
+    for client in AgentClient::ALL {
+        if removed.contains(client) || client.instruction_relative() != instructions {
+            continue;
+        }
+        let path = root.join(client.mcp_config_relative());
+        let Some(text) = read_optional(&path)? else {
+            continue;
+        };
+        let present = match client {
+            AgentClient::Codex => {
+                let document = text.parse::<toml_edit::DocumentMut>().map_err(|parse| {
+                    error(format!("{} is not valid TOML: {parse}", path.display()))
+                })?;
+                document
+                    .get("mcp_servers")
+                    .and_then(|servers| servers.get("chakra"))
+                    .is_some()
+            }
+            AgentClient::Claude | AgentClient::Cursor => parse_json(Some(&text), &path)?
+                .get("mcpServers")
+                .and_then(|servers| servers.get("chakra"))
+                .is_some(),
+            AgentClient::Opencode => parse_json(Some(&text), &path)?
+                .get("mcp")
+                .and_then(|servers| servers.get("chakra"))
+                .is_some(),
+        };
+        if present {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 /// Plan removal of Chakra-owned setup. Pure: reads but never writes.
 pub fn plan_removal(root: &Path, clients: &[AgentClient]) -> Result<SetupPlan, SetupError> {
     let mut plan = SetupPlan::default();
@@ -612,6 +651,13 @@ pub fn plan_removal(root: &Path, clients: &[AgentClient]) -> Result<SetupPlan, S
             }
         }
         let instruction_path = root.join(client.instruction_relative());
+        if other_client_uses_instructions(root, clients, &client.instruction_relative())? {
+            plan.notes.push(format!(
+                "{} is still used by another client; instruction block preserved",
+                instruction_path.display()
+            ));
+            continue;
+        }
         if let Some(existing) = read_optional(&instruction_path)? {
             let stripped = strip_block(&existing)?;
             if stripped.as_deref() != Some(existing.as_str()) {
@@ -693,6 +739,107 @@ mod tests {
 
     fn exe() -> PathBuf {
         PathBuf::from("/usr/local/bin/chakra")
+    }
+
+    #[test]
+    fn repeated_setup_preserves_every_client_registration_option() -> TestResult {
+        for client in AgentClient::ALL {
+            let directory = root()?;
+            apply_plan(&plan_setup(directory.path(), &exe(), &[*client])?)?;
+            let path = directory.path().join(client.mcp_config_relative());
+            let original = fs::read_to_string(&path)?;
+            let customized = if *client == AgentClient::Codex {
+                let mut document = original.parse::<toml_edit::DocumentMut>()?;
+                document["mcp_servers"]["chakra"]["enabled"] = toml_edit::value(false);
+                document["mcp_servers"]["chakra"]["env"] = toml_edit::table();
+                document["mcp_servers"]["chakra"]["env"]["CHAKRA_UPDATE_CHECK"] =
+                    toml_edit::value("0");
+                document.to_string()
+            } else {
+                let mut document: serde_json::Value = serde_json::from_str(&original)?;
+                let key = if *client == AgentClient::Opencode {
+                    "mcp"
+                } else {
+                    "mcpServers"
+                };
+                let environment = if *client == AgentClient::Opencode {
+                    "environment"
+                } else {
+                    "env"
+                };
+                document[key]["chakra"][environment] =
+                    serde_json::json!({"CHAKRA_UPDATE_CHECK":"0","CUSTOM":"keep"});
+                document[key]["chakra"]["enabled"] = serde_json::json!(false);
+                serde_json::to_string_pretty(&document)?
+            };
+            fs::write(&path, &customized)?;
+            let plan = plan_setup(directory.path(), &exe(), &[*client])?;
+            assert!(
+                !plan.writes.iter().any(|write| write.path == path),
+                "{client:?}"
+            );
+            apply_plan(&plan)?;
+            assert_eq!(fs::read_to_string(path)?, customized, "{client:?}");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn remote_or_malformed_registrations_are_conflicts_without_writes() -> TestResult {
+        for client in AgentClient::ALL {
+            let directory = root()?;
+            let path = directory.path().join(client.mcp_config_relative());
+            fs::create_dir_all(path.parent().ok_or("parent")?)?;
+            let original = match client {
+                AgentClient::Codex => "[mcp_servers.chakra]\nurl = \"https://example.test/mcp\"\n",
+                AgentClient::Claude | AgentClient::Cursor => {
+                    r#"{"mcpServers":{"chakra":{"type":"http","url":"https://example.test/mcp"}}}"#
+                }
+                AgentClient::Opencode => {
+                    r#"{"mcp":{"chakra":{"type":"remote","url":"https://example.test/mcp"}}}"#
+                }
+            };
+            fs::write(&path, original)?;
+            assert!(
+                plan_setup(directory.path(), &exe(), &[*client]).is_err(),
+                "{client:?}"
+            );
+            assert_eq!(fs::read_to_string(path)?, original);
+            assert!(!directory.path().join("chakra.toml").exists());
+        }
+        let directory = root()?;
+        let path = directory.path().join(".mcp.json");
+        let (command, mut args) = registration_command_for(&exe(), directory.path());
+        let mut bad_args: Vec<serde_json::Value> = args.drain(..).map(Into::into).collect();
+        bad_args.push(serde_json::json!(42));
+        fs::write(
+            &path,
+            serde_json::json!({"mcpServers":{"chakra":{"command":command,"args":bad_args}}})
+                .to_string(),
+        )?;
+        assert!(plan_setup(directory.path(), &exe(), &[AgentClient::Claude]).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn removing_one_client_keeps_shared_instructions_until_last_registration() -> TestResult {
+        let directory = root()?;
+        let clients = [
+            AgentClient::Codex,
+            AgentClient::Cursor,
+            AgentClient::Opencode,
+        ];
+        apply_plan(&plan_setup(directory.path(), &exe(), &clients)?)?;
+        let instructions = directory.path().join("AGENTS.md");
+        let original = fs::read_to_string(&instructions)?;
+        for client in [AgentClient::Cursor, AgentClient::Codex] {
+            apply_plan(&plan_removal(directory.path(), &[client])?)?;
+            assert_eq!(fs::read_to_string(&instructions)?, original);
+            assert!(!directory.path().join(client.mcp_config_relative()).exists());
+        }
+        apply_plan(&plan_removal(directory.path(), &[AgentClient::Opencode])?)?;
+        assert!(!instructions.exists());
+        Ok(())
     }
 
     #[test]

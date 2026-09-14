@@ -427,7 +427,8 @@ pub fn analyze_providers(
         }
         findings.push(
             Finding::new("provider-readiness", severity, subject, evidence, advice)
-                .with_applicability(spec.language),
+                .with_applicability(spec.language)
+                .with_private_path(&executable),
         );
     }
     findings

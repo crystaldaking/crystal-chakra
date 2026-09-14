@@ -36,12 +36,14 @@ def host_target() -> str:
     raise AssertionError(f"test host not in the release matrix: {system}/{machine}")
 
 
-def make_fixture(base: Path, version: str, target: str, corrupt: bool = False) -> Path:
+def make_fixture(base: Path, version: str, target: str, corrupt: bool = False,
+                 binary_text: str | None = None) -> Path:
     """Create a fixture release: archive, SHA256SUMS, and the latest-API path."""
     bundle = base / f"chakra-{version}-{target}"
     bundle.mkdir(parents=True)
     binary = bundle / "chakra"
-    binary.write_text(f'#!/bin/sh\necho "chakra {version.lstrip("v")}"\n')
+    binary.write_text(binary_text if binary_text is not None else
+                      f'#!/bin/sh\necho "chakra {version.lstrip("v")}"\n')
     binary.chmod(binary.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
     (bundle / "LICENSE").write_text("MIT\n")
     (bundle / "README.md").write_text("fixture\n")
@@ -182,6 +184,46 @@ def test_unsupported_platform_fails_early(tmp: Path) -> None:
     assert "unsupported platform" in result.stderr
     assert not env.binary.exists()
     assert not env.rc().exists()
+
+
+def test_runtime_or_version_failure_preserves_installation(tmp: Path) -> None:
+    target = host_target()
+    env = InstallEnv(tmp)
+    good = make_fixture(tmp / "good", "v0.4.0", target)
+    assert env.run(good).returncode == 0
+    binary_before = env.binary.read_bytes()
+    rc_before = env.rc().read_bytes()
+    candidates = [
+        "#!/bin/sh\necho simulated-loader-failure >&2\nexit 126\n",
+        "#!/bin/sh\necho 'chakra 0.5.0'\nexit 1\n",
+        "#!/bin/sh\necho 'chakra 0.3.0'\n",
+    ]
+    for index, candidate in enumerate(candidates):
+        bad = make_fixture(tmp / f"bad-{index}", "v0.5.0", target, binary_text=candidate)
+        result = env.run(bad, "--version", "v0.5.0")
+        assert result.returncode != 0, result.stdout
+        assert env.binary.read_bytes() == binary_before, result.stderr
+        assert env.rc().read_bytes() == rc_before
+        assert env.version() == "chakra 0.4.0"
+        assert not list(env.install_dir.glob(".chakra.new.*")), "staging file cleanup"
+
+
+def test_release_workflow_fresh_shell_checks_requested_version(tmp: Path) -> None:
+    # Execute the actual workflow snippet, not a second copy of its env setup.
+    # This catches losing RELEASE_TAG at the env -i boundary.
+    if shutil.which("zsh") is None:
+        print("skip fresh-shell smoke: zsh unavailable")
+        return
+    fixture = make_fixture(tmp / "fixture", "v0.4.0", host_target())
+    env = InstallEnv(tmp)
+    assert env.run(fixture).returncode == 0
+    workflow = (REPO_ROOT / ".github/workflows/release.yml").read_text()
+    section = workflow.split("# Fresh-shell PATH resolution through the managed block.\n", 1)[1]
+    snippet = "\n".join(section.splitlines()[:2])
+    for tag, success in [("v0.4.0", True), ("v0.5.0", False)]:
+        result = subprocess.run(["bash", "-eu", "-c", snippet], text=True, capture_output=True,
+                                env={**env.env, "smoke_home": str(env.home), "RELEASE_TAG": tag})
+        assert (result.returncode == 0) == success, (result.stdout, result.stderr)
 
 
 def test_foreign_binary_with_non_release_version_does_not_crash(tmp: Path) -> None:

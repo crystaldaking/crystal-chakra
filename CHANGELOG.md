@@ -45,8 +45,8 @@ real kotlin-lsp smoke run are release-gate items (#195).
   Apache-2.0). Hermetic lifecycle tests cover readiness, delta sync,
   timeout cancellation, crash-restart counting, capability absence, and
   process-group reaping; the real-server smoke test runs in the pinned
-  image. Public-corpus evidence remains pending in the same issue, so
-  Kotlin is still not advertised.
+  image. The real-server run remains pending, so Kotlin is still not
+  advertised.
 
 - Kotlin conformance, matrix, and language documentation (issue #209,
   continued). The Kotlin conformance fixture (Gradle-shaped project under
@@ -55,9 +55,9 @@ real kotlin-lsp smoke run are release-gate items (#195).
   maintainer-accepted, `in-progress` language: every syntax, discovery,
   query, freshness, provenance, ambiguity, budget, cancellation,
   degradation, conformance, and documentation capability passes with
-  evidence; precise-provider and public-corpus capabilities stay
-  explicitly `missing` until the kotlin-lsp adapter and corpus evaluation
-  land, so Kotlin is not yet advertised.
+  evidence. The adapter and public-corpus evaluation have landed; the
+  precise-provider capability still needs the real kotlin-lsp smoke run
+  before Kotlin can be advertised.
 
 - Kotlin syntax intelligence (issue #209, ADR-0056). `.kt` and `.kts`
   sources — including `build.gradle.kts` as both Kotlin syntax and Gradle
@@ -68,8 +68,7 @@ real kotlin-lsp smoke run are release-gate items (#195).
   extension receivers, annotations, inheritance delegation, JUnit test
   hints, diagnostics, and bounded call candidates. Kotlin/JVM reuses the
   Gradle/Maven project model; `src/test/kotlin` sources classify as tests.
-  Precise-provider integration and full parity evidence continue in the
-  same issue.
+  Precise enrichment uses the separate kotlin-lsp adapter described above.
 
 - Cross-platform installers with automatic PATH setup (issue #203).
   `tools/install.sh` (Linux/macOS) and `tools/install.ps1` (Windows)
@@ -91,7 +90,9 @@ real kotlin-lsp smoke run are release-gate items (#195).
   an explicit allowlist: doctor findings, platform identity, non-sensitive
   effective limits with their source layers, provider readiness, and the
   observed HEAD revision — with unavailable values marked `unavailable`,
-  never fabricated. Free-text fields pass a sanitizer that replaces
+  never fabricated. Raw MCP registration values and configuration parser
+  excerpts are replaced with report-only summaries. Other free-text fields
+  pass a sanitizer that replaces
   worktree/home/config/provider paths and scrubs residual absolute paths,
   URLs, and token-like strings; source contents, environment values,
   credentials, remote URLs, and raw logs are excluded by construction and
@@ -139,7 +140,11 @@ real kotlin-lsp smoke run are release-gate items (#195).
   `[update] automatic = false` setting. Checks send no repository data,
   require no authentication, and never download or replace the binary.
 
-ints the effective configuration
+- Shared project configuration (issue #206, ADR-0053). `chakra.toml` holds
+  portable settings; the untracked `chakra.local.toml` holds private
+  overrides. Typed settings merge built-in defaults, shared configuration,
+  private configuration, and explicit CLI flags in that order.
+  `chakra config show` prints the effective configuration
   with the source layer of every key. Executable overrides live only in the
   private file or CLI flags; invalid or unsupported configuration fails
   startup with a file- and key-aware error and is never applied partially.
@@ -153,6 +158,22 @@ ints the effective configuration
 
 ### Fixed
 
+- Diagnostic reports omit raw MCP command/argument values and TOML parser
+  excerpts, including short credentials; local doctor diagnostics retain
+  their detail. Observed executable paths are redacted even if the
+  executable disappears before export, and field truncation respects UTF-8.
+- Installers validate the staged binary's exit status and exact version
+  before replacing a working installation. Windows checksum matching uses
+  valid .NET regex escaping, and the Unix release smoke test preserves the
+  requested tag in its clean shell environment.
+- Repeated agent setup preserves environment, timeout, and enablement
+  options on matching registrations and rejects conflicting remote or
+  malformed entries. Removing one client retains shared instructions until
+  the last registered client is removed. Doctor handles missing Codex MCP
+  tables without panicking.
+- Nested Kotlin members retain the complete enclosing container chain,
+  distinguishing `Alpha::Inner::work` from `Beta::Inner::work`. The Kotlin
+  snapshot codec advances to `kotlin:s2` to invalidate cached old identities.
 - Provider crash-restart lifecycle harnesses now count crash-inducing
   requests explicitly, so a restart deliberately triggered by the harness
   itself can no longer masquerade as a provider crash and inflate or hide

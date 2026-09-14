@@ -121,6 +121,10 @@ jobs:
             $errors | ForEach-Object { Write-Host $_.Message }
             throw "install.ps1 has syntax errors"
           }
+      - name: Run hermetic Windows installer tests
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./tools/test_install.ps1
 
   large-repository-gate:
     runs-on: ubuntu-latest

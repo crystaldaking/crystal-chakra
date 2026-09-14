@@ -40,6 +40,10 @@ pub struct Finding {
     pub applicability: String,
     pub evidence: String,
     pub advice: String,
+    /// Observed machine paths retained only for portable-report redaction.
+    /// Do not rediscover them at export time: the executable may have moved.
+    #[serde(skip)]
+    pub(crate) private_paths: Vec<PathBuf>,
 }
 
 impl Finding {
@@ -57,11 +61,17 @@ impl Finding {
             applicability: String::new(),
             evidence,
             advice,
+            private_paths: Vec::new(),
         }
     }
 
     pub fn with_applicability(mut self, applicability: impl Into<String>) -> Self {
         self.applicability = applicability.into();
+        self
+    }
+
+    pub(crate) fn with_private_path(mut self, path: &Path) -> Self {
+        self.private_paths.push(path.to_owned());
         self
     }
 
@@ -143,7 +153,7 @@ pub fn diagnose(
                 "client-executable",
                 name.to_owned(),
                 format!("{} found at {}", client.executable_name(), path.display()),
-            )),
+            ).with_private_path(&path)),
             None => findings.push(Finding::warning(
                 "client-executable",
                 name.to_owned(),
@@ -232,12 +242,15 @@ fn check_registration(
             .parse::<toml_edit::DocumentMut>()
             .ok()
             .and_then(|document| {
-                let command = document["mcp_servers"]["chakra"]["command"]
+                let entry = document.get("mcp_servers")?.get("chakra")?;
+                let command = entry
+                    .get("command")?
                     .as_str()
                     .unwrap_or_default()
                     .to_owned();
-                let args: Vec<String> = document["mcp_servers"]["chakra"]["args"]
-                    .as_array()
+                let args: Vec<String> = entry
+                    .get("args")
+                    .and_then(toml_edit::Item::as_array)
                     .map(|array| {
                         array
                             .iter()
@@ -379,6 +392,26 @@ mod tests {
         directory: &Path,
     ) -> Result<crate::config::EffectiveConfig, Box<dyn std::error::Error>> {
         Ok(crate::config::ConfigLayers::load(directory, None)?.merge())
+    }
+
+    #[test]
+    fn codex_without_chakra_registration_is_a_warning_not_a_panic() {
+        for text in [
+            "model = \"example\"\n",
+            "[mcp_servers.other]\ncommand = \"other\"\n",
+            "[mcp_servers.chakra]\nenabled = false\n",
+            "mcp_servers = false\n",
+        ] {
+            let finding = check_registration(
+                &AgentClient::Codex,
+                Path::new(".codex/config.toml"),
+                text,
+                &exe(),
+                Path::new("/project"),
+            );
+            assert_eq!(finding.severity, Severity::Warning, "{text}");
+            assert_eq!(finding.code, "mcp-registration");
+        }
     }
 
     #[test]

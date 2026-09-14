@@ -31,7 +31,9 @@ Chakra owns exactly three artifacts per project, and nothing else:
 
 1. **One MCP server entry named `chakra`** in the client project-scope
    configuration. An existing `chakra` entry with identical command/args is
-   a no-op (idempotent). An entry with different content is a *conflict*:
+   a no-op (idempotent), preserving optional fields such as environment,
+   timeouts, and disabled state byte-for-byte. Remote registrations and
+   entries with different command/args or malformed shapes are a *conflict*:
    setup stops with an actionable message and changes nothing unless the
    user first removes it or runs `--remove`.
 2. **One delimited instruction block** bounded by
@@ -87,6 +89,11 @@ overrides existing project policy outside its markers.
   pruning files it created only when they become empty of other content;
   `chakra.toml` is left in place (it is project configuration, not
   Chakra-owned runtime state).
+- A shared instruction block remains while any unremoved supported client
+  using that instruction file still has a `chakra` registration, including
+  a disabled one. The last registration's removal deletes the block.
+  Unreadable sibling configurations or invalid TOML/JSON stop removal before writes
+  because ownership cannot be established safely.
 
 ## Alternatives considered
 

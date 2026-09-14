@@ -2,7 +2,10 @@
 //!
 //! A report is built from an explicit allowlist of typed values: doctor
 //! findings, platform identity, non-sensitive effective limits, and
-//! provider readiness. Free-text fields pass through a sanitizer that
+//! provider readiness. Raw MCP payloads and configuration parse excerpts
+//! are replaced by report-only summaries before serialization; pattern
+//! matching cannot distinguish arbitrary short secrets from ordinary text.
+//! Remaining free-text fields pass through a sanitizer that
 //! replaces known-sensitive values (worktree/home paths, configured
 //! executable paths) and then scrubs residual absolute paths, URLs, and
 //! token-like strings, so a provider error message cannot smuggle machine
@@ -64,19 +67,26 @@ impl Sanitizer {
     /// Seed with the worktree root and the user's home directory.
     pub fn new(root: &Path) -> Self {
         let mut sanitizer = Sanitizer::default();
-        sanitizer.add_replacement(root.to_string_lossy().into_owned(), "<worktree>");
+        sanitizer.add_path(root, "<worktree>");
         if let Some(home) = std::env::var_os("HOME") {
-            sanitizer.add_replacement(PathBuf::from(home).to_string_lossy().into_owned(), "<home>");
+            sanitizer.add_path(&PathBuf::from(home), "<home>");
         }
         sanitizer
     }
 
-    /// Replace one exact sensitive value with an opaque label. Values
-    /// shorter than 8 characters are ignored so scrubbing cannot corrupt
-    /// ordinary prose.
+    /// Replace an explicitly identified sensitive value with an opaque label.
     pub fn add_replacement(&mut self, sensitive: String, label: &str) {
-        if sensitive.len() >= 8 {
+        if sensitive.len() > 1 {
             self.replacements.push((sensitive, label.to_owned()));
+            self.replacements
+                .sort_by_key(|(value, _)| std::cmp::Reverse(value.len()));
+        }
+    }
+
+    fn add_path(&mut self, path: &Path, label: &str) {
+        let value = path.to_string_lossy().into_owned();
+        if path.is_absolute() {
+            self.add_replacement(value, label);
         }
     }
 
@@ -85,24 +95,75 @@ impl Sanitizer {
     pub fn sanitize(&self, text: &str) -> String {
         let mut out = text.to_owned();
         for (sensitive, label) in &self.replacements {
-            out = out.replace(sensitive.as_str(), label);
+            out = replace_known_value(&out, sensitive, label);
         }
         out = scrub_urls(&out);
         out = scrub_windows_paths(&out);
         out = scrub_unix_paths(&out);
         out = scrub_token_like(&out);
         if out.len() > MAX_FIELD_BYTES {
-            out.truncate(MAX_FIELD_BYTES);
-            out.push_str("…[truncated]");
+            const MARKER: &str = "…[truncated]";
+            let mut end = MAX_FIELD_BYTES - MARKER.len();
+            while !out.is_char_boundary(end) {
+                end -= 1;
+            }
+            out.truncate(end);
+            out.push_str(MARKER);
         }
         out
     }
 }
 
+/// Match a complete value or path prefix, never a substring of prose or a
+/// relative documentation link (for example `/p` in `docs/python.md`).
+fn replace_known_value(text: &str, sensitive: &str, label: &str) -> String {
+    let delimiter = |c: char| {
+        c.is_whitespace()
+            || matches!(
+                c,
+                '`' | '"' | '\'' | '(' | ')' | '[' | ']' | '{' | '}' | ',' | ';' | ':' | '='
+            )
+    };
+    let mut out = String::with_capacity(text.len());
+    let mut copied = 0;
+    for (start, _) in text.match_indices(sensitive) {
+        let end = start + sensitive.len();
+        let starts_value = text[..start].chars().next_back().is_none_or(delimiter);
+        let ends_value = text[end..]
+            .chars()
+            .next()
+            .is_none_or(|c| delimiter(c) || matches!(c, '/' | '\\' | '.'));
+        if starts_value && ends_value {
+            out.push_str(&text[copied..start]);
+            out.push_str(label);
+            copied = end;
+        }
+    }
+    out.push_str(&text[copied..]);
+    out
+}
+
+fn unwrapped_value(word: &str) -> &str {
+    let word = word.trim_matches(['`', '"', '\'', '(', ')', '[', ']', ',', ';']);
+    // Only strip an option/key prefix: '=' may belong to the URL query or
+    // filename itself, in which case the complete value must be inspected.
+    let value = word
+        .split_once('=')
+        .filter(|(key, _)| {
+            !key.is_empty()
+                && key
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+        })
+        .map_or(word, |(_, value)| value);
+    value.trim_matches(['`', '"', '\'', '(', ')', '[', ']', ',', ';'])
+}
+
 fn scrub_urls(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     for word in text.split_inclusive(char::is_whitespace) {
-        if word.trim_start().starts_with("http://") || word.trim_start().starts_with("https://") {
+        let value = unwrapped_value(word.trim());
+        if value.starts_with("http://") || value.starts_with("https://") {
             let trailing: String = word
                 .chars()
                 .rev()
@@ -122,16 +183,17 @@ fn scrub_urls(text: &str) -> String {
 
 fn looks_like_windows_path(word: &str) -> bool {
     let bytes = word.as_bytes();
-    bytes.len() >= 3
-        && bytes[0].is_ascii_alphabetic()
-        && bytes[1] == b':'
-        && (bytes[2] == b'\\' || bytes[2] == b'/')
+    word.starts_with("\\\\")
+        || (bytes.len() >= 3
+            && bytes[0].is_ascii_alphabetic()
+            && bytes[1] == b':'
+            && (bytes[2] == b'\\' || bytes[2] == b'/'))
 }
 
 fn scrub_windows_paths(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     for word in text.split_inclusive(char::is_whitespace) {
-        if looks_like_windows_path(word.trim_end()) {
+        if looks_like_windows_path(unwrapped_value(word.trim_end())) {
             let trailing: String = word
                 .chars()
                 .rev()
@@ -149,24 +211,17 @@ fn scrub_windows_paths(text: &str) -> String {
     out
 }
 
-/// Scrub residual absolute Unix paths: two or more `/segment` parts with no
-/// whitespace. Runs after exact replacements so `<worktree>` labels survive.
+/// Scrub residual absolute Unix paths, including quoted and key=value forms.
+/// Runs after exact replacements so `<worktree>` labels survive.
 fn scrub_unix_paths(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     for word in text.split_inclusive(char::is_whitespace) {
         let trimmed = word.trim_end();
         let trailing = &word[trimmed.len()..];
-        let core = trimmed.trim_end_matches([')', ']', ',', ';', '.', ':']);
-        let suffix = &trimmed[core.len()..];
-        let is_path = core.starts_with('/')
-            && core.len() > 4
-            && core[1..].contains('/')
-            && core.chars().all(|c| {
-                c.is_ascii_alphanumeric() || matches!(c, '/' | '.' | '_' | '-' | '+' | '~')
-            });
+        let core = unwrapped_value(trimmed).trim_end_matches(['.', ':']);
+        let is_path = core.starts_with('/') && core.len() > 1;
         if is_path {
             out.push_str("<path>");
-            out.push_str(suffix);
             out.push_str(trailing);
         } else {
             out.push_str(word);
@@ -178,24 +233,16 @@ fn scrub_unix_paths(text: &str) -> String {
 /// Scrub long token-like runs (32+ unbroken credential characters).
 fn scrub_token_like(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
-    let mut current = String::new();
-    for word in text.split_inclusive(char::is_whitespace) {
-        let trimmed = word.trim_end();
-        let trailing = &word[trimmed.len()..];
-        let core =
-            trimmed.trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '-' && c != '_');
-        if core.len() >= 32
-            && core
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-        {
-            current.push_str("<redacted>");
-            current.push_str(trailing);
+    let credential_char = |c: char| c.is_ascii_alphanumeric() || c == '-' || c == '_';
+    for part in text.split_inclusive(|c| !credential_char(c)) {
+        let run = part.trim_end_matches(|c| !credential_char(c));
+        if run.len() >= 32 {
+            out.push_str("<redacted>");
+            out.push_str(&part[run.len()..]);
         } else {
-            current.push_str(word);
+            out.push_str(part);
         }
     }
-    out.push_str(&current);
     out
 }
 
@@ -251,17 +298,22 @@ pub fn build_report(
     findings: &[Finding],
 ) -> Result<Report, ReportError> {
     let mut sanitizer = Sanitizer::new(root);
+    for finding in findings {
+        for path in &finding.private_paths {
+            sanitizer.add_path(path, "<executable>");
+        }
+    }
     if let Some(effective) = effective {
         for key in crate::config::ProviderKey::ALL {
             if let Some(path) = &effective.provider(*key).path {
-                sanitizer.add_replacement(path.to_string_lossy().into_owned(), "<provider-exe>");
+                sanitizer.add_path(path, "<provider-exe>");
             }
         }
         for source in effective.sources().values() {
             match source {
                 crate::config::ConfigSource::Shared(path)
                 | crate::config::ConfigSource::Private(path) => {
-                    sanitizer.add_replacement(path.to_string_lossy().into_owned(), "<config>");
+                    sanitizer.add_path(path, "<config>");
                 }
                 _ => {}
             }
@@ -276,7 +328,17 @@ pub fn build_report(
             let mut sanitized = finding.clone();
             sanitized.subject = sanitizer.sanitize(&finding.subject);
             sanitized.applicability = sanitizer.sanitize(&finding.applicability);
-            sanitized.evidence = sanitizer.sanitize(&finding.evidence);
+            // These diagnostics incorporate arbitrary registration values or
+            // TOML parser excerpts (including short, otherwise unrecognizable
+            // credentials). Retain local doctor detail, but export only the
+            // classification; no copy of those raw values reaches the report.
+            sanitized.evidence = match (finding.code, finding.severity) {
+                ("mcp-registration", crate::doctor::Severity::Error) =>
+                    "MCP registration does not match this installation/worktree; inspect its values locally".to_owned(),
+                ("project-config", crate::doctor::Severity::Error) =>
+                    "Project configuration is invalid; inspect the parser diagnostic locally".to_owned(),
+                _ => sanitizer.sanitize(&finding.evidence),
+            };
             sanitized.advice = sanitizer.sanitize(&finding.advice);
             sanitized
         })
@@ -497,6 +559,154 @@ mod tests {
             evidence.to_owned(),
             "advice".to_owned(),
         )
+    }
+
+    #[test]
+    fn report_excludes_registration_payloads_for_every_client() -> TestResult {
+        use crate::setup::AgentClient;
+        let directory = tempfile::tempdir()?;
+        let command = "/opt/private folder/私人/program";
+        let args = vec![
+            "--password=tiny-secret",
+            "--token=ghp_abcdefghijklmnopqrstuvwxyz0123456789",
+            "--endpoint=https://user:pw@example.test/x",
+            "--path=C:\\Users\\private\\cfg",
+        ];
+        for client in AgentClient::ALL {
+            let path = directory.path().join(client.mcp_config_relative());
+            std::fs::create_dir_all(path.parent().ok_or("parent")?)?;
+            let config = match client {
+                AgentClient::Codex => format!(
+                    "[mcp_servers.chakra]\ncommand = {}\nargs = {}\n",
+                    serde_json::to_string(command)?,
+                    serde_json::to_string(&args)?
+                ),
+                AgentClient::Claude | AgentClient::Cursor => {
+                    serde_json::json!({"mcpServers":{"chakra":{"command": command, "args":args}}})
+                        .to_string()
+                }
+                AgentClient::Opencode => {
+                    let mut line = vec![command];
+                    line.extend(args.iter().copied());
+                    serde_json::json!({"mcp":{"chakra":{"type":"local","command":line}}})
+                        .to_string()
+                }
+            };
+            std::fs::write(path, config)?;
+            let findings = crate::doctor::diagnose(
+                directory.path(),
+                Path::new("/actual/chakra"),
+                &[*client],
+                None,
+                false,
+            );
+            let registration = findings
+                .iter()
+                .find(|finding| finding.code == "mcp-registration")
+                .ok_or("finding")?;
+            assert_eq!(registration.severity, Severity::Error);
+            assert!(
+                registration.evidence.contains("tiny-secret"),
+                "local diagnostic stays detailed"
+            );
+            let report = build_report(directory.path(), None, &findings)?;
+            for sensitive in [
+                "tiny-secret",
+                "ghp_",
+                "private folder",
+                "user:pw",
+                "Users\\\\private",
+            ] {
+                assert!(!report.json.contains(sensitive), "{client:?}: {sensitive}");
+            }
+            assert!(report.json.contains("mcp-registration"));
+            assert!(report.json.contains("inspect its values locally"));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn report_omits_config_parser_excerpts_and_retains_observed_paths_for_redaction() -> TestResult
+    {
+        let directory = tempfile::tempdir()?;
+        std::fs::write(
+            directory.path().join("chakra.toml"),
+            "schema_version = 1\npassword = \"tiny-secret\"\n",
+        )?;
+        let error = crate::config::ConfigLayers::load(directory.path(), None)
+            .err()
+            .ok_or("invalid config")?;
+        let config = Finding::new(
+            "project-config",
+            Severity::Error,
+            "project".to_owned(),
+            error.to_string(),
+            "fix configuration locally".to_owned(),
+        );
+        assert!(config.evidence.contains("tiny-secret"));
+        let observed = directory.path().join("private executable 私人");
+        let provider = finding_with(&format!("found at {}; ready", observed.display()))
+            .with_private_path(&observed);
+        let report = build_report(directory.path(), None, &[config, provider])?;
+        assert!(!report.json.contains("tiny-secret"));
+        assert!(!report.json.contains("private executable"));
+        assert!(report.json.contains("<executable>"));
+        assert!(report.json.contains("fix configuration locally"));
+        Ok(())
+    }
+
+    #[test]
+    fn sanitizer_handles_inline_credentials_wrapped_paths_and_utf8_boundaries() {
+        let sanitizer = Sanitizer::default();
+        let text = "--token=ghp_abcdefghijklmnopqrstuvwxyz0123456789 `/opt/private/program` --url=https://user:pw@example.test/x --path=C:\\Users\\private\\cfg /私人/path \\\\server\\private";
+        let sanitized = sanitizer.sanitize(text);
+        for sensitive in [
+            "ghp_",
+            "/opt",
+            "user:pw",
+            "C:\\Users",
+            "私人",
+            "server\\private",
+        ] {
+            assert!(!sanitized.contains(sensitive), "{sanitized}");
+        }
+        assert_eq!(
+            sanitizer.sanitize("version 0.4.0; see docs/languages/rust.md"),
+            "version 0.4.0; see docs/languages/rust.md"
+        );
+        for offset in 0..4 {
+            let text = format!("{}{}", "a".repeat(offset), "я界😀 ".repeat(MAX_FIELD_BYTES));
+            let result = sanitizer.sanitize(&text);
+            assert!(result.len() <= MAX_FIELD_BYTES);
+            assert!(result.ends_with("…[truncated]"));
+        }
+    }
+
+    #[test]
+    fn short_paths_do_not_rewrite_language_names_or_documentation_links() {
+        for root in ["/J", "/p"] {
+            let mut sanitizer = Sanitizer::default();
+            sanitizer.add_replacement(root.to_owned(), "<worktree>");
+            let prose = "TypeScript/JavaScript; docs/languages/python.md";
+            assert_eq!(sanitizer.sanitize(prose), prose);
+            assert_eq!(
+                sanitizer.sanitize(&format!("found at `{root}/src/main.kt`")),
+                "found at `<worktree>/src/main.kt`"
+            );
+        }
+    }
+
+    #[test]
+    fn sanitizer_handles_query_assignments_inside_urls_and_paths() {
+        let sanitizer = Sanitizer::default();
+        for text in [
+            "https://user:pw@example.test/x?key=tiny",
+            "--url=https://user:pw@example.test/x?key=tiny",
+            "`/private/token=tiny`",
+            "--path=C:\\private\\token=tiny",
+        ] {
+            assert!(!sanitizer.sanitize(text).contains("tiny"), "{text}");
+        }
     }
 
     #[test]

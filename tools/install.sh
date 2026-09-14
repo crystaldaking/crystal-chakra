@@ -85,7 +85,7 @@ fi
 
 ARCHIVE="chakra-${VERSION}-${TARGET}.tar.gz"
 WORK="$(mktemp -d)"
-trap 'rm -rf "${WORK}"' EXIT
+trap 'rm -rf "${WORK}"; if [ -n "${tmp_bin:-}" ]; then rm -f "${tmp_bin}"; fi' EXIT
 
 # --- verified download: checksum before any install step ---
 fetch "${BASE_URL}/download/${VERSION}/${ARCHIVE}" "${WORK}/${ARCHIVE}"
@@ -108,14 +108,18 @@ tar -xzf "${WORK}/${ARCHIVE}" -C "${WORK}" \
 
 # --- atomic binary swap: previous binary stays usable until this point ---
 mkdir -p "${INSTALL_DIR}"
-tmp_bin="${INSTALL_DIR}/.chakra.new.$$"
+tmp_bin="$(mktemp "${INSTALL_DIR}/.chakra.new.XXXXXX")"
 cp "${WORK}/chakra-${VERSION}-${TARGET}/chakra" "${tmp_bin}"
 chmod 0755 "${tmp_bin}"
+# Check the staged executable, including its exit status, before replacing
+# a working installation. A valid checksum does not imply runtime compatibility.
+if ! version_output="$("${tmp_bin}" --version)"; then
+    fail "downloaded binary cannot run on this machine; previous installation untouched"
+fi
+[ "${version_output}" = "chakra ${VERSION#v}" ] \
+    || fail "downloaded binary reports ${version_output}, expected chakra ${VERSION#v}; previous installation untouched"
+installed_version="${VERSION#v}"
 mv -f "${tmp_bin}" "${INSTALL_DIR}/chakra"
-
-installed_version="$("${INSTALL_DIR}/chakra" --version | awk '{print $2}')"
-[ "${installed_version}" = "${VERSION#v}" ] \
-    || fail "installed binary reports ${installed_version}, expected ${VERSION#v}"
 
 # --- idempotent PATH setup through a managed shell block ---
 BLOCK_BEGIN="# >>> chakra path >>>"

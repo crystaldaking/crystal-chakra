@@ -28,6 +28,13 @@ use tree_sitter::{Node, Parser, Point};
 
 const MAX_SIGNATURE_CHARS: usize = 512;
 
+fn nested_container(parent: Option<&str>, name: &str) -> String {
+    match parent {
+        Some(parent) => format!("{parent}::{name}"),
+        None => name.to_owned(),
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum ParseError {
     #[error("failed to load the Tree-sitter Kotlin grammar: {0}")]
@@ -352,7 +359,7 @@ impl Extraction<'_> {
                 let index = self.add_symbol(&name, container, kind, node, Some(parent))?;
                 self.record_annotations(node, index)?;
                 self.record_delegation(node, index)?;
-                self.visit_members(node, &name, index)
+                self.visit_members(node, &nested_container(container, &name), index)
             }
             "object_declaration" => {
                 let Some(name_node) = node.child_by_field_name("name") else {
@@ -365,7 +372,7 @@ impl Extraction<'_> {
                     self.add_symbol(&name, container, SymbolKind::Class, node, Some(parent))?;
                 self.record_annotations(node, index)?;
                 self.record_delegation(node, index)?;
-                self.visit_members(node, &name, index)
+                self.visit_members(node, &nested_container(container, &name), index)
             }
             "companion_object" => {
                 let name = node
@@ -375,7 +382,7 @@ impl Extraction<'_> {
                     .to_owned();
                 let index =
                     self.add_symbol(&name, container, SymbolKind::Class, node, Some(parent))?;
-                self.visit_members(node, &name, index)
+                self.visit_members(node, &nested_container(container, &name), index)
             }
             "enum_entry" => {
                 let mut walker = node.walk();
@@ -393,7 +400,10 @@ impl Extraction<'_> {
             "property_declaration" => self.visit_property(node, container, parent),
             "function_declaration" => self.visit_function(node, container, parent),
             "secondary_constructor" => {
-                let name = container.unwrap_or("constructor").to_owned();
+                let name = container
+                    .and_then(|name| name.rsplit("::").next())
+                    .unwrap_or("constructor")
+                    .to_owned();
                 let index =
                     self.add_symbol(&name, container, SymbolKind::Method, node, Some(parent))?;
                 self.record_annotations(node, index)?;
@@ -915,6 +925,55 @@ fun main() {
             .find(|symbol| simple_name(symbol) == "Greeter")
             .ok_or("Greeter missing")?;
         assert_eq!(qualified.key.qualified_name, "com.example.app::Greeter");
+        Ok(())
+    }
+
+    #[test]
+    fn nested_members_keep_full_container_chains_and_parents() -> TestResult {
+        let parsed = parse(
+            r#"package review
+class Alpha {
+    class Inner {
+        fun work() {}
+        companion object {
+            fun create() {}
+        }
+    }
+}
+class Beta {
+    class Inner {
+        fun work() {}
+    }
+    object Nested {
+        fun work() {}
+    }
+}
+"#,
+        )?;
+        assert!(!parsed.has_errors, "{:?}", parsed.diagnostics);
+        let expected = [
+            ("review::Alpha::Inner::work", "review::Alpha::Inner"),
+            (
+                "review::Alpha::Inner::Companion::create",
+                "review::Alpha::Inner::Companion",
+            ),
+            ("review::Beta::Inner::work", "review::Beta::Inner"),
+            ("review::Beta::Nested::work", "review::Beta::Nested"),
+        ];
+        for (name, parent) in expected {
+            let symbol = parsed
+                .symbols
+                .iter()
+                .find(|symbol| symbol.key.qualified_name == name)
+                .ok_or_else(|| format!("missing {name}"))?;
+            assert_eq!(symbol.key.container.as_deref(), Some(parent));
+            assert_eq!(
+                parsed.symbols[symbol.parent.ok_or("parent")?]
+                    .key
+                    .qualified_name,
+                parent
+            );
+        }
         Ok(())
     }
 

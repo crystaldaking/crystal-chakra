@@ -1533,7 +1533,7 @@ impl SyntaxLanguageAdapter for chakra_language_kotlin::KotlinSyntaxIndex {
         self.fact_counts().into()
     }
 
-    snapshot_codec_methods!(chakra_language_kotlin::KotlinSyntaxIndex, "kotlin:s1");
+    snapshot_codec_methods!(chakra_language_kotlin::KotlinSyntaxIndex, "kotlin:s2");
 }
 
 #[cfg(test)]

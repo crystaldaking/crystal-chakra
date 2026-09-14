@@ -57,6 +57,11 @@ recorded capability evidence.
 - Offline discovery never runs Gradle, Maven, or scripts. Kotlin test
   sources follow the conventional `src/test/kotlin` layout alongside the
   existing role classifications.
+- Nested declarations carry the complete enclosing container chain for
+  qualified names and parent lookup (`Alpha::Inner::work` differs from
+  `Beta::Inner::work`). The corrected parser uses snapshot codec `kotlin:s2`;
+  `kotlin:s1` snapshots are invalidated through the existing codec gate so
+  cached shortened identities cannot survive an upgrade.
 
 ### Configuration and diagnostics
 

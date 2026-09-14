@@ -200,19 +200,19 @@ jobs:
             sha256sum *.tar.gz >SHA256SUMS 2>/dev/null \
               || shasum -a 256 *.tar.gz >SHA256SUMS
           )
-          home="${fixture}/home"
-          mkdir -p "${home}"
-          env HOME="${home}" SHELL=/bin/zsh \
+          smoke_home="${fixture}/home"
+          mkdir -p "${smoke_home}"
+          env HOME="${smoke_home}" SHELL=/bin/zsh \
             sh tools/install.sh --version "${RELEASE_TAG}" \
-              --base-url "file://${fixture}" --dir "${home}/.local/bin"
+              --base-url "file://${fixture}" --dir "${smoke_home}/.local/bin"
           # Fresh-shell PATH resolution through the managed block.
-          env -i HOME="${home}" PATH=/usr/bin:/bin SHELL=/bin/zsh \
+          env -i HOME="${smoke_home}" PATH=/usr/bin:/bin SHELL=/bin/zsh RELEASE_TAG="${RELEASE_TAG}" \
             zsh -c '. ~/.zshrc; command -v chakra; test "$(chakra --version)" = "chakra ${RELEASE_TAG#v}"'
           # Repeat install: upgrade path stays idempotent.
-          env HOME="${home}" SHELL=/bin/zsh \
+          env HOME="${smoke_home}" SHELL=/bin/zsh \
             sh tools/install.sh --version "${RELEASE_TAG}" \
-              --base-url "file://${fixture}" --dir "${home}/.local/bin"
-          test "$(grep -c '>>> chakra path >>>' "${home}/.zshrc")" -eq 1
+              --base-url "file://${fixture}" --dir "${smoke_home}/.local/bin"
+          test "$(grep -c '>>> chakra path >>>' "${smoke_home}/.zshrc")" -eq 1
       - name: Smoke-test the Windows installer
         if: runner.os == 'Windows'
         shell: pwsh
