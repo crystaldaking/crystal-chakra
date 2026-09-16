@@ -336,7 +336,7 @@ mod tests {
                 .iter()
                 .all(
                     |(language, version)| version.ends_with(if *language == Language::Kotlin {
-                        ":s2"
+                        ":s3"
                     } else {
                         ":s1"
                     })
@@ -347,17 +347,22 @@ mod tests {
     #[test]
     fn shortened_kotlin_identity_snapshots_are_incompatible() -> Result<(), &'static str> {
         let current = compatibility_from_defaults(IndexBudgets::default());
-        let mut previous = current.clone();
-        let (_, version) = previous
-            .adapters
-            .iter_mut()
-            .find(|(language, _)| *language == Language::Kotlin)
-            .ok_or("missing registered Kotlin adapter")?;
-        *version = "kotlin:s1".to_owned();
-        assert!(matches!(
-            validate_compatibility(&previous, &current),
-            Err(CommitSnapshotPayloadError::Compatibility("adapters"))
-        ));
+        for outdated in ["kotlin:s1", "kotlin:s2"] {
+            let mut previous = current.clone();
+            let (_, version) = previous
+                .adapters
+                .iter_mut()
+                .find(|(language, _)| *language == Language::Kotlin)
+                .ok_or("missing registered Kotlin adapter")?;
+            *version = outdated.to_owned();
+            assert!(
+                matches!(
+                    validate_compatibility(&previous, &current),
+                    Err(CommitSnapshotPayloadError::Compatibility("adapters"))
+                ),
+                "{outdated} must be incompatible"
+            );
+        }
         assert!(validate_compatibility(&current, &current).is_ok());
         Ok(())
     }

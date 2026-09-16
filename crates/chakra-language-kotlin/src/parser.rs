@@ -740,8 +740,11 @@ pub(crate) fn module_path(path: &RepoRelativePath, package: &str) -> Vec<String>
         .as_str()
         .rsplit('/')
         .next()
-        .and_then(|file| file.strip_suffix(".kt"))
-        .and_then(|file| file.strip_suffix(".kts").or(Some(file)))
+        .map(|file| {
+            file.strip_suffix(".kts")
+                .or_else(|| file.strip_suffix(".kt"))
+                .unwrap_or(file)
+        })
         .filter(|stem| !stem.is_empty())
         .unwrap_or("source");
     let mut segments: Vec<String> = package
@@ -1097,6 +1100,36 @@ val имя = "привет"
         assert!(broken.has_errors);
         assert!(broken.diagnostic_count >= 1);
         assert!(!broken.diagnostics.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn kts_scripts_keep_their_file_stem_in_the_module_path() -> TestResult {
+        let mut parser = KotlinParser::new()?;
+        let build = parser.parse(
+            RepoRelativePath::new("build.gradle.kts")?,
+            "plugins { kotlin(\"jvm\") }\n",
+        )?;
+        let settings = parser.parse(
+            RepoRelativePath::new("settings.gradle.kts")?,
+            "rootProject.name = \"sample\"\n",
+        )?;
+        let build_module = build
+            .symbols
+            .iter()
+            .find(|symbol| symbol.key.kind == SymbolKind::Module)
+            .ok_or("build script module missing")?;
+        let settings_module = settings
+            .symbols
+            .iter()
+            .find(|symbol| symbol.key.kind == SymbolKind::Module)
+            .ok_or("settings script module missing")?;
+        assert_eq!(build_module.key.qualified_name, "root::build.gradle");
+        assert_eq!(settings_module.key.qualified_name, "root::settings.gradle");
+        assert_ne!(
+            build_module.key.qualified_name, settings_module.key.qualified_name,
+            "distinct .kts scripts must not share a module identity"
+        );
         Ok(())
     }
 }
