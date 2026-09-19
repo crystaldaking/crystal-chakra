@@ -493,6 +493,67 @@ mod tests {
     }
 
     #[test]
+    fn manual_check_preserves_exit_contract_for_controlled_releases() -> TestResult {
+        let target = platform_target().ok_or("test platform must be in the matrix")?;
+        let current = current_version();
+        let newer = format!("v{}.0.0", current.major + 1);
+        let extension = if target.ends_with("msvc") {
+            "zip"
+        } else {
+            "tar.gz"
+        };
+        let archive = format!("chakra-{newer}-{target}.{extension}");
+        let (base, hits) = stub_server(vec![
+            (200, release_json(&newer, &[&archive])),
+            (200, release_json(&format!("v{current}"), &[])),
+            (200, release_json("v0.0.0", &[])),
+            (200, release_json(&newer, &["SHA256SUMS"])),
+            (503, "temporarily unavailable".to_owned()),
+        ])?;
+        for (index, expected) in [
+            EXIT_AVAILABLE,
+            EXIT_CURRENT,
+            EXIT_CURRENT,
+            EXIT_FAILED,
+            EXIT_FAILED,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            assert_eq!(run_manual_check(&base), expected, "case {index}");
+            assert_eq!(hits.load(Ordering::SeqCst), index + 1);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn automatic_available_release_is_persistently_gated() -> TestResult {
+        let directory = tempfile::tempdir()?;
+        let target = platform_target().ok_or("test platform must be in the matrix")?;
+        let newer = format!("v{}.0.0", current_version().major + 1);
+        let extension = if target.ends_with("msvc") {
+            "zip"
+        } else {
+            "tar.gz"
+        };
+        let archive = format!("chakra-{newer}-{target}.{extension}");
+        let (base, hits) = stub_server(vec![(200, release_json(&newer, &[&archive]))])?;
+        let now = 1_800_000_000;
+        assert_eq!(
+            run_automatic_once(directory.path(), &base, false, now),
+            AutoOutcome::Available
+        );
+        assert_eq!(
+            run_automatic_once(directory.path(), &base, false, now + 1),
+            AutoOutcome::Skipped
+        );
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+        assert_eq!(read_state(directory.path()).last_attempt_unix, Some(now));
+        assert_eq!(read_state(directory.path()).consecutive_failures, 0);
+        Ok(())
+    }
+
+    #[test]
     fn fetch_parses_latest_release_and_finds_platform_asset() -> TestResult {
         let target = platform_target().ok_or("test platform must be in the matrix")?;
         let archive = if target.ends_with("msvc") {

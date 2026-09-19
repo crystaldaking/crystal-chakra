@@ -171,7 +171,7 @@ pub fn upsert_block(existing: Option<&str>) -> Result<String, SetupError> {
         (Some(begin), Some(end))
             if begin < end
                 && !existing[end + BLOCK_END.len()..].contains(BLOCK_END)
-                && !existing[begin + BLOCK_BEGIN.len()..end].contains(BLOCK_BEGIN) =>
+                && !existing[begin + BLOCK_BEGIN.len()..].contains(BLOCK_BEGIN) =>
         {
             let after = &existing[end + BLOCK_END.len()..];
             Ok(format!("{}{block}{}", &existing[..begin], after))
@@ -191,15 +191,16 @@ pub fn strip_block(existing: &str) -> Result<Option<String>, SetupError> {
     let begin = existing.find(BLOCK_BEGIN);
     let end = existing.find(BLOCK_END);
     match (begin, end) {
-        (Some(begin), Some(end)) if begin < end => {
-            let mut remaining = format!(
+        (Some(begin), Some(end))
+            if begin < end
+                && !existing[end + BLOCK_END.len()..].contains(BLOCK_END)
+                && !existing[begin + BLOCK_BEGIN.len()..].contains(BLOCK_BEGIN) =>
+        {
+            let remaining = format!(
                 "{}{}",
                 &existing[..begin],
                 &existing[end + BLOCK_END.len()..]
             );
-            while remaining.contains("\n\n\n") {
-                remaining = remaining.replace("\n\n\n", "\n\n");
-            }
             if remaining.trim().is_empty() {
                 Ok(None)
             } else {
@@ -1030,9 +1031,27 @@ mod tests {
         assert!(upsert_block(Some(&format!("text {BLOCK_END} dangling"))).is_err());
         // Strip returns user text; empty result means delete the file.
         let stripped = strip_block(&appended)?;
-        assert_eq!(stripped.as_deref(), Some("# Team rules\n\nBe nice.\n\n"));
+        assert_eq!(stripped.as_deref(), Some("# Team rules\n\nBe nice.\n\n\n"));
         let stripped = strip_block(&created)?;
         assert_eq!(stripped, None);
+        Ok(())
+    }
+
+    #[test]
+    fn removal_preserves_outside_bytes_and_rejects_ambiguous_markers() -> TestResult {
+        let prefix = "# User rules\n\n\nKeep these blank lines.\n\n";
+        let suffix = "\n\n\nTrailing user instructions.\n";
+        let source = format!("{prefix}{BLOCK_BEGIN}\nmanaged\n{BLOCK_END}{suffix}");
+        assert_eq!(strip_block(&source)?, Some(format!("{prefix}{suffix}")));
+        for source in [
+            format!("{BLOCK_BEGIN}{BLOCK_BEGIN}{BLOCK_END}"),
+            format!("{BLOCK_BEGIN}{BLOCK_END}{BLOCK_END}"),
+            format!("{BLOCK_BEGIN}{BLOCK_END}{BLOCK_BEGIN}{BLOCK_END}"),
+            format!("{BLOCK_BEGIN}{BLOCK_END}{BLOCK_BEGIN}"),
+        ] {
+            assert!(strip_block(&source).is_err(), "{source}");
+            assert!(upsert_block(Some(&source)).is_err(), "{source}");
+        }
         Ok(())
     }
 

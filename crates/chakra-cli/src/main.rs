@@ -80,12 +80,12 @@ struct DoctorArgs {
     #[arg(long, value_name = "PATH", default_value = ".")]
     repo: PathBuf,
 
-    /// Emit the versioned JSON representation instead of human-readable text.
+    /// Emit detailed local diagnostics as JSON (not sanitized; use --report for sharing).
     #[arg(long)]
     json: bool,
 
     /// Run bounded isolated probes (provider --version executions with hard
-    /// deadlines). Default inspection spawns no processes (issue #207).
+    /// deadlines). Default inspection uses Git but does not launch language servers.
     #[arg(long)]
     probe: bool,
 
@@ -461,16 +461,16 @@ fn doctor_command(args: DoctorArgs) -> ExitCode {
             .and_then(|built| report::write_report(path, &built.json, args.force).map(|()| built))
         {
             Ok(built) => {
-                println!(
+                eprintln!(
                     "report written to {} ({} findings, {} bytes)",
                     path.display(),
                     built.finding_count,
                     built.json.len()
                 );
                 for section in &built.truncated_sections {
-                    println!("note: {section}");
+                    eprintln!("note: {section}");
                 }
-                println!(
+                eprintln!(
                     "the report is an isolated inspection with an explicit allowlist (no source, secrets, or machine paths); review it and attach it to a GitHub issue manually"
                 );
             }
@@ -483,7 +483,11 @@ fn doctor_command(args: DoctorArgs) -> ExitCode {
     if failure {
         return ExitCode::FAILURE;
     }
-    ExitCode::from(doctor::report(&findings))
+    ExitCode::from(if args.json {
+        doctor::exit_status(&findings)
+    } else {
+        doctor::report(&findings)
+    })
 }
 
 /// Resolve the configuration layers for the primary worktree (ADR-0053).

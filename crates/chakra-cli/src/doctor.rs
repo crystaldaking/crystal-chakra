@@ -229,6 +229,124 @@ pub fn diagnose(
     findings
 }
 
+enum RegistrationEntry {
+    Absent,
+    Disabled,
+    Local(String, Vec<String>),
+}
+
+/// Parse presence separately from validity; a remote or malformed entry must
+/// never be diagnosed as an absent local registration. Error reasons exclude
+/// raw configuration values so diagnostics cannot echo embedded credentials.
+fn registration_entry(client: &AgentClient, text: &str) -> Result<RegistrationEntry, &'static str> {
+    if *client == AgentClient::Codex {
+        let document = text
+            .parse::<toml_edit::DocumentMut>()
+            .map_err(|_| "invalid TOML")?;
+        let Some(servers) = document.get("mcp_servers") else {
+            return Ok(RegistrationEntry::Absent);
+        };
+        let servers = servers
+            .as_table_like()
+            .ok_or("mcp_servers must be a table")?;
+        let Some(entry) = servers.get("chakra") else {
+            return Ok(RegistrationEntry::Absent);
+        };
+        let entry = entry.as_table_like().ok_or("chakra must be a table")?;
+        if let Some(enabled) = entry.get("enabled")
+            && !enabled.as_bool().ok_or("enabled must be a boolean")?
+        {
+            return Ok(RegistrationEntry::Disabled);
+        }
+        if entry.get("url").is_some() {
+            return Err("remote entries cannot serve this local worktree");
+        }
+        let command = entry
+            .get("command")
+            .and_then(toml_edit::Item::as_str)
+            .filter(|value| !value.is_empty())
+            .ok_or("local command must be a nonempty string")?;
+        let args = match entry.get("args") {
+            None => Vec::new(),
+            Some(args) => args
+                .as_array()
+                .ok_or("args must be an array")?
+                .iter()
+                .map(|value| {
+                    value
+                        .as_str()
+                        .map(str::to_owned)
+                        .ok_or("args must contain only strings")
+                })
+                .collect::<Result<Vec<_>, _>>()?,
+        };
+        return Ok(RegistrationEntry::Local(command.to_owned(), args));
+    }
+    let document: serde_json::Value = serde_json::from_str(text).map_err(|_| "invalid JSON")?;
+    let document = document
+        .as_object()
+        .ok_or("configuration must be an object")?;
+    let key = if *client == AgentClient::Opencode {
+        "mcp"
+    } else {
+        "mcpServers"
+    };
+    let Some(servers) = document.get(key) else {
+        return Ok(RegistrationEntry::Absent);
+    };
+    let servers = servers
+        .as_object()
+        .ok_or("MCP server map must be an object")?;
+    let Some(entry) = servers.get("chakra") else {
+        return Ok(RegistrationEntry::Absent);
+    };
+    let entry = entry.as_object().ok_or("chakra must be an object")?;
+    if *client == AgentClient::Opencode
+        && let Some(enabled) = entry.get("enabled")
+        && !enabled.as_bool().ok_or("enabled must be a boolean")?
+    {
+        return Ok(RegistrationEntry::Disabled);
+    }
+    if entry.contains_key("url") {
+        return Err("remote entries cannot serve this local worktree");
+    }
+    let strings = |value: &serde_json::Value| -> Result<Vec<String>, &'static str> {
+        value
+            .as_array()
+            .ok_or("command arguments must be an array")?
+            .iter()
+            .map(|value| {
+                value
+                    .as_str()
+                    .map(str::to_owned)
+                    .ok_or("command arguments must contain only strings")
+            })
+            .collect()
+    };
+    if *client == AgentClient::Opencode {
+        if entry.get("type").and_then(serde_json::Value::as_str) != Some("local") {
+            return Err("OpenCode Chakra entry must have local type");
+        }
+        let command = strings(entry.get("command").ok_or("missing command")?)?;
+        let (first, rest) = command
+            .split_first()
+            .filter(|(first, _)| !first.is_empty())
+            .ok_or("missing executable")?;
+        return Ok(RegistrationEntry::Local(first.clone(), rest.to_vec()));
+    }
+    let command = entry
+        .get("command")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.is_empty())
+        .ok_or("local command must be a nonempty string")?;
+    let args = entry
+        .get("args")
+        .map(strings)
+        .transpose()?
+        .unwrap_or_default();
+    Ok(RegistrationEntry::Local(command.to_owned(), args))
+}
+
 fn check_registration(
     client: &AgentClient,
     path: &Path,
@@ -237,79 +355,31 @@ fn check_registration(
     root: &Path,
 ) -> Finding {
     let name = client.as_str();
-    let entry = match client {
-        AgentClient::Codex => text
-            .parse::<toml_edit::DocumentMut>()
-            .ok()
-            .and_then(|document| {
-                let entry = document.get("mcp_servers")?.get("chakra")?;
-                let command = entry
-                    .get("command")?
-                    .as_str()
-                    .unwrap_or_default()
-                    .to_owned();
-                let args: Vec<String> = entry
-                    .get("args")
-                    .and_then(toml_edit::Item::as_array)
-                    .map(|array| {
-                        array
-                            .iter()
-                            .filter_map(|value| value.as_str().map(str::to_owned))
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                if command.is_empty() {
-                    None
-                } else {
-                    Some((command, args))
-                }
-            }),
-        AgentClient::Claude | AgentClient::Cursor => {
-            serde_json::from_str::<serde_json::Value>(text)
-                .ok()
-                .and_then(|document| {
-                    let entry = &document["mcpServers"]["chakra"];
-                    let command = entry["command"].as_str().unwrap_or_default().to_owned();
-                    let args: Vec<String> = entry["args"]
-                        .as_array()
-                        .map(|array| {
-                            array
-                                .iter()
-                                .filter_map(|value| value.as_str().map(str::to_owned))
-                                .collect()
-                        })
-                        .unwrap_or_default();
-                    if command.is_empty() {
-                        None
-                    } else {
-                        Some((command, args))
-                    }
-                })
-        }
-        AgentClient::Opencode => serde_json::from_str::<serde_json::Value>(text)
-            .ok()
-            .and_then(|document| {
-                let command: Vec<String> = document["mcp"]["chakra"]["command"]
-                    .as_array()
-                    .map(|array| {
-                        array
-                            .iter()
-                            .filter_map(|value| value.as_str().map(str::to_owned))
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                let (first, rest) = command.split_first()?;
-                Some((first.clone(), rest.to_vec()))
-            }),
+    let entry = match registration_entry(client, text) {
+        Ok(entry) => entry,
+        Err(reason) => return Finding::error(
+            "mcp-registration", name.to_owned(),
+            format!("invalid or incompatible Chakra registration in {}: {reason}", path.display()),
+            "review the client configuration and keep a local Chakra registration for this worktree".to_owned(),
+        ),
     };
     match entry {
-        None => Finding::warning(
+        RegistrationEntry::Absent => Finding::warning(
             "mcp-registration",
             name.to_owned(),
             format!("no chakra MCP entry in {}", path.display()),
             format!("run chakra init --agent {name}"),
         ),
-        Some((command, args)) => {
+        RegistrationEntry::Disabled => Finding::warning(
+            "mcp-registration",
+            name.to_owned(),
+            format!(
+                "chakra MCP entry in {} is explicitly disabled",
+                path.display()
+            ),
+            "enable the entry only if this client should use Chakra".to_owned(),
+        ),
+        RegistrationEntry::Local(command, args) => {
             let (want_command, want_args) = registration_command_for(exe, root);
             if command == want_command && args == want_args {
                 Finding::info(
@@ -363,9 +433,7 @@ pub fn report_json(findings: &[Finding], worktree: &Path) -> Result<String, serd
 
 /// Print findings and derive the exit status (1 when any error exists).
 pub fn report(findings: &[Finding]) -> u8 {
-    let mut failed = false;
     for finding in findings {
-        failed |= finding.severity == Severity::Error;
         println!(
             "[{}] {} ({}): {}",
             finding.severity, finding.code, finding.subject, finding.evidence
@@ -374,7 +442,16 @@ pub fn report(findings: &[Finding]) -> u8 {
             println!("    next: {}", finding.advice);
         }
     }
-    u8::from(failed)
+    exit_status(findings)
+}
+
+/// Derive status without writing human-readable output into a JSON stream.
+pub fn exit_status(findings: &[Finding]) -> u8 {
+    u8::from(
+        findings
+            .iter()
+            .any(|finding| finding.severity == Severity::Error),
+    )
 }
 
 #[cfg(test)]
@@ -395,12 +472,67 @@ mod tests {
     }
 
     #[test]
+    fn malformed_and_remote_registrations_are_errors_not_absence() {
+        for (client, text) in [
+            (AgentClient::Codex, "invalid = ["),
+            (
+                AgentClient::Codex,
+                "[mcp_servers.chakra]\nurl = 'https://example.invalid/secret'",
+            ),
+            (AgentClient::Codex, "mcp_servers = 1"),
+            (AgentClient::Codex, "mcp_servers = false"),
+            (
+                AgentClient::Codex,
+                "[mcp_servers.chakra]\ncommand = 'chakra'\nargs = ['serve', 1]",
+            ),
+            (
+                AgentClient::Claude,
+                r#"{"mcpServers":{"chakra":{"url":"https://example.invalid/secret"}}}"#,
+            ),
+            (
+                AgentClient::Cursor,
+                r#"{"mcpServers":{"chakra":{"command":"chakra","args":[1]}}}"#,
+            ),
+            (
+                AgentClient::Opencode,
+                r#"{"mcp":{"chakra":{"type":"remote","command":["chakra"]}}}"#,
+            ),
+            (
+                AgentClient::Opencode,
+                r#"{"mcp":{"chakra":{"type":"local","command":["chakra",1]}}}"#,
+            ),
+            (AgentClient::Claude, r#"{"mcpServers":{"chakra":null}}"#),
+            (AgentClient::Cursor, "[]"),
+        ] {
+            let finding = check_registration(
+                &client,
+                Path::new("config"),
+                text,
+                &exe(),
+                Path::new("project"),
+            );
+            assert_eq!(finding.severity, Severity::Error, "{client:?}: {finding:?}");
+            assert!(!finding.evidence.contains("secret"));
+        }
+        for client in AgentClient::ALL {
+            let empty = if *client == AgentClient::Codex {
+                ""
+            } else {
+                "{}"
+            };
+            assert!(matches!(
+                registration_entry(client, empty),
+                Ok(RegistrationEntry::Absent)
+            ));
+        }
+    }
+
+    #[test]
     fn codex_without_chakra_registration_is_a_warning_not_a_panic() {
         for text in [
             "model = \"example\"\n",
             "[mcp_servers.other]\ncommand = \"other\"\n",
             "[mcp_servers.chakra]\nenabled = false\n",
-            "mcp_servers = false\n",
         ] {
             let finding = check_registration(
                 &AgentClient::Codex,
