@@ -358,6 +358,7 @@ pub struct IndexMetrics {
     pub cpp_files: u64,
     pub hcl_files: u64,
     pub go_files: u64,
+    pub kotlin_files: u64,
     pub laravel_detected: bool,
     pub framework_symbols: u64,
     pub framework_edges: u64,
@@ -999,6 +1000,7 @@ fn metrics_from_reconciled_index(
         cpp_files: language_files(Language::Cpp),
         hcl_files: language_files(Language::Hcl),
         go_files: language_files(Language::Go),
+        kotlin_files: language_files(Language::Kotlin),
         laravel_detected: framework.detected,
         framework_symbols: framework.symbols,
         framework_edges: framework.edges,
@@ -1166,6 +1168,7 @@ fn index_workspace_source_scan_with_options(
     let cpp_files = language_files(Language::Cpp);
     let hcl_files = language_files(Language::Hcl);
     let go_files = language_files(Language::Go);
+    let kotlin_files = language_files(Language::Kotlin);
     let mut framework = AdapterFrameworkMetrics::default();
     for metrics in &built_metrics {
         framework.detected |= metrics.framework.detected;
@@ -1212,6 +1215,7 @@ fn index_workspace_source_scan_with_options(
         cpp_files,
         hcl_files,
         go_files,
+        kotlin_files,
         laravel_detected: framework.detected,
         framework_symbols: framework.symbols,
         framework_edges: framework.edges,

@@ -189,11 +189,11 @@ impl<H: ProviderHooks> PreciseProvider for ProviderHandle<H> {
     }
 
     fn supports(&self, language: Language) -> bool {
-        self.hooks.synchronizes(language)
+        self.hooks.supports_query_language(language)
     }
 
     fn supports_path(&self, language: Language, path: &RepoRelativePath) -> bool {
-        self.hooks.synchronizes_path(language, path)
+        self.supports(language) && self.hooks.synchronizes_path(language, path)
     }
 
     fn state_for(&self, revision: Revision) -> ProviderState {
@@ -239,6 +239,9 @@ impl<H: ProviderHooks> PreciseProvider for ProviderHandle<H> {
         operation: &OperationContext,
     ) -> PreciseQueryResult {
         let revision = request.workspace.revision;
+        if !self.supports_path(request.symbol.language, request.symbol.declaration.file()) {
+            return PreciseQueryResult::unavailable(revision, ProviderState::Degraded);
+        }
         if self.stopped.load(Ordering::Acquire) {
             return PreciseQueryResult::unavailable(revision, ProviderState::Degraded);
         }

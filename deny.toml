@@ -8,7 +8,9 @@ ignore = []
 allow = [
     "MIT",
     "Apache-2.0",
+    "BSD-3-Clause",
     "CC0-1.0",
+    "CDLA-Permissive-2.0",
     "ISC",
     "Unicode-3.0",
 ]

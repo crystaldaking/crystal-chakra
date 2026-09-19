@@ -366,6 +366,7 @@ impl ProbePlan {
             ],
             "hcl" => &["tf", "hcl"],
             "go" => &["go"],
+            "kotlin" => &["kt", "kts"],
             other => return Err(failure(format!("no probe plan for language `{other}`")).into()),
         };
         let mut paths: Vec<RepoRelativePath> = cold
@@ -509,6 +510,14 @@ impl ProbePlan {
                     "\nfunc chakraCorpusProbeOne() {}\n".to_owned(),
                     "\nfunc chakraCorpusProbeTwo() {}\n".to_owned(),
                     "\nfunc chakraCorpusBroken( {\n".to_owned(),
+                ),
+                "kotlin" => (
+                    "chakraCorpusProbe",
+                    "chakraCorpusProbeOne",
+                    "chakraCorpusProbeTwo",
+                    "\nfun chakraCorpusProbeOne() {}\n".to_owned(),
+                    "\nfun chakraCorpusProbeTwo() {}\n".to_owned(),
+                    "\nfun chakraCorpusBroken( {\n".to_owned(),
                 ),
                 other => {
                     return Err(failure(format!("no probe plan for language `{other}`")).into());

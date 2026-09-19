@@ -1,0 +1,329 @@
+// KMP import adapter for the pinned kotlin-server JSON model (ADR-0056).
+// Run only by the live precise provider, never by offline indexing.
+// KGP owns dependency/variant resolution; do not infer libraries from names.
+import groovy.json.JsonOutput
+import java.beans.Introspector
+import java.nio.file.Files
+import java.nio.file.StandardCopyOption
+
+// Keep argument tokens intact: the server's additionalArguments string parser
+// cannot round-trip every quoted path. Parse with this build's Kotlin compiler
+// and serialize the resulting bean properties into the existing JSON model.
+def mergeCompilerArguments = { ClassLoader loader, String kind, Map base, List tokens, String parseKind, options ->
+    // Argument files introduce additional mutable inputs that the provider
+    // does not yet track; they also bypass the token/byte bounds below.
+    if (tokens.any { it.startsWith('@') }) {
+        throw new GradleException('Kotlin compiler argument files require tracked import inputs')
+    }
+    if (tokens.size() > 1024 || tokens.sum { it.getBytes('UTF-8').length } > 65536) {
+        throw new GradleException('Kotlin free compiler arguments exceed import bounds')
+    }
+    def types = [jvm:'K2JVMCompilerArguments', js:'K2JSCompilerArguments',
+        native:'K2NativeCompilerArguments', common:'K2MetadataCompilerArguments']
+    def type = loader.loadClass("org.jetbrains.kotlin.cli.common.arguments.${types[parseKind]}")
+    def facetType = loader.loadClass("org.jetbrains.kotlin.cli.common.arguments.${types[kind]}")
+    def facetProperties = Introspector.getBeanInfo(facetType).propertyDescriptors
+        .findAll { it.readMethod != null && it.writeMethod != null }.collect { it.name }.toSet()
+    def arguments = type.getDeclaredConstructor().newInstance()
+    def defaults = type.getDeclaredConstructor().newInstance()
+    // Use the build's KGP conversion so typed DSL options are not silently
+    // dropped when they do not appear in freeCompilerArgs.
+    def helperKinds = [jvm:'Jvm', js:'Js', native:'Native', common:'MultiplatformCommon']
+    def helperType = loader.loadClass("org.jetbrains.kotlin.gradle.dsl.Kotlin${helperKinds[parseKind]}CompilerOptionsHelper")
+    def helper = helperType.getField('INSTANCE').get(null)
+    def fill = helperType.methods.find {
+        it.name.startsWith('fillCompilerArguments$') && it.parameterCount == 2
+    }
+    if (fill == null) throw new GradleException('Unsupported KGP compiler option conversion API')
+    fill.invoke(helper, options, arguments)
+    // KGP stages the raw flags in freeArgs; the CLI parser below consumes
+    // those same tokens and must retain only genuine positional leftovers.
+    if (arguments.freeArgs != tokens) throw new GradleException('Unexpected KGP free argument conversion')
+    arguments.freeArgs = []
+    base.each { name, value -> arguments."${name}" = value }
+    def parser = loader.loadClass('org.jetbrains.kotlin.cli.common.arguments.ParseCommandLineArgumentsKt')
+    parser.methods.find { it.name == 'parseCommandLineArguments' && it.parameterCount == 3 }
+        .invoke(null, tokens, arguments, false)
+    def errors = arguments.errors
+    def invalid = errors != null && (parser.methods.find { it.name == 'validateArguments' }.invoke(null, errors) != null ||
+        !errors.unknownArgs.empty || !errors.unknownExtraFlags.empty)
+    if (invalid || !arguments.freeArgs.empty || !arguments.internalArguments.empty) {
+        throw new GradleException('Unsupported or invalid Kotlin free compiler arguments')
+    }
+    def merged = new LinkedHashMap(base)
+    Introspector.getBeanInfo(type).propertyDescriptors.each { property ->
+        if (!facetProperties.contains(property.name) || property.readMethod == null || property.writeMethod == null ||
+            property.name in ['errors', 'freeArgs', 'internalArguments', 'frozen']) return
+        def value = property.readMethod.invoke(arguments)
+        def defaultValue = property.readMethod.invoke(defaults)
+        if (value == defaultValue && !base.containsKey(property.name)) return
+        if (value != null && !(value instanceof String || value instanceof Boolean || value instanceof Number ||
+            value instanceof String[])) {
+            throw new GradleException('Unsupported Kotlin compiler argument value type')
+        }
+        merged[property.name] = value
+    }
+    return merged
+}
+
+gradle.projectsEvaluated {
+    def projects = rootProject.allprojects.findAll { it.plugins.hasPlugin('org.jetbrains.kotlin.multiplatform') }
+    def importers = projects.collectEntries { p ->
+        def kotlin = p.extensions.getByName('kotlin')
+        def api = kotlin.class.classLoader.loadClass('org.jetbrains.kotlin.gradle.plugin.ide.IdeMultiplatformImport')
+        [(p.path): api.instance(p)]
+    }
+    rootProject.tasks.register('chakraExportKotlinModel') { task ->
+        importers.values().each { it.addDependencyOnResolvers(task) }
+        doLast {
+            def outputProperty = System.getProperty('chakra.kotlin.modelDir')
+            if (!outputProperty) throw new GradleException('Missing chakra.kotlin.modelDir')
+            if (!new File(outputProperty).isAbsolute()) throw new GradleException('Kotlin model path must be absolute')
+            def output = new File(outputProperty).canonicalFile
+            if (!output.isAbsolute() || output.toPath().startsWith(rootProject.projectDir.canonicalFile.toPath())) {
+                throw new GradleException('Kotlin model must be outside the canonical worktree')
+            }
+            if (projects.empty) {
+                output.mkdirs()
+                new File(output, 'not-multiplatform').text = 'No Kotlin Multiplatform plugin applied\n'
+                return
+            }
+            def modules = []
+            def facets = []
+            def libraries = [:]
+            def sdks = [:]
+            def knownModules = projects.collectMany { p ->
+                p.extensions.getByName('kotlin').sourceSets.collect { ss -> "${p.path}/${ss.name}".toString() }
+            }.toSet()
+            if (knownModules.size() > 512) throw new GradleException('KMP model exceeds 512 source sets')
+            // KGP exposes project binaries as compilation output artifacts.
+            // Resolve them back to the producing source sets, never by target
+            // name or a guessed build-directory convention.
+            def artifactSources = [:]
+            projects.each { project ->
+                project.extensions.getByName('kotlin').targets.each { target ->
+                    target.compilations.each { compilation ->
+                        def sourceSets = compilation.allKotlinSourceSets.collect { it.name.toString() }.unique().sort()
+                        compilation.output.classesDirs.files.each { file ->
+                            def key = [project.path.toString(), file.canonicalPath]
+                            if (!artifactSources.containsKey(key)) artifactSources[key] = []
+                            if (!artifactSources[key].contains(sourceSets)) artifactSources[key].add(sourceSets)
+                            if (artifactSources.size() > 4096) throw new GradleException('KMP model exceeds 4096 project artifacts')
+                        }
+                    }
+                    // A target's published archive is the artifact of its
+                    // main compilation. Use KGP's task and Gradle's archive
+                    // provider rather than inventing a jar filename.
+                    if (target.platformType.toString() != 'common') {
+                        def main = target.compilations.findByName('main')
+                        def archiveTask = project.tasks.findByName(target.artifactsTaskName)
+                        if (main != null && archiveTask != null && archiveTask.hasProperty('archiveFile')) {
+                            def artifact = archiveTask.archiveFile.get().asFile.canonicalPath
+                            def key = [project.path.toString(), artifact]
+                            def sourceSets = main.allKotlinSourceSets.collect { it.name.toString() }.unique().sort()
+                            if (!artifactSources.containsKey(key)) artifactSources[key] = []
+                            if (!artifactSources[key].contains(sourceSets)) artifactSources[key].add(sourceSets)
+                            if (artifactSources.size() > 4096) throw new GradleException('KMP model exceeds 4096 project artifacts')
+                        }
+                    }
+                }
+            }
+            projects.each { p ->
+                def kotlin = p.extensions.getByName('kotlin')
+                def pluginVersion = kotlin.class.classLoader.loadClass('org.jetbrains.kotlin.config.KotlinCompilerVersion').getField('VERSION').get(null)
+                def defaultLanguage = pluginVersion.tokenize('.').take(2).join('.')
+                kotlin.sourceSets.each { ss ->
+                    def moduleName = "${p.path}/${ss.name}".toString()
+                    def compilations = kotlin.targets.findAll { it.platformType.toString() != 'common' }
+                        .collectMany { target -> target.compilations.findAll { it.allKotlinSourceSets.contains(ss) } }
+                    // Detached source sets are not compiler inputs. Do not invent a platform.
+                    if (compilations.empty) return
+                    def platforms = compilations.collect { it.platformType.toString() }.toSet()
+                    if (!platforms.every { it in ['jvm', 'androidJvm', 'js', 'native'] }) {
+                        throw new GradleException("Unsupported KMP platform in ${moduleName}: ${platforms}")
+                    }
+                    def jvmCompilations = compilations.findAll { it.platformType.toString() in ['jvm', 'androidJvm'] }
+                    def nativeTargets = compilations.findAll { it.platformType.toString() == 'native' }
+                        .collect { it.target.konanTarget.name }.unique().sort()
+                    def jvmTargets = jvmCompilations.collect { it.compileTaskProvider.get().compilerOptions.jvmTarget.get().target }.unique()
+                    if (jvmTargets.size() > 1) throw new GradleException("Conflicting JVM targets for ${moduleName}")
+                    def isJvm = platforms.every { it in ['jvm', 'androidJvm'] }
+                    def kind = isJvm ? 'jvm' : platforms.size() == 1 ? platforms.first() : 'common'
+                    def prefix = [jvm:'J', js:'S', native:'N', common:'M'][kind]
+                    def compilerOptions = compilations.collect { it.compileTaskProvider.get().compilerOptions }
+                    def languageVersions = compilerOptions.collect { it.languageVersion.orNull?.version ?: defaultLanguage }.unique()
+                    def apiVersions = compilerOptions.collect {
+                        it.apiVersion.orNull?.version ?: ss.languageSettings.languageVersion ?: it.languageVersion.orNull?.version ?: defaultLanguage
+                    }.unique()
+                    if (languageVersions.size() != 1 || apiVersions.size() != 1) {
+                        throw new GradleException("Conflicting language/API versions for ${moduleName}")
+                    }
+                    def progressiveModes = compilerOptions.collect { it.progressiveMode.get() }.unique()
+                    def optIns = compilerOptions.collect { it.optIn.get().toSet().sort() }.unique()
+                    if (progressiveModes.size() != 1 || optIns.size() != 1) {
+                        throw new GradleException("Conflicting progressive/opt-in options for ${moduleName}")
+                    }
+                    def args = [languageVersion:ss.languageSettings.languageVersion ?: languageVersions.first(),
+                        apiVersion:ss.languageSettings.apiVersion ?: apiVersions.first(),
+                        autoAdvanceLanguageVersion:false, autoAdvanceApiVersion:false,
+                        multiPlatform:true, moduleName:moduleName,
+                        progressiveMode:progressiveModes.first() || ss.languageSettings.progressiveMode,
+                        optIn:(optIns.first() + ss.languageSettings.optInAnnotationsInUse.toList()).unique().sort()]
+                    if (isJvm) args.jvmTarget = jvmTargets.first()
+                    if (kind == 'native' && nativeTargets.size() == 1) args.target = nativeTargets.first()
+                    // KGP injects backend-only flags (for example JS output
+                    // names). Parse each compilation with its own compiler;
+                    // common facets keep common properties, not backend flags.
+                    def resolvedArguments = compilations.collect { compilation ->
+                        def parseKind = compilation.platformType.toString()
+                        if (parseKind == 'androidJvm') parseKind = 'jvm'
+                        mergeCompilerArguments(kotlin.class.classLoader, kind, args,
+                            compilation.compileTaskProvider.get().compilerOptions.freeCompilerArgs.get().toList(), parseKind,
+                            compilation.compileTaskProvider.get().compilerOptions)
+                    }.unique { JsonOutput.toJson(it) }
+                    if (resolvedArguments.size() != 1) {
+                        throw new GradleException("Conflicting free compiler arguments for ${moduleName}")
+                    }
+                    args = resolvedArguments.first()
+                    // KGP's source-set language settings select the appropriate
+                    // metadata/platform plugin classpath. Platform tasks may use
+                    // different compiler artifacts, so do not union their jars.
+                    def pluginPaths = ss.languageSettings.compilerPluginClasspath.files.collect { file ->
+                        if (!file.isFile()) throw new GradleException('Missing Kotlin compiler plugin artifact')
+                        file.canonicalPath
+                    }.unique()
+                    def pluginOptions = ss.languageSettings.compilerPluginArguments.toList()
+                    def taskPluginOptions = compilations.collect { compilation ->
+                        compilation.defaultSourceSet.languageSettings.compilerPluginArguments.toList()
+                    }.unique()
+                    if (taskPluginOptions.size() != 1 || taskPluginOptions.first() != pluginOptions) {
+                        throw new GradleException("Conflicting Kotlin compiler plugin options for ${moduleName}")
+                    }
+                    if (compilations.any { compilation ->
+                        compilation.defaultSourceSet.languageSettings.compilerPluginClasspath.files.any { file ->
+                            !pluginPaths.contains(file.canonicalPath)
+                        }
+                    }) {
+                        throw new GradleException("Conflicting Kotlin compiler plugin classpaths for ${moduleName}")
+                    }
+                    pluginPaths = ((args.pluginClasspaths ?: []) + pluginPaths).unique()
+                    pluginOptions = (args.pluginOptions ?: []) + pluginOptions
+                    if (pluginPaths.size() > 256 || pluginOptions.size() > 1024 ||
+                        (pluginPaths + pluginOptions).sum { it.getBytes('UTF-8').length } > 65536) {
+                        throw new GradleException('Kotlin compiler plugins exceed import bounds')
+                    }
+                    pluginPaths = pluginPaths.collect { path ->
+                        def file = new File(path)
+                        if (!file.isAbsolute()) file = new File(p.projectDir, path)
+                        if (!file.isFile()) throw new GradleException('Missing Kotlin compiler plugin artifact')
+                        file.canonicalPath
+                    }.unique()
+                    args.pluginClasspaths = pluginPaths
+                    args.pluginOptions = pluginOptions
+                    def platformTokens = []
+                    if (platforms.contains('js')) platformTokens.add('JS []')
+                    if (!jvmTargets.empty) platformTokens.add("JVM [${jvmTargets.first()}]".toString())
+                    if (!nativeTargets.empty) {
+                        platformTokens.add('Native []')
+                        nativeTargets.each { platformTokens.add("Native [${it}]".toString()) }
+                    }
+                    def dependencies = [[type:'moduleSource']]
+                    def friends = []
+                    def ideDependencies = importers[p.path].resolveDependencies(ss).collectMany { dependency ->
+                        if (dependency.class.simpleName != 'IdeaKotlinProjectArtifactDependency') return [dependency]
+                        def coordinates = dependency.coordinates
+                        // Only the top-level build's allprojects graph is
+                        // exported. Included builds have distinct buildPath
+                        // values even when their projectPath is also ':'.
+                        if (coordinates.buildPath != ':') {
+                            throw new GradleException('KMP project artifact belongs to an unexported included build')
+                        }
+                        def extrasApi = kotlin.class.classLoader.loadClass('org.jetbrains.kotlin.gradle.idea.tcs.extras.ProjectArtifactClasspathExtrasKt')
+                        def classpath = extrasApi.getMethod('getArtifactsClasspath', dependency.class).invoke(null, dependency)
+                        if (classpath.empty) throw new GradleException('KMP project artifact has no producer paths')
+                        def sourceSets = classpath.collectMany { file ->
+                            def producers = artifactSources[[coordinates.projectPath.toString(), file.canonicalPath]]
+                            if (producers == null || producers.size() != 1) {
+                                throw new GradleException("Unmapped or ambiguous KMP project artifact: ${file}")
+                            }
+                            producers.first()
+                        }.unique().sort()
+                        dependency.resolved(sourceSets).toList()
+                    }
+                    ideDependencies.each { dependency ->
+                        switch (dependency.class.simpleName) {
+                            case 'IdeaKotlinSourceDependency':
+                                def coordinates = dependency.coordinates
+                                if (coordinates.project.buildPath != ':') {
+                                    throw new GradleException('KMP source dependency belongs to an unexported included build')
+                                }
+                                def targetModule = "${coordinates.project.projectPath}/${coordinates.sourceSetName}".toString()
+                                if (!knownModules.contains(targetModule)) {
+                                    throw new GradleException("KMP dependency outside exported project graph: ${targetModule}")
+                                }
+                                def dependencyKind = dependency.type.toString()
+                                dependencies.add([type:'module', name:targetModule, scope:'compile', isExported:dependencyKind == 'DependsOn'])
+                                if (dependencyKind == 'Friend') friends.add(targetModule)
+                                break
+                            case 'IdeaKotlinResolvedBinaryDependency':
+                                if (dependency.binaryType != 'KOTLIN_COMPILE') break
+                                dependency.classpath.each { File file ->
+                                    if (!file.exists()) throw new GradleException("Missing KMP dependency: ${file}")
+                                    def libraryName = "${kind}:${file.canonicalPath}".toString()
+                                    def library = [name:libraryName, type:null, roots:[[path:file.canonicalPath]]]
+                                    if (kind != 'jvm') library.type = "kotlin.${kind}".toString()
+                                    libraries[libraryName] = library
+                                    dependencies.add([type:'library', name:libraryName, scope:'compile'])
+                                }
+                                break
+                            default:
+                                throw new GradleException("Unresolved/unsupported KMP dependency: ${dependency}")
+                        }
+                    }
+                    if (isJvm) {
+                        def toolchain = jvmCompilations.first().compileTaskProvider.get().kotlinJavaToolchain
+                        // KGP 2.2.20's actual selected toolchain; Gradle's own JVM may differ.
+                        def javaExecutable = toolchain.'javaExecutable$kotlin_gradle_plugin_common'.get().asFile
+                        def home = javaExecutable.parentFile.parentFile.canonicalPath
+                        def version = toolchain.javaVersion.get().majorVersion
+                        def sdkName = "JDK:${home}".toString()
+                        sdks[sdkName] = [name:sdkName, type:'jdk', version:"JDK_${version}".toString(), homePath:home, additionalData:'']
+                        dependencies.add([type:'sdk', name:sdkName, kind:'jdk'])
+                    }
+                    def roots = ss.kotlin.srcDirs.collect { it.canonicalPath }.unique().sort()
+                    def isTest = compilations.every { !it.associatedCompilations.empty }
+                    modules.add([name:moduleName, dependencies:dependencies.unique(), contentRoots:roots.collect { root ->
+                        [path:root, sourceRoots:[[path:root, type:isTest ? 'java-test' : 'java-source']]]
+                    }])
+                    facets.add([name:'Kotlin', sourceRoots:roots, configFileItems:[], module:moduleName,
+                        useProjectSettings:false, implementedModuleNames:[],
+                        dependsOnModuleNames:ss.dependsOn.collect { "${p.path}/${it.name}".toString() }.sort(),
+                        additionalVisibleModuleNames:friends.unique().sort(), productionOutputPath:null, testOutputPath:null,
+                        sourceSetNames:[ss.name], isTestModule:isTest, externalProjectId:'', isHmppEnabled:true,
+                        pureKotlinSourceFolders:roots, kind:'source_set_holder', compilerArguments:prefix + JsonOutput.toJson(args),
+                        additionalArguments:'', scriptTemplates:null, scriptTemplatesClasspath:null,
+                        copyJsLibraryFiles:false, outputDirectoryForJsLibraryFiles:null,
+                        targetPlatform:platformTokens.join('/'), externalSystemRunTasks:[], version:5, flushNeeded:false])
+                }
+            }
+            if (libraries.size() > 4096) throw new GradleException('KMP model exceeds 4096 libraries')
+            def model = JsonOutput.toJson([modules:modules, libraries:libraries.values().toList(), sdks:sdks.values().toList(), kotlinSettings:facets])
+            if (model.getBytes('UTF-8').length > 16 * 1024 * 1024) throw new GradleException('KMP model exceeds 16 MiB')
+            output.mkdirs()
+            def pending = new File(output, 'workspace.json.pending')
+            pending.setText(model + '\n', 'UTF-8')
+            Files.move(pending.toPath(), new File(output, 'workspace.json').toPath(), StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE)
+            // The JSON route replaces the server's ordinary Gradle importer.
+            // Until those modules are exported too, do not claim complete
+            // incoming/outgoing coverage for a mixed Kotlin project.
+            def omittedKotlinProjects = rootProject.allprojects.findAll { p ->
+                !projects.contains(p) && (p.plugins.hasPlugin('org.jetbrains.kotlin.jvm') ||
+                    p.plugins.hasPlugin('org.jetbrains.kotlin.android'))
+            }
+            if (!omittedKotlinProjects.empty) {
+                new File(output, 'incomplete-coverage').text = 'Non-KMP Kotlin modules are not present in this model\n'
+            }
+            println("Chakra KMP import: ${modules.size()} modules, ${libraries.size()} libraries")
+        }
+    }
+}

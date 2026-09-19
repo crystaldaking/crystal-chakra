@@ -1,6 +1,6 @@
 # Public corpus evaluation results (issue #25)
 
-Produced by `cargo run --release -p chakra-conformance -- corpus --emit docs/support/corpus/results` on macos/aarch64 (10 logical CPUs), 2026-08-23.
+Produced by `cargo run --release -p chakra-conformance -- corpus --emit docs/support/corpus/results` on macos/aarch64 (10 logical CPUs), 2026-09-13.
 
 Measured values vary by machine and run; these artifacts are committed deliberately and are **not** diffed in CI. CI runs `chakra-conformance corpus --verify`, which checks artifact structure and manifest consistency only. Budgets live in `budgets.json`; refreshing budgets or baselines requires review.
 
@@ -17,6 +17,8 @@ Measured values vary by machine and run; these artifacts are committed deliberat
 | java | apache/kafka | `aa502fb153d9` | pass | 8.39 | 1562 | 216728 | 241541 | 236 | 0 |
 | java | spring-projects/spring-boot | `e3d4b1ceb6d8` | pass | 4.00 | 957 | 161763 | 102692 | 597 | 0 |
 | javascript | react/react | `eb8feb71096e` | pass | 2.61 | 523 | 82648 | 66026 | 121 | 0 |
+| kotlin | Kotlin/kotlinx.coroutines | `7e8b5a405c83` | pass | 0.40 | 137 | 15557 | 20693 | 248 | 0 |
+| kotlin | square/okhttp | `140245177910` | pass | 0.39 | 157 | 18217 | 22038 | 254 | 0 |
 | php | laravel/framework | `faf45dd2b154` | pass | 2.63 | 516 | 56729 | 118988 | 63 | 0 |
 | php | symfony/symfony | `add4ddb9867b` | pass | 8.12 | 1174 | 122685 | 245871 | 237 | 0 |
 | python | apache/airflow | `f8b8461e8191` | pass | 7.99 | 1612 | 282953 | 253255 | 364 | 0 |

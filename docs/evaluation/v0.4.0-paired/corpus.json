@@ -1,0 +1,278 @@
+{
+  "schema_version": 1,
+  "issue": "https://github.com/crystaldaking/crystal-chakra/issues/189",
+  "protocol": "docs/evaluation/v0.4.0-paired-agent-protocol.md",
+  "defined_at": "2026-09-11",
+  "selection_note": "Repository pins reuse docs/support/corpus/manifest.json (ADR-0029). Every expected file/test path was verified against the pinned SHA via the GitHub tree API on 2026-09-11. Paths are repository-relative. A verification failure must be fixed here before any run that references the path.",
+  "defaults": {
+    "budgets": {
+      "max_wall_time_minutes": 45,
+      "max_turns": 60
+    },
+    "conditions": ["baseline", "chakra"]
+  },
+  "repositories": [
+    {
+      "id": "tokio",
+      "name": "tokio-rs/tokio",
+      "url": "https://github.com/tokio-rs/tokio",
+      "sha": "625954f365727668cb02d04172b34f1149637728",
+      "license": "MIT",
+      "language": "rust"
+    },
+    {
+      "id": "ripgrep",
+      "name": "BurntSushi/ripgrep",
+      "url": "https://github.com/BurntSushi/ripgrep",
+      "sha": "3fce3b5bb0236da2df6d99672afb8a719642eca7",
+      "license": "Unlicense",
+      "language": "rust"
+    },
+    {
+      "id": "laravel",
+      "name": "laravel/framework",
+      "url": "https://github.com/laravel/framework",
+      "sha": "faf45dd2b1549ff451993e9b20047ff0bf093033",
+      "license": "MIT",
+      "language": "php"
+    },
+    {
+      "id": "django",
+      "name": "django/django",
+      "url": "https://github.com/django/django",
+      "sha": "d92b0209014021350af0383983315bf0a05ffac0",
+      "license": "BSD-3-Clause",
+      "language": "python"
+    },
+    {
+      "id": "prometheus",
+      "name": "prometheus/prometheus",
+      "url": "https://github.com/prometheus/prometheus",
+      "sha": "98c983239715d0d81b8acf3560d47aba2a6d1649",
+      "license": "Apache-2.0",
+      "language": "go"
+    }
+  ],
+  "tasks": [
+    {
+      "id": "tokio-spawn-navigation",
+      "repository": "tokio",
+      "scenario": "navigation",
+      "brief": "Trace how a task spawned with `tokio::spawn` is handed to the multi-thread scheduler and eventually executed by a worker thread. Identify the public entry point, the scheduling/injection path, and where a worker picks the task up. Report the answer with exact file and symbol references.",
+      "expected_relevant_files": [
+        "tokio/src/task/spawn.rs",
+        "tokio/src/runtime/scheduler/mod.rs",
+        "tokio/src/runtime/scheduler/inject.rs",
+        "tokio/src/runtime/scheduler/multi_thread/worker.rs",
+        "tokio/src/runtime/scheduler/multi_thread/queue.rs"
+      ],
+      "expected_related_tests": [],
+      "validation": "Answer review against the expected file list; every claimed path must exist at the pinned SHA.",
+      "objective_success_criteria": [
+        "Names the public spawn entry in tokio/src/task/spawn.rs or its re-export path.",
+        "Identifies the injection/queue hand-off into the multi-thread scheduler with file references.",
+        "Identifies where a worker thread obtains the next task, with file references.",
+        "No fabricated file or symbol references."
+      ]
+    },
+    {
+      "id": "ripgrep-ignore-regression-tests",
+      "repository": "ripgrep",
+      "scenario": "regression-test-discovery",
+      "brief": "A refactor of .gitignore handling in the `ignore` crate is planned. Identify the existing automated tests that would catch a regression in gitignore semantics, and name the source modules under test.",
+      "expected_relevant_files": [
+        "crates/ignore/src",
+        "tests/regression.rs",
+        "tests/feature.rs"
+      ],
+      "expected_related_tests": [
+        "tests/regression.rs",
+        "tests/feature.rs"
+      ],
+      "validation": "Answer review; optionally `cargo test --test regression --test feature` in a scratch copy of the pinned checkout.",
+      "objective_success_criteria": [
+        "Identifies tests/regression.rs and tests/feature.rs as behavior-pinning suites for ignore handling.",
+        "Locates the ignore crate under crates/ignore/src as the module under test.",
+        "Names at least one concrete test function per relevant suite.",
+        "No fabricated file or test names."
+      ]
+    },
+    {
+      "id": "laravel-where-change-surface",
+      "repository": "laravel",
+      "scenario": "change-surface-discovery",
+      "brief": "Assume `Illuminate\\Database\\Eloquent\\Builder::where()` must change so that an explicitly null operator throws instead of being normalized. Enumerate every in-repository caller, forwarder, and overrider that the change could affect, and the tests that pin the current behavior.",
+      "expected_relevant_files": [
+        "src/Illuminate/Database/Eloquent/Builder.php",
+        "src/Illuminate/Database/Query/Builder.php",
+        "tests/Database/DatabaseEloquentBuilderTest.php",
+        "tests/Database/DatabaseQueryBuilderTest.php"
+      ],
+      "expected_related_tests": [
+        "tests/Database/DatabaseEloquentBuilderTest.php",
+        "tests/Database/DatabaseQueryBuilderTest.php"
+      ],
+      "validation": "Answer review against the expected lists; caller enumeration must be checkable against the pinned checkout.",
+      "objective_success_criteria": [
+        "Identifies the Eloquent and Query Builder pair and their forwarding relationship.",
+        "Enumerates in-repository callers/overriders without inventing classes.",
+        "Identifies the two behavior-pinning test classes.",
+        "Notes dynamic/forwarded call paths that a purely lexical search would miss."
+      ]
+    },
+    {
+      "id": "laravel-soft-deletes-navigation",
+      "repository": "laravel",
+      "scenario": "navigation",
+      "brief": "Explain how Laravel's SoftDeletes feature keeps soft-deleted models out of query results: from trait boot, through the global scope, to the query constraint. Report with exact file and symbol references.",
+      "expected_relevant_files": [
+        "src/Illuminate/Database/Eloquent/SoftDeletes.php",
+        "src/Illuminate/Database/Eloquent/SoftDeletingScope.php",
+        "src/Illuminate/Database/Eloquent/Builder.php"
+      ],
+      "expected_related_tests": [
+        "tests/Database/DatabaseSoftDeletingScopeTest.php",
+        "tests/Database/DatabaseSoftDeletingTest.php"
+      ],
+      "validation": "Answer review against the expected file/test lists.",
+      "objective_success_criteria": [
+        "Names the trait boot mechanism in SoftDeletes.php.",
+        "Names SoftDeletingScope.php as the constraint point and its apply behavior.",
+        "Connects the scope to the Eloquent Builder query path.",
+        "No fabricated file or symbol references."
+      ]
+    },
+    {
+      "id": "django-queryset-test-discovery",
+      "repository": "django",
+      "scenario": "regression-test-discovery",
+      "brief": "A change to `QuerySet.bulk_update` and to `Q` object combination is planned. Find the existing test modules that pin current behavior for both, and the source modules under test.",
+      "expected_relevant_files": [
+        "django/db/models/query.py",
+        "django/db/models/query_utils.py",
+        "tests/queries/test_bulk_update.py",
+        "tests/queries/test_q.py"
+      ],
+      "expected_related_tests": [
+        "tests/queries/test_bulk_update.py",
+        "tests/queries/test_q.py",
+        "tests/queries/test_query.py"
+      ],
+      "validation": "Answer review; optionally a focused Django test run (tests/runtests.py queries) in a scratch copy where the environment permits.",
+      "objective_success_criteria": [
+        "Identifies tests/queries/test_bulk_update.py for bulk_update behavior.",
+        "Identifies tests/queries/test_q.py for Q combination behavior.",
+        "Names django/db/models/query.py and django/db/models/query_utils.py as the modules under test.",
+        "No fabricated file or test names."
+      ]
+    },
+    {
+      "id": "django-lookup-navigation",
+      "repository": "django",
+      "scenario": "navigation",
+      "brief": "Trace how a filter lookup such as `field__icontains` is resolved from the ORM filter call to the emitted SQL fragment: lookup registration, lookup resolution, and SQL compilation. Report with exact file and symbol references.",
+      "expected_relevant_files": [
+        "django/db/models/query.py",
+        "django/db/models/lookups.py",
+        "django/db/models/sql/query.py",
+        "django/db/models/sql/where.py",
+        "django/db/models/sql/compiler.py"
+      ],
+      "expected_related_tests": [],
+      "validation": "Answer review against the expected file list.",
+      "objective_success_criteria": [
+        "Identifies where lookups are registered and resolved (django/db/models/lookups.py and the field/query path).",
+        "Identifies the WHERE-tree construction and SQL compilation stages with file references.",
+        "No fabricated file or symbol references."
+      ]
+    },
+    {
+      "id": "promql-function-change-surface",
+      "repository": "prometheus",
+      "scenario": "change-surface-discovery",
+      "brief": "Assume the evaluation signature of PromQL built-in functions in promql/functions.go must change (for example an added context or storage parameter). Enumerate every in-repository call site that must be updated and the tests that pin current behavior.",
+      "expected_relevant_files": [
+        "promql/functions.go",
+        "promql/engine.go"
+      ],
+      "expected_related_tests": [
+        "promql/functions_test.go",
+        "promql/engine_test.go",
+        "promql/promqltest"
+      ],
+      "validation": "Answer review against the expected lists; call-site enumeration must be checkable against the pinned checkout.",
+      "objective_success_criteria": [
+        "Identifies the function registration table and its consumer in the engine, with file references.",
+        "Enumerates in-repository call sites without inventing symbols.",
+        "Identifies functions_test.go, engine_test.go, and the promqltest harness as behavior-pinning.",
+        "No fabricated file or symbol references."
+      ]
+    },
+    {
+      "id": "promql-query-navigation",
+      "repository": "prometheus",
+      "scenario": "navigation",
+      "brief": "Trace a PromQL expression from parsing to an evaluated result: parser entry, AST, engine execution, and value construction. Report with exact file and symbol references.",
+      "expected_relevant_files": [
+        "promql/parser",
+        "promql/engine.go",
+        "promql/value.go"
+      ],
+      "expected_related_tests": [
+        "promql/promql_test.go",
+        "promql/engine_test.go"
+      ],
+      "validation": "Answer review against the expected file/test lists.",
+      "objective_success_criteria": [
+        "Names the parser entry point under promql/parser.",
+        "Identifies the engine evaluation entry in promql/engine.go.",
+        "Identifies result value construction in promql/value.go.",
+        "No fabricated file or symbol references."
+      ]
+    },
+    {
+      "id": "tokio-stale-worktree-edit",
+      "repository": "tokio",
+      "scenario": "stale-worktree",
+      "brief": "Rewrite the doc comment of the public `spawn` function in tokio/src/task/spawn.rs so that it documents cancellation behavior explicitly (the exact wording is the agent's choice; semantics must remain accurate). The worktree may be edited by another process during the task: before producing the final patch, verify the worktree state has not drifted since you started, and base the patch on the current state.",
+      "expected_relevant_files": [
+        "tokio/src/task/spawn.rs"
+      ],
+      "expected_related_tests": [],
+      "harness_mutation": {
+        "file": "tokio/src/runtime/scheduler/mod.rs",
+        "kind": "append a one-line documentation comment",
+        "timing": "after setup handoff, before the agent's final patch"
+      },
+      "validation": "The final diff must apply cleanly on the post-mutation worktree state and must not revert the harness mutation; doc-comment accuracy review.",
+      "objective_success_criteria": [
+        "Final patch is based on the post-mutation worktree state.",
+        "The harness mutation in tokio/src/runtime/scheduler/mod.rs is preserved.",
+        "The new doc comment is accurate about cancellation semantics.",
+        "A stale-context incident is recorded if the agent acted on pre-mutation state without detecting drift."
+      ]
+    },
+    {
+      "id": "laravel-stale-worktree-edit",
+      "repository": "laravel",
+      "scenario": "stale-worktree",
+      "brief": "Extend the docblock of `Illuminate\\Database\\Eloquent\\Builder::where()` in src/Illuminate/Database/Eloquent/Builder.php so that it documents the accepted operator list (the exact wording is the agent's choice; it must match the actual normalization logic). The worktree may be edited by another process during the task: before producing the final patch, verify the worktree state has not drifted since you started, and base the patch on the current state.",
+      "expected_relevant_files": [
+        "src/Illuminate/Database/Eloquent/Builder.php"
+      ],
+      "expected_related_tests": [],
+      "harness_mutation": {
+        "file": "src/Illuminate/Database/Query/Builder.php",
+        "kind": "append a one-line documentation comment",
+        "timing": "after setup handoff, before the agent's final patch"
+      },
+      "validation": "The final diff must apply cleanly on the post-mutation worktree state and must not revert the harness mutation; docblock accuracy review against the operator normalization code.",
+      "objective_success_criteria": [
+        "Final patch is based on the post-mutation worktree state.",
+        "The harness mutation in src/Illuminate/Database/Query/Builder.php is preserved.",
+        "The documented operator list matches the actual normalization logic.",
+        "A stale-context incident is recorded if the agent acted on pre-mutation state without detecting drift."
+      ]
+    }
+  ]
+}

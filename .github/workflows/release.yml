@@ -47,8 +47,11 @@ jobs:
             fi
           else
             tag="${DISPATCH_TAG}"
-            if [[ "${GITHUB_REF_NAME}" != "main" ]]; then
-              echo "manual release preflight must run from main" >&2
+            if [[ "${GITHUB_REF_TYPE}" != "branch" ]] || \
+               [[ "${GITHUB_REF_NAME}" != "main" && \
+                  "${GITHUB_REF_NAME}" != "release/${tag}" && \
+                  "${GITHUB_REF_NAME}" != "release/${tag#v}" ]]; then
+              echo "manual release preflight requires main or the matching release branch" >&2
               exit 1
             fi
           fi
@@ -71,6 +74,18 @@ jobs:
 
           python3 tools/extract_release_notes.py "${version}" >/dev/null
           printf 'tag=%s\nversion=%s\n' "${tag}" "${version}" >>"${GITHUB_OUTPUT}"
+
+  language-acceptance:
+    name: Real language-provider acceptance
+    needs: prepare
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+      # Includes Kotlin Maven, Gradle JVM, Android and Multiplatform. These
+      # ignored real-server tests must pass before a release is published.
+      - name: Run workspace and real-provider tests in the pinned image
+        run: ./tools/run_lsp_tests.sh
 
   build:
     name: Build ${{ matrix.target }}
@@ -160,6 +175,128 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  installer-smoke:
+    name: Installer smoke ${{ matrix.target }}
+    needs: [prepare, assemble]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+          - runner: macos-15-intel
+            target: x86_64-apple-darwin
+          - runner: macos-15
+            target: aarch64-apple-darwin
+          - runner: windows-2022
+            target: x86_64-pc-windows-msvc
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          name: release-bundle
+          path: bundle
+      - name: Smoke-test the Unix installer
+        if: runner.os != 'Windows'
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -eu
+          (
+            cd bundle
+            if command -v sha256sum >/dev/null 2>&1; then
+              sha256sum --check SHA256SUMS
+            else
+              shasum -a 256 --check SHA256SUMS
+            fi
+          )
+          fixture="$(mktemp -d)"
+          mkdir -p "${fixture}/download/${RELEASE_TAG}"
+          cp "bundle/chakra-${RELEASE_TAG}-${TARGET}.tar.gz" \
+            "${fixture}/download/${RELEASE_TAG}/"
+          cp bundle/SHA256SUMS "${fixture}/download/${RELEASE_TAG}/"
+          smoke_home="${fixture}/home"
+          mkdir -p "${smoke_home}"
+          env HOME="${smoke_home}" SHELL=/bin/zsh \
+            sh bundle/install.sh --version "${RELEASE_TAG}" \
+              --base-url "file://${fixture}" --dir "${smoke_home}/.local/bin"
+          # Fresh-shell PATH resolution through the managed block.
+          env -i HOME="${smoke_home}" PATH=/usr/bin:/bin SHELL=/bin/zsh RELEASE_TAG="${RELEASE_TAG}" \
+            zsh -ic 'command -v chakra && test "$(chakra --version)" = "chakra ${RELEASE_TAG#v}"'
+          # Repeat install: upgrade path stays idempotent.
+          env HOME="${smoke_home}" SHELL=/bin/zsh \
+            sh bundle/install.sh --version "${RELEASE_TAG}" \
+              --base-url "file://${fixture}" --dir "${smoke_home}/.local/bin"
+          test "$(grep -c '>>> chakra path >>>' "${smoke_home}/.zshrc")" -eq 1
+      - name: Smoke-test the Windows installer
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          foreach ($line in Get-Content bundle/SHA256SUMS) {
+            if ($line -notmatch '^([a-f0-9]{64})  ([A-Za-z0-9_.-]+)$') {
+              throw "malformed checksum manifest entry"
+            }
+            $expected = $Matches[1]
+            $asset = Join-Path bundle $Matches[2]
+            if ((Get-FileHash $asset -Algorithm SHA256).Hash.ToLower() -ne $expected) {
+              throw "checksum mismatch: $asset"
+            }
+          }
+          $fixture = Join-Path $env:TEMP "chakra-fixture-$PID"
+          $download = Join-Path $fixture "download/$env:RELEASE_TAG"
+          New-Item -ItemType Directory -Force -Path $download | Out-Null
+          $archive = "chakra-$env:RELEASE_TAG-$env:TARGET.zip"
+          Copy-Item "bundle/$archive" $download
+          Copy-Item bundle/SHA256SUMS $download
+          $dir = Join-Path $fixture "bin"
+          $originalUserPath = [Environment]::GetEnvironmentVariable("Path", "User")
+          try {
+            # Both installations must succeed and leave exactly one PATH entry.
+            foreach ($attempt in 1..2) {
+              & pwsh -NoProfile -File bundle/install.ps1 -Version $env:RELEASE_TAG `
+                -BaseUrl $fixture -Dir $dir
+              if ($LASTEXITCODE -ne 0) { throw "installer attempt $attempt failed" }
+              $actual = (& (Join-Path $dir "chakra.exe") --version).Trim()
+              if ($LASTEXITCODE -ne 0 -or $actual -ne "chakra $($env:RELEASE_TAG.Substring(1))") {
+                throw "installed binary reports $actual"
+              }
+              $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
+              if (@($userPath.Split(';') | Where-Object { $_ -eq $dir }).Count -ne 1) {
+                throw "install dir must occur exactly once in user PATH"
+              }
+            }
+            $binary = Join-Path $dir "chakra.exe"
+            $before = (Get-FileHash $binary -Algorithm SHA256).Hash
+            # A rejected download must preserve both the binary and user PATH.
+            $checksum = Join-Path $download "SHA256SUMS"
+            Set-Content -Path $checksum -Value (("0" * 64) + "  " + $archive)
+            & pwsh -NoProfile -File bundle/install.ps1 -Version $env:RELEASE_TAG `
+              -BaseUrl $fixture -Dir $dir
+            if ($LASTEXITCODE -eq 0) { throw "corrupt checksum unexpectedly accepted" }
+            if ((Get-FileHash $binary -Algorithm SHA256).Hash -ne $before) {
+              throw "failed installation changed the installed binary"
+            }
+            if ([Environment]::GetEnvironmentVariable("Path", "User") -ne $userPath) {
+              throw "failed installation changed user PATH"
+            }
+            $actual = (& $binary --version).Trim()
+            if ($LASTEXITCODE -ne 0 -or $actual -ne "chakra $($env:RELEASE_TAG.Substring(1))") {
+              throw "previous installation no longer runs"
+            }
+          } finally {
+            # Restore exact pre-test state even if any assertion fails.
+            [Environment]::SetEnvironmentVariable("Path", $originalUserPath, "User")
+            Remove-Item -Recurse -Force $fixture -ErrorAction SilentlyContinue
+          }
+
+
   assemble:
     needs: [prepare, build]
     runs-on: ubuntu-22.04
@@ -191,16 +328,17 @@ jobs:
           done
           test "$(find bundle -maxdepth 1 -type f | wc -l | tr -d ' ')" -eq 4
 
+          cp tools/install.sh tools/install.ps1 bundle/
           (
             cd bundle
-            sha256sum *.tar.gz *.zip | sort -k2 >SHA256SUMS
+            sha256sum *.tar.gz *.zip install.sh install.ps1 | sort -k2 >SHA256SUMS
             sha256sum --check SHA256SUMS
           )
       - name: Extract release notes
         env:
           VERSION: ${{ needs.prepare.outputs.version }}
         run: python3 tools/extract_release_notes.py "${VERSION}" >bundle/RELEASE_NOTES.md
-      - name: Attest release archives
+      - name: Attest release archives and installers
         uses: actions/attest@v4
         with:
           subject-checksums: bundle/SHA256SUMS
@@ -213,7 +351,7 @@ jobs:
 
   publish:
     if: github.event_name == 'push'
-    needs: [prepare, assemble]
+    needs: [prepare, assemble, installer-smoke, language-acceptance]
     runs-on: ubuntu-22.04
     timeout-minutes: 10
     permissions:
@@ -232,6 +370,8 @@ jobs:
           gh release create "${RELEASE_TAG}" \
             ./bundle/*.tar.gz \
             ./bundle/*.zip \
+            ./bundle/install.sh \
+            ./bundle/install.ps1 \
             ./bundle/SHA256SUMS \
             --repo "${GITHUB_REPOSITORY}" \
             --verify-tag \

@@ -1,0 +1,30 @@
+{
+  "status": "pass",
+  "target": "x86_64-unknown-linux-gnu",
+  "version": "0.4.0",
+  "execution": "Linux/amd64 Docker container on macOS ARM64; not physical x86-64 native runner",
+  "binary_sha256": "86f7d6489d15df6962e745dec8fb53f62511fd880c1c1e3b1526fee03f77d3ca",
+  "archive_sha256": "3cc89b80a7495716d28beb0853cbfcd3b7a1287967dcafeaf29ddd2a784fc03b",
+  "installer_sha256": {
+    "install.sh": "782d076ec9bec1fe103001533faa73d8341726f1b9b89b6d2f1ea4b0031b9b7f",
+    "install.ps1": "614c6e28b6b3a4a7623fd848f20e7bbb90a510e3319dfa2092c6f7c488355c35"
+  },
+  "git_head": "ab2dc51ccb113c80f80e0c9b02e1dd80cc0b35e3",
+  "source_state": "committed runtime candidate; local build, not published release provenance",
+  "controlled_newer_release": "not covered",
+  "steps": [
+    "built-version",
+    "runtime-linkage",
+    "bundle-checksums",
+    "clean-install",
+    "fresh-interactive-bash",
+    "repeat-install",
+    "checksum-failure",
+    "missing-download",
+    "preserved-version",
+    "public-update-current"
+  ],
+  "build_source_head": "ab2dc51ccb113c80f80e0c9b02e1dd80cc0b35e3",
+  "source_hashes_unchanged": true,
+  "evidence_directory": "target/kmp-fix/final-candidate-linux"
+}

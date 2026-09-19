@@ -67,9 +67,14 @@ ignored by default because they need a language server on `PATH`.
 to the versions recorded in `docs/languages/*.md`: rust-analyzer from the
 pinned rustup toolchain, clangd 21, gopls 0.23.x with the Go toolchain,
 pyright, vtsls with a resolvable TypeScript, bash-language-server 5.6.x,
-jdtls with a JDK 21 runtime, csharp-ls on the .NET 10 SDK, and terraform-ls
-0.39.x. `tools/run_lsp_tests.sh` wraps image build and test execution; only
-Docker is required on the host.
+jdtls with a JDK 21 runtime, csharp-ls on the .NET 10 SDK, terraform-ls
+0.39.x, and Kotlin's standalone `kotlin-server 263.4702.0` with its bundled
+runtime, Maven 3.9.16, Android SDK platform 35, and build tools 35.0.0.
+Kotlin acceptance covers Maven, Gradle JVM, Android, and Multiplatform
+projects and remains a 0.4.0 release gate; see
+[Kotlin verification](docs/languages/kotlin.md#verification) for its current
+evidence. `tools/run_lsp_tests.sh` wraps image build and test
+execution; only Docker is required on the host.
 
 Run the full suite, including the real-provider tests:
 
@@ -79,11 +84,20 @@ Run the full suite, including the real-provider tests:
 
 Without arguments the wrapper first runs `cargo test --locked --workspace`,
 then runs each existing ignored real-provider smoke-test target
-(rust-analyzer, clangd, csharp-ls, gopls, and terraform-ls) explicitly. This
-keeps the single command green without accidentally enabling unrelated ignored
+(rust-analyzer, clangd, csharp-ls, gopls, terraform-ls, pyright, vtsls, jdtls,
+bash-language-server, and kotlin-lsp) explicitly. The vtsls target exercises
+both TypeScript and JavaScript; the Kotlin target exercises five positive
+scenarios (Maven, Gradle JVM, mixed Kotlin/Java, Android and KMP), plus
+explicit fallback for standalone scripts. Android checks SDK overloads;
+KMP checks source-set callers and build-input regeneration.
+The default run also executes Kotlin's ignored `real_gradle_` import-contract
+tests, which check the generated model before language-server startup.
+Each provider target runs serially, and a
+failure is reported without skipping later providers; the overall command
+still exits with failure. This avoids accidentally enabling unrelated ignored
 benchmarks and large-workspace gates that require external inputs. Provider
-adapters without a real-server test target are still covered by their hermetic
-lifecycle suites and by the image's executable/version checks. Any arguments
+adapters are also covered by their hermetic lifecycle suites. PHP has no LSP
+adapter and is covered by syntax/resolver and shared conformance tests. Any arguments
 replace the default test selection, so a selective provider run looks like:
 
 ```sh
@@ -92,12 +106,14 @@ replace the default test selection, so a selective provider run looks like:
 
 The repository is mounted read-write at `/workspace`; `target/`, the Cargo
 registry, and the Cargo Git cache live in named volumes (`chakra-lsp-target`,
-`chakra-lsp-cargo-registry`, `chakra-lsp-cargo-git`), so reruns stay
-incremental and the host `target/` is never touched by the root-owned
+`chakra-lsp-cargo-registry`, `chakra-lsp-cargo-git`). Gradle distributions
+and dependency caches use `chakra-lsp-gradle`; Maven uses
+`chakra-lsp-maven`. Reruns stay incremental and the host `target/` is never touched by the root-owned
 container. Remove those volumes to force a cold rebuild.
 
-The image is about 5 GB; a cold build takes on the order of 15–20 minutes
-(mostly toolchain downloads) and is then fully cached by Docker. A cold
+Earlier image builds were about 5 GB and took roughly 15–20 minutes; these
+are historical estimates, not measurements of the image with Kotlin's
+bundled runtime. Docker caches completed build layers. A cold
 container test run additionally compiles the workspace into the target
 volume once; subsequent runs start in seconds. The downloaded server
 toolchains are x86-64 builds, so the wrapper explicitly selects
@@ -119,6 +135,9 @@ Before freezing an Unreleased changelog section on `release/<version>`:
 1. Compare platform, runtime, provider, schema-version, and support claims
    with the final implementation, feature flags, accepted ADRs, and
    platform-specific tests.
+   Keep an unpublished candidate labeled as such. Once publication gates
+   pass, replace the preparation banner, set the changelog release date,
+   and update the README's archive/source examples to the final version.
 2. Re-read entries affected by every late `fix:` commit; update historical
    implementation wording rather than publishing an earlier design.
 3. Run the full required checks on the final release branch, verify the
@@ -126,9 +145,13 @@ Before freezing an Unreleased changelog section on `release/<version>`:
    generated support/corpus artifacts.
 4. Confirm the release commit, annotated tag, and GitHub release all identify
    the same version and commit.
-5. Run the release workflow's manual preflight from the final `main` commit
-   before tagging. It must build and package every supported target without
-   publishing a release.
+5. Run the release workflow's manual preflight from the candidate's matching
+   `release/X.Y.Z` or `release/vX.Y.Z` branch before merging, then from the
+   final `main` commit before tagging. It must build and package every
+   supported target and pass
+   the `language-acceptance` Docker job without publishing a release. This
+   includes real Kotlin Maven, Gradle JVM, Android, and Multiplatform tests;
+   the publication job depends on their success.
 6. After pushing the annotated tag, wait for the tag-triggered release workflow
    and verify every archive, `SHA256SUMS`, and build-provenance attestation
    before closing the milestone.

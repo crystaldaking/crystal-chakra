@@ -165,13 +165,69 @@ RUN curl -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-l
     && vtsls --version \
     && bash-language-server --version
 
-# Final resolvability check for every provider executable Chakra discovers.
+# kotlin-server (Kotlin LSP) 263.4702.0 (docs/languages/kotlin.md): the
+# standalone distribution bundles its own runtime; the pinned
+# linux-x64 archive is checksum-verified and exposed as `kotlin-lsp` with
+# `bin/intellij-server` as the launch target (ADR-0056).
+ARG KOTLIN_LSP_VERSION=263.4702.0
+ARG KOTLIN_LSP_SHA256=1e11d2e5fefbf9ea215ad8dd6be95f2222897cd086e8cb7a661a52084a590405
+RUN curl -fsSL "https://download-cdn.jetbrains.com/language-server/kotlin-server/${KOTLIN_LSP_VERSION}/kotlin-server-${KOTLIN_LSP_VERSION}.tar.gz" -o /tmp/kotlin-server.tar.gz \
+    && echo "${KOTLIN_LSP_SHA256}  /tmp/kotlin-server.tar.gz" | sha256sum -c - \
+    && mkdir -p /opt/kotlin-lsp \
+    && tar -xzf /tmp/kotlin-server.tar.gz -C /opt/kotlin-lsp --strip-components=1 \
+    && rm /tmp/kotlin-server.tar.gz \
+    && test -x /opt/kotlin-lsp/bin/intellij-server \
+    && printf '#!/bin/sh\nexec /opt/kotlin-lsp/bin/intellij-server "$@"\n' > /usr/local/bin/kotlin-lsp \
+    && chmod 0755 /usr/local/bin/kotlin-lsp \
+    && test -x /usr/local/bin/kotlin-lsp
+
+# The Kotlin real-provider fixture is a Maven project. Unlike jdtls, the
+# standalone Kotlin importer launches an external mvn executable.
+ARG MAVEN_VERSION=3.9.16
+ARG MAVEN_SHA512=831a8591fe20c8243b1dbe7d71e3244f31d1665b0804b2e825e38cbbe5ce0cafb8338851f90780735568773e0a6cd07bbec107cda0b896b008b861075358b6f6
+RUN (curl -fsSL --connect-timeout 20 --max-time 300 "https://dlcdn.apache.org/maven/maven-3/${MAVEN_VERSION}/binaries/apache-maven-${MAVEN_VERSION}-bin.tar.gz" -o /tmp/maven.tar.gz \
+        || curl -fsSL --connect-timeout 20 --max-time 600 "https://archive.apache.org/dist/maven/maven-3/${MAVEN_VERSION}/binaries/apache-maven-${MAVEN_VERSION}-bin.tar.gz" -o /tmp/maven.tar.gz) \
+    && echo "${MAVEN_SHA512}  /tmp/maven.tar.gz" | sha512sum -c - \
+    && mkdir -p /opt/maven \
+    && tar -xzf /tmp/maven.tar.gz -C /opt/maven --strip-components=1 \
+    && rm /tmp/maven.tar.gz
+ENV PATH="/opt/maven/bin:${PATH}"
+
+# Android Kotlin import fixture: pinned SDK platform and build tools, fetched
+# from Google's SDK repository. No emulator is needed for code intelligence.
+ARG ANDROID_PLATFORM_SHA256=0988cacad01b38a18a47bac14a0695f246bc76c1b06c0eeb8eb0dc825ab0c8e0
+ARG ANDROID_BUILD_TOOLS_SHA256=bd3a4966912eb8b30ed0d00b0cda6b6543b949d5ffe00bea54c04c81e1561d88
+RUN curl -fsSL "https://dl.google.com/android/repository/platform-35_r02.zip" -o /tmp/android-platform.zip \
+    && echo "${ANDROID_PLATFORM_SHA256}  /tmp/android-platform.zip" | sha256sum -c - \
+    && curl -fsSL "https://dl.google.com/android/repository/build-tools_r35_linux.zip" -o /tmp/android-build-tools.zip \
+    && echo "${ANDROID_BUILD_TOOLS_SHA256}  /tmp/android-build-tools.zip" | sha256sum -c - \
+    && mkdir -p /opt/android-sdk/platforms /opt/android-sdk/build-tools \
+    && unzip -q /tmp/android-platform.zip -d /opt/android-sdk/platforms \
+    && unzip -q /tmp/android-build-tools.zip -d /opt/android-sdk/build-tools \
+    && mv /opt/android-sdk/build-tools/android-15 /opt/android-sdk/build-tools/35.0.0 \
+    && rm /tmp/android-platform.zip /tmp/android-build-tools.zip
+ENV ANDROID_HOME=/opt/android-sdk
+
+# KMP preparation invokes Gradle before LSP initialization. Production
+# projects normally provide gradlew; the hermetic fixtures use this pinned
+# executable so no developer-global Gradle installation is required.
+ARG GRADLE_VERSION=8.14.3
+ARG GRADLE_SHA256=bd71102213493060956ec229d946beee57158dbd89d0e62b91bca0fa2c5f3531
+RUN curl -fsSL --connect-timeout 20 --max-time 600 "https://services.gradle.org/distributions/gradle-${GRADLE_VERSION}-bin.zip" -o /tmp/gradle.zip \
+    && echo "${GRADLE_SHA256}  /tmp/gradle.zip" | sha256sum -c - \
+    && unzip -q /tmp/gradle.zip -d /opt \
+    && mv "/opt/gradle-${GRADLE_VERSION}" /opt/gradle \
+    && rm /tmp/gradle.zip
+ENV PATH="/opt/gradle/bin:${PATH}"
+
+# Final resolvability check for providers and the Kotlin fixture's build tool.
 RUN for exe in rust-analyzer clangd gopls pyright-langserver vtsls \
-        bash-language-server jdtls csharp-ls terraform-ls; do \
+        bash-language-server jdtls csharp-ls terraform-ls kotlin-lsp mvn gradle; do \
         command -v "$exe" >/dev/null || { echo "missing: $exe"; exit 1; }; \
     done \
     && rust-analyzer --version \
-    && python3 --version
+    && python3 --version \
+    && mvn --version
 
 WORKDIR /workspace
 CMD ["bash"]

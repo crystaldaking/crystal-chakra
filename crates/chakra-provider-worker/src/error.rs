@@ -24,6 +24,12 @@ pub enum WorkerError {
     InvalidUri(String),
     #[error("provider position is outside captured source")]
     InvalidPosition,
+    #[error("provider project import failed: {0}")]
+    ProjectImport(String),
+    #[error("provider build inputs changed; a new session is required")]
+    RestartRequired,
+    #[error("provider build inputs no longer match the requested revision")]
+    InputsChanged,
 }
 
 impl WorkerError {
@@ -47,7 +53,7 @@ impl WorkerError {
 
     pub(crate) fn fallback_state(&self) -> ProviderState {
         match self {
-            Self::Timeout | Self::Cancelled => ProviderState::CatchingUp,
+            Self::Timeout | Self::Cancelled | Self::InputsChanged => ProviderState::CatchingUp,
             _ => ProviderState::Degraded,
         }
     }
