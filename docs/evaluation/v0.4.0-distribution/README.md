@@ -113,3 +113,18 @@ pre-setup newline count; the existing contract preserves all bytes outside
 markers, including setup separators. That assertion was corrected to match
 the documented lifecycle test, and the complete sequence then passed.
 Production code was unchanged. No agent-client sessions ran in this check.
+
+## Committed candidate: Linux container, 2026-09-19
+
+The current runtime candidate was rebuilt with `cargo build --locked --release
+-p chakra-cli --bin chakra` in Linux/amd64 Docker. Build source hashes remained
+unchanged. Its actual package passed checksum verification, clean installation,
+fresh interactive Bash PATH discovery, repeat installation with one PATH
+block, and binary/shell-configuration preservation on checksum and download
+failure. Manual public update discovery also passed. See the [current Linux
+result](linux-current-candidate.json) for binary/archive/installer hashes and
+source identity; detailed logs are under its recorded evidence directory.
+
+This supersedes the historical Linux run for current-code package acceptance.
+It still uses amd64 emulation on macOS ARM64 and does not cover Windows,
+Intel macOS, controlled newer-release discovery, or public release provenance.
