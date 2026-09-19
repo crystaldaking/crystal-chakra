@@ -6,10 +6,10 @@
 
 **Local, current code intelligence for AI coding agents.**
 
-This checkout documents **0.4.0 in release preparation**. The latest published
-release is [0.3.2](https://github.com/crystaldaking/crystal-chakra/releases/tag/v0.3.2).
-Build this prepared checkout to try the 0.4.0 setup, diagnostics, and Kotlin
-features; the 0.4.0 archives are not published yet.
+**Chakra 0.4.0** adds installers, GitHub update checks, agent setup,
+project configuration, diagnostics, and experimental Kotlin support.
+Download binaries and installers from the
+[0.4.0 release](https://github.com/crystaldaking/crystal-chakra/releases/tag/v0.4.0).
 
 Chakra turns one materialized Git worktree into a compact, structured graph
 that agents can query over MCP. It answers questions about repository shape,
@@ -54,7 +54,7 @@ Kotlin is available in this checkout as an **in-progress** addition: offline
 syntax, 14/14 conformance scenarios, and recorded public-corpus results are
 present. Real-server scenarios for Maven, Gradle JVM, mixed Kotlin/Java,
 Android and Multiplatform have passed in the pinned Docker environment.
-Native Windows and final candidate validation remain incomplete, so Kotlin
+Native Windows Kotlin lifecycle acceptance remains incomplete, so Kotlin
 is not yet advertised as first-class. See
 [Kotlin support](docs/languages/kotlin.md) for setup and remaining limitations.
 
@@ -427,8 +427,8 @@ scenario uses a hermetic provider double; it does not establish real-server
 compatibility. All ten registered Codex pairs from the
 [paired agent-evaluation protocol](docs/evaluation/v0.4.0-paired-agent-protocol.md)
 have completed. Both conditions scored 0.95, but the registered efficiency
-thresholds were not met. The maintainer accepted a local no-go for a separate
-`impact` query; see the [analysis](docs/evaluation/v0.4.0-paired/ANALYSIS.md).
+thresholds were not met. The maintainer accepted a no-go for a separate
+`impact` query; see the [recorded decision](https://github.com/crystaldaking/crystal-chakra/issues/190#issuecomment-5744011490).
 
 Repository validation:
 
