@@ -18,6 +18,7 @@ import sys
 import tarfile
 import tempfile
 from pathlib import Path
+from unittest import SkipTest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 INSTALL_SH = REPO_ROOT / "tools" / "install.sh"
@@ -212,8 +213,7 @@ def test_release_workflow_fresh_shell_checks_requested_version(tmp: Path) -> Non
     # Execute the actual workflow snippet, not a second copy of its env setup.
     # This catches losing RELEASE_TAG at the env -i boundary.
     if shutil.which("zsh") is None:
-        print("skip fresh-shell smoke: zsh unavailable")
-        return
+        raise SkipTest("fresh-shell smoke requires zsh")
     fixture = make_fixture(tmp / "fixture", "v0.4.0", host_target())
     env = InstallEnv(tmp)
     assert env.run(fixture).returncode == 0
@@ -281,10 +281,14 @@ def main() -> int:
         if name.startswith("test_") and callable(value)
     ]
     failures = 0
+    skipped = 0
     for test in tests:
         with tempfile.TemporaryDirectory() as directory:
             try:
                 test(Path(directory))
+            except SkipTest as error:
+                skipped += 1
+                print(f"SKIP {test.__name__}: {error}")
             except AssertionError as error:
                 failures += 1
                 print(f"FAIL {test.__name__}: {error}", file=sys.stderr)
@@ -293,7 +297,7 @@ def main() -> int:
     if failures:
         print(f"{failures} of {len(tests)} install tests failed", file=sys.stderr)
         return 1
-    print(f"all {len(tests)} install tests passed")
+    print(f"{len(tests) - skipped} install tests passed; {skipped} skipped")
     return 0
 
 
