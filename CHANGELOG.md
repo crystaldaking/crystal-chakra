@@ -5,36 +5,34 @@ version tags prefixed with `v`.
 
 ## [Unreleased]
 
-## [0.4.0] - Unreleased
+## [0.4.0] - 2026-09-19
 
-Chakra v0.4.0 is in release preparation: setup, diagnostics, and Kotlin
-syntax support with an Alpha precise-provider adapter.
-It adds shared project configuration with typed precedence and trust
-boundaries; one-time agent-client setup for Codex, Claude Code, Cursor, and
-OpenCode; an actionable doctor with provider and analysis diagnostics plus
-bounded sanitized local reports; offline-first GitHub update checks; and
-cross-platform installers with checksum verification and automatic PATH
-setup. Kotlin joins the language matrix with offline syntax intelligence, a kotlin-lsp precise
-adapter (Alpha, adapter-ready), 14/14 conformance scenarios, and a pinned
-public-corpus evaluation. All ten registered Codex pairs have completed: both conditions scored 0.95,
-but the registered efficiency thresholds were not met. The
-[paired analysis](docs/evaluation/v0.4.0-paired/ANALYSIS.md) records a local
-no-go for a standalone impact query, accepted locally by the maintainer;
-GitHub milestone bookkeeping is deferred by request. The public query surface,
-freshness model, provenance, bounded degradation, and multi-worktree
-behavior are unchanged from v0.3.2. The provider test image was rebuilt;
-Kotlin acceptance for Maven, Gradle JVM, Android, and Multiplatform remains
-a release gate (#195), alongside
-native Windows installer validation and real agent-client session records. No 0.4.0 GitHub
-release is published yet.
+Chakra v0.4.0 adds cross-platform installers with checksum verification and
+PATH setup; offline-first GitHub update checks; shared project configuration;
+one-time setup for Codex, Claude Code, Cursor, and OpenCode; and actionable
+diagnostics with bounded, sanitized local reports.
+
+Experimental Kotlin support includes offline syntax intelligence and a
+JetBrains kotlin-lsp adapter (Alpha). Real-provider Docker scenarios passed
+for Maven, Gradle JVM, mixed Kotlin/Java, Android, and Multiplatform. Kotlin
+remains `in-progress`, pending native Windows lifecycle acceptance. Automatic
+agent adoption was verified in real Codex sessions; equivalent Claude Code,
+Cursor, and OpenCode session acceptance remains incomplete.
+
+All ten registered Codex pairs completed with equal correctness scores of
+0.95, but the efficiency thresholds were not met. The
+[accepted no-go decision](https://github.com/crystaldaking/crystal-chakra/issues/190#issuecomment-5744011490)
+excludes a standalone impact query from this release. The public query
+surface, freshness model, provenance, bounded degradation, and multi-worktree
+behavior are unchanged from v0.3.2.
 
 ### Added
 
 - Release packaging includes `install.sh` and `install.ps1` alongside the
   native archives. The shared checksum manifest and build-attestation step
   cover all six assets; installer smoke jobs consume and verify the assembled
-  bundle before executing its scripts. These workflow changes still require
-  final candidate execution.
+  bundle before executing its scripts. Publication requires all four native
+  installer smoke jobs and the real-provider Docker gate to pass.
 
 - Real-provider Docker smoke tests for Python, TypeScript, JavaScript, Java,
   and Shell, including incoming relations after an edit. The wrapper now
@@ -50,7 +48,7 @@ release is published yet.
   queries, cancellation, cache restore, and provider lifecycle — with
   results and budgets recorded (`docs/support/corpus/RESULTS.md`,
   `budgets.json`). The required real kotlin-lsp project scenarios have passed locally;
-  native Windows and final candidate acceptance remain before Kotlin can be advertised.
+  native Windows lifecycle acceptance remains before Kotlin can be advertised.
 
 - Kotlin precise enrichment via kotlin-lsp (issue #209, ADR-0056). The new
   `chakra-provider-kotlin-lsp` adapter integrates JetBrains' official
@@ -67,7 +65,7 @@ release is published yet.
   process-group reaping; the real-server smoke test runs in the pinned
   image. The earlier readiness failures are fixed. Maven, Gradle JVM, mixed
   Kotlin/Java, Android and KMP scenarios have passed in Docker; Kotlin remains
-  unadvertised until native Windows and final candidate gates pass.
+  unadvertised until native Windows lifecycle acceptance passes.
 
 - Kotlin conformance, matrix, and language documentation (issue #209,
   continued). The Kotlin conformance fixture (Gradle-shaped project under
@@ -77,7 +75,7 @@ release is published yet.
   query, freshness, provenance, ambiguity, budget, cancellation,
   degradation, conformance, and documentation capability passes with
   evidence. The adapter and public-corpus evaluation have landed; the
-  precise-provider capability still needs the real kotlin-lsp smoke run
+  precise-provider capability still needs native Windows lifecycle acceptance
   before Kotlin can be advertised.
 
 - Kotlin syntax intelligence (issue #209, ADR-0056). `.kt` and `.kts`

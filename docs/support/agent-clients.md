@@ -56,7 +56,7 @@ client support from this matrix alone.
 
 | Client surface | Available-server scenario | Unavailable-server scenario | Evidence |
 | --- | --- | --- | --- |
-| Codex CLI 0.154.0, macOS ARM64 | Pass: fresh session independently used status, symbol_search, context and callers | Pass: missing executable disclosed; correct source-based answer, no edits | [Manifest](../evaluation/v0.4.0-clients/codex.json), [available events](../evaluation/v0.4.0-clients/codex-available.jsonl), [unavailable events](../evaluation/v0.4.0-clients/codex-unavailable.jsonl) |
+| Codex CLI 0.154.0, macOS ARM64 | Pass: fresh session independently used status, symbol_search, context and callers | Pass: missing executable disclosed; correct source-based answer, no edits | Historical raw transcripts retained locally; [committed follow-up evidence](../evaluation/v0.4.0-clients/codex-current-candidate.json) records the 2026-09-19 rerun |
 | OpenCode 1.18.30, macOS ARM64 | Blocked: SystemPrompt.environment TypeError also occurs with Chakra disabled; OpenAI OAuth refresh also returned 401 | Not demonstrated | Local diagnostic logs recorded in release-readiness register |
 | Claude Code | Not run; client unavailable locally | Not run | Pending |
 | Cursor | Not run; client unavailable locally | Not run | Pending |

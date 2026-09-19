@@ -198,6 +198,9 @@ jobs:
         with:
           name: release-bundle
           path: bundle
+      - name: Install the Linux smoke-test shell
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y zsh
       - name: Smoke-test the Unix installer
         if: runner.os != 'Windows'
         shell: bash
