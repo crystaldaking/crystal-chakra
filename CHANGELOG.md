@@ -5,23 +5,43 @@ version tags prefixed with `v`.
 
 ## [Unreleased]
 
-## [0.4.0] - 2026-09-13
+## [0.4.0] - Unreleased
 
-Chakra v0.4.0 is the setup-and-diagnostics release with first-class Kotlin.
+Chakra v0.4.0 is in release preparation: setup, diagnostics, and Kotlin
+syntax support with an Alpha precise-provider adapter.
 It adds shared project configuration with typed precedence and trust
 boundaries; one-time agent-client setup for Codex, Claude Code, Cursor, and
 OpenCode; an actionable doctor with provider and analysis diagnostics plus
 bounded sanitized local reports; offline-first GitHub update checks; and
-verified cross-platform installers with automatic PATH setup. Kotlin joins
-the language matrix with offline syntax intelligence, a kotlin-lsp precise
+cross-platform installers with checksum verification and automatic PATH
+setup. Kotlin joins the language matrix with offline syntax intelligence, a kotlin-lsp precise
 adapter (Alpha, adapter-ready), 14/14 conformance scenarios, and a pinned
-public-corpus evaluation. The v0.4.0 paired agent-evaluation protocol is
-accepted and waits for its recorded runs. The public query surface,
+public-corpus evaluation. All ten registered Codex pairs have completed: both conditions scored 0.95,
+but the registered efficiency thresholds were not met. The
+[paired analysis](docs/evaluation/v0.4.0-paired/ANALYSIS.md) records a local
+no-go for a standalone impact query, accepted locally by the maintainer;
+GitHub milestone bookkeeping is deferred by request. The public query surface,
 freshness model, provenance, bounded degradation, and multi-worktree
-behavior are unchanged from v0.3.2. Provider test-image rebuilds and the
-real kotlin-lsp smoke run are release-gate items (#195).
+behavior are unchanged from v0.3.2. The provider test image was rebuilt;
+Kotlin acceptance for Maven, Gradle JVM, Android, and Multiplatform remains
+a release gate (#195), alongside
+native Windows installer validation and real agent-client session records. No 0.4.0 GitHub
+release is published yet.
 
 ### Added
+
+- Release packaging includes `install.sh` and `install.ps1` alongside the
+  native archives. The shared checksum manifest and build-attestation step
+  cover all six assets; installer smoke jobs consume and verify the assembled
+  bundle before executing its scripts. These workflow changes still require
+  final candidate execution.
+
+- Real-provider Docker smoke tests for Python, TypeScript, JavaScript, Java,
+  and Shell, including incoming relations after an edit. The wrapper now
+  runs all ten provider targets and records failure without skipping the
+  remaining targets. The [2026-09-16 language recheck](docs/evaluation/v0.4.0-language-recheck.md)
+  passes syntax conformance for all 12 languages. Kotlin's real-provider
+  acceptance now includes separate Maven, Gradle JVM, Android, and KMP checks.
 
 - Kotlin public-corpus evaluation (issue #209, continued). Pinned
   `Kotlin/kotlinx.coroutines` (7e8b5a4) and `square/okhttp` (1402451, mixed
@@ -29,8 +49,8 @@ real kotlin-lsp smoke run are release-gate items (#195).
   one-file edit, atomic replace, rename/delete, syntax error, diff context,
   queries, cancellation, cache restore, and provider lifecycle — with
   results and budgets recorded (`docs/support/corpus/RESULTS.md`,
-  `budgets.json`). Only the real kotlin-lsp image run remains before
-  Kotlin can be advertised.
+  `budgets.json`). The required real kotlin-lsp project scenarios have passed locally;
+  native Windows and final candidate acceptance remain before Kotlin can be advertised.
 
 - Kotlin precise enrichment via kotlin-lsp (issue #209, ADR-0056). The new
   `chakra-provider-kotlin-lsp` adapter integrates JetBrains' official
@@ -40,13 +60,14 @@ real kotlin-lsp smoke run are release-gate items (#195).
   backoff, cancellation, orphan-free shutdown, and honest syntax fallback.
   The server registers as the `kotlin-lsp` provider key in `chakra.toml`
   configuration, `--no-kotlin-lsp` / `--kotlin-ls-path` CLI options, and a
-  doctor row; the provider test image pins `kotlin-server 262.9593.0` with
-  SHA-256 verification (the distribution bundles its own runtime and is
-  Apache-2.0). Hermetic lifecycle tests cover readiness, delta sync,
-  timeout cancellation, crash-restart counting, capability absence, and
+  doctor row; the provider test image pins `kotlin-server 263.4702.0` with
+  SHA-256 verification and its bundled runtime. Hermetic lifecycle tests cover
+  readiness, delta sync, timeout cancellation, crash-restart counting,
+  capability absence, and
   process-group reaping; the real-server smoke test runs in the pinned
-  image. The real-server run remains pending, so Kotlin is still not
-  advertised.
+  image. The earlier readiness failures are fixed. Maven, Gradle JVM, mixed
+  Kotlin/Java, Android and KMP scenarios have passed in Docker; Kotlin remains
+  unadvertised until native Windows and final candidate gates pass.
 
 - Kotlin conformance, matrix, and language documentation (issue #209,
   continued). The Kotlin conformance fixture (Gradle-shaped project under
@@ -72,18 +93,22 @@ real kotlin-lsp smoke run are release-gate items (#195).
 
 - Cross-platform installers with automatic PATH setup (issue #203).
   `tools/install.sh` (Linux/macOS) and `tools/install.ps1` (Windows)
-  install the latest stable release — or an explicit `--version` — into a
-  user-owned directory after verifying the archive against the release
+  install the latest stable release — or a version selected with `--version`
+  (Unix) / `-Version` (PowerShell) — into a user-owned directory after
+  verifying the archive against the release
   `SHA256SUMS`, with unsupported platforms rejected before any change, an
   idempotent managed PATH block (Unix shells) or user-PATH entry
   (Windows), a downgrade guard that requires an explicit version, and
   failure preservation that keeps a previous installation usable.
-  `--no-path-modify` skips PATH changes; unrecognized shells get exact
-  manual instructions; conflicting earlier PATH entries produce a warning.
-  Hermetic fixture tests cover install, repeat, upgrade, downgrade,
-  checksum failure, custom dirs, and shell variants; CI runs them on all
-  four release targets plus a native installer smoke job on the real
-  release archives.
+  `--no-path-modify` (Unix) / `-NoPathModify` (PowerShell) skips PATH changes;
+  unrecognized shells get exact manual instructions; conflicting earlier
+  PATH entries produce a warning.
+  Unix fixture tests cover install, repeat, upgrade, downgrade, checksum and
+  runtime/version failures, custom dirs, and shell variants. Native Windows
+  tests cover install, repeat, upgrade, and checksum/runtime/version failures.
+  CI defines fixture jobs for the four release targets and installer smoke
+  jobs against packaged release binaries; local macOS results alone do not
+  validate every platform.
 
 - Bounded local diagnostic reports (issue #208). `chakra doctor --report
   <path>` exports a versioned (`schema_version = 1`) JSON report built from
@@ -92,15 +117,16 @@ real kotlin-lsp smoke run are release-gate items (#195).
   observed HEAD revision — with unavailable values marked `unavailable`,
   never fabricated. Raw MCP registration values and configuration parser
   excerpts are replaced with report-only summaries. Other free-text fields
-  pass a sanitizer that replaces
-  worktree/home/config/provider paths and scrubs residual absolute paths,
-  URLs, and token-like strings; source contents, environment values,
+  pass a sanitizer that replaces worktree/home/config/provider paths and
+  scrubs residual absolute paths, URLs, and token-like strings; source contents, environment values,
   credentials, remote URLs, and raw logs are excluded by construction and
   recorded under `omissions`. Reports are bounded (200 findings, 2 KiB per
-  field, 256 KiB total, with explicit truncation records), written with
-  owner-only permissions through an atomic rename, never overwrite an
-  existing file without `--force`, and are never uploaded — review and
-  attach them to an issue manually.
+  field, 256 KiB total, with field markers and dropped-finding records),
+  written through an atomic rename with final mode `0600` on Unix (Windows
+  inherits directory permissions). They never overwrite an existing file
+  without `--force` and are never uploaded — review and
+  attach them to an issue manually. `doctor --json` retains detailed local
+  diagnostics and does not use this export sanitizer.
 
 - Actionable provider and analysis diagnostics in `chakra doctor`
   (issue #207). Per provider, doctor reports intentional disablement
@@ -110,9 +136,10 @@ real kotlin-lsp smoke run are release-gate items (#195).
   with deterministic finding codes, applicability, evidence, and scoped
   next steps. Every run is labeled an isolated inspection; session states
   (dormant, catching up, ready, degraded) are pointed to the session
-  `status` tool rather than guessed. The default inspection spawns no
-  processes; `--probe` runs bounded `--version` executions (2 s deadline,
-  reaped children) with pinned-version compatibility findings, and
+  `status` tool rather than guessed. The default inspection uses Git but
+  does not launch language servers; `--probe` runs bounded provider
+  `--version` executions (2 s deadline, reaped children) with pinned-version
+  compatibility findings, and
   `--json` emits the versioned `schema_version = 1` document.
 
 - One-time agent-client project setup (issue #205, ADR-0055). `chakra init
@@ -133,10 +160,11 @@ real kotlin-lsp smoke run are release-gate items (#195).
   --check` reports the installed version, the latest stable release with
   notes link, platform-asset availability, and the installer upgrade path,
   with a documented exit-status contract (0 current, 1 unavailable, 2
-  update available). While `chakra serve` runs, one bounded background
-  check runs at most once per 24 hours per state directory with failure
-  backoff; it never delays startup, never writes to MCP stdout, and is
-  disabled completely by `CHAKRA_UPDATE_CHECK=0` or the private-only
+  update available). After `chakra serve` starts, one bounded background
+  attempt uses a persisted 24-hour gate per state directory with failure
+  backoff; there is no periodic polling loop. It never delays startup,
+  never writes to MCP stdout, and is disabled completely by
+  `CHAKRA_UPDATE_CHECK=0` or the private-only
   `[update] automatic = false` setting. Checks send no repository data,
   require no authentication, and never download or replace the binary.
 
@@ -158,6 +186,35 @@ real kotlin-lsp smoke run are release-gate items (#195).
 
 ### Fixed
 
+- Removing agent setup preserves all bytes outside the managed instruction
+  block, including blank lines. Setup and removal reject duplicate or nested
+  block markers without rewriting the instruction file.
+
+- `chakra doctor --json` emits exactly one JSON document, including when
+  exporting a report or reporting configuration errors. Report notices go
+  to stderr. Malformed or remote Chakra MCP registrations are diagnosed as
+  errors instead of being mistaken for absent entries; intentionally disabled
+  registrations are identified explicitly.
+
+- Release publication now requires the Docker workspace and real-language
+  provider acceptance job, including all four required Kotlin project shapes.
+- Kotlin readiness no longer treats a null call-hierarchy preparation during
+  project import as an empty precise answer. Cold queries use a bounded
+  readiness budget, honor cancellation, and invalidate readiness after edits.
+  Nonempty answers produced during server indexing are also discarded;
+  Kotlin waits for completed work-done progress before publishing precise
+  relations, preventing the observed Android overload confusion.
+- Kotlin sources now load shared Gradle/Maven module metadata. Android
+  variant and Multiplatform test source sets receive test roles; parser
+  regressions cover `expect`/`actual` and Android annotations.
+- Updated the locked `rustls` dependency from 0.23.44 to 0.23.45 to address
+  RUSTSEC-2026-0285. No new Rust dependency was introduced.
+
+- Kotlin server launch now uses `--stdio` exactly once. The smoke test uses
+  a valid Kotlin/Maven project and the `CHAKRA_KOTLIN_LSP` override. The
+  Docker image no longer masks Kotlin installation failures, replaces an
+  expired server build with 263.4702.0, and includes Maven for project import.
+
 - Diagnostic reports omit raw MCP command/argument values and TOML parser
   excerpts, including short credentials; local doctor diagnostics retain
   their detail. Observed executable paths are redacted even if the
@@ -172,8 +229,11 @@ real kotlin-lsp smoke run are release-gate items (#195).
   the last registered client is removed. Doctor handles missing Codex MCP
   tables without panicking.
 - Nested Kotlin members retain the complete enclosing container chain,
-  distinguishing `Alpha::Inner::work` from `Beta::Inner::work`. The Kotlin
-  snapshot codec advances to `kotlin:s2` to invalidate cached old identities.
+  distinguishing `Alpha::Inner::work` from `Beta::Inner::work`. Kotlin
+  `.kts` scripts keep their file stem in the module path, so
+  `build.gradle.kts` and `settings.gradle.kts` no longer share a `source`
+  module identity. The Kotlin snapshot codec advances to `kotlin:s3` to
+  invalidate cached old identities.
 - Provider crash-restart lifecycle harnesses now count crash-inducing
   requests explicitly, so a restart deliberately triggered by the harness
   itself can no longer masquerade as a provider crash and inflate or hide
@@ -861,8 +921,8 @@ record every pre-1.0 compatibility break explicitly (ADR-0043).
 - All development after this release follows the Gitflow policy in
   `CONTRIBUTING.md` and `AGENTS.md`.
 
-[Unreleased]: https://github.com/crystaldaking/crystal-chakra/compare/v0.4.0...develop
-[0.4.0]: https://github.com/crystaldaking/crystal-chakra/compare/v0.3.2...v0.4.0
+[Unreleased]: https://github.com/crystaldaking/crystal-chakra/compare/v0.3.2...develop
+[0.4.0]: #040---unreleased
 [0.3.2]: https://github.com/crystaldaking/crystal-chakra/compare/v0.3.1...v0.3.2
 [0.3.1]: https://github.com/crystaldaking/crystal-chakra/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/crystaldaking/crystal-chakra/compare/v0.2.0...v0.3.0

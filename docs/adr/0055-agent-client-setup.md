@@ -65,8 +65,8 @@ Chakra owns exactly three artifacts per project, and nothing else:
   configuration containing JSONC comments is refused with an actionable
   message instead of silently dropping them.
 - A client configuration whose shape does not match the pinned format (for
-  example an OpenCode V1 `mcpServers` layout) is *unsupported*: setup stops
-  and names the expected format rather than guessing.
+  example an OpenCode `mcpServers` layout instead of `mcp`) is *unsupported*:
+  setup stops and names the expected format rather than guessing.
 - The MCP server already advertises workflow guidance through
   `initialize.instructions`; persistent project instructions remain the
   primary route because not every client injects that field into model

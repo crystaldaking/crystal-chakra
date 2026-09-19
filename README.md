@@ -6,6 +6,11 @@
 
 **Local, current code intelligence for AI coding agents.**
 
+This checkout documents **0.4.0 in release preparation**. The latest published
+release is [0.3.2](https://github.com/crystaldaking/crystal-chakra/releases/tag/v0.3.2).
+Build this prepared checkout to try the 0.4.0 setup, diagnostics, and Kotlin
+features; the 0.4.0 archives are not published yet.
+
 Chakra turns one materialized Git worktree into a compact, structured graph
 that agents can query over MCP. It answers questions about repository shape,
 symbols, callers, source context, tests, and current changes without uploading
@@ -45,44 +50,71 @@ The generated [support matrix](docs/support/SUPPORT_MATRIX.md) records the
 capability-level evidence. Language-specific behavior and honest limitations
 live under [docs/languages](docs/languages/).
 
+Kotlin is available in this checkout as an **in-progress** addition: offline
+syntax, 14/14 conformance scenarios, and recorded public-corpus results are
+present. Real-server scenarios for Maven, Gradle JVM, mixed Kotlin/Java,
+Android and Multiplatform have passed in the pinned Docker environment.
+Native Windows and final candidate validation remain incomplete, so Kotlin
+is not yet advertised as first-class. See
+[Kotlin support](docs/languages/kotlin.md) for setup and remaining limitations.
+
 ## Install
 
-### Installer (recommended)
+### 0.4.0 installers
 
-One command installs the latest stable release and puts `chakra` on your
-PATH, after verifying the archive against the release `SHA256SUMS`
-(issue #203):
+The installers in this checkout verify release archives against `SHA256SUMS`
+and add `chakra` to PATH. **The following download commands become available
+after the 0.4.0 release is published**; for now, use the published archives
+below or build this checkout from source.
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/crystaldaking/crystal-chakra/main/tools/install.sh | sh
+curl -fsSL https://github.com/crystaldaking/crystal-chakra/releases/latest/download/install.sh | sh
 ```
 
 ```powershell
-irm https://raw.githubusercontent.com/crystaldaking/crystal-chakra/main/tools/install.ps1 | iex
+irm https://github.com/crystaldaking/crystal-chakra/releases/latest/download/install.ps1 | iex
 ```
+
+The release bundle includes both installer scripts in `SHA256SUMS` and its
+build-provenance attestation. To verify a script before executing it, download
+it and `SHA256SUMS` from the same versioned release and check its manifest
+entry, as described for archives below. The piped commands above execute the
+download directly.
 
 The installer covers Linux x86-64, macOS Apple silicon and Intel, and
 Windows x86-64, and rejects other platforms before changing anything. It
 installs into a user-owned directory (`~/.local/bin`,
 `%LOCALAPPDATA%\Programs\chakra`) — no administrator rights needed.
-Options: `--version vX.Y.Z` (explicit version; required for downgrades),
-`--dir PATH`, `--no-path-modify`. PATH changes are idempotent (a managed
+Without an explicit version, the installer selects GitHub's latest stable
+release. Options differ by shell:
+
+| Purpose | Unix | PowerShell |
+|---|---|---|
+| Select a version (required for downgrades) | `--version vX.Y.Z` | `-Version vX.Y.Z` |
+| Choose the install directory | `--dir PATH` | `-Dir PATH` |
+| Skip PATH changes | `--no-path-modify` | `-NoPathModify` |
+
+Pass options to a saved installer script. PATH changes are idempotent (a managed
 shell block on Unix, the user PATH on Windows) and take effect in a new
 terminal; the installer never claims to modify the parent shell. Re-running
 upgrades through the same verified download flow, and a failed download or
-checksum check leaves any previous installation usable.
+checksum check leaves any previous installation usable. The candidate must
+also run successfully and report the exact requested version before it
+replaces the previous binary.
 
-Removal: delete the installed binary (`chakra`/`chakra.exe`), remove the
+Removal: first run `chakra init --agent <client> --remove` per project and
+client if you set up agent integration. Then delete the installed binary
+(`chakra`/`chakra.exe`) and remove the
 `# >>> chakra path >>>` block from your shell startup file or the install
-directory from the Windows user PATH, and re-run `chakra init --agent
-<client> --remove` per project if you set up agent integration. Already
-registered MCP clients pick up a replaced binary automatically because the
-registration points at the install path, not a versioned file.
+directory from the Windows user PATH. Registered MCP clients use a replaced
+binary when they next start the server because registration points at the
+install path. Restart an existing agent/server session after upgrading.
 
 ### Prebuilt release archives
 
-[Chakra v0.4.0](https://github.com/crystaldaking/crystal-chakra/releases/tag/v0.4.0)
-ships native archives for:
+[Chakra v0.3.2](https://github.com/crystaldaking/crystal-chakra/releases/tag/v0.3.2)
+provides the currently published native archives. The 0.4.0 release workflow
+targets the same platforms:
 
 | Platform | Target | Archive |
 |---|---|---|
@@ -91,13 +123,13 @@ ships native archives for:
 | macOS Intel | `x86_64-apple-darwin` | `.tar.gz` |
 | Windows x86-64 | `x86_64-pc-windows-msvc` | `.zip` |
 
-Archive names have the form `chakra-v0.4.0-<target>.<format>`. Each contains
-the `chakra` executable, this README, and the MIT license in a versioned
+Archive names have the form `chakra-vX.Y.Z-<target>.<format>`. Each contains
+the `chakra` executable, a README, and the MIT license in a versioned
 directory. Download `SHA256SUMS` from the same release and verify the archive
 before installing it. For example, on Linux:
 
 ```sh
-version=v0.4.0
+version=v0.3.2
 target=x86_64-unknown-linux-gnu
 archive="chakra-${version}-${target}.tar.gz"
 base="https://github.com/crystaldaking/crystal-chakra/releases/download/${version}"
@@ -133,13 +165,17 @@ Requirements:
 - Git on `PATH`;
 - [rustup](https://rustup.rs/) to build the pinned Rust 1.97.1 toolchain.
 
+From the root of this prepared 0.4.0 checkout:
+
 ```sh
-git clone https://github.com/crystaldaking/crystal-chakra.git
-cd crystal-chakra
-git checkout v0.4.0
 cargo install --locked --path crates/chakra-cli
-chakra --version
+chakra --version  # chakra 0.4.0
 ```
+
+For released source, clone the repository and check out the published
+`v0.3.2` tag instead; it does not contain the new 0.4.0 commands. A local
+0.4.0 tag from preparation is not a published release or a guarantee that
+it contains the latest release-branch fixes.
 
 The Cargo package is `chakra-cli`; the executable is `chakra`. Optional
 language servers are discovered only when their language route is activated.
@@ -152,23 +188,30 @@ budgets, index budgets, and watcher startup controls.
 
 ## Quick start with an MCP client
 
-Chakra is a stdio MCP server. The client normally owns its process:
+With the 0.4.0 binary, configure the project once for each selected client:
+
+```sh
+chakra init --repo /absolute/path/to/repository --agent codex
+chakra doctor --repo /absolute/path/to/repository --agent codex
+```
+
+Use `claude`, `cursor`, or `opencode` for the other setup adapters, or repeat
+`--agent` for several clients. Start a new agent session after setup and
+complete the client's trust/permission prompts. Setup installs both an MCP
+registration and workflow instructions; whether a client follows those
+instructions still needs the real-session evidence recorded in the
+[client matrix](docs/support/agent-clients.md).
+
+Other MCP-capable clients can register the stdio server manually. The client
+normally owns its process:
 
 ```sh
 chakra serve --repo /absolute/path/to/a/git-worktree
 ```
 
 Stdout is reserved for MCP. Logs go to stderr and can be adjusted with
-`RUST_LOG`.
-
-With [Codex CLI](https://developers.openai.com/codex/mcp/):
-
-```sh
-codex mcp add chakra -- chakra serve --repo /absolute/path/to/repository
-codex mcp list
-```
-
-Equivalent `~/.codex/config.toml` configuration:
+`RUST_LOG`. For example, a manual Codex project registration in
+`.codex/config.toml` is:
 
 ```toml
 [mcp_servers.chakra]
@@ -244,12 +287,17 @@ chakra init --agent claude --remove        # revert Chakra-owned setup
 
 Setup is idempotent and preserves user work: it owns only the `chakra` MCP
 entry, a delimited `<!-- chakra:begin/end -->` instruction block, and a
-minimal `chakra.toml` created only when none exists. Conflicting
+minimal `chakra.toml` created only when none exists. Matching registrations
+retain environment, timeout, and enablement options byte-for-byte; setup
+does not re-enable a deliberately disabled entry. Conflicting
 registrations and malformed blocks stop setup with an actionable message
 instead of overwriting anything. See `docs/support/agent-clients.md` for
 the pinned per-client formats and current evidence status, and run
 `chakra doctor --agent <client>` to diagnose registration, instructions,
-and project configuration.
+and project configuration. Removal preserves shared `AGENTS.md` instructions
+while another supported client still has a `chakra` registration, including
+a disabled one. The last registration's removal strips the managed block;
+`chakra.toml` remains in place. `chakra serve` never edits client setup.
 
 `chakra doctor` also explains analysis quality (issue #207): per provider
 it reports intentional syntax-only disablement, missing or misconfigured
@@ -258,7 +306,8 @@ project metadata at the worktree root, and index-budget pressure from the
 tracked source inventory — always labeled as an *isolated inspection*,
 never as the agent's live session (dormant/catching-up/ready/degraded
 states and live counters belong to the session's `status` tool). The
-default run spawns no processes; `--probe` adds bounded `--version`
+default run uses Git for repository inspection but does not launch language
+servers; `--probe` adds bounded provider `--version`
 executions with hard deadlines and pinned-version compatibility findings,
 and `--json` emits the versioned machine-readable document. Exit status
 `1` marks broken setup; an intentionally disabled provider is healthy.
@@ -268,9 +317,17 @@ bounded, sanitized JSON document (issue #208): findings, platform,
 non-sensitive effective limits, provider readiness, and the HEAD revision,
 built from an explicit allowlist — no source text, environment values,
 credentials, remote URLs, or absolute machine paths — with unavailable
-values marked as such and truncation recorded explicitly. The file is
-written owner-only and is never uploaded; review it and attach it to a
-GitHub issue manually. It describes observed health, not model behavior.
+values marked as such. Raw MCP registration values and configuration-parser
+excerpts are replaced with report-only summaries. Reports retain at most
+200 findings, 2 KiB per text field, and 256 KiB overall; shortened fields
+carry a truncation marker, and dropped findings are recorded separately.
+Existing reports require `--force` to replace. The final file has mode `0600`
+on Unix; Windows uses the destination directory's inherited permissions.
+Reports are never uploaded; review the file before sharing it.
+
+`doctor --json` is the detailed local diagnostic format and **does not use
+the report sanitizer**. Use `--report` for a file intended for sharing. Both
+describe isolated observations; query `status` for the live agent session.
 
 ## Update checks
 
@@ -280,14 +337,17 @@ the supported upgrade path (ADR-0054). Exit status is part of the contract:
 `0` up to date, `1` check unavailable, `2` update available with a matching
 platform asset.
 
-While `chakra serve` runs, one gated background check runs at most once per
-24 hours per state directory (with failure backoff) and reports an available
-update to stderr only — never to MCP clients, never blocking startup or
-queries. Disable automatic checks completely with
+After `chakra serve` starts, it makes one gated background-check attempt.
+The persisted gate allows a check at most once per 24 hours per state
+directory, with failure backoff. There is no periodic polling loop within
+that process. An available update is reported to stderr only — never to
+MCP clients, never blocking startup or queries. Disable automatic checks with
 `CHAKRA_UPDATE_CHECK=0` or `[update] automatic = false` in
 `chakra.local.toml` (private-only, so a committed repository cannot
 re-enable them). Checking never downloads or replaces the binary; upgrades
-happen only through the explicit installer flow.
+happen only through the explicit installer flow. `CHAKRA_UPDATE_CHECK=false`
+and `off` also disable automatic checks; the explicit `update --check`
+command remains available regardless of automatic-check opt-out.
 
 ## MCP tools
 
@@ -350,17 +410,25 @@ flowchart LR
 ```
 
 MCP and language servers are adapters; domain and query layers do not depend
-on their protocol types. The graph is in memory and rebuilt deterministically
-at startup. See the [SPEC](docs/SPEC.md), [v0.1 roadmap](docs/roadmap/v0.1.md),
+on their protocol types. The graph is in memory; startup normally rebuilds
+it deterministically. Compatible commit snapshots can also be restored from
+the opt-in local store, while the worktree overlay and live enrichment remain
+materialization-dependent. See the [SPEC](docs/SPEC.md), [v0.1 roadmap](docs/roadmap/v0.1.md),
 and [ADRs](docs/adr/) for the full contract and trade-offs.
 
 ## Evidence and validation
 
 The shared conformance harness runs the same behavior catalog for every
-language. A separate opt-in evaluation runs against 20 pinned public
+language. A separate opt-in evaluation has recorded results for 22 pinned public
 repositories, including Kubernetes, VS Code, Kafka, Spring Boot, Django,
 Symfony, Tokio, and the .NET runtime. Results and machine-readable artifacts
-are in [docs/support/corpus](docs/support/corpus/).
+are in [docs/support/corpus](docs/support/corpus/). Its provider-lifecycle
+scenario uses a hermetic provider double; it does not establish real-server
+compatibility. All ten registered Codex pairs from the
+[paired agent-evaluation protocol](docs/evaluation/v0.4.0-paired-agent-protocol.md)
+have completed. Both conditions scored 0.95, but the registered efficiency
+thresholds were not met. The maintainer accepted a local no-go for a separate
+`impact` query; see the [analysis](docs/evaluation/v0.4.0-paired/ANALYSIS.md).
 
 Repository validation:
 
@@ -376,8 +444,14 @@ gate, verifies support artifacts, and exercises the native macOS watcher path.
 
 ## Project status and limits
 
-Chakra v0.4.0 is the current stable release in the v0.x line. One process
-serves one repository and a bounded set of isolated materialized worktrees.
+Chakra v0.4.0 is in local release preparation. Publication still requires
+native platform validation, the remaining real agent-client sessions, and
+complete validation of the final candidate. Current dependency checks and
+the local paired-evaluation scope decision are complete. The
+[readiness register](docs/evaluation/v0.4.0-release-readiness.md) separates
+recorded results from the remaining gates.
+
+One process serves one repository and a bounded set of isolated materialized worktrees.
 Compatible commit snapshots are shared in process and may be restored from an
 opt-in bounded local store; live provider enrichment remains tied to the
 materialized worktree. Chakra deliberately does not provide historical commit

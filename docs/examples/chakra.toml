@@ -39,7 +39,9 @@ schema_version = 1
 # enabled = false
 
 # Available provider tables: rust-analyzer, vtsls, pyright, jdtls,
-# csharp-ls, bash-language-server, clangd, terraform-ls, gopls.
+# csharp-ls, bash-language-server, clangd, terraform-ls, gopls, kotlin-lsp.
+# Kotlin's precise adapter remains unadvertised pending the full acceptance
+# gate. Use [providers.kotlin-lsp] with enabled = false for syntax-only mode.
 # In `chakra.local.toml` each table may additionally set `path`:
 #
 # [providers.clangd]
