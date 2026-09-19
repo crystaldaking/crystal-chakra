@@ -9,6 +9,7 @@ use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use chakra_domain::location::{RepoRelativePath, SourceRange, TextPosition};
+use chakra_domain::operation::OperationContext;
 use chakra_domain::provenance::Provenance;
 use chakra_domain::revision::Revision;
 use chakra_domain::state::ProviderState;
@@ -42,6 +43,20 @@ fn send(id: &str, result: &str) -> io::Result<()> {
     stdout.flush()
 }
 
+fn progress(kind: &str) -> io::Result<()> {
+    let body = format!("{{\"jsonrpc\":\"2.0\",\"method\":\"$/progress\",\"params\":{{\"token\":\"indexing\",\"value\":{{\"kind\":\"{kind}\",\"title\":\"Indexing\"}}}}}}");
+    let mut stdout = io::stdout().lock();
+    write!(stdout, "Content-Length: {}\r\n\r\n{body}", body.len())?;
+    stdout.flush()
+}
+
+fn import_status(status: &str) -> io::Result<()> {
+    let body = format!("{{\"jsonrpc\":\"2.0\",\"method\":\"intellij/workspaceImportState\",\"params\":{{\"phase\":\"FINISHED\",\"folders\":[{{\"status\":\"{status}\"}}]}}}}");
+    let mut stdout = io::stdout().lock();
+    write!(stdout, "Content-Length: {}\r\n\r\n{body}", body.len())?;
+    stdout.flush()
+}
+
 fn bump(path: &std::path::Path) -> io::Result<()> {
     let count = fs::read_to_string(path)
         .ok()
@@ -59,6 +74,11 @@ fn stem_contains(needle: &str) -> bool {
 }
 
 fn main() -> io::Result<()> {
+    // Match the pinned standalone launcher's CLI contract, so lifecycle
+    // tests reject positional `stdio` and duplicated transport arguments.
+    if std::env::args().skip(1).collect::<Vec<_>>() != ["--stdio"] {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "expected --stdio"));
+    }
     let executable = std::env::current_exe()?;
     let count_path = executable.with_extension("count");
     let cancelled_path = executable.with_extension("cancelled");
@@ -71,6 +91,12 @@ fn main() -> io::Result<()> {
     let hang = stem_contains("hang");
     let crash = stem_contains("crash");
     let no_hierarchy = stem_contains("no-hierarchy");
+    let delayed_import = stem_contains("delayed-import");
+    let no_item = stem_contains("no-item");
+    let no_calls = stem_contains("no-calls");
+    let delayed_calls = stem_contains("delayed-calls");
+    let indexing = stem_contains("indexing");
+    let stuck_indexing = stem_contains("stuck-indexing");
     let spawn_child = stem_contains("spawn-child");
     let _child: Option<Child> = if spawn_child {
         let child = std::process::Command::new("sh")
@@ -84,6 +110,8 @@ fn main() -> io::Result<()> {
     let stdin = io::stdin();
     let mut stdin = stdin.lock();
     let mut last_uri = String::new();
+    let mut prepares = 0;
+    let mut index_finished_at = None;
     loop {
         let mut content_length = None;
         loop {
@@ -106,13 +134,24 @@ fn main() -> io::Result<()> {
         stdin.read_exact(&mut body)?;
         let body = String::from_utf8_lossy(&body);
         if body.contains("\"method\":\"initialize\"") {
+            fs::write(executable.with_extension("initialize"), body.as_bytes())?;
             let capabilities = if no_hierarchy {
-                "{\"capabilities\":{}}"
+                "{\"capabilities\":{\"definitionProvider\":true,\"referencesProvider\":true}}"
+            } else if stem_contains("no-references") {
+                "{\"capabilities\":{\"callHierarchyProvider\":true,\"definitionProvider\":true}}"
+            } else if stem_contains("external-model") {
+                "{\"capabilities\":{\"definitionProvider\":true,\"referencesProvider\":true}}"
             } else {
-                "{\"capabilities\":{\"callHierarchyProvider\":true}}"
+                "{\"capabilities\":{\"callHierarchyProvider\":true,\"definitionProvider\":true,\"referencesProvider\":true}}"
             };
             if let Some(id) = request_id(&body) {
                 send(id, capabilities)?;
+            }
+        } else if body.contains("\"method\":\"initialized\"") {
+            progress("begin")?;
+            progress("end")?;
+            if !stem_contains("missing-import") {
+                import_status(if stem_contains("failed-import") { "FAILED" } else { "SUCCESS" })?;
             }
         } else if body.contains("\"method\":\"textDocument/didOpen\"") {
             bump(&opened_path)?;
@@ -121,15 +160,33 @@ fn main() -> io::Result<()> {
             }
         } else if body.contains("\"method\":\"textDocument/didChange\"") {
             bump(&changed_path)?;
+            prepares = 0;
         } else if body.contains("\"method\":\"workspace/didChangeWatchedFiles\"") {
             bump(&watched_path)?;
         } else if body.contains("\"method\":\"textDocument/prepareCallHierarchy\"") {
+            prepares += 1;
+            bump(&prepared_path)?;
             if crash {
-                bump(&prepared_path)?;
                 std::process::exit(17);
             }
             if hang {
                 continue;
+            }
+            if no_item || (delayed_import && prepares <= 3) {
+                if let Some(id) = request_id(&body) {
+                    send(id, "null")?;
+                }
+                continue;
+            }
+            if indexing && prepares == 1 {
+                progress("begin")?;
+                if !stuck_indexing {
+                    index_finished_at = Some(std::time::Instant::now() + std::time::Duration::from_millis(600));
+                    std::thread::spawn(|| {
+                        std::thread::sleep(std::time::Duration::from_millis(600));
+                        progress("end").expect("write indexing completion");
+                    });
+                }
             }
             if let Some(uri) = request_uri(&body) {
                 last_uri = uri.to_owned();
@@ -144,11 +201,30 @@ fn main() -> io::Result<()> {
             if hang {
                 continue;
             }
+            if delayed_calls {
+                std::thread::sleep(std::time::Duration::from_millis(300));
+            }
+            if no_calls || (indexing && index_finished_at.is_none_or(|end| std::time::Instant::now() < end)) {
+                if let Some(id) = request_id(&body) {
+                    send(id, "[]")?;
+                }
+                continue;
+            }
             let call = format!(
                 "[{{\"from\":{{\"name\":\"caller\",\"kind\":12,\"uri\":\"{last_uri}\",\"range\":{{\"start\":{{\"line\":3,\"character\":0}},\"end\":{{\"line\":3,\"character\":25}}}},\"selectionRange\":{{\"start\":{{\"line\":3,\"character\":5}},\"end\":{{\"line\":3,\"character\":11}}}}}},\"fromRanges\":[{{\"start\":{{\"line\":3,\"character\":16}},\"end\":{{\"line\":3,\"character\":22}}}}]}}]"
             );
             if let Some(id) = request_id(&body) {
                 send(id, &call)?;
+            }
+        } else if body.contains("\"method\":\"textDocument/definition\"") {
+            if let Some(id) = request_id(&body) {
+                let result = format!("{{\"uri\":\"{last_uri}\",\"range\":{{\"start\":{{\"line\":2,\"character\":4}},\"end\":{{\"line\":2,\"character\":10}}}}}}");
+                send(id, &result)?;
+            }
+        } else if body.contains("\"method\":\"textDocument/references\"") {
+            if let Some(id) = request_id(&body) {
+                let result = format!("[{{\"uri\":\"{last_uri}\",\"range\":{{\"start\":{{\"line\":3,\"character\":15}},\"end\":{{\"line\":3,\"character\":21}}}}}}]");
+                send(id, &result)?;
             }
         } else if body.contains("\"method\":\"callHierarchy/outgoingCalls\"") {
             if let Some(id) = request_id(&body) {
@@ -234,6 +310,74 @@ fn wait_for_file(path: &Path) -> Result<String, Box<dyn Error>> {
 
 const TARGET_SOURCE: &str = "package sample\n\nfun target() {}\nfun caller() { target() }\n";
 
+#[test]
+fn gradle_kotlin_dsl_queries_do_not_enter_the_kotlin_session() -> Result<(), Box<dyn Error>> {
+    let repository = tempfile::tempdir()?;
+    let executable =
+        materialize_fake_server(repository.path(), "fake-kotlin-gradle-script-routing")?;
+    let request = request(repository.path(), Revision(1))?;
+    let provider = KotlinLspProvider::start(request.workspace.clone(), config(&executable))?;
+    assert_eq!(provider.enrich(request.clone()).state, ProviderState::Ready);
+    let prepared = counter(&executable, "prepared");
+    for name in [
+        "build.gradle.kts",
+        "settings.gradle.kts",
+        "gradle/conventions.gradle.kts",
+    ] {
+        let path = RepoRelativePath::new(name)?;
+        let mut unsupported = request.clone();
+        unsupported.symbol.declaration = SourceRange::new(
+            path.clone(),
+            TextPosition::new(3, 1)?,
+            TextPosition::new(3, 13)?,
+        )?;
+        assert!(!provider.supports_path(Language::Kotlin, &path), "{name}");
+        assert_eq!(provider.enrich(unsupported).state, ProviderState::Degraded);
+        assert_eq!(counter(&executable, "prepared"), prepared);
+        assert_eq!(provider.state_for(Revision(1)), ProviderState::Ready);
+    }
+    assert!(provider.supports_path(Language::Kotlin, &RepoRelativePath::new("service.kt")?));
+    provider.shutdown()?;
+    Ok(())
+}
+
+#[test]
+fn companion_language_queries_do_not_enter_the_kotlin_session() -> Result<(), Box<dyn Error>> {
+    let repository = tempfile::tempdir()?;
+    let executable = materialize_fake_server(repository.path(), "fake-kotlin-companion-routing")?;
+    let request = request(repository.path(), Revision(1))?;
+    let provider = KotlinLspProvider::start(request.workspace.clone(), config(&executable))?;
+    let result = provider.enrich(request.clone());
+    assert_eq!(result.state, ProviderState::Ready);
+    let prepared = counter(&executable, "prepared");
+    let mut unsupported = request;
+    unsupported.symbol.language = Language::Java;
+    assert!(!provider.supports(Language::Java));
+    assert_eq!(provider.enrich(unsupported).state, ProviderState::Degraded);
+    assert_eq!(counter(&executable, "prepared"), prepared);
+    assert_eq!(provider.state_for(Revision(1)), ProviderState::Ready);
+    provider.shutdown()?;
+    Ok(())
+}
+
+#[test]
+fn missing_references_cannot_enable_incomplete_mixed_language_queries() -> Result<(), Box<dyn Error>>
+{
+    let repository = tempfile::tempdir()?;
+    let executable = materialize_fake_server(repository.path(), "fake-kotlin-no-references")?;
+    let request = request(repository.path(), Revision(1))?;
+    let provider = KotlinLspProvider::start(request.workspace.clone(), config(&executable))?;
+    assert_eq!(provider.enrich(request).state, ProviderState::Degraded);
+    assert!(
+        provider
+            .last_error()
+            .is_some_and(|error| error.contains("definitions and references"))
+    );
+    assert_eq!(counter(&executable, "prepared"), "0");
+    provider.shutdown()?;
+    Ok(())
+}
+
 fn document(path: &RepoRelativePath, source: &str) -> ProviderDocument {
     ProviderDocument {
         path: path.clone(),
@@ -256,10 +400,6 @@ fn workspace(
 
 fn request(root: &Path, revision: Revision) -> Result<PreciseQueryRequest, Box<dyn Error>> {
     let path = RepoRelativePath::new("service.kt")?;
-    fs::write(
-        root.join("settings.gradle.kts"),
-        "module example.com/sample\n\ngo 1.25\n",
-    )?;
     fs::write(root.join(path.as_str()), TARGET_SOURCE)?;
     Ok(PreciseQueryRequest {
         workspace: workspace(root, revision, vec![document(&path, TARGET_SOURCE)])?,
@@ -268,7 +408,7 @@ fn request(root: &Path, revision: Revision) -> Result<PreciseQueryRequest, Box<d
             declaration: SourceRange::new(
                 path,
                 TextPosition::new(3, 1)?,
-                TextPosition::new(3, 17)?,
+                TextPosition::new(3, 16)?,
             )?,
             language: Language::Kotlin,
         },
@@ -285,6 +425,7 @@ fn config(executable: &Path) -> KotlinLspConfig {
     KotlinLspConfig {
         command: KotlinLspCommand::stdio(executable.as_os_str().to_owned()),
         startup_timeout: Duration::from_secs(5),
+        readiness_timeout: Duration::from_millis(500),
         request_timeout: Duration::from_millis(500),
         barrier_timeout: Duration::from_millis(250),
         query_wait_timeout: Duration::from_secs(10),
@@ -320,6 +461,185 @@ fn precise_incoming_call_carries_kotlin_lsp_provenance() -> Result<(), Box<dyn E
     assert_eq!(relation.occurrence_count, 1);
     assert_eq!(relation.call_sites.len(), 1);
     assert_eq!(provider.state_for(Revision(1)), ProviderState::Ready);
+    provider.shutdown()?;
+    Ok(())
+}
+
+#[test]
+fn hierarchy_answers_during_indexing_are_discarded() -> Result<(), Box<dyn Error>> {
+    let repository = tempfile::tempdir()?;
+    let executable = materialize_fake_server(repository.path(), "fake-kotlin-indexing")?;
+    let request = request(repository.path(), Revision(1))?;
+    let mut settings = config(&executable);
+    settings.readiness_timeout = Duration::from_secs(3);
+    let provider = KotlinLspProvider::start(request.workspace.clone(), settings)?;
+    let started = Instant::now();
+    let result = provider.enrich(request);
+    assert_eq!(result.state, ProviderState::Ready);
+    assert_eq!(
+        result.incoming.len(),
+        1,
+        "early empty answer must not be precise"
+    );
+    assert!(started.elapsed() >= Duration::from_millis(600));
+    assert_eq!(counter(&executable, "prepared"), "2");
+    provider.shutdown()?;
+    Ok(())
+}
+
+#[test]
+fn never_ending_indexing_is_bounded_and_never_ready() -> Result<(), Box<dyn Error>> {
+    let repository = tempfile::tempdir()?;
+    let executable = materialize_fake_server(repository.path(), "fake-kotlin-stuck-indexing")?;
+    let request = request(repository.path(), Revision(1))?;
+    let provider = KotlinLspProvider::start(request.workspace.clone(), config(&executable))?;
+    let started = Instant::now();
+    let result = provider.enrich(request);
+    assert_eq!(result.state, ProviderState::CatchingUp);
+    assert!(result.incoming.is_empty());
+    assert!(started.elapsed() < Duration::from_secs(3));
+    assert_ne!(provider.state_for(Revision(1)), ProviderState::Ready);
+    provider.shutdown()?;
+    Ok(())
+}
+
+#[test]
+fn cold_incoming_calls_share_the_readiness_budget() -> Result<(), Box<dyn Error>> {
+    let repository = tempfile::tempdir()?;
+    let executable = materialize_fake_server(repository.path(), "fake-kotlin-delayed-calls")?;
+    let request = request(repository.path(), Revision(1))?;
+    let mut settings = config(&executable);
+    settings.request_timeout = Duration::from_millis(100);
+    settings.readiness_timeout = Duration::from_secs(3);
+    let provider = KotlinLspProvider::start(request.workspace.clone(), settings)?;
+    let result = provider.enrich(request);
+    assert_eq!(result.state, ProviderState::Ready);
+    assert_eq!(result.incoming.len(), 1);
+    provider.shutdown()?;
+    Ok(())
+}
+
+#[test]
+fn null_prepare_waits_for_import_without_publishing_ready() -> Result<(), Box<dyn Error>> {
+    let repository = tempfile::tempdir()?;
+    let executable = materialize_fake_server(repository.path(), "fake-kotlin-delayed-import")?;
+    let initial = request(repository.path(), Revision(1))?;
+    let mut settings = config(&executable);
+    settings.readiness_timeout = Duration::from_secs(3);
+    let provider = KotlinLspProvider::start(initial.workspace.clone(), settings)?;
+    let worker_provider = provider.clone();
+    let first = initial.clone();
+    let query = std::thread::spawn(move || worker_provider.enrich(first));
+    wait_for_file(&executable.with_extension("prepared"))?;
+    assert_eq!(provider.state_for(Revision(1)), ProviderState::CatchingUp);
+    let result = query.join().map_err(|_| "query thread panicked")?;
+    assert_eq!(result.state, ProviderState::Ready);
+    assert_eq!(result.incoming.len(), 1);
+    assert_eq!(counter(&executable, "prepared"), "4");
+
+    // A new document generation must not inherit the old readiness proof.
+    let changed = format!("{TARGET_SOURCE}// changed\n");
+    let path = RepoRelativePath::new("service.kt")?;
+    fs::write(repository.path().join(path.as_str()), &changed)?;
+    let result = provider.enrich(PreciseQueryRequest {
+        workspace: workspace(
+            repository.path(),
+            Revision(2),
+            vec![document(&path, &changed)],
+        )?,
+        ..initial
+    });
+    assert_eq!(result.state, ProviderState::Ready);
+    assert_eq!(result.revision, Revision(2));
+    assert_eq!(result.incoming.len(), 1);
+    assert_eq!(counter(&executable, "prepared"), "8");
+    provider.shutdown()?;
+    Ok(())
+}
+
+#[test]
+fn cold_import_finishes_after_the_callers_short_wait() -> Result<(), Box<dyn Error>> {
+    let repository = tempfile::tempdir()?;
+    let executable =
+        materialize_fake_server(repository.path(), "fake-kotlin-delayed-import-budget")?;
+    let request = request(repository.path(), Revision(1))?;
+    let mut settings = config(&executable);
+    settings.readiness_timeout = Duration::from_secs(3);
+    settings.query_wait_timeout = Duration::from_millis(100);
+    let provider = KotlinLspProvider::start(request.workspace.clone(), settings)?;
+    assert_eq!(
+        provider.enrich(request.clone()).state,
+        ProviderState::CatchingUp
+    );
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while provider.state_for(Revision(1)) != ProviderState::Ready {
+        assert!(Instant::now() < deadline, "cold import never became ready");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let result = provider.enrich(request);
+    assert_eq!(result.state, ProviderState::Ready);
+    assert_eq!(result.incoming.len(), 1);
+    assert_eq!(counter(&executable, "count"), "1");
+    provider.shutdown()?;
+    Ok(())
+}
+
+#[test]
+fn missing_hierarchy_item_has_a_bounded_readiness_deadline() -> Result<(), Box<dyn Error>> {
+    let repository = tempfile::tempdir()?;
+    let executable = materialize_fake_server(repository.path(), "fake-kotlin-no-item")?;
+    let request = request(repository.path(), Revision(1))?;
+    let mut settings = config(&executable);
+    settings.readiness_timeout = Duration::from_millis(150);
+    let provider = KotlinLspProvider::start(request.workspace.clone(), settings)?;
+    let started = Instant::now();
+    assert_eq!(provider.enrich(request).state, ProviderState::CatchingUp);
+    assert!(started.elapsed() < Duration::from_secs(2));
+    assert_eq!(provider.state_for(Revision(1)), ProviderState::CatchingUp);
+    assert!(
+        provider
+            .last_error()
+            .is_some_and(|message| message.contains("timed out"))
+    );
+    provider.shutdown()?;
+    Ok(())
+}
+
+#[test]
+fn caller_cancellation_interrupts_the_import_retry_wait() -> Result<(), Box<dyn Error>> {
+    let repository = tempfile::tempdir()?;
+    let executable = materialize_fake_server(repository.path(), "fake-kotlin-no-item-cancel")?;
+    let request = request(repository.path(), Revision(1))?;
+    let mut settings = config(&executable);
+    settings.readiness_timeout = Duration::from_secs(5);
+    let provider = KotlinLspProvider::start(request.workspace.clone(), settings)?;
+    let operation = OperationContext::unbounded();
+    let query_operation = operation.clone();
+    let query_provider = provider.clone();
+    let query =
+        std::thread::spawn(move || query_provider.enrich_with_context(request, &query_operation));
+    wait_for_file(&executable.with_extension("prepared"))?;
+    let started = Instant::now();
+    operation.cancel();
+    assert_eq!(
+        query.join().map_err(|_| "query thread panicked")?.state,
+        ProviderState::CatchingUp
+    );
+    provider.shutdown()?;
+    assert!(started.elapsed() < Duration::from_secs(2));
+    Ok(())
+}
+
+#[test]
+fn hierarchy_item_with_no_callers_is_a_ready_empty_result() -> Result<(), Box<dyn Error>> {
+    let repository = tempfile::tempdir()?;
+    let executable = materialize_fake_server(repository.path(), "fake-kotlin-no-calls")?;
+    let request = request(repository.path(), Revision(1))?;
+    let provider = KotlinLspProvider::start(request.workspace.clone(), config(&executable))?;
+    let result = provider.enrich(request);
+    assert_eq!(result.state, ProviderState::Ready);
+    assert!(result.incoming.is_empty());
+    assert_eq!(counter(&executable, "prepared"), "1");
     provider.shutdown()?;
     Ok(())
 }
@@ -520,5 +840,109 @@ fn shutdown_reaps_provider_process_group_descendants() -> Result<(), Box<dyn Err
         );
         std::thread::sleep(Duration::from_millis(25));
     }
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn external_model_changes_import_root_but_preserves_canonical_source_uris()
+-> Result<(), Box<dyn Error>> {
+    external_model_coverage(false)
+}
+
+#[cfg(unix)]
+#[test]
+fn incomplete_model_cannot_claim_complete_query_coverage() -> Result<(), Box<dyn Error>> {
+    external_model_coverage(true)
+}
+
+#[cfg(unix)]
+fn external_model_coverage(incomplete: bool) -> Result<(), Box<dyn Error>> {
+    let repository = tempfile::tempdir()?;
+    use std::os::unix::fs::PermissionsExt;
+    let root = fs::canonicalize(repository.path())?;
+    fs::write(root.join("build.gradle.kts"), "// hermetic fixture")?;
+    fs::write(
+        root.join("fixture-model.json"),
+        serde_json::to_vec(&serde_json::json!({
+            "modules":[{"contentRoots":[{"sourceRoots":[{"path":root}]}]}]
+        }))?,
+    )?;
+    let wrapper = root.join("gradlew");
+    fs::write(
+        &wrapper,
+        "#!/bin/sh\nfor arg in \"$@\"; do\ncase \"$arg\" in -Dchakra.kotlin.modelDir=*) model=${arg#*=} ;; esac\ndone\ncp fixture-model.json \"$model/workspace.json\"\n",
+    )?;
+    fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o700))?;
+    if incomplete {
+        let mut script = fs::read_to_string(&wrapper)?;
+        script.push_str("touch \"$model/incomplete-coverage\"\n");
+        fs::write(&wrapper, script)?;
+    }
+    let executable = materialize_fake_server(repository.path(), "fake-kotlin-external-model")?;
+    let mut request = request(repository.path(), Revision(4))?;
+    request.directions.outgoing = true;
+    let provider = KotlinLspProvider::start(request.workspace.clone(), config(&executable))?;
+    let result = provider.enrich(request);
+    assert_eq!(
+        result.state,
+        ProviderState::Ready,
+        "{:?}",
+        provider.last_error()
+    );
+    assert_eq!(result.revision, Revision(4));
+    assert_eq!(result.incoming.len(), 1);
+    assert_eq!(result.incoming_truncated, incomplete);
+    assert_eq!(result.outgoing_truncated, incomplete);
+    assert_eq!(result.incoming[0].declaration.file().as_str(), "service.kt");
+    assert_eq!(result.incoming[0].name, "caller");
+    let initialize: serde_json::Value =
+        serde_json::from_str(&wait_for_file(&executable.with_extension("initialize"))?)?;
+    let actual = initialize["params"]["rootUri"]
+        .as_str()
+        .ok_or("missing import root")?;
+    let model_root = url::Url::parse(actual)?
+        .to_file_path()
+        .map_err(|_| "invalid import root")?;
+    assert!(!model_root.starts_with(&root));
+    assert!(model_root.join("workspace.json").is_file());
+    assert_eq!(
+        initialize["params"]["workspaceFolders"][0]["uri"].as_str(),
+        Some(actual)
+    );
+    provider.shutdown()?;
+    Ok(())
+}
+
+#[test]
+fn failed_import_cannot_publish_precise_empty_or_nonempty_calls() -> Result<(), Box<dyn Error>> {
+    let repository = tempfile::tempdir()?;
+    let executable = materialize_fake_server(repository.path(), "fake-kotlin-failed-import")?;
+    let request = request(repository.path(), Revision(1))?;
+    let provider = KotlinLspProvider::start(request.workspace.clone(), config(&executable))?;
+    let result = provider.enrich(request);
+    assert_eq!(result.state, ProviderState::Degraded);
+    assert!(result.incoming.is_empty());
+    assert_eq!(counter(&executable, "prepared"), "0");
+    assert!(
+        provider
+            .last_error()
+            .is_some_and(|error| error.contains("project import failed"))
+    );
+    provider.shutdown()?;
+    Ok(())
+}
+
+#[test]
+fn missing_import_completion_is_bounded_catching_up() -> Result<(), Box<dyn Error>> {
+    let repository = tempfile::tempdir()?;
+    let executable = materialize_fake_server(repository.path(), "fake-kotlin-missing-import")?;
+    let request = request(repository.path(), Revision(1))?;
+    let provider = KotlinLspProvider::start(request.workspace.clone(), config(&executable))?;
+    let result = provider.enrich(request);
+    assert_eq!(result.state, ProviderState::CatchingUp);
+    assert!(result.incoming.is_empty());
+    assert_eq!(counter(&executable, "prepared"), "0");
+    provider.shutdown()?;
     Ok(())
 }

@@ -155,7 +155,7 @@ pub const PROVIDER_SPECS: &[ProviderSpec] = &[
         language: "Kotlin",
         default_executable: "kotlin-lsp",
         version_args: None,
-        expected: "kotlin-server 262.9593.0 (Alpha, bin/intellij-server, JDK 25; docs/languages/kotlin.md)",
+        expected: "kotlin-server 263.4702.0 (Alpha, bin/intellij-server, JDK 25; docs/languages/kotlin.md)",
         expected_prefix: None,
         language_doc: "docs/languages/kotlin.md",
         metadata_markers: &[

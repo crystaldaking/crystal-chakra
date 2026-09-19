@@ -35,7 +35,7 @@
     },
     "DISC-03": {
       "status": "pass",
-      "mechanism": "src/test/kotlin and Kotlin test-stem roles with Gradle metadata provenance",
+      "mechanism": "Kotlin test stems plus JVM, Android variant and Multiplatform test source-set conventions with Gradle/Maven metadata provenance",
       "evidence": [
         "crates/chakra-git/src/source_metadata.rs",
         "docs/support/conformance/kotlin.json"
@@ -111,19 +111,39 @@
     },
     "PRECISE-02": {
       "status": "missing",
-      "mechanism": "adapter integrated with hermetic lifecycle evidence; real-server image run pending (#195)"
+      "mechanism": "Maven, Gradle JVM, Android, KMP and mixed Kotlin/Java real-provider fixtures pass individually, including Java-only edits and overload/method-value exclusions. KMP and mixed JVM calls use semantic references/definitions. Mixed/composite graph coverage and final candidate review remain open.",
+      "evidence": [
+        "docs/evaluation/v0.4.0-kotlin-acceptance.md",
+        "crates/chakra-provider-kotlin-lsp/tests/real_provider.rs",
+        "crates/chakra-provider-kotlin-lsp/tests/lifecycle.rs"
+      ]
     },
     "PRECISE-03": {
       "status": "missing",
-      "mechanism": "adapter integrated with hermetic lifecycle evidence; real-server image run pending (#195)"
+      "mechanism": "Owned startup/readiness, cancellation, restart and shutdown have hermetic and real Gradle cancellation evidence; native Windows and final candidate lifecycle verification remain pending.",
+      "evidence": [
+        "docs/evaluation/v0.4.0-kotlin-acceptance.md",
+        "crates/chakra-provider-kotlin-lsp/tests/real_provider.rs",
+        "crates/chakra-provider-kotlin-lsp/tests/lifecycle.rs"
+      ]
     },
     "PRECISE-04": {
       "status": "missing",
-      "mechanism": "adapter integrated with hermetic lifecycle evidence; real-server image run pending (#195)"
+      "mechanism": "All routes require definition/reference capabilities; ordinary projects additionally require call hierarchy. KMP and Java-containing workspaces use the bounded semantic route; partial model coverage is explicitly truncated. Missing-capability and Java query-isolation tests pass; final candidate review remains pending.",
+      "evidence": [
+        "docs/evaluation/v0.4.0-kotlin-acceptance.md",
+        "crates/chakra-provider-kotlin-lsp/tests/real_provider.rs",
+        "crates/chakra-provider-kotlin-lsp/tests/lifecycle.rs"
+      ]
     },
     "PRECISE-05": {
       "status": "missing",
-      "mechanism": "adapter integrated with hermetic lifecycle evidence; real-server image run pending (#195)"
+      "mechanism": "Hermetic crash, timeout, missing-capability and failed-import tests preserve syntax fallback; final candidate isolation verification remains pending.",
+      "evidence": [
+        "docs/evaluation/v0.4.0-kotlin-acceptance.md",
+        "crates/chakra-provider-kotlin-lsp/tests/real_provider.rs",
+        "crates/chakra-provider-kotlin-lsp/tests/lifecycle.rs"
+      ]
     },
     "QUERY-01": {
       "status": "pass",
@@ -179,9 +199,12 @@
     },
     "BUDGET-01": {
       "status": "pass",
-      "mechanism": "query/index work budgets; public-corpus calibration pending",
+      "mechanism": "query/index work budgets with a recorded public-corpus baseline and per-language limits",
       "evidence": [
-        "docs/support/conformance/kotlin.json"
+        "docs/support/conformance/kotlin.json",
+        "docs/support/corpus/budgets.json",
+        "docs/support/corpus/results/kotlin-Kotlin__kotlinx.coroutines.json",
+        "docs/support/corpus/results/kotlin-square__okhttp.json"
       ]
     },
     "CANCEL-01": {

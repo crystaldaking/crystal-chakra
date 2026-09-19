@@ -57,6 +57,7 @@ pub(crate) struct WorkerCore<H: ProviderHooks> {
     barrier_generation: Option<u64>,
     sync_metrics: ProviderDocumentSyncMetrics,
     progress: Option<ProviderProgress>,
+    work_done: crate::work_done::WorkDoneTracker,
     active_operation: Option<OperationContext>,
     backoff: RestartBackoff,
 }
@@ -98,6 +99,7 @@ impl<H: ProviderHooks> WorkerCore<H> {
                 ..ProviderDocumentSyncMetrics::default()
             },
             progress: None,
+            work_done: crate::work_done::WorkDoneTracker::default(),
             active_operation: None,
         }
     }
@@ -162,13 +164,21 @@ impl<H: ProviderHooks> WorkerCore<H> {
         if self.session.is_none()
             && let Err(error) = self.restart_for(&request.workspace)
         {
-            self.set_state(ProviderState::Degraded, None, Some(error.to_string()));
-            return PreciseQueryResult::unavailable(revision, ProviderState::Degraded);
+            return self.fallback(revision, error);
         }
 
         let first = self.query_with_owned_session(&request);
         let result = match first {
             Ok(result) => result,
+            Err(WorkerError::RestartRequired) => {
+                self.stop_session();
+                match self.restart_for(&request.workspace) {
+                    Ok(()) => self
+                        .query_with_owned_session(&request)
+                        .unwrap_or_else(|error| self.fallback(revision, error)),
+                    Err(error) => self.fallback(revision, error),
+                }
+            }
             Err(error) if error.is_transport_failure() => {
                 self.set_state(ProviderState::Degraded, None, Some(error.to_string()));
                 self.stop_session();
@@ -330,6 +340,22 @@ impl<H: ProviderHooks> WorkerCore<H> {
     ) -> Result<(), WorkerError> {
         self.check_operation()?;
         let hooks = self.hooks.clone();
+        let delta = workspace
+            .delta_since_matching_documents_and_inputs(
+                &self.known_workspace,
+                |language, path| hooks.synchronizes_path(language, path),
+                |language, _| hooks.synchronizes(language),
+                self.active_operation
+                    .as_ref()
+                    .ok_or(WorkerError::Cancelled)?,
+            )
+            .map_err(|abort| match abort {
+                OperationAbort::Cancelled => WorkerError::Cancelled,
+                OperationAbort::DeadlineExceeded => WorkerError::Timeout,
+            })?;
+        if hooks.restart_for_delta(&delta) {
+            return Err(WorkerError::RestartRequired);
+        }
         let ProviderWorkspaceDelta {
             created,
             changed,
@@ -340,18 +366,7 @@ impl<H: ProviderHooks> WorkerCore<H> {
             inputs_changed,
             inputs_deleted,
             inputs_examined: _,
-        } = workspace
-            .delta_since_matching_documents(
-                &self.known_workspace,
-                |language, path| hooks.synchronizes_path(language, path),
-                self.active_operation
-                    .as_ref()
-                    .ok_or(WorkerError::Cancelled)?,
-            )
-            .map_err(|abort| match abort {
-                OperationAbort::Cancelled => WorkerError::Cancelled,
-                OperationAbort::DeadlineExceeded => WorkerError::Timeout,
-            })?;
+        } = delta;
         let target_document = workspace
             .document(target.file())
             .filter(|document| hooks.synchronizes_path(document.language, &document.path))
@@ -581,6 +596,22 @@ impl<H: ProviderHooks> WorkerCore<H> {
             percentage: None,
         });
         self.set_state(ProviderState::Initializing, None, None);
+        let force_stop = self.force_stop.clone();
+        let operation = self.active_operation.clone();
+        self.hooks.prepare_session(
+            &self.known_workspace,
+            self.operation_deadline(self.config.startup_timeout),
+            &|| {
+                if force_stop.load(Ordering::Acquire) {
+                    return Err(WorkerError::Cancelled);
+                }
+                match operation.as_ref().map(OperationContext::check).transpose() {
+                    Ok(_) => Ok(()),
+                    Err(OperationAbort::Cancelled) => Err(WorkerError::Cancelled),
+                    Err(OperationAbort::DeadlineExceeded) => Err(WorkerError::Timeout),
+                }
+            },
+        )?;
         let client_config = ClientConfig {
             transport: TransportConfig {
                 max_message_bytes: self.config.max_message_bytes,
@@ -612,7 +643,10 @@ impl<H: ProviderHooks> WorkerCore<H> {
         });
         self.sync_generation = 0;
         self.barrier_generation = None;
-        let root_uri = directory_uri(&self.root)?;
+        self.work_done = crate::work_done::WorkDoneTracker::default();
+        let initialization_root = self.hooks.initialization_root();
+        let initialization_root = initialization_root.as_deref().unwrap_or(&self.root);
+        let root_uri = directory_uri(initialization_root)?;
         #[allow(deprecated)]
         let params = InitializeParams {
             process_id: Some(std::process::id()),
@@ -629,8 +663,7 @@ impl<H: ProviderHooks> WorkerCore<H> {
             trace: None,
             workspace_folders: Some(vec![WorkspaceFolder {
                 uri: root_uri,
-                name: self
-                    .root
+                name: initialization_root
                     .file_name()
                     .and_then(|name| name.to_str())
                     .unwrap_or("workspace")
@@ -765,14 +798,16 @@ impl<H: ProviderHooks> WorkerCore<H> {
     }
 
     fn handle_event(&mut self, event: ServerEvent) {
-        if let ServerEvent::Notification { method, params } = &event
-            && method == "$/progress"
-        {
-            self.handle_work_done_progress(params);
+        if let ServerEvent::Notification { method, params } = &event {
+            self.hooks.observe_notification(method, params);
+            if method == "$/progress" {
+                self.handle_work_done_progress(params);
+            }
         }
     }
 
     fn handle_work_done_progress(&mut self, params: &Value) {
+        self.work_done.observe(params);
         let Some(value) = params.get("value") else {
             return;
         };
@@ -846,6 +881,35 @@ struct CoreChannel<'a, H: ProviderHooks> {
 }
 
 impl<H: ProviderHooks> QueryChannel for CoreChannel<'_, H> {
+    fn work_done_idle_epoch(&self) -> Option<u64> {
+        self.core.work_done.idle_epoch()
+    }
+
+    fn sync_barrier_confirmed(&self) -> bool {
+        self.core.provider_is_ready()
+    }
+
+    fn wait_until(&mut self, deadline: Instant) -> Result<(), WorkerError> {
+        loop {
+            self.core.check_operation()?;
+            if self.core.force_stop.load(Ordering::Acquire) {
+                return Err(WorkerError::Cancelled);
+            }
+            let mut pending = Vec::new();
+            self.session.drain_events(&mut |event| pending.push(event));
+            for event in pending {
+                if let ServerEvent::Closed(error) = &event {
+                    return Err(WorkerError::transport(self.core.hooks.name(), error));
+                }
+                self.core.handle_event(event);
+            }
+            let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+                return Ok(());
+            };
+            std::thread::sleep(EVENT_POLL.min(remaining));
+        }
+    }
+
     fn request(
         &mut self,
         method: &str,

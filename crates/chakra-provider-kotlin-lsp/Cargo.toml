@@ -12,6 +12,9 @@ publish = false
 chakra-domain = { path = "../chakra-domain", version = "0.4.0" }
 chakra-engine = { path = "../chakra-engine", version = "0.4.0" }
 chakra-lsp = { path = "../chakra-lsp", version = "0.4.0" }
+chakra-language-kotlin = { path = "../chakra-language-kotlin", version = "0.4.0" }
+chakra-language-java = { path = "../chakra-language-java", version = "0.4.0" }
+chakra-language-index = { path = "../chakra-language-index", version = "0.4.0" }
 chakra-provider-worker = { path = "../chakra-provider-worker", version = "0.4.0" }
 crossbeam-channel.workspace = true
 lsp-types.workspace = true
@@ -20,9 +23,10 @@ serde_json.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 url.workspace = true
-
-[dev-dependencies]
 tempfile.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+nix.workspace = true
 
 [lints]
 workspace = true

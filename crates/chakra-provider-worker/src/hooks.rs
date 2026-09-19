@@ -33,6 +33,25 @@ pub trait QueryChannel {
         deadline: Instant,
     ) -> Result<Value, WorkerError>;
 
+    /// Whether a previous query completed the current document generation's
+    /// synchronization barrier. A new session or document delta clears it.
+    fn sync_barrier_confirmed(&self) -> bool {
+        false
+    }
+
+    /// An epoch only after observed server work has finished and no work is
+    /// active. A new begin changes the epoch, including work that begins and
+    /// ends within one request. Adapters decide whether this gates readiness.
+    fn work_done_idle_epoch(&self) -> Option<u64> {
+        None
+    }
+
+    /// Pump the owned session until this instant, honoring caller cancellation
+    /// and shutdown. Used by adapters whose server returns null during import.
+    fn wait_until(&mut self, _deadline: Instant) -> Result<(), WorkerError> {
+        Err(WorkerError::Unsupported("readiness event wait".to_owned()))
+    }
+
     /// Opens a synchronized workspace document discovered mid-query (for
     /// example a caller found through references before its documentSymbol
     /// request, terraform-ls ADR-0040). Bumps the synchronization generation
@@ -98,6 +117,13 @@ pub trait ProviderHooks: Send + Sync + 'static {
     /// Languages whose documents this provider's session synchronizes.
     fn synchronizes(&self, language: Language) -> bool;
 
+    /// Query languages can be narrower than synchronized companion documents.
+    /// For example Kotlin queries depend on current Java sources without
+    /// turning the Kotlin adapter into a Java query provider.
+    fn supports_query_language(&self, language: Language) -> bool {
+        self.synchronizes(language)
+    }
+
     /// Whether one document synchronizes. Defaults to the language-level
     /// filter; providers override it to exclude files their server cannot
     /// parse (terraform-ls rejects Terraform JSON variants, issue #86).
@@ -129,13 +155,42 @@ pub trait ProviderHooks: Send + Sync + 'static {
         Ok(())
     }
 
+    /// Optional external build-model directory used only for LSP import.
+    /// Source synchronization and URI validation retain the canonical
+    /// repository root; no source files are copied into this directory.
+    fn initialization_root(&self) -> Option<std::path::PathBuf> {
+        None
+    }
+
+    /// Bounded preparation performed by the owner before spawning a session.
+    /// Subprocesses must be owned and terminated when `check` fails.
+    fn prepare_session(
+        &self,
+        _workspace: &chakra_engine::ProviderWorkspace,
+        _deadline: Instant,
+        _check: &dyn Fn() -> Result<(), WorkerError>,
+    ) -> Result<(), WorkerError> {
+        Ok(())
+    }
+
+    /// Whether this input delta invalidates the session's imported model.
+    /// Checked before sending notifications or answering a query.
+    fn restart_for_delta(&self, _delta: &chakra_engine::ProviderWorkspaceDelta) -> bool {
+        false
+    }
+
+    /// Observe provider-specific notifications on the owner thread. Hooks
+    /// must not block; they may retain bounded readiness state for queries.
+    fn observe_notification(&self, _method: &str, _params: &Value) {}
+
     /// Verifies the initialized server actually serves this provider's
     /// precise operations.
     fn verify_capabilities(&self, result: &InitializeResult) -> Result<(), WorkerError>;
 
     /// Runs the provider-specific query after documents are synchronized.
-    /// Every successful channel round-trip confirms the synchronization
-    /// barrier; the core handles readiness waiting and the single retry.
+    /// A successful hook outcome with a channel round-trip confirms the
+    /// synchronization barrier. Hooks may enforce stronger readiness before
+    /// returning; the core handles the optional single retry.
     fn query(
         &self,
         channel: &mut dyn QueryChannel,

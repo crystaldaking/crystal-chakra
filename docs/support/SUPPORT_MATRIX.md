@@ -233,22 +233,22 @@ Target list reviewed: 2026-09 (GitHub Octoverse 2025 top languages plus pre-exis
 | Capability | Status | Mechanism |
 |------------|--------|-----------|
 | AMBIG-01 | pass | query-layer typed ambiguity for duplicate Kotlin declaration names |
-| BUDGET-01 | pass | query/index work budgets; public-corpus calibration pending |
+| BUDGET-01 | pass | query/index work budgets with a recorded public-corpus baseline and per-language limits |
 | CANCEL-01 | pass | cooperative syntax cancellation through the shared driver |
 | CONFORM-01 | pass | chakra-conformance shared scenario harness, 14/14 |
 | CORPUS-01 | pass | pinned Kotlin/kotlinx.coroutines and square/okhttp evaluation, 12/12 scenarios each including a mixed Kotlin/Java project |
 | DEGRADE-01 | pass | bounded degradation with syntax fallback |
 | DISC-01 | pass | chakra-git discovery for Git-visible .kt and .kts files, including *.gradle.kts as Kotlin source and Gradle manifest |
 | DISC-02 | pass | shared Gradle/Maven JVM project model scoping (ADR-0056) |
-| DISC-03 | pass | src/test/kotlin and Kotlin test-stem roles with Gradle metadata provenance |
+| DISC-03 | pass | Kotlin test stems plus JVM, Android variant and Multiplatform test source-set conventions with Gradle/Maven metadata provenance |
 | DOCS-01 | pass | per-language support status, offline syntax scope, Alpha provider status, and measured limitations |
 | FRESH-01 | pass | atomic revision publication and targeted language partitions |
 | FRESH-02 | pass | shared-driver live reconciliation for Kotlin sources |
 | PRECISE-01 | pass | recorded JetBrains kotlin-lsp selection with Alpha status notes (ADR-0056) |
-| PRECISE-02 | missing | adapter integrated with hermetic lifecycle evidence; real-server image run pending (#195) |
-| PRECISE-03 | missing | adapter integrated with hermetic lifecycle evidence; real-server image run pending (#195) |
-| PRECISE-04 | missing | adapter integrated with hermetic lifecycle evidence; real-server image run pending (#195) |
-| PRECISE-05 | missing | adapter integrated with hermetic lifecycle evidence; real-server image run pending (#195) |
+| PRECISE-02 | missing | Maven, Gradle JVM, Android, KMP and mixed Kotlin/Java real-provider fixtures pass individually, including Java-only edits and overload/method-value exclusions. KMP and mixed JVM calls use semantic references/definitions. Mixed/composite graph coverage and final candidate review remain open. |
+| PRECISE-03 | missing | Owned startup/readiness, cancellation, restart and shutdown have hermetic and real Gradle cancellation evidence; native Windows and final candidate lifecycle verification remain pending. |
+| PRECISE-04 | missing | All routes require definition/reference capabilities; ordinary projects additionally require call hierarchy. KMP and Java-containing workspaces use the bounded semantic route; partial model coverage is explicitly truncated. Missing-capability and Java query-isolation tests pass; final candidate review remains pending. |
+| PRECISE-05 | missing | Hermetic crash, timeout, missing-capability and failed-import tests preserve syntax fallback; final candidate isolation verification remains pending. |
 | PROV-01 | pass | domain provenance model including TreeSitter and Git |
 | QUERY-01 | pass | chakra-engine QueryService over Kotlin syntax relations |
 | QUERY-02 | pass | chakra-mcp structured tools |

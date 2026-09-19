@@ -1025,6 +1025,53 @@ fun String.shout(): String = this.uppercase()
     }
 
     #[test]
+    fn multiplatform_expect_actual_and_android_annotations_preserve_declarations() -> TestResult {
+        let mut parser = KotlinParser::new()?;
+        let common = parser.parse(
+            RepoRelativePath::new("shared/src/commonMain/kotlin/Platform.kt")?,
+            "package sample\nexpect fun platformName(): String\nfun greeting(): String = platformName()\n",
+        )?;
+        assert!(!common.has_errors, "{:?}", common.diagnostics);
+        assert_eq!(
+            names(&common, SymbolKind::Function),
+            ["greeting", "platformName"]
+        );
+        assert!(common.calls.iter().any(|call| call.name == "platformName"));
+        let android = parser.parse(
+            RepoRelativePath::new("shared/src/androidMain/kotlin/Platform.kt")?,
+            "package sample\nimport android.os.Build\nactual fun platformName(): String = Build.MODEL\n@Composable fun Greeting() { Text(platformName()) }\n",
+        )?;
+        assert!(!android.has_errors, "{:?}", android.diagnostics);
+        assert_eq!(
+            names(&android, SymbolKind::Function),
+            ["Greeting", "platformName"]
+        );
+        assert!(
+            android
+                .named_relations
+                .iter()
+                .any(|relation| relation.candidates.contains(&"Composable".to_owned()))
+        );
+        let native = parser.parse(
+            RepoRelativePath::new("shared/src/iosMain/kotlin/Platform.kt")?,
+            "package sample\nimport platform.UIKit.UIDevice\nactual fun platformName(): String = UIDevice.currentDevice.systemName\n",
+        )?;
+        assert!(!native.has_errors, "{:?}", native.diagnostics);
+        assert_eq!(names(&native, SymbolKind::Function), ["platformName"]);
+        assert!(
+            common
+                .symbols
+                .iter()
+                .filter(|symbol| simple_name(symbol) == "platformName")
+                .all(|symbol| symbol
+                    .signature
+                    .as_ref()
+                    .is_some_and(|signature| signature.contains("expect")))
+        );
+        Ok(())
+    }
+
+    #[test]
     fn annotations_and_test_hints_are_recorded() -> TestResult {
         let parsed = parse(
             r#"package tests

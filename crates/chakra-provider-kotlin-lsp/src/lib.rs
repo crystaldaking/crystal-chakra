@@ -5,10 +5,11 @@
 //! document synchronization, the post-synchronization request barrier,
 //! observability, restart, and shutdown) live in `chakra-provider-worker`;
 //! this crate keeps only kotlin-lsp-specific seams: command discovery,
-//! defaults, the `kotlin` language id, and the call-hierarchy capability
-//! gate.
+//! defaults, companion Java synchronization, build-model import, readiness,
+//! and call binding through hierarchy or definition/reference requests.
 //!
-//! Only the v0.4 call-hierarchy operations cross this adapter internally.
+//! The public operations provide v0.4 call intelligence; internal LSP
+//! definitions and references support KMP and mixed Kotlin/Java workspaces.
 //! Public contracts are Chakra-native, so LSP URIs, UTF-16 positions, and
 //! protocol lifecycle details remain confined to the adapter crates and
 //! chakra-lsp.
@@ -22,7 +23,8 @@
 use std::ffi::{OsStr, OsString};
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
+use std::sync::atomic::{AtomicU8, Ordering};
+use std::time::{Duration, Instant};
 
 use chakra_domain::location::RepoRelativePath;
 use chakra_domain::operation::{OperationAbort, OperationContext};
@@ -35,13 +37,16 @@ use chakra_provider_worker::{
 };
 use lsp_types::InitializeResult;
 
+mod import;
+mod semantic;
+
 pub use chakra_provider_worker::{StartError, WorkerShutdownError as ShutdownError};
 
 const DEFAULT_COMMAND_CAPACITY: usize = 8;
 const DEFAULT_MAX_MESSAGE_BYTES: usize = 32 * 1024 * 1024;
 pub const DEFAULT_QUERY_WAIT_TIMEOUT: Duration = Duration::from_secs(1);
 
-/// Resolved `intellij-server stdio` invocation of the standalone
+/// Resolved `intellij-server --stdio` invocation of the standalone
 /// kotlin-server distribution.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KotlinLspCommand {
@@ -54,7 +59,7 @@ impl KotlinLspCommand {
     pub fn stdio(executable: impl Into<OsString>) -> Self {
         Self {
             program: executable.into(),
-            args: vec![OsString::from("stdio")],
+            args: vec![OsString::from("--stdio")],
         }
     }
 
@@ -125,6 +130,10 @@ fn is_executable_file(path: &std::path::Path) -> bool {
 pub struct KotlinLspConfig {
     pub command: KotlinLspCommand,
     pub startup_timeout: Duration,
+    /// Bounds cold project import and indexing after LSP initialization.
+    /// Readiness requires completed work-done progress and a hierarchy query
+    /// uninterrupted by further import/indexing, not merely a prepared item.
+    pub readiness_timeout: Duration,
     pub request_timeout: Duration,
     pub barrier_timeout: Duration,
     pub query_wait_timeout: Duration,
@@ -141,6 +150,7 @@ impl Default for KotlinLspConfig {
             // The Alpha server imports Gradle/Maven projects on first use;
             // startup gets the same generous bound as the JVM jdtls route.
             startup_timeout: Duration::from_secs(180),
+            readiness_timeout: Duration::from_secs(180),
             request_timeout: Duration::from_secs(5),
             barrier_timeout: Duration::from_millis(750),
             query_wait_timeout: DEFAULT_QUERY_WAIT_TIMEOUT,
@@ -168,13 +178,72 @@ impl From<KotlinLspConfig> for WorkerConfig {
     }
 }
 
-/// kotlin-lsp language hooks: Kotlin documents synchronize through the
-/// session and the precise surface is the LSP call-hierarchy trio verified
-/// at initialization.
-#[derive(Debug, Clone, Copy, Default)]
-struct KotlinLspHooks;
+/// kotlin-lsp hooks keep imported models, companion documents and readiness
+/// aligned with the requested revision; queries remain Kotlin-owned.
+#[derive(Debug, Default)]
+struct KotlinLspHooks {
+    readiness_timeout: Duration,
+    import_state: AtomicU8,
+    automatic_import: import::ProjectImport,
+}
+
+const IMPORT_PENDING: u8 = 0;
+const IMPORT_READY: u8 = 1;
+const IMPORT_FAILED: u8 = 2;
 
 impl ProviderHooks for KotlinLspHooks {
+    fn initialization_root(&self) -> Option<PathBuf> {
+        self.automatic_import.initialization_root()
+    }
+
+    fn prepare_session(
+        &self,
+        workspace: &chakra_engine::ProviderWorkspace,
+        deadline: Instant,
+        check: &dyn Fn() -> Result<(), WorkerError>,
+    ) -> Result<(), WorkerError> {
+        self.automatic_import.prepare(workspace, deadline, check)
+    }
+
+    fn restart_for_delta(&self, delta: &chakra_engine::ProviderWorkspaceDelta) -> bool {
+        let build_script = |path: &RepoRelativePath| {
+            let path = path.as_str();
+            path.ends_with(".gradle.kts") || path.starts_with("buildSrc/")
+        };
+        !delta.inputs_created.is_empty()
+            || !delta.inputs_changed.is_empty()
+            || !delta.inputs_deleted.is_empty()
+            || delta
+                .created
+                .iter()
+                .chain(&delta.changed)
+                .any(|document| build_script(&document.path))
+            || delta.deleted.iter().any(build_script)
+    }
+
+    fn before_session_start(&self) -> Result<(), WorkerError> {
+        self.import_state.store(IMPORT_PENDING, Ordering::Release);
+        Ok(())
+    }
+
+    fn observe_notification(&self, method: &str, params: &serde_json::Value) {
+        if method != "intellij/workspaceImportState" {
+            return;
+        }
+        let state = if params["phase"].as_str() != Some("FINISHED") {
+            IMPORT_PENDING
+        } else if params["folders"].as_array().is_some_and(|folders| {
+            !folders.is_empty()
+                && folders
+                    .iter()
+                    .all(|folder| folder["status"].as_str() == Some("SUCCESS"))
+        }) {
+            IMPORT_READY
+        } else {
+            IMPORT_FAILED
+        };
+        self.import_state.store(state, Ordering::Release);
+    }
     fn name(&self) -> &'static str {
         "kotlin-lsp"
     }
@@ -184,14 +253,40 @@ impl ProviderHooks for KotlinLspHooks {
     }
 
     fn synchronizes(&self, language: Language) -> bool {
+        matches!(language, Language::Kotlin | Language::Java)
+    }
+
+    fn supports_query_language(&self, language: Language) -> bool {
         language == Language::Kotlin
     }
 
-    fn language_id(&self, _path: &RepoRelativePath) -> &'static str {
-        "kotlin"
+    fn synchronizes_path(&self, language: Language, path: &RepoRelativePath) -> bool {
+        // The pinned server imports Gradle projects but does not resolve the
+        // Kotlin DSL scripts themselves. They remain tracked project inputs.
+        self.synchronizes(language) && !path.as_str().ends_with(".gradle.kts")
+    }
+
+    fn language_id(&self, path: &RepoRelativePath) -> &'static str {
+        if path.as_str().ends_with(".java") {
+            "java"
+        } else {
+            "kotlin"
+        }
+    }
+
+    fn readiness_timeout(&self) -> Option<Duration> {
+        Some(self.readiness_timeout)
+    }
+
+    fn cold_start_outlives_caller_wait(&self) -> bool {
+        true
     }
 
     fn verify_capabilities(&self, result: &InitializeResult) -> Result<(), WorkerError> {
+        semantic::verify_capabilities(result)?;
+        if self.initialization_root().is_some() {
+            return Ok(());
+        }
         CallHierarchyDriver::verify_call_hierarchy(result)
     }
 
@@ -201,7 +296,101 @@ impl ProviderHooks for KotlinLspHooks {
         request: &PreciseQueryRequest,
         deadlines: QueryDeadlines,
     ) -> Result<QueryOutcome, WorkerError> {
-        CallHierarchyDriver.query(channel, request, deadlines, Provenance::KotlinLsp)
+        if !self
+            .automatic_import
+            .covers(&request.workspace, request.symbol.declaration.file())
+        {
+            return Ok(QueryOutcome::ready(PreciseQueryResult::unavailable(
+                request.workspace.revision,
+                chakra_domain::state::ProviderState::Degraded,
+            )));
+        }
+        let cold = !channel.sync_barrier_confirmed();
+        let semantic_queries =
+            self.initialization_root().is_some() || request.workspace.has_language(Language::Java);
+        let deadline = if cold {
+            deadlines.readiness
+        } else {
+            deadlines.request
+        };
+        loop {
+            if Instant::now() >= deadline {
+                return Err(WorkerError::Timeout);
+            }
+            channel.wait_until(Instant::now())?;
+            import::verify_inputs(&request.workspace, &|| {
+                if Instant::now() >= deadline {
+                    Err(WorkerError::Timeout)
+                } else {
+                    Ok(())
+                }
+            })?;
+            match self.import_state.load(Ordering::Acquire) {
+                IMPORT_READY => {}
+                IMPORT_FAILED => {
+                    return Err(WorkerError::ProjectImport(
+                        "kotlin-lsp did not successfully import every workspace folder".to_owned(),
+                    ));
+                }
+                _ => {
+                    channel
+                        .wait_until(deadline.min(Instant::now() + Duration::from_millis(250)))?;
+                    continue;
+                }
+            }
+            let Some(idle_epoch) = channel.work_done_idle_epoch() else {
+                channel.wait_until(deadline.min(Instant::now() + Duration::from_millis(250)))?;
+                continue;
+            };
+            // Kotlin can prepare a hierarchy item before its reference index
+            // is ready. Both prepare and incoming/outgoing requests therefore
+            // share the bounded cold-import budget, not the short warm budget.
+            let query_deadlines = QueryDeadlines {
+                request: deadline,
+                readiness: deadline,
+            };
+            let mut outcome = if semantic_queries {
+                semantic::query(channel, request, deadline)?
+            } else {
+                CallHierarchyDriver.query(
+                    channel,
+                    request,
+                    query_deadlines,
+                    Provenance::KotlinLsp,
+                )?
+            };
+            if !self.automatic_import.coverage_complete() {
+                outcome.result.incoming_truncated |= request.directions.incoming;
+                outcome.result.outgoing_truncated |= request.directions.outgoing;
+            }
+            channel.wait_until(Instant::now())?;
+            if channel.work_done_idle_epoch() != Some(idle_epoch)
+                || self.import_state.load(Ordering::Acquire) != IMPORT_READY
+            {
+                // Even nonempty Kotlin answers can be approximate while the
+                // server imports/indexes. Discard a query spanning such work.
+                continue;
+            }
+            if !outcome.may_improve_when_ready {
+                import::verify_inputs(&request.workspace, &|| {
+                    if Instant::now() >= deadline {
+                        Err(WorkerError::Timeout)
+                    } else {
+                        Ok(())
+                    }
+                })?;
+                return Ok(outcome);
+            }
+            if !cold {
+                // No item in an already synchronized session is query-local
+                // fallback, never evidence that the symbol has no callers.
+                return Ok(QueryOutcome::ready(PreciseQueryResult::unavailable(
+                    request.workspace.revision,
+                    chakra_domain::state::ProviderState::Degraded,
+                )));
+            }
+            channel.wait_until(deadline.min(Instant::now() + Duration::from_millis(250)))?;
+        }
     }
 }
 
@@ -224,7 +413,15 @@ impl KotlinLspProvider {
         initial_workspace: chakra_engine::ProviderWorkspace,
         config: KotlinLspConfig,
     ) -> Result<Arc<Self>, StartError> {
-        let inner = ProviderHandle::start(initial_workspace, config.into(), KotlinLspHooks)?;
+        if config.readiness_timeout.is_zero() {
+            return Err(StartError::InvalidTimeout);
+        }
+        let hooks = KotlinLspHooks {
+            readiness_timeout: config.readiness_timeout,
+            import_state: AtomicU8::new(IMPORT_PENDING),
+            automatic_import: import::ProjectImport::default(),
+        };
+        let inner = ProviderHandle::start(initial_workspace, config.into(), hooks)?;
         Ok(Arc::new(Self { inner }))
     }
 
@@ -243,6 +440,10 @@ impl chakra_engine::PreciseProvider for KotlinLspProvider {
 
     fn supports(&self, language: Language) -> bool {
         self.inner.supports(language)
+    }
+
+    fn supports_path(&self, language: Language, path: &RepoRelativePath) -> bool {
+        self.inner.supports_path(language, path)
     }
 
     fn state_for(
@@ -388,6 +589,7 @@ mod tests {
         assert_eq!(provider.name(), "kotlin-lsp");
         assert!(provider.supports(Language::Kotlin));
         assert!(!provider.supports(Language::Go));
+        assert!(!provider.supports(Language::Java));
         provider.shutdown()?;
         Ok(())
     }

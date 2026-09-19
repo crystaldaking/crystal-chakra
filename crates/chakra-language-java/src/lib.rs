@@ -9,6 +9,7 @@
 //! lazy call candidates. The adapter has no dependency on an LSP
 //! implementation and publishes only language-neutral Chakra graph types.
 
+pub mod calls;
 mod discovery;
 mod indexer;
 mod parser;
