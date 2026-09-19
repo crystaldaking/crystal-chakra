@@ -1070,6 +1070,49 @@ fn java_path_role(path: &RepoRelativePath) -> SourceRole {
     }
 }
 
+/// Kotlin source role: JVM, Android variant and Multiplatform test source
+/// sets plus Kotlin test stems (ADR-0056). Build scripts are never executed.
+fn kotlin_path_role(path: &RepoRelativePath) -> SourceRole {
+    let fallback = SourceMetadata::path_fallback(path);
+    if fallback.role != SourceRole::Production {
+        return fallback.role;
+    }
+    let components: Vec<&str> = path.as_str().split('/').collect();
+    if components.windows(3).any(|parts| {
+        let source_set = parts[1];
+        let test_variant = ["test", "androidTest"].iter().any(|prefix| {
+            source_set
+                .strip_prefix(prefix)
+                .is_some_and(|suffix| suffix.is_empty() || suffix.starts_with(char::is_uppercase))
+        });
+        parts[0] == "src"
+            && matches!(parts[2], "kotlin" | "java")
+            && (test_variant || source_set.ends_with("Test"))
+    }) {
+        return SourceRole::Test;
+    }
+    let is_test_stem = path
+        .as_str()
+        .rsplit('/')
+        .next()
+        .and_then(|file| {
+            file.strip_suffix(".kt")
+                .or_else(|| file.strip_suffix(".kts"))
+        })
+        .is_some_and(|stem| stem.ends_with("Test") || stem.ends_with("Tests"));
+    if is_test_stem {
+        SourceRole::Test
+    } else {
+        SourceRole::Production
+    }
+}
+
+fn classify_kotlin(path: &RepoRelativePath, packages: &[JavaRoot]) -> SourceMetadata {
+    let mut metadata = classify_java(path, packages);
+    metadata.role = kotlin_path_role(path);
+    metadata
+}
+
 fn classify_java(path: &RepoRelativePath, packages: &[JavaRoot]) -> SourceMetadata {
     let role = java_path_role(path);
     let package = packages
@@ -1696,7 +1739,7 @@ pub fn classify_discovered_sources_with_context(
     } else {
         None
     };
-    let java = if language == Language::Java {
+    let java = if matches!(language, Language::Java | Language::Kotlin) {
         Some(java_packages(root, metadata_inputs, operation)?)
     } else {
         None
@@ -1745,6 +1788,8 @@ pub fn classify_discovered_sources_with_context(
                 Language::Cpp => classify_cpp(&path, cpp.as_deref().unwrap_or_default()),
                 Language::Hcl => classify_hcl(&path, hcl.as_deref().unwrap_or_default()),
                 Language::Go => classify_go(&path, go.as_deref().unwrap_or_default()),
+                // Kotlin/JVM reuses the Gradle/Maven project model (ADR-0056).
+                Language::Kotlin => classify_kotlin(&path, java.as_deref().unwrap_or_default()),
             },
             path,
             language,
@@ -2305,6 +2350,110 @@ mod tests {
             Some(("app", Some("app"))),
             "a build.gradle.kts without a sibling settings file is a project boundary"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn kotlin_maven_module_metadata_is_loaded() -> Result<(), Box<dyn Error>> {
+        let repository = repository()?;
+        let root = repository.path();
+        write(
+            root,
+            "pom.xml",
+            "<project><artifactId>parent</artifactId></project>",
+        )?;
+        write(
+            root,
+            "library/pom.xml",
+            "<project><artifactId>library</artifactId></project>",
+        )?;
+        write(root, "library/src/main/kotlin/Entry.kt", "fun entry() {}\n")?;
+        write(
+            root,
+            "library/src/test/kotlin/Spec.kt",
+            "fun subject() {}\n",
+        )?;
+        let classified = discover_classified_sources(root, Language::Kotlin)?;
+        assert_eq!(classified.len(), 2);
+        for source in classified {
+            assert_eq!(
+                source.metadata.classification,
+                SourceClassification::MavenMetadata
+            );
+            let package = source.metadata.package.ok_or("missing Maven module")?;
+            assert_eq!(package.name, "library");
+            assert_eq!(package.root, Some(RepoRelativePath::new("library")?));
+            assert_eq!(
+                source.metadata.role,
+                if source.path.as_str().contains("/test/") {
+                    SourceRole::Test
+                } else {
+                    SourceRole::Production
+                }
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn kotlin_android_and_multiplatform_source_sets_preserve_roles_and_module_scope()
+    -> Result<(), Box<dyn Error>> {
+        let repository = repository()?;
+        let root = repository.path();
+        write(
+            root,
+            "settings.gradle.kts",
+            "rootProject.name = \"sample\"\n",
+        )?;
+        write(
+            root,
+            "shared/build.gradle.kts",
+            "plugins { kotlin(\"multiplatform\") }\n",
+        )?;
+        let cases = [
+            ("commonMain", SourceRole::Production),
+            ("androidMain", SourceRole::Production),
+            ("iosMain", SourceRole::Production),
+            ("latest", SourceRole::Production),
+            ("contest", SourceRole::Production),
+            ("commonTest", SourceRole::Test),
+            ("jvmTest", SourceRole::Test),
+            ("iosSimulatorArm64Test", SourceRole::Test),
+            ("androidUnitTest", SourceRole::Test),
+            ("androidInstrumentedTest", SourceRole::Test),
+            ("androidTest", SourceRole::Test),
+            ("androidTestDebug", SourceRole::Test),
+            ("testDebug", SourceRole::Test),
+        ];
+        for (source_set, _) in cases {
+            write(
+                root,
+                &format!("shared/src/{source_set}/kotlin/Spec.kt"),
+                "fun subject() {}\n",
+            )?;
+        }
+        let classified = discover_classified_sources(root, Language::Kotlin)?;
+        let by_path: BTreeMap<_, _> = classified
+            .into_iter()
+            .map(|source| (source.path, source.metadata))
+            .collect();
+        for (source_set, expected_role) in cases {
+            let path = RepoRelativePath::new(format!("shared/src/{source_set}/kotlin/Spec.kt"))?;
+            let metadata = &by_path[&path];
+            assert_eq!(metadata.role, expected_role, "{path}");
+            assert_eq!(
+                metadata.classification,
+                SourceClassification::GradleMetadata
+            );
+            assert_eq!(
+                metadata
+                    .package
+                    .as_ref()
+                    .and_then(|package| package.root.as_ref())
+                    .map(RepoRelativePath::as_str),
+                Some("shared")
+            );
+        }
         Ok(())
     }
 

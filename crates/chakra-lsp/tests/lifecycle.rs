@@ -114,6 +114,13 @@ fn main() -> io::Result<()> {
             return Ok(());
         } else if body.contains("\"method\":\"$/cancelRequest\"") {
             fs::write(&cancelled_path, body.as_bytes())?;
+        } else if body.contains("\"method\":\"test/burst\"") {
+            // Signal before writing: a small OS pipe may block the producer
+            // until the client starts draining its bounded transport queue.
+            fs::write(executable.with_extension("burst"), "started")?;
+            for _ in 0..256 {
+                notify("test/event", "{}")?;
+            }
         } else if body.contains("\"method\":\"test/triggerProgress\"") {
             notify("$/progress", "{\"token\":\"t\",\"value\":{\"kind\":\"begin\",\"title\":\"Loading\"}}")?;
             if let Some(id) = request_id(&body) {
@@ -278,6 +285,45 @@ fn server_notifications_are_interleaved_while_waiting() -> Result<(), Box<dyn Er
         )),
         "events: {events:?}"
     );
+    client.shutdown();
+    Ok(())
+}
+
+#[test]
+fn notification_drain_yields_between_bounded_batches() -> Result<(), Box<dyn Error>> {
+    let scratch = tempfile::tempdir()?;
+    let executable = materialize_fake_server(scratch.path(), "fake-lsp-burst")?;
+    let mut client = spawn(&executable, scratch.path())?;
+    initialize(&mut client)?;
+    client.notify(
+        "test/burst",
+        &serde_json::json!({}),
+        Instant::now() + Duration::from_secs(2),
+    )?;
+    wait_for_file(&executable.with_extension("burst"))?;
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut total = 0;
+    while total < 256 {
+        let mut batch = 0;
+        client.drain_events(&mut |event| {
+            if matches!(event, ServerEvent::Notification { method, .. } if method == "test/event") {
+                batch += 1;
+                // Model actual event handling while the producer replenishes
+                // its bounded queue. One drain must still yield to its owner.
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        });
+        assert!(
+            batch <= config().transport.incoming_capacity,
+            "unbounded batch: {batch}"
+        );
+        total += batch;
+        assert!(Instant::now() < deadline, "event delivery did not complete");
+        if batch == 0 {
+            std::thread::yield_now();
+        }
+    }
+    assert_eq!(total, 256);
     client.shutdown();
     Ok(())
 }

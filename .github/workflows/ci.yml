@@ -53,6 +53,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.97.1
       - run: cargo check --locked --package chakra-cli --bin chakra
       - run: cargo test --locked -p chakra-git --test identity
+      - run: cargo test --locked -p chakra-provider-kotlin-lsp --lib import::tests
 
   deny:
     runs-on: ubuntu-latest
@@ -73,6 +74,8 @@ jobs:
       # Hermetic corpus-fetcher retry tests; never touch the network.
       - run: python3 tools/test_fetch_corpus.py
       - run: python3 tools/test_extract_release_notes.py
+      - run: python3 tools/test_release_preflight.py
+      - run: python3 tools/test_release_bundle.py
       - run: python3 tools/test_run_lsp_tests.py
 
   conformance:
@@ -93,6 +96,38 @@ jobs:
       # manifest-consistent. Structure only: measured values are never
       # diffed, and nothing is fetched from the network.
       - run: cargo run --locked -p chakra-conformance -- corpus --verify
+
+  installer-tests:
+    name: Installer tests (${{ matrix.runner }})
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-latest, macos-15, macos-15-intel, windows-2022]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - name: Run hermetic Unix installer tests
+        if: runner.os != 'Windows'
+        shell: bash
+        run: python3 tools/test_install.py
+      - name: Validate the PowerShell installer parses
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $errors = $null
+          [void][System.Management.Automation.Language.Parser]::ParseFile(
+            (Join-Path $pwd "tools/install.ps1"),
+            [ref]$null,
+            [ref]$errors)
+          if ($errors.Count -gt 0) {
+            $errors | ForEach-Object { Write-Host $_.Message }
+            throw "install.ps1 has syntax errors"
+          }
+      - name: Run hermetic Windows installer tests
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./tools/test_install.ps1
 
   large-repository-gate:
     runs-on: ubuntu-latest

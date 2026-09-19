@@ -234,8 +234,14 @@ impl Client {
 
     /// Pumps already-received server traffic without blocking. Providers call
     /// this between queries so progress notifications stay current.
+    /// Process only the queue length observed at entry: a continuously active
+    /// server must not starve the owner's cancellation or deadline checks.
     pub fn drain_events(&mut self, events: &mut dyn FnMut(ServerEvent)) {
-        loop {
+        let queued = self
+            .transport
+            .as_ref()
+            .map_or(0, |transport| transport.incoming().len());
+        for _ in 0..queued {
             let event = {
                 let Some(transport) = self.transport.as_ref() else {
                     return;

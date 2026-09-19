@@ -27,6 +27,7 @@ mod error;
 mod hooks;
 mod provider;
 mod state;
+mod work_done;
 mod worker;
 
 pub use error::WorkerError;

@@ -75,5 +75,9 @@ Accepted decisions:
 - ADR-050: commit snapshot and worktree overlay composition
 - ADR-051: compatible complete commit snapshot reuse
 - ADR-052: no default shared or prebuilt indexes after complete-snapshot evaluation
+- ADR-053: shared project configuration with typed precedence and trust boundaries
+- ADR-054: bounded GitHub update checks with offline-first operation
+- ADR-055: agent-client setup ownership, worktree resolution, and instruction blocks
+- ADR-056: Kotlin grammar and provider selection (issue #209)
 
 Do not pre-create empty ADRs merely to satisfy a list.

@@ -1,0 +1,35 @@
+{
+  "status": "pass",
+  "target": "x86_64-unknown-linux-gnu",
+  "version": "0.4.0",
+  "execution": "Linux/amd64 Docker container on macOS ARM64; not physical x86-64 native runner",
+  "binary_sha256": "05d4ecd7cd81c0ff781f5336387e18fbce7762e2c2d32c4d0b328726c93b1f53",
+  "archive_sha256": "350173f055d1b25ced80b999fa17a59f8c68c27693d750997658772f65868de6",
+  "installer_sha256": {
+    "install.sh": "782d076ec9bec1fe103001533faa73d8341726f1b9b89b6d2f1ea4b0031b9b7f",
+    "install.ps1": "614c6e28b6b3a4a7623fd848f20e7bbb90a510e3319dfa2092c6f7c488355c35"
+  },
+  "git_head": "cb2af120838b639a482adcb2a08ade14acdff9ec",
+  "source_state": "uncommitted candidate; not final release provenance",
+  "controlled_newer_release": "not covered",
+  "steps": [
+    "built-version",
+    "runtime-linkage",
+    "bundle-checksums",
+    "clean-install",
+    "fresh-interactive-bash",
+    "repeat-install",
+    "checksum-failure",
+    "missing-download",
+    "preserved-version",
+    "public-update-current"
+  ],
+  "date": "2026-09-18",
+  "image": "chakra-lsp-test",
+  "image_id": "sha256:1041bfe686332776f1a2dd857de4e24a1589028e7bfc70f055f22b783a043094",
+  "base_distribution": "Debian bookworm",
+  "build_log": "target/kmp-fix/linux-release-build.log",
+  "step_log": "target/kmp-fix/linux-package/steps.json",
+  "source_verification": "At the time of the 2026-09-18 run, all 267 entries in ../v0.4.0-paired/runs/candidate-source-hashes.json matched the worktree. This does not identify the later release candidate.",
+  "setup_attempt": "First attempt did not start the smoke script because the Docker target volume hid its host path. A separate read-only script mount corrected this; the initial output is retained in target/kmp-fix/linux-package-smoke-setup-void.log."
+}

@@ -1,0 +1,170 @@
+//! Explicit real-provider smoke test. It is ignored by default so the normal
+//! suite never depends on a developer-global vtsls installation.
+
+use std::error::Error;
+use std::fs;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use chakra_domain::location::{RepoRelativePath, SourceRange, TextPosition};
+use chakra_domain::provenance::Provenance;
+use chakra_domain::revision::Revision;
+use chakra_domain::state::ProviderState;
+use chakra_domain::symbol::Language;
+use chakra_engine::{
+    CallHierarchyDirections, PreciseProvider, PreciseQueryRequest, ProviderDocument,
+    ProviderSymbol, ProviderWorkspace,
+};
+use chakra_provider_vtsls::{VtslsCommand, VtslsConfig, VtslsProvider};
+
+fn request(
+    repository_root: &std::path::Path,
+    path: RepoRelativePath,
+    source: Arc<str>,
+    revision: Revision,
+    language: Language,
+) -> Result<PreciseQueryRequest, Box<dyn Error>> {
+    Ok(PreciseQueryRequest {
+        workspace: ProviderWorkspace::from_documents(
+            fs::canonicalize(repository_root)?,
+            revision,
+            vec![ProviderDocument {
+                path: path.clone(),
+                source,
+                language,
+            }],
+        ),
+        symbol: ProviderSymbol {
+            name: "target".to_owned(),
+            declaration: SourceRange::new(
+                path,
+                TextPosition::new(1, 1)?,
+                TextPosition::new(1, 21)?,
+            )?,
+            language,
+        },
+        directions: CallHierarchyDirections {
+            incoming: true,
+            outgoing: false,
+        },
+        limit: 20,
+        priority: chakra_engine::ProviderRequestPriority::Normal,
+    })
+}
+
+#[test]
+#[ignore = "requires vtsls on PATH or CHAKRA_VTSLS"]
+fn current_vtsls_returns_precise_incoming_calls_across_revisions() -> Result<(), Box<dyn Error>> {
+    check_language(Language::TypeScript, "main.ts")
+}
+
+#[test]
+#[ignore = "requires vtsls on PATH or CHAKRA_VTSLS"]
+fn current_vtsls_returns_precise_javascript_calls_across_revisions() -> Result<(), Box<dyn Error>> {
+    check_language(Language::JavaScript, "main.js")
+}
+
+fn check_language(language: Language, file: &str) -> Result<(), Box<dyn Error>> {
+    let repository = tempfile::tempdir()?;
+    fs::write(
+        repository.path().join("tsconfig.json"),
+        "{\"compilerOptions\":{\"allowJs\":true,\"checkJs\":true},\"include\":[\"*.ts\",\"*.js\"]}\n",
+    )?;
+    let path = RepoRelativePath::new(file)?;
+    let source: Arc<str> = Arc::from("function target() {}\nfunction caller() { target(); }\n");
+    fs::write(repository.path().join(path.as_str()), source.as_ref())?;
+    let initial = request(
+        repository.path(),
+        path.clone(),
+        source,
+        Revision(1),
+        language,
+    )?;
+    let command = std::env::var_os("CHAKRA_VTSLS")
+        .map_or_else(VtslsCommand::discover, |path| {
+            Some(VtslsCommand::stdio(path))
+        })
+        .ok_or("vtsls not found")?;
+    let provider = VtslsProvider::start(
+        initial.workspace.clone(),
+        VtslsConfig {
+            command,
+            startup_timeout: Duration::from_secs(60),
+            request_timeout: Duration::from_secs(60),
+            barrier_timeout: Duration::from_secs(20),
+            query_wait_timeout: Duration::from_secs(150),
+            ..VtslsConfig::default()
+        },
+    )?;
+
+    let initial_started = Instant::now();
+    let result = provider.enrich(initial);
+    let initial_elapsed = initial_started.elapsed();
+    assert_eq!(
+        result.state,
+        ProviderState::Ready,
+        "provider error: {:?}",
+        provider.last_error()
+    );
+    assert!(
+        result
+            .incoming
+            .iter()
+            .any(|relation| relation.name == "caller"),
+        "incoming: {:?}",
+        result.incoming
+    );
+
+    assert_eq!(result.revision, Revision(1));
+    assert!(
+        result
+            .incoming
+            .iter()
+            .all(|relation| relation.provenance == Provenance::Vtsls)
+    );
+
+    let changed_source: Arc<str> = Arc::from(
+        "function target() {}\nfunction caller() { target(); }\nfunction callerTwo() { target(); }\n",
+    );
+    fs::write(
+        repository.path().join(path.as_str()),
+        changed_source.as_ref(),
+    )?;
+    let changed_started = Instant::now();
+    let changed = provider.enrich(request(
+        repository.path(),
+        path,
+        changed_source,
+        Revision(2),
+        language,
+    )?);
+    let changed_elapsed = changed_started.elapsed();
+    assert_eq!(
+        changed.state,
+        ProviderState::Ready,
+        "provider error after edit: {:?}",
+        provider.last_error()
+    );
+    assert_eq!(changed.revision, Revision(2));
+    assert!(
+        changed
+            .incoming
+            .iter()
+            .any(|relation| relation.name == "callerTwo"),
+        "incoming after edit: {:?}",
+        changed.incoming
+    );
+    assert!(
+        changed
+            .incoming
+            .iter()
+            .all(|relation| relation.provenance == Provenance::Vtsls)
+    );
+    eprintln!(
+        "vtsls_enrichment: initial={initial_elapsed:?}, after_edit={changed_elapsed:?}, initial_incoming={}, changed_incoming={}",
+        result.incoming.len(),
+        changed.incoming.len(),
+    );
+    provider.shutdown()?;
+    Ok(())
+}

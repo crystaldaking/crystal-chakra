@@ -293,6 +293,35 @@ pub fn resolve_repository_root_with_context(
         .map_err(|source| DiscoveryError::Canonicalize { path: root, source })
 }
 
+/// Returns whether `relative` is tracked in the index of the worktree at
+/// `root`, asking Git itself rather than assuming any administrative layout.
+///
+/// The path travels as a command argument after `--`, never through a shell.
+/// Exit status 1 means "not tracked"; any other non-zero status is an error.
+pub fn is_worktree_path_tracked(root: &Path, relative: &Path) -> Result<bool, DiscoveryError> {
+    let command = "ls-files --error-unmatch";
+    let output = capture_git(
+        root,
+        command,
+        &[
+            OsStr::new("ls-files"),
+            OsStr::new("--error-unmatch"),
+            OsStr::new("--"),
+            relative.as_os_str(),
+        ],
+        &OperationContext::unbounded(),
+    )?;
+    match output.status.code() {
+        Some(0) => Ok(true),
+        Some(1) => Ok(false),
+        code => Err(DiscoveryError::Git {
+            command,
+            status: code.unwrap_or(-1),
+            stderr: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+        }),
+    }
+}
+
 /// Resolves a repository identity from Git object history rather than an
 /// absolute worktree path.
 ///
@@ -513,6 +542,8 @@ const SOURCE_EXTENSIONS: &[(&str, Language)] = &[
     ("tfvars", Language::Hcl),
     ("hcl", Language::Hcl),
     ("go", Language::Go),
+    ("kt", Language::Kotlin),
+    ("kts", Language::Kotlin),
 ];
 
 pub(crate) fn raw_may_be_source(raw: &[u8]) -> bool {
@@ -672,13 +703,16 @@ fn workspace_inventory_from_git_output(
             inventory.sources.push(path.clone());
         }
         // A `setup.py` is both a Python source and a project-scope manifest:
-        // it joins the source inventory and is still a metadata input.
+        // it joins the source inventory and is still a metadata input. A
+        // `*.gradle.kts` build script is likewise both a Kotlin source and a
+        // Gradle project manifest (ADR-0056).
         if metadata_input
             && (!is_source
                 || raw == "setup.py"
                 || raw
                     .strip_suffix("setup.py")
-                    .is_some_and(|p| p.ends_with('/')))
+                    .is_some_and(|p| p.ends_with('/'))
+                || raw.ends_with(".gradle.kts"))
         {
             inventory.metadata_inputs.push(path);
         }
@@ -696,7 +730,9 @@ const TYPESCRIPT_METADATA_LANGUAGES: &[Language] = &[Language::TypeScript];
 const JAVASCRIPT_METADATA_LANGUAGES: &[Language] = &[Language::JavaScript];
 const WEB_METADATA_LANGUAGES: &[Language] = &[Language::TypeScript, Language::JavaScript];
 const PYTHON_METADATA_LANGUAGES: &[Language] = &[Language::Python];
-const JAVA_METADATA_LANGUAGES: &[Language] = &[Language::Java];
+/// JVM build metadata feeds both the Java and the Kotlin provider routes:
+/// Gradle/Maven model changes affect Kotlin sources too (ADR-0056).
+const JVM_METADATA_LANGUAGES: &[Language] = &[Language::Java, Language::Kotlin];
 const CSHARP_METADATA_LANGUAGES: &[Language] = &[Language::CSharp];
 const SHELL_METADATA_LANGUAGES: &[Language] = &[Language::Shell];
 const CPP_METADATA_LANGUAGES: &[Language] = &[Language::Cpp];
@@ -769,7 +805,7 @@ fn raw_metadata_languages(raw: &[u8]) -> &'static [Language] {
                 b"settings.gradle".as_slice(),
                 b"settings.gradle.kts".as_slice(),
             ][..],
-            JAVA_METADATA_LANGUAGES,
+            JVM_METADATA_LANGUAGES,
         ),
         (
             &[

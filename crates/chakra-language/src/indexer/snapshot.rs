@@ -334,8 +334,37 @@ mod tests {
             compatibility
                 .adapters
                 .iter()
-                .all(|(_, version)| version.ends_with(":s1"))
+                .all(
+                    |(language, version)| version.ends_with(if *language == Language::Kotlin {
+                        ":s3"
+                    } else {
+                        ":s1"
+                    })
+                )
         );
+    }
+
+    #[test]
+    fn shortened_kotlin_identity_snapshots_are_incompatible() -> Result<(), &'static str> {
+        let current = compatibility_from_defaults(IndexBudgets::default());
+        for outdated in ["kotlin:s1", "kotlin:s2"] {
+            let mut previous = current.clone();
+            let (_, version) = previous
+                .adapters
+                .iter_mut()
+                .find(|(language, _)| *language == Language::Kotlin)
+                .ok_or("missing registered Kotlin adapter")?;
+            *version = outdated.to_owned();
+            assert!(
+                matches!(
+                    validate_compatibility(&previous, &current),
+                    Err(CommitSnapshotPayloadError::Compatibility("adapters"))
+                ),
+                "{outdated} must be incompatible"
+            );
+        }
+        assert!(validate_compatibility(&current, &current).is_ok());
+        Ok(())
     }
 
     #[test]

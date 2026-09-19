@@ -12,6 +12,7 @@
 //! Rust (impl-block drafts), PHP (receiver-aware call resolution), and C#
 //! (extension-method delta machinery).
 
+pub mod calls;
 pub mod driver;
 pub mod error;
 pub mod facts;

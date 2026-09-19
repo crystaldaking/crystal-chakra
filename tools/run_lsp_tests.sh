@@ -14,7 +14,8 @@
 #
 # The repository is mounted read-write at /workspace; build artifacts go to
 # named volumes (chakra-lsp-target, chakra-lsp-cargo-registry,
-# chakra-lsp-cargo-git) so reruns stay incremental and the host target/ is
+# chakra-lsp-cargo-git, chakra-lsp-gradle, chakra-lsp-maven) so reruns stay
+# incremental and the host target/ is
 # never touched by the root-owned container.
 set -euo pipefail
 
@@ -23,6 +24,8 @@ PLATFORM=linux/amd64
 TARGET_VOLUME=chakra-lsp-target
 REGISTRY_VOLUME=chakra-lsp-cargo-registry
 GIT_VOLUME=chakra-lsp-cargo-git
+GRADLE_VOLUME=chakra-lsp-gradle
+MAVEN_VOLUME=chakra-lsp-maven
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
@@ -52,6 +55,8 @@ run_in_container() {
         -v "$TARGET_VOLUME:/workspace/target" \
         -v "$REGISTRY_VOLUME:/usr/local/cargo/registry" \
         -v "$GIT_VOLUME:/usr/local/cargo/git" \
+        -v "$GRADLE_VOLUME:/root/.gradle" \
+        -v "$MAVEN_VOLUME:/root/.m2" \
         "$IMAGE" "$@"
 }
 
@@ -60,7 +65,11 @@ if [ $# -gt 0 ]; then
     exit
 fi
 
-run_in_container cargo test --locked --workspace
+failed=0
+if ! run_in_container cargo test --locked --workspace; then
+    echo "Workspace tests failed; continuing with each real provider" >&2
+    failed=1
+fi
 
 REAL_PROVIDER_PACKAGES=(
     chakra-provider-rust-analyzer
@@ -68,7 +77,21 @@ REAL_PROVIDER_PACKAGES=(
     chakra-provider-csharp-ls
     chakra-provider-gopls
     chakra-provider-terraform-ls
+    chakra-provider-pyright
+    chakra-provider-vtsls
+    chakra-provider-jdtls
+    chakra-provider-bash-language-server
+    chakra-provider-kotlin-lsp
 )
 for package in "${REAL_PROVIDER_PACKAGES[@]}"; do
-    run_in_container cargo test --locked -p "$package" --test real_provider -- --ignored
+    if ! run_in_container cargo test --locked -p "$package" --test real_provider -- --ignored --test-threads=1; then
+        echo "Real-provider tests failed: $package" >&2
+        failed=1
+    fi
 done
+# These exercise Gradle model preparation itself, before an LSP is started.
+if ! run_in_container cargo test --locked -p chakra-provider-kotlin-lsp --lib import::tests::real_gradle_ -- --ignored --test-threads=1; then
+    echo "Real Gradle import contract tests failed" >&2
+    failed=1
+fi
+exit "$failed"

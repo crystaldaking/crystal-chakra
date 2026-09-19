@@ -70,6 +70,12 @@ impl ProviderInput {
     pub fn languages(&self) -> impl Iterator<Item = Language> + '_ {
         self.languages.iter().copied()
     }
+
+    /// Compare a later filesystem observation with the input captured in
+    /// this revision. Adapters use this around build-model preparation.
+    pub fn matches_metadata(&self, metadata: &fs::Metadata) -> bool {
+        self.identity == ProviderInputIdentity::from_metadata(metadata)
+    }
 }
 
 /// Strong identity on Unix. Other platforms conservatively report a metadata
@@ -141,6 +147,13 @@ pub struct ProviderWorkspace {
 }
 
 impl ProviderWorkspace {
+    /// Revision-bound build inputs affecting one provider language.
+    pub fn inputs_for(&self, language: Language) -> impl Iterator<Item = &ProviderInput> {
+        self.inputs
+            .values()
+            .filter(move |input| input.languages.contains(&language))
+    }
+
     pub(crate) fn from_snapshot(snapshot: &WorkspaceSnapshot) -> Self {
         Self {
             repository_root: snapshot.identity().root.clone(),
@@ -219,6 +232,18 @@ impl ProviderWorkspace {
 
     pub fn document_count(&self, language: Language) -> usize {
         self.document_stats(language).0
+    }
+
+    /// Test companion-language presence without cloning a document catalog.
+    pub fn has_language(&self, language: Language) -> bool {
+        match &self.documents {
+            ProviderDocuments::Snapshot(graph) => graph
+                .source_files_iter()
+                .any(|(path, _)| language_from_path(path.as_str()) == Some(language)),
+            ProviderDocuments::Owned(documents) => documents
+                .values()
+                .any(|document| document.language == language),
+        }
     }
 
     pub fn document_bytes(&self, language: Language) -> u64 {
@@ -325,6 +350,18 @@ impl ProviderWorkspace {
         include: impl Fn(Language, &RepoRelativePath) -> bool,
         operation: &OperationContext,
     ) -> Result<ProviderWorkspaceDelta, OperationAbort> {
+        self.delta_since_matching_documents_and_inputs(previous, &include, &include, operation)
+    }
+
+    /// Select source documents independently from build metadata. A provider
+    /// may reject a source dialect while still depending on that file as input.
+    pub fn delta_since_matching_documents_and_inputs(
+        &self,
+        previous: &Self,
+        include: impl Fn(Language, &RepoRelativePath) -> bool,
+        include_input: impl Fn(Language, &RepoRelativePath) -> bool,
+        operation: &OperationContext,
+    ) -> Result<ProviderWorkspaceDelta, OperationAbort> {
         if self.shares_document_catalog_with(previous)
             && Arc::ptr_eq(&self.inputs, &previous.inputs)
         {
@@ -396,7 +433,7 @@ impl ProviderWorkspace {
             .filter(|input| {
                 input
                     .languages()
-                    .any(|language| include(language, &input.path))
+                    .any(|language| include_input(language, &input.path))
             })
             .cloned()
             .collect();
@@ -406,7 +443,7 @@ impl ProviderWorkspace {
             .filter(|input| {
                 input
                     .languages()
-                    .any(|language| include(language, &input.path))
+                    .any(|language| include_input(language, &input.path))
             })
             .cloned()
             .collect();
@@ -723,6 +760,7 @@ fn language_from_path(path: &str) -> Option<Language> {
         Some("cs") => Some(Language::CSharp),
         Some("sh" | "bash" | "zsh" | "ksh") => Some(Language::Shell),
         Some("go") => Some(Language::Go),
+        Some("kt" | "kts") => Some(Language::Kotlin),
         Some("c" | "h" | "cc" | "cpp" | "cxx" | "hh" | "hpp" | "hxx" | "ipp" | "tpp" | "inc") => {
             Some(Language::Cpp)
         }
@@ -796,6 +834,40 @@ mod tests {
                 .document(&RepoRelativePath::new("infra/main.tf")?)
                 .is_some()
         );
+        Ok(())
+    }
+
+    #[test]
+    fn excluded_script_documents_still_invalidate_build_inputs() -> Result<(), Box<dyn Error>> {
+        let root = std::env::current_dir()?;
+        let path = RepoRelativePath::new("build.gradle.kts")?;
+        let workspace = |revision, metadata: &fs::Metadata| -> Result<_, Box<dyn Error>> {
+            Ok(ProviderWorkspace::from_documents_and_inputs(
+                root.clone(),
+                Revision(revision),
+                vec![ProviderDocument {
+                    path: path.clone(),
+                    source: Arc::from(format!("// revision {revision}")),
+                    language: Language::Kotlin,
+                }],
+                vec![
+                    ProviderInput::from_metadata(path.clone(), [Language::Kotlin], metadata)
+                        .ok_or("missing Kotlin input")?,
+                ],
+            ))
+        };
+        let before = workspace(1, &fs::metadata(root.join("Cargo.toml"))?)?;
+        let after = workspace(2, &fs::metadata(root.join("src/lib.rs"))?)?;
+        let delta = after.delta_since_matching_documents_and_inputs(
+            &before,
+            |_, path| !path.as_str().ends_with(".gradle.kts"),
+            |language, _| language == Language::Kotlin,
+            &OperationContext::unbounded(),
+        )?;
+        assert!(delta.created.is_empty());
+        assert!(delta.changed.is_empty());
+        assert!(delta.deleted.is_empty());
+        assert_eq!(delta.inputs_changed, [path]);
         Ok(())
     }
 

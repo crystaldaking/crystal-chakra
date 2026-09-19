@@ -9,12 +9,7 @@ use std::process::ExitCode;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
-use chakra_domain::indexing::{
-    DEFAULT_MAX_INDEX_CALL_SITES, DEFAULT_MAX_INDEX_EDGES, DEFAULT_MAX_INDEX_FILES,
-    DEFAULT_MAX_INDEX_SYMBOLS, DEFAULT_MAX_INDEX_WORKERS, DEFAULT_MAX_SOURCE_FILE_BYTES,
-    DEFAULT_MAX_WORKSPACE_SOURCE_BYTES, DEFAULT_MEMORY_TARGET_BYTES, DEFAULT_STARTUP_TARGET_MILLIS,
-    IndexBudgets, IndexCancellation,
-};
+use chakra_domain::indexing::IndexCancellation;
 use chakra_domain::symbol::Language;
 use chakra_engine::PreciseProvider;
 use chakra_provider_pool::{
@@ -22,6 +17,16 @@ use chakra_provider_pool::{
 };
 use chakra_workspace::{WorkspaceRegistry, WorkspaceRegistryConfig, WorkspaceStartOptions};
 use clap::{Args, CommandFactory, Parser, Subcommand};
+
+mod analysis;
+mod config;
+mod doctor;
+mod report;
+mod setup;
+mod update;
+
+use config::{ConfigLayers, ConfigSource, EffectiveConfig, ProviderKey};
+use setup::AgentClient;
 
 /// Local code intelligence layer for AI coding agents.
 #[derive(Debug, Parser)]
@@ -34,7 +39,94 @@ struct Cli {
 #[derive(Debug, Subcommand)]
 enum Commands {
     /// Serve MCP over stdio; this is what agents connect to.
-    Serve(ServeArgs),
+    Serve(Box<ServeArgs>),
+    /// Inspect the effective configuration (ADR-0053).
+    Config(ConfigArgs),
+    /// Check GitHub for a newer stable Chakra release (ADR-0054).
+    Update(UpdateArgs),
+    /// One-time agent-client project setup: MCP registration, instruction
+    /// block, and a minimal chakra.toml (issue #205, ADR-0055).
+    Init(InitArgs),
+    /// Diagnose client registration and project configuration (issue #205).
+    Doctor(DoctorArgs),
+}
+
+#[derive(Debug, Args)]
+struct InitArgs {
+    /// Client to configure; repeat for several. No all-clients default.
+    #[arg(long, value_enum, required = true)]
+    agent: Vec<AgentClient>,
+
+    /// Project path; the Git worktree root is resolved through Git.
+    #[arg(long, value_name = "PATH", default_value = ".")]
+    repo: PathBuf,
+
+    /// Print the planned writes without touching disk.
+    #[arg(long)]
+    dry_run: bool,
+
+    /// Remove Chakra-owned setup instead of installing it.
+    #[arg(long)]
+    remove: bool,
+}
+
+#[derive(Debug, Args)]
+struct DoctorArgs {
+    /// Limit diagnostics to one client (default: all supported clients).
+    #[arg(long, value_enum)]
+    agent: Option<Vec<AgentClient>>,
+
+    /// Project path; the Git worktree root is resolved through Git.
+    #[arg(long, value_name = "PATH", default_value = ".")]
+    repo: PathBuf,
+
+    /// Emit detailed local diagnostics as JSON (not sanitized; use --report for sharing).
+    #[arg(long)]
+    json: bool,
+
+    /// Run bounded isolated probes (provider --version executions with hard
+    /// deadlines). Default inspection uses Git but does not launch language servers.
+    #[arg(long)]
+    probe: bool,
+
+    /// Export a bounded, sanitized local diagnostic report (issue #208).
+    #[arg(long, value_name = "PATH")]
+    report: Option<PathBuf>,
+
+    /// Allow --report to replace an existing file.
+    #[arg(long)]
+    force: bool,
+}
+
+#[derive(Debug, Args)]
+struct UpdateArgs {
+    /// Query the latest stable release and report the result. Exit status:
+    /// 0 up to date, 1 check unavailable, 2 update available (ADR-0054).
+    #[arg(long, required = true)]
+    check: bool,
+}
+
+#[derive(Debug, Args)]
+struct ConfigArgs {
+    #[command(subcommand)]
+    command: ConfigCommands,
+}
+
+#[derive(Debug, Subcommand)]
+enum ConfigCommands {
+    /// Print the effective configuration and the source layer of each key.
+    Show(ConfigShowArgs),
+}
+
+#[derive(Debug, Args)]
+struct ConfigShowArgs {
+    /// Worktree whose configuration to inspect.
+    #[arg(long, value_name = "PATH", default_value = ".")]
+    repo: PathBuf,
+
+    /// Explicit shared configuration file; disables chakra.toml discovery.
+    #[arg(long, value_name = "PATH")]
+    config: Option<PathBuf>,
 }
 
 #[derive(Debug, Args)]
@@ -43,21 +135,26 @@ struct ServeArgs {
     #[arg(long, value_name = "PATH", default_value = ".")]
     repo: Vec<PathBuf>,
 
+    /// Explicit shared configuration file; disables chakra.toml discovery.
+    /// The private override is its chakra.local.toml sibling (ADR-0053).
+    #[arg(long, value_name = "PATH")]
+    config: Option<PathBuf>,
+
     /// Maximum linked worktrees admitted to this process.
-    #[arg(long, default_value_t = 4)]
-    max_workspaces: usize,
+    #[arg(long)]
+    max_workspaces: Option<usize>,
 
     /// Maximum watcher construction and initial registration time, in milliseconds.
-    #[arg(long, default_value_t = 30_000)]
-    live_index_startup_timeout_millis: u64,
+    #[arg(long)]
+    live_index_startup_timeout_millis: Option<u64>,
 
     /// Run syntax-only and do not start the optional rust-analyzer provider.
     #[arg(long)]
     no_rust_analyzer: bool,
 
     /// rust-analyzer executable to use for optional precise enrichment.
-    #[arg(long, value_name = "PATH", default_value = "rust-analyzer")]
-    rust_analyzer_path: OsString,
+    #[arg(long, value_name = "PATH")]
+    rust_analyzer_path: Option<OsString>,
 
     /// Run without the optional vtsls TypeScript/JavaScript provider.
     #[arg(long)]
@@ -84,8 +181,8 @@ struct ServeArgs {
     jdtls_path: Option<OsString>,
 
     /// Maximum jdtls project-import readiness wait, in milliseconds.
-    #[arg(long, default_value_t = 3 * 60 * 1_000_u64)]
-    jdtls_readiness_timeout_millis: u64,
+    #[arg(long)]
+    jdtls_readiness_timeout_millis: Option<u64>,
 
     /// Run without the optional csharp-ls C# provider.
     #[arg(long)]
@@ -127,72 +224,81 @@ struct ServeArgs {
     #[arg(long, value_name = "PATH")]
     gopls_path: Option<OsString>,
 
+    /// Run without the optional kotlin-lsp Kotlin provider.
+    #[arg(long)]
+    no_kotlin_lsp: bool,
+
+    /// Explicit kotlin-lsp executable; omit for side-effect-free PATH discovery.
+    #[arg(long, value_name = "PATH")]
+    kotlin_ls_path: Option<OsString>,
+
     /// Maximum simultaneously active precise providers.
-    #[arg(long, default_value_t = 3)]
-    max_active_providers: usize,
+    #[arg(long)]
+    max_active_providers: Option<usize>,
 
     /// Maximum simultaneously active precise providers in one worktree.
-    #[arg(long, default_value_t = 3)]
-    max_active_providers_per_workspace: usize,
+    #[arg(long)]
+    max_active_providers_per_workspace: Option<usize>,
 
     /// Maximum deterministic memory reservations for active providers.
-    #[arg(long, default_value_t = 2 * 1024 * 1024 * 1024_u64)]
-    max_provider_reserved_memory_bytes: u64,
+    #[arg(long)]
+    max_provider_reserved_memory_bytes: Option<u64>,
 
     /// Maximum deterministic provider-memory reservations in one worktree.
-    #[arg(long, default_value_t = 2 * 1024 * 1024 * 1024_u64)]
-    max_provider_reserved_memory_bytes_per_workspace: u64,
+    #[arg(long)]
+    max_provider_reserved_memory_bytes_per_workspace: Option<u64>,
 
     /// Maximum precise-provider queries admitted concurrently.
-    #[arg(long, default_value_t = 4)]
-    max_concurrent_provider_queries: usize,
+    #[arg(long)]
+    max_concurrent_provider_queries: Option<usize>,
 
     /// Maximum precise-provider queries waiting for admission.
-    #[arg(long, default_value_t = 16)]
-    max_queued_provider_queries: usize,
+    #[arg(long)]
+    max_queued_provider_queries: Option<usize>,
 
     /// Maximum queue wait before syntax fallback, in milliseconds.
-    #[arg(long, default_value_t = 1_000)]
-    provider_queue_timeout_millis: u64,
+    #[arg(long)]
+    provider_queue_timeout_millis: Option<u64>,
 
     /// Idle time before an inactive provider is stopped, in milliseconds.
-    #[arg(long, default_value_t = 5 * 60 * 1_000_u64)]
-    provider_idle_timeout_millis: u64,
+    #[arg(long)]
+    provider_idle_timeout_millis: Option<u64>,
+
     /// Maximum Git-discovered supported source files admitted to one revision.
-    #[arg(long, default_value_t = DEFAULT_MAX_INDEX_FILES)]
-    max_index_files: u64,
+    #[arg(long)]
+    max_index_files: Option<u64>,
 
     /// Maximum bytes retained from one supported source file.
-    #[arg(long, default_value_t = DEFAULT_MAX_SOURCE_FILE_BYTES)]
-    max_source_file_bytes: u64,
+    #[arg(long)]
+    max_source_file_bytes: Option<u64>,
 
     /// Maximum total supported source bytes retained by the syntax index.
-    #[arg(long, default_value_t = DEFAULT_MAX_WORKSPACE_SOURCE_BYTES)]
-    max_workspace_source_bytes: u64,
+    #[arg(long)]
+    max_workspace_source_bytes: Option<u64>,
 
     /// Maximum declarations retained in the published graph.
-    #[arg(long, default_value_t = DEFAULT_MAX_INDEX_SYMBOLS)]
-    max_index_symbols: u64,
+    #[arg(long)]
+    max_index_symbols: Option<u64>,
 
     /// Maximum relationships retained in the published graph.
-    #[arg(long, default_value_t = DEFAULT_MAX_INDEX_EDGES)]
-    max_index_edges: u64,
+    #[arg(long)]
+    max_index_edges: Option<u64>,
 
     /// Maximum compact syntax call sites retained in the published graph.
-    #[arg(long, default_value_t = DEFAULT_MAX_INDEX_CALL_SITES)]
-    max_index_call_sites: u64,
+    #[arg(long)]
+    max_index_call_sites: Option<u64>,
 
     /// Observable cold-start target in milliseconds; it never changes graph contents.
-    #[arg(long, default_value_t = DEFAULT_STARTUP_TARGET_MILLIS)]
-    startup_target_millis: u64,
+    #[arg(long)]
+    startup_target_millis: Option<u64>,
 
     /// Observable current/phase-sampled resident-memory target in bytes.
-    #[arg(long, default_value_t = DEFAULT_MEMORY_TARGET_BYTES)]
-    memory_target_bytes: u64,
+    #[arg(long)]
+    memory_target_bytes: Option<u64>,
 
     /// Maximum syntax parser workers; effective use is CPU/memory/phase bounded.
-    #[arg(long, default_value_t = DEFAULT_MAX_INDEX_WORKERS)]
-    max_index_workers: u64,
+    #[arg(long)]
+    max_index_workers: Option<u64>,
 }
 
 #[tokio::main]
@@ -209,12 +315,535 @@ async fn main() -> ExitCode {
                 }
             }
         }
-        Some(Commands::Serve(args)) => serve(args).await,
+        Some(Commands::Serve(args)) => serve(*args).await,
+        Some(Commands::Config(args)) => config_command(args),
+        Some(Commands::Update(args)) => {
+            let _ = args;
+            ExitCode::from(update::run_manual_check(update::GITHUB_API_BASE))
+        }
+        Some(Commands::Init(args)) => init_command(args),
+        Some(Commands::Doctor(args)) => doctor_command(args),
     }
 }
 
-fn should_register_provider(disabled: bool) -> bool {
-    !disabled
+/// Resolve the Git worktree root for setup/doctor, or fail with an
+/// actionable message (ADR-0055: Git-aware resolution, invariant 7).
+fn resolve_project_root(repo: &std::path::Path) -> Result<PathBuf, String> {
+    chakra_git::resolve_repository_root(repo).map_err(|error| {
+        format!(
+            "{} is not inside a Git worktree ({error}); agent setup requires a Git worktree",
+            repo.display()
+        )
+    })
+}
+
+fn init_command(args: InitArgs) -> ExitCode {
+    let root = match resolve_project_root(&args.repo) {
+        Ok(root) => root,
+        Err(message) => {
+            eprintln!("chakra: {message}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let exe = match std::env::current_exe() {
+        Ok(exe) => exe,
+        Err(error) => {
+            eprintln!("chakra: cannot resolve this executable: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let plan = if args.remove {
+        setup::plan_removal(&root, &args.agent)
+    } else {
+        setup::plan_setup(&root, &exe, &args.agent)
+    };
+    let plan = match plan {
+        Ok(plan) => plan,
+        Err(error) => {
+            eprintln!("chakra: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    for write in &plan.writes {
+        println!(
+            "{} {} — {}",
+            write.action,
+            write.path.display(),
+            write.summary
+        );
+    }
+    for note in &plan.notes {
+        println!("note: {note}");
+    }
+    if args.dry_run {
+        for write in &plan.writes {
+            if let Some(content) = &write.content {
+                println!("--- {} would contain ---", write.path.display());
+                print!("{content}");
+            }
+        }
+        return ExitCode::SUCCESS;
+    }
+    match setup::apply_plan(&plan) {
+        Ok(()) => {
+            for client in &plan_clients(&args.agent) {
+                println!(
+                    "chakra: {client} setup written; restart the client session to pick up the registration"
+                );
+            }
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("chakra: {error}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn plan_clients(clients: &[AgentClient]) -> Vec<String> {
+    clients
+        .iter()
+        .map(|client| client.as_str().to_owned())
+        .collect()
+}
+
+fn doctor_command(args: DoctorArgs) -> ExitCode {
+    let root = match resolve_project_root(&args.repo) {
+        Ok(root) => root,
+        Err(message) => {
+            eprintln!("chakra: {message}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let exe = match std::env::current_exe() {
+        Ok(exe) => exe,
+        Err(error) => {
+            eprintln!("chakra: cannot resolve this executable: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let clients = args.agent.unwrap_or_else(|| AgentClient::ALL.to_vec());
+    // Invalid configuration is itself a finding; analysis still reports
+    // what it honestly can without it.
+    let (effective, config_error) = match resolve_config(&root, None) {
+        Ok(layers) => (Some(layers.merge()), None),
+        Err(error) => (None, Some(error.to_string())),
+    };
+    let mut findings = Vec::new();
+    if let Some(message) = config_error {
+        findings.push(doctor::Finding::new(
+            "project-config",
+            doctor::Severity::Error,
+            "project".to_owned(),
+            format!("configuration error: {message}"),
+            "fix the reported file/key; startup fails on invalid configuration".to_owned(),
+        ));
+    }
+    findings.extend(doctor::diagnose(
+        &root,
+        &exe,
+        &clients,
+        effective.as_ref(),
+        args.probe,
+    ));
+    if args.json {
+        match doctor::report_json(&findings, &root) {
+            Ok(json) => println!("{json}"),
+            Err(error) => {
+                eprintln!("chakra: cannot render doctor JSON: {error}");
+                return ExitCode::FAILURE;
+            }
+        }
+    }
+    let mut failure = false;
+    if let Some(path) = &args.report {
+        match report::build_report(&root, effective.as_ref(), &findings)
+            .and_then(|built| report::write_report(path, &built.json, args.force).map(|()| built))
+        {
+            Ok(built) => {
+                eprintln!(
+                    "report written to {} ({} findings, {} bytes)",
+                    path.display(),
+                    built.finding_count,
+                    built.json.len()
+                );
+                for section in &built.truncated_sections {
+                    eprintln!("note: {section}");
+                }
+                eprintln!(
+                    "the report is an isolated inspection with an explicit allowlist (no source, secrets, or machine paths); review it and attach it to a GitHub issue manually"
+                );
+            }
+            Err(error) => {
+                eprintln!("chakra: {error}");
+                failure = true;
+            }
+        }
+    }
+    if failure {
+        return ExitCode::FAILURE;
+    }
+    ExitCode::from(if args.json {
+        doctor::exit_status(&findings)
+    } else {
+        doctor::report(&findings)
+    })
+}
+
+/// Resolve the configuration layers for the primary worktree (ADR-0053).
+///
+/// Discovery anchors at the Git worktree root of `repo`; when the path is not
+/// a Git worktree the given directory itself is the configuration base and
+/// workspace registration reports the repository error later. A missing
+/// `chakra.toml` contributes no layer and keeps built-in defaults.
+fn resolve_config(
+    repo: &std::path::Path,
+    explicit: Option<&std::path::Path>,
+) -> Result<ConfigLayers, config::ConfigError> {
+    let root = match explicit {
+        Some(_) => repo.to_owned(),
+        None => chakra_git::resolve_repository_root(repo).unwrap_or_else(|_| repo.to_owned()),
+    };
+    ConfigLayers::load(&root, explicit)
+}
+
+/// Apply explicit CLI options as the final precedence layer (ADR-0053).
+/// Absent flags contribute nothing, so parser defaults can never override
+/// configured values.
+fn apply_cli_overrides(effective: &mut EffectiveConfig, args: &ServeArgs) {
+    if let Some(value) = args.max_workspaces {
+        effective.max_workspaces = value;
+        effective.record_cli_override("startup.max_workspaces");
+    }
+    if let Some(value) = args.live_index_startup_timeout_millis {
+        effective.live_index_startup_timeout_millis = value;
+        effective.record_cli_override("startup.live_index_startup_timeout_millis");
+    }
+    if let Some(value) = args.max_active_providers {
+        effective.max_active_providers = value;
+        effective.record_cli_override("providers.max_active");
+    }
+    if let Some(value) = args.max_active_providers_per_workspace {
+        effective.max_active_providers_per_workspace = value;
+        effective.record_cli_override("providers.max_active_per_workspace");
+    }
+    if let Some(value) = args.max_provider_reserved_memory_bytes {
+        effective.max_provider_reserved_memory_bytes = value;
+        effective.record_cli_override("providers.max_reserved_memory_bytes");
+    }
+    if let Some(value) = args.max_provider_reserved_memory_bytes_per_workspace {
+        effective.max_provider_reserved_memory_bytes_per_workspace = value;
+        effective.record_cli_override("providers.max_reserved_memory_bytes_per_workspace");
+    }
+    if let Some(value) = args.max_concurrent_provider_queries {
+        effective.max_concurrent_provider_queries = value;
+        effective.record_cli_override("providers.max_concurrent_queries");
+    }
+    if let Some(value) = args.max_queued_provider_queries {
+        effective.max_queued_provider_queries = value;
+        effective.record_cli_override("providers.max_queued_queries");
+    }
+    if let Some(value) = args.provider_queue_timeout_millis {
+        effective.provider_queue_timeout_millis = value;
+        effective.record_cli_override("providers.queue_timeout_millis");
+    }
+    if let Some(value) = args.provider_idle_timeout_millis {
+        effective.provider_idle_timeout_millis = value;
+        effective.record_cli_override("providers.idle_timeout_millis");
+    }
+    if let Some(value) = args.jdtls_readiness_timeout_millis {
+        effective.jdtls_readiness_timeout_millis = value;
+        effective.record_cli_override("providers.jdtls_readiness_timeout_millis");
+    }
+    if let Some(value) = args.max_index_files {
+        effective.budgets.max_files = value;
+        effective.record_cli_override("index.max_files");
+    }
+    if let Some(value) = args.max_source_file_bytes {
+        effective.budgets.max_source_file_bytes = value;
+        effective.record_cli_override("index.max_source_file_bytes");
+    }
+    if let Some(value) = args.max_workspace_source_bytes {
+        effective.budgets.max_workspace_source_bytes = value;
+        effective.record_cli_override("index.max_workspace_source_bytes");
+    }
+    if let Some(value) = args.max_index_symbols {
+        effective.budgets.max_symbols = value;
+        effective.record_cli_override("index.max_symbols");
+    }
+    if let Some(value) = args.max_index_edges {
+        effective.budgets.max_edges = value;
+        effective.record_cli_override("index.max_edges");
+    }
+    if let Some(value) = args.max_index_call_sites {
+        effective.budgets.max_call_sites = value;
+        effective.record_cli_override("index.max_call_sites");
+    }
+    if let Some(value) = args.startup_target_millis {
+        effective.budgets.startup_target_millis = value;
+        effective.record_cli_override("index.startup_target_millis");
+    }
+    if let Some(value) = args.memory_target_bytes {
+        effective.budgets.memory_target_bytes = value;
+        effective.record_cli_override("index.memory_target_bytes");
+    }
+    if let Some(value) = args.max_index_workers {
+        effective.budgets.max_workers = value;
+        effective.record_cli_override("index.max_workers");
+    }
+    let disables = [
+        (ProviderKey::RustAnalyzer, args.no_rust_analyzer),
+        (ProviderKey::Vtsls, args.no_vtsls),
+        (ProviderKey::Pyright, args.no_pyright),
+        (ProviderKey::Jdtls, args.no_jdtls),
+        (ProviderKey::CsharpLs, args.no_csharp_ls),
+        (
+            ProviderKey::BashLanguageServer,
+            args.no_bash_language_server,
+        ),
+        (ProviderKey::Clangd, args.no_clangd),
+        (ProviderKey::TerraformLs, args.no_terraform_ls),
+        (ProviderKey::Gopls, args.no_gopls),
+        (ProviderKey::KotlinLsp, args.no_kotlin_lsp),
+    ];
+    for (key, disabled) in disables {
+        if disabled {
+            effective.provider_mut(key).enabled = false;
+            effective.record_cli_override(&format!("providers.{}.enabled", key.as_str()));
+        }
+    }
+    let paths = [
+        (ProviderKey::RustAnalyzer, &args.rust_analyzer_path),
+        (ProviderKey::Vtsls, &args.vtsls_path),
+        (ProviderKey::Pyright, &args.pyright_path),
+        (ProviderKey::Jdtls, &args.jdtls_path),
+        (ProviderKey::CsharpLs, &args.csharp_ls_path),
+        (
+            ProviderKey::BashLanguageServer,
+            &args.bash_language_server_path,
+        ),
+        (ProviderKey::Clangd, &args.clangd_path),
+        (ProviderKey::TerraformLs, &args.terraform_ls_path),
+        (ProviderKey::Gopls, &args.gopls_path),
+        (ProviderKey::KotlinLsp, &args.kotlin_ls_path),
+    ];
+    for (key, value) in paths {
+        if let Some(path) = value {
+            effective.provider_mut(key).path = Some(PathBuf::from(path));
+            effective.record_cli_override(&format!("providers.{}.path", key.as_str()));
+        }
+    }
+}
+
+/// Resolve the workspace-scoped settings (index budgets, live startup
+/// timeout) for one registered worktree.
+///
+/// Every worktree reads its own checked-out `chakra.toml` (ADR-0053). An
+/// explicit `--config` disables discovery and applies to every registered
+/// worktree; explicit CLI options always win. Process-global settings
+/// (provider pool, provider enablement, registry limits) are not resolved
+/// here — they come from the primary worktree's configuration.
+fn workspace_scoped_settings(
+    effective: &EffectiveConfig,
+    args: &ServeArgs,
+    root: &std::path::Path,
+    primary_repo: &std::path::Path,
+) -> Result<(chakra_domain::indexing::IndexBudgets, u64), config::ConfigError> {
+    if args.config.is_some() || root == primary_repo {
+        return Ok((
+            effective.budgets,
+            effective.live_index_startup_timeout_millis,
+        ));
+    }
+    let workspace_layers = resolve_config(root, None)?;
+    let mut workspace_effective = workspace_layers.merge();
+    apply_cli_overrides(&mut workspace_effective, args);
+    Ok((
+        workspace_effective.budgets,
+        workspace_effective.live_index_startup_timeout_millis,
+    ))
+}
+
+fn push_rendered(
+    out: &mut String,
+    effective: &EffectiveConfig,
+    key: &str,
+    value: impl std::fmt::Display,
+) {
+    use std::fmt::Write as _;
+    let source = effective
+        .sources()
+        .get(key)
+        .cloned()
+        .unwrap_or(ConfigSource::Default);
+    let _ = writeln!(out, "{key} = {value}    # {source}");
+}
+
+/// Render the effective configuration with per-key source layers.
+fn render_effective(effective: &EffectiveConfig) -> String {
+    let mut out = String::new();
+    push_rendered(
+        &mut out,
+        effective,
+        "index.max_files",
+        effective.budgets.max_files,
+    );
+    push_rendered(
+        &mut out,
+        effective,
+        "index.max_source_file_bytes",
+        effective.budgets.max_source_file_bytes,
+    );
+    push_rendered(
+        &mut out,
+        effective,
+        "index.max_workspace_source_bytes",
+        effective.budgets.max_workspace_source_bytes,
+    );
+    push_rendered(
+        &mut out,
+        effective,
+        "index.max_symbols",
+        effective.budgets.max_symbols,
+    );
+    push_rendered(
+        &mut out,
+        effective,
+        "index.max_edges",
+        effective.budgets.max_edges,
+    );
+    push_rendered(
+        &mut out,
+        effective,
+        "index.max_call_sites",
+        effective.budgets.max_call_sites,
+    );
+    push_rendered(
+        &mut out,
+        effective,
+        "index.max_workers",
+        effective.budgets.max_workers,
+    );
+    push_rendered(
+        &mut out,
+        effective,
+        "index.startup_target_millis",
+        effective.budgets.startup_target_millis,
+    );
+    push_rendered(
+        &mut out,
+        effective,
+        "index.memory_target_bytes",
+        effective.budgets.memory_target_bytes,
+    );
+    push_rendered(
+        &mut out,
+        effective,
+        "startup.max_workspaces",
+        effective.max_workspaces,
+    );
+    push_rendered(
+        &mut out,
+        effective,
+        "startup.live_index_startup_timeout_millis",
+        effective.live_index_startup_timeout_millis,
+    );
+    push_rendered(
+        &mut out,
+        effective,
+        "providers.max_active",
+        effective.max_active_providers,
+    );
+    push_rendered(
+        &mut out,
+        effective,
+        "providers.max_active_per_workspace",
+        effective.max_active_providers_per_workspace,
+    );
+    push_rendered(
+        &mut out,
+        effective,
+        "providers.max_reserved_memory_bytes",
+        effective.max_provider_reserved_memory_bytes,
+    );
+    push_rendered(
+        &mut out,
+        effective,
+        "providers.max_reserved_memory_bytes_per_workspace",
+        effective.max_provider_reserved_memory_bytes_per_workspace,
+    );
+    push_rendered(
+        &mut out,
+        effective,
+        "providers.max_concurrent_queries",
+        effective.max_concurrent_provider_queries,
+    );
+    push_rendered(
+        &mut out,
+        effective,
+        "providers.max_queued_queries",
+        effective.max_queued_provider_queries,
+    );
+    push_rendered(
+        &mut out,
+        effective,
+        "providers.queue_timeout_millis",
+        effective.provider_queue_timeout_millis,
+    );
+    push_rendered(
+        &mut out,
+        effective,
+        "providers.idle_timeout_millis",
+        effective.provider_idle_timeout_millis,
+    );
+    push_rendered(
+        &mut out,
+        effective,
+        "providers.jdtls_readiness_timeout_millis",
+        effective.jdtls_readiness_timeout_millis,
+    );
+    push_rendered(
+        &mut out,
+        effective,
+        "update.automatic",
+        effective.update_automatic,
+    );
+    for key in ProviderKey::ALL {
+        let settings = effective.provider(*key);
+        push_rendered(
+            &mut out,
+            effective,
+            &format!("providers.{}.enabled", key.as_str()),
+            settings.enabled,
+        );
+        if let Some(path) = &settings.path {
+            push_rendered(
+                &mut out,
+                effective,
+                &format!("providers.{}.path", key.as_str()),
+                path.display(),
+            );
+        }
+    }
+    out
+}
+
+fn config_command(args: ConfigArgs) -> ExitCode {
+    match args.command {
+        ConfigCommands::Show(show) => {
+            let layers = match resolve_config(&show.repo, show.config.as_deref()) {
+                Ok(layers) => layers,
+                Err(error) => {
+                    eprintln!("chakra: {error}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            let effective = layers.merge();
+            // Configuration diagnostics go to stdout; no MCP server runs here.
+            print!("{}", render_effective(&effective));
+            ExitCode::SUCCESS
+        }
+    }
 }
 
 async fn serve(args: ServeArgs) -> ExitCode {
@@ -229,66 +858,25 @@ async fn serve(args: ServeArgs) -> ExitCode {
 
     // Parsing is CPU-heavy and filesystem/Git discovery is blocking. Keep it
     // on Tokio's owned blocking pool instead of a runtime worker.
-    let ServeArgs {
-        repo,
-        max_workspaces,
-        live_index_startup_timeout_millis,
-        no_rust_analyzer,
-        rust_analyzer_path,
-        no_vtsls,
-        vtsls_path,
-        no_pyright,
-        pyright_path,
-        no_jdtls,
-        jdtls_path,
-        jdtls_readiness_timeout_millis,
-        no_csharp_ls,
-        csharp_ls_path,
-        no_bash_language_server,
-        bash_language_server_path,
-        no_clangd,
-        clangd_path,
-        no_terraform_ls,
-        terraform_ls_path,
-        no_gopls,
-        gopls_path,
-        max_active_providers,
-        max_active_providers_per_workspace,
-        max_provider_reserved_memory_bytes,
-        max_provider_reserved_memory_bytes_per_workspace,
-        max_concurrent_provider_queries,
-        max_queued_provider_queries,
-        provider_queue_timeout_millis,
-        provider_idle_timeout_millis,
-        max_index_files,
-        max_source_file_bytes,
-        max_workspace_source_bytes,
-        max_index_symbols,
-        max_index_edges,
-        max_index_call_sites,
-        startup_target_millis,
-        memory_target_bytes,
-        max_index_workers,
-    } = args;
-    let budgets = IndexBudgets {
-        max_files: max_index_files,
-        max_source_file_bytes,
-        max_workspace_source_bytes,
-        max_symbols: max_index_symbols,
-        max_edges: max_index_edges,
-        max_call_sites: max_index_call_sites,
-        startup_target_millis,
-        memory_target_bytes,
-        max_workers: max_index_workers,
+    let Some(primary_repo) = args.repo.first().cloned() else {
+        eprintln!("chakra: at least one --repo worktree is required");
+        return ExitCode::FAILURE;
     };
-    let options = match chakra_language::IndexOptions::new(budgets, IndexCancellation::default()) {
-        Ok(options) => options,
+    // Configuration is loaded and merged once at startup; changing it
+    // requires a restart (ADR-0053).
+    let layers = match resolve_config(&primary_repo, args.config.as_deref()) {
+        Ok(layers) => layers,
         Err(error) => {
-            eprintln!("chakra: invalid index budget: {error}");
+            eprintln!("chakra: {error}");
             return ExitCode::FAILURE;
         }
     };
-    let registry = match WorkspaceRegistry::new(WorkspaceRegistryConfig { max_workspaces }) {
+    let mut effective = layers.merge();
+    apply_cli_overrides(&mut effective, &args);
+    let repo = args.repo.clone();
+    let registry = match WorkspaceRegistry::new(WorkspaceRegistryConfig {
+        max_workspaces: effective.max_workspaces,
+    }) {
         Ok(registry) => Arc::new(registry),
         Err(error) => {
             eprintln!("chakra: invalid workspace registry configuration: {error}");
@@ -297,11 +885,33 @@ async fn serve(args: ServeArgs) -> ExitCode {
     };
     let mut registered_workspaces = Vec::with_capacity(repo.len());
     for root in repo {
+        let (workspace_budgets, workspace_live_timeout) =
+            match workspace_scoped_settings(&effective, &args, &root, &primary_repo) {
+                Ok(settings) => settings,
+                Err(error) => {
+                    eprintln!("chakra: {error}");
+                    let registry = registry.clone();
+                    let _ = tokio::task::spawn_blocking(move || registry.shutdown()).await;
+                    return ExitCode::FAILURE;
+                }
+            };
+        let options = match chakra_language::IndexOptions::new(
+            workspace_budgets,
+            IndexCancellation::default(),
+        ) {
+            Ok(options) => options,
+            Err(error) => {
+                eprintln!("chakra: invalid index budget: {error}");
+                let registry = registry.clone();
+                let _ = tokio::task::spawn_blocking(move || registry.shutdown()).await;
+                return ExitCode::FAILURE;
+            }
+        };
         let start_registry = registry.clone();
         let workspace_options = WorkspaceStartOptions {
-            index: options.clone(),
+            index: options,
             live: chakra_language::LiveIndexOptions {
-                startup_timeout: Duration::from_millis(live_index_startup_timeout_millis),
+                startup_timeout: Duration::from_millis(workspace_live_timeout),
                 ..chakra_language::LiveIndexOptions::default()
             },
         };
@@ -352,7 +962,61 @@ async fn serve(args: ServeArgs) -> ExitCode {
         registered_workspaces.push(registered);
     }
     let mut registrations = Vec::new();
-    if should_register_provider(no_rust_analyzer) {
+    // Provider executable overrides resolved from configuration and CLI; the
+    // closures below capture these locals.
+    let rust_analyzer_executable: OsString = effective
+        .provider(ProviderKey::RustAnalyzer)
+        .path
+        .clone()
+        .map(PathBuf::into_os_string)
+        .unwrap_or_else(|| OsString::from("rust-analyzer"));
+    let vtsls_path = effective
+        .provider(ProviderKey::Vtsls)
+        .path
+        .clone()
+        .map(PathBuf::into_os_string);
+    let pyright_path = effective
+        .provider(ProviderKey::Pyright)
+        .path
+        .clone()
+        .map(PathBuf::into_os_string);
+    let jdtls_path = effective
+        .provider(ProviderKey::Jdtls)
+        .path
+        .clone()
+        .map(PathBuf::into_os_string);
+    let csharp_ls_path = effective
+        .provider(ProviderKey::CsharpLs)
+        .path
+        .clone()
+        .map(PathBuf::into_os_string);
+    let bash_language_server_path = effective
+        .provider(ProviderKey::BashLanguageServer)
+        .path
+        .clone()
+        .map(PathBuf::into_os_string);
+    let clangd_path = effective
+        .provider(ProviderKey::Clangd)
+        .path
+        .clone()
+        .map(PathBuf::into_os_string);
+    let terraform_ls_path = effective
+        .provider(ProviderKey::TerraformLs)
+        .path
+        .clone()
+        .map(PathBuf::into_os_string);
+    let gopls_path = effective
+        .provider(ProviderKey::Gopls)
+        .path
+        .clone()
+        .map(PathBuf::into_os_string);
+    let kotlin_ls_path = effective
+        .provider(ProviderKey::KotlinLsp)
+        .path
+        .clone()
+        .map(PathBuf::into_os_string);
+    let jdtls_readiness_timeout_millis = effective.jdtls_readiness_timeout_millis;
+    if effective.provider(ProviderKey::RustAnalyzer).enabled {
         let query_wait_budget = chakra_provider_rust_analyzer::DEFAULT_QUERY_WAIT_TIMEOUT;
         registrations.push(
             ProviderRegistration::new(
@@ -363,7 +1027,7 @@ async fn serve(args: ServeArgs) -> ExitCode {
                       _operation|
                       -> Result<Arc<dyn PreciseProvider>, ProviderStartError> {
                     let config = chakra_provider_rust_analyzer::RustAnalyzerConfig {
-                        executable: rust_analyzer_path.clone(),
+                        executable: rust_analyzer_executable.clone(),
                         ..chakra_provider_rust_analyzer::RustAnalyzerConfig::default()
                     };
                     chakra_provider_rust_analyzer::RustAnalyzerProvider::start(workspace, config)
@@ -376,7 +1040,7 @@ async fn serve(args: ServeArgs) -> ExitCode {
     } else {
         tracing::info!("rust-analyzer precise enrichment is disabled");
     }
-    if should_register_provider(no_vtsls) {
+    if effective.provider(ProviderKey::Vtsls).enabled {
         let command: OnceLock<chakra_provider_vtsls::VtslsCommand> = OnceLock::new();
         let discovery_budget = if vtsls_path.is_some() {
             Duration::ZERO
@@ -417,7 +1081,7 @@ async fn serve(args: ServeArgs) -> ExitCode {
     } else {
         tracing::info!("vtsls precise enrichment is disabled");
     }
-    if should_register_provider(no_pyright) {
+    if effective.provider(ProviderKey::Pyright).enabled {
         let command: OnceLock<chakra_provider_pyright::PyrightCommand> = OnceLock::new();
         let discovery_budget = if pyright_path.is_some() {
             Duration::ZERO
@@ -458,7 +1122,7 @@ async fn serve(args: ServeArgs) -> ExitCode {
     } else {
         tracing::info!("pyright precise enrichment is disabled");
     }
-    if should_register_provider(no_jdtls) {
+    if effective.provider(ProviderKey::Jdtls).enabled {
         let query_wait_budget = chakra_provider_jdtls::DEFAULT_QUERY_WAIT_TIMEOUT;
         registrations.push(
             ProviderRegistration::new(
@@ -491,7 +1155,7 @@ async fn serve(args: ServeArgs) -> ExitCode {
     } else {
         tracing::info!("jdtls precise enrichment is disabled");
     }
-    if should_register_provider(no_csharp_ls) {
+    if effective.provider(ProviderKey::CsharpLs).enabled {
         let command: OnceLock<chakra_provider_csharp_ls::CsharpLsCommand> = OnceLock::new();
         let query_wait_budget = chakra_provider_csharp_ls::DEFAULT_QUERY_WAIT_TIMEOUT;
         registrations.push(
@@ -527,7 +1191,7 @@ async fn serve(args: ServeArgs) -> ExitCode {
     } else {
         tracing::info!("csharp-ls precise enrichment is disabled");
     }
-    if should_register_provider(no_bash_language_server) {
+    if effective.provider(ProviderKey::BashLanguageServer).enabled {
         let command: OnceLock<chakra_provider_bash_language_server::BashLanguageServerCommand> =
             OnceLock::new();
         let query_wait_budget = chakra_provider_bash_language_server::DEFAULT_QUERY_WAIT_TIMEOUT;
@@ -567,7 +1231,7 @@ async fn serve(args: ServeArgs) -> ExitCode {
     } else {
         tracing::info!("bash-language-server precise enrichment is disabled");
     }
-    if should_register_provider(no_clangd) {
+    if effective.provider(ProviderKey::Clangd).enabled {
         let command: OnceLock<chakra_provider_clangd::ClangdCommand> = OnceLock::new();
         let query_wait_budget = chakra_provider_clangd::DEFAULT_QUERY_WAIT_TIMEOUT;
         registrations.push(
@@ -603,7 +1267,7 @@ async fn serve(args: ServeArgs) -> ExitCode {
     } else {
         tracing::info!("clangd precise enrichment is disabled");
     }
-    if should_register_provider(no_terraform_ls) {
+    if effective.provider(ProviderKey::TerraformLs).enabled {
         let command: OnceLock<chakra_provider_terraform_ls::TerraformLsCommand> = OnceLock::new();
         let query_wait_budget = chakra_provider_terraform_ls::DEFAULT_QUERY_WAIT_TIMEOUT;
         registrations.push(
@@ -640,7 +1304,7 @@ async fn serve(args: ServeArgs) -> ExitCode {
     } else {
         tracing::info!("terraform-ls precise enrichment is disabled");
     }
-    if should_register_provider(no_gopls) {
+    if effective.provider(ProviderKey::Gopls).enabled {
         let command: OnceLock<chakra_provider_gopls::GoplsCommand> = OnceLock::new();
         let query_wait_budget = chakra_provider_gopls::DEFAULT_QUERY_WAIT_TIMEOUT;
         registrations.push(
@@ -676,17 +1340,53 @@ async fn serve(args: ServeArgs) -> ExitCode {
     } else {
         tracing::info!("gopls precise enrichment is disabled");
     }
+    if effective.provider(ProviderKey::KotlinLsp).enabled {
+        let command: OnceLock<chakra_provider_kotlin_lsp::KotlinLspCommand> = OnceLock::new();
+        let query_wait_budget = chakra_provider_kotlin_lsp::DEFAULT_QUERY_WAIT_TIMEOUT;
+        registrations.push(
+            ProviderRegistration::new(
+                "kotlin-lsp",
+                vec![Language::Kotlin],
+                1024 * 1024 * 1024,
+                move |workspace,
+                      operation|
+                      -> Result<Arc<dyn PreciseProvider>, ProviderStartError> {
+                    let resolved_command = if let Some(command) = command.get() {
+                        command.clone()
+                    } else {
+                        let resolved = chakra_provider_kotlin_lsp::resolve_command_with_context(
+                            kotlin_ls_path.as_deref(),
+                            operation,
+                        )
+                        .map_err(ProviderStartError::from)?;
+                        let _ = command.set(resolved.clone());
+                        resolved
+                    };
+                    let config = chakra_provider_kotlin_lsp::KotlinLspConfig {
+                        command: resolved_command,
+                        ..chakra_provider_kotlin_lsp::KotlinLspConfig::default()
+                    };
+                    chakra_provider_kotlin_lsp::KotlinLspProvider::start(workspace, config)
+                        .map(|provider| provider as Arc<dyn PreciseProvider>)
+                        .map_err(|error| ProviderStartError::new(error.to_string()))
+                },
+            )
+            .with_additional_wait_budget(query_wait_budget),
+        );
+    } else {
+        tracing::info!("kotlin-lsp precise enrichment is disabled");
+    }
     let provider_pool = match ProviderPool::start(
         ProviderPoolConfig {
-            max_active_providers,
-            max_active_providers_per_workspace,
-            max_reserved_memory_bytes: max_provider_reserved_memory_bytes,
-            max_reserved_memory_bytes_per_workspace:
-                max_provider_reserved_memory_bytes_per_workspace,
-            max_concurrent_queries: max_concurrent_provider_queries,
-            max_queued_queries: max_queued_provider_queries,
-            query_queue_timeout: Duration::from_millis(provider_queue_timeout_millis),
-            idle_timeout: Duration::from_millis(provider_idle_timeout_millis),
+            max_active_providers: effective.max_active_providers,
+            max_active_providers_per_workspace: effective.max_active_providers_per_workspace,
+            max_reserved_memory_bytes: effective.max_provider_reserved_memory_bytes,
+            max_reserved_memory_bytes_per_workspace: effective
+                .max_provider_reserved_memory_bytes_per_workspace,
+            max_concurrent_queries: effective.max_concurrent_provider_queries,
+            max_queued_queries: effective.max_queued_provider_queries,
+            query_queue_timeout: Duration::from_millis(effective.provider_queue_timeout_millis),
+            idle_timeout: Duration::from_millis(effective.provider_idle_timeout_millis),
             ..ProviderPoolConfig::default()
         },
         registrations,
@@ -718,7 +1418,13 @@ async fn serve(args: ServeArgs) -> ExitCode {
             }
         }
     }
+    let update_task = crate::update::spawn_automatic_check(effective.update_automatic);
     let serve_result = chakra_mcp::serve_stdio_router(registry.clone()).await;
+    // The update task is bounded by its own deadline; aborting guarantees no
+    // orphaned work outlives the server (ADR-0054).
+    if let Some(handle) = update_task {
+        handle.abort();
+    }
     match tokio::task::spawn_blocking(move || provider_pool.shutdown()).await {
         Ok(Ok(())) => {}
         Ok(Err(error)) => {
@@ -752,13 +1458,15 @@ async fn serve(args: ServeArgs) -> ExitCode {
 mod tests {
     use super::*;
 
+    type TestResult = Result<(), Box<dyn std::error::Error>>;
+
     #[test]
     fn cli_definition_is_valid() {
         Cli::command().debug_assert();
     }
 
     #[test]
-    fn serve_budget_help_is_language_neutral() -> Result<(), Box<dyn std::error::Error>> {
+    fn serve_budget_help_is_language_neutral() -> TestResult {
         let mut command = Cli::command();
         let help = command
             .find_subcommand_mut("serve")
@@ -779,23 +1487,27 @@ mod tests {
 
     #[test]
     fn serve_parses_repo_path() {
+        // The parser holds no defaults: an absent flag contributes nothing, so
+        // configured values win over clap and explicit CLI wins over files
+        // (ADR-0053).
         let cli = Cli::try_parse_from(["chakra", "serve", "--repo", "/tmp/example"]);
         assert!(matches!(
             cli,
             Ok(Cli {
                 command: Some(Commands::Serve(ref args)),
             }) if args.repo == [PathBuf::from("/tmp/example")]
-                && args.max_workspaces == 4
-                && args.live_index_startup_timeout_millis == 30_000
+                && args.config.is_none()
+                && args.max_workspaces.is_none()
+                && args.live_index_startup_timeout_millis.is_none()
                 && !args.no_rust_analyzer
-                && args.rust_analyzer_path == "rust-analyzer"
+                && args.rust_analyzer_path.is_none()
                 && !args.no_vtsls
                 && args.vtsls_path.is_none()
                 && !args.no_pyright
                 && args.pyright_path.is_none()
                 && !args.no_jdtls
                 && args.jdtls_path.is_none()
-                && args.jdtls_readiness_timeout_millis == 180_000
+                && args.jdtls_readiness_timeout_millis.is_none()
                 && !args.no_csharp_ls
                 && args.csharp_ls_path.is_none()
                 && !args.no_bash_language_server
@@ -806,11 +1518,11 @@ mod tests {
                 && args.terraform_ls_path.is_none()
                 && !args.no_gopls
                 && args.gopls_path.is_none()
-                && args.max_active_providers == 3
-                && args.max_active_providers_per_workspace == 3
-                && args.max_index_files == DEFAULT_MAX_INDEX_FILES
-                && args.max_index_symbols == DEFAULT_MAX_INDEX_SYMBOLS
-                && args.max_index_workers == DEFAULT_MAX_INDEX_WORKERS
+                && args.max_active_providers.is_none()
+                && args.max_active_providers_per_workspace.is_none()
+                && args.max_index_files.is_none()
+                && args.max_index_symbols.is_none()
+                && args.max_index_workers.is_none()
         ));
     }
 
@@ -848,10 +1560,10 @@ mod tests {
             Ok(Cli {
                 command: Some(Commands::Serve(ref args)),
             }) if args.repo == [PathBuf::from("/tmp/first"), PathBuf::from("/tmp/second")]
-                && args.max_workspaces == 2
-                && args.max_active_providers == 4
-                && args.max_active_providers_per_workspace == 2
-                && args.max_provider_reserved_memory_bytes_per_workspace == 1_048_576
+                && args.max_workspaces == Some(2)
+                && args.max_active_providers == Some(4)
+                && args.max_active_providers_per_workspace == Some(2)
+                && args.max_provider_reserved_memory_bytes_per_workspace == Some(1_048_576)
         ));
     }
 
@@ -895,7 +1607,8 @@ mod tests {
             Ok(Cli {
                 command: Some(Commands::Serve(ref args)),
             }) if args.no_rust_analyzer
-                && args.rust_analyzer_path == "/opt/bin/rust-analyzer"
+                && args.rust_analyzer_path.as_deref()
+                    == Some(std::ffi::OsStr::new("/opt/bin/rust-analyzer"))
                 && args.no_vtsls
                 && args.vtsls_path.as_deref() == Some(std::ffi::OsStr::new("/opt/bin/vtsls"))
                 && args.no_pyright
@@ -904,7 +1617,7 @@ mod tests {
                 && args.no_jdtls
                 && args.jdtls_path.as_deref()
                     == Some(std::ffi::OsStr::new("/opt/bin/jdtls"))
-                && args.jdtls_readiness_timeout_millis == 240_000
+                && args.jdtls_readiness_timeout_millis == Some(240_000)
                 && args.no_csharp_ls
                 && args.csharp_ls_path.as_deref()
                     == Some(std::ffi::OsStr::new("/opt/bin/csharp-ls"))
@@ -930,13 +1643,127 @@ mod tests {
             cli,
             Ok(Cli {
                 command: Some(Commands::Serve(ref args)),
-            }) if args.max_index_workers == 2
+            }) if args.max_index_workers == Some(2)
         ));
     }
 
     #[test]
-    fn provider_registration_policy_is_independent_of_startup_inventory() {
-        assert!(should_register_provider(false));
-        assert!(!should_register_provider(true));
+    fn file_configuration_applies_when_cli_flags_are_absent() -> TestResult {
+        // A non-Git tempdir is its own configuration base; workspace
+        // registration would report the missing repository later.
+        let directory = tempfile::tempdir()?;
+        std::fs::write(
+            directory.path().join(config::SHARED_CONFIG_FILENAME),
+            "schema_version = 1\n\n[providers.clangd]\nenabled = false\n\n[providers]\nmax_active = 2\n",
+        )?;
+        let root = directory.path().to_string_lossy().into_owned();
+        let cli = Cli::try_parse_from(["chakra", "serve", "--repo", &root]);
+        let args = match cli {
+            Ok(Cli {
+                command: Some(Commands::Serve(args)),
+            }) => args,
+            other => return Err(format!("unexpected parse result: {other:?}").into()),
+        };
+        let layers = resolve_config(std::path::Path::new(&root), None)?;
+        let mut effective = layers.merge();
+        apply_cli_overrides(&mut effective, &args);
+        assert!(!effective.provider(ProviderKey::Clangd).enabled);
+        assert!(effective.provider(ProviderKey::Gopls).enabled);
+        assert_eq!(effective.max_active_providers, 2);
+        assert!(matches!(
+            effective.sources()["providers.clangd.enabled"],
+            ConfigSource::Shared(_)
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn secondary_worktree_reads_its_own_configuration() -> TestResult {
+        // Each registered worktree reads its own checked-out chakra.toml for
+        // workspace-scoped settings instead of inheriting the primary's
+        // (ADR-0053, issue #213).
+        let primary = tempfile::tempdir()?;
+        let secondary = tempfile::tempdir()?;
+        std::fs::write(
+            primary.path().join(config::SHARED_CONFIG_FILENAME),
+            "schema_version = 1\n\n[index]\nmax_files = 1\n",
+        )?;
+        std::fs::write(
+            secondary.path().join(config::SHARED_CONFIG_FILENAME),
+            "schema_version = 1\n\n[index]\nmax_files = 25\n",
+        )?;
+        let primary_root = primary.path().to_string_lossy().into_owned();
+        let secondary_root = secondary.path().to_string_lossy().into_owned();
+        let cli = Cli::try_parse_from(["chakra", "serve", "--repo", &primary_root]);
+        let args = match cli {
+            Ok(Cli {
+                command: Some(Commands::Serve(args)),
+            }) => args,
+            other => return Err(format!("unexpected parse result: {other:?}").into()),
+        };
+        let primary_path = std::path::Path::new(&primary_root);
+        let secondary_path = std::path::Path::new(&secondary_root);
+        let mut effective = resolve_config(primary_path, None)?.merge();
+        apply_cli_overrides(&mut effective, &args);
+        let (primary_budgets, _) =
+            workspace_scoped_settings(&effective, &args, primary_path, primary_path)?;
+        let (secondary_budgets, _) =
+            workspace_scoped_settings(&effective, &args, secondary_path, primary_path)?;
+        assert_eq!(primary_budgets.max_files, 1);
+        assert_eq!(secondary_budgets.max_files, 25);
+        Ok(())
+    }
+
+    #[test]
+    fn cli_options_override_file_configuration() -> TestResult {
+        let directory = tempfile::tempdir()?;
+        std::fs::write(
+            directory.path().join(config::SHARED_CONFIG_FILENAME),
+            "schema_version = 1\n\n[index]\nmax_files = 100\n\n[providers]\nmax_active = 2\n",
+        )?;
+        let root = directory.path().to_string_lossy().into_owned();
+        let cli =
+            Cli::try_parse_from(["chakra", "serve", "--repo", &root, "--max-index-files", "7"]);
+        let args = match cli {
+            Ok(Cli {
+                command: Some(Commands::Serve(args)),
+            }) => args,
+            other => return Err(format!("unexpected parse result: {other:?}").into()),
+        };
+        let layers = resolve_config(std::path::Path::new(&root), None)?;
+        let mut effective = layers.merge();
+        apply_cli_overrides(&mut effective, &args);
+        assert_eq!(effective.budgets.max_files, 7);
+        assert_eq!(effective.max_active_providers, 2);
+        assert_eq!(effective.sources()["index.max_files"], ConfigSource::Cli);
+        assert!(matches!(
+            effective.sources()["providers.max_active"],
+            ConfigSource::Shared(_)
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn config_show_renders_effective_values_with_sources() -> TestResult {
+        let directory = tempfile::tempdir()?;
+        std::fs::write(
+            directory.path().join(config::SHARED_CONFIG_FILENAME),
+            "schema_version = 1\n\n[index]\nmax_files = 55\n",
+        )?;
+        let root = directory.path().to_string_lossy().into_owned();
+        let effective = resolve_config(std::path::Path::new(&root), None)?.merge();
+        let rendered = render_effective(&effective);
+        assert!(rendered.contains("index.max_files = 55"), "{rendered}");
+        assert!(rendered.contains("# shared:"), "{rendered}");
+        assert!(rendered.contains("index.max_workers"), "{rendered}");
+        assert!(
+            rendered.contains("providers.gopls.enabled = true"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("providers.rust-analyzer.path = rust-analyzer"),
+            "{rendered}"
+        );
+        Ok(())
     }
 }

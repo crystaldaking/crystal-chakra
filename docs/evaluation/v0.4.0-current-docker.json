@@ -1,0 +1,47 @@
+{
+  "command": "./tools/run_lsp_tests.sh",
+  "source_head": "bdbcfa6e1b6dcdd60a756f84cf36724c7273c981",
+  "exit_code": 0,
+  "elapsed_seconds": 1095.995038986206,
+  "source_hashes_unchanged": true,
+  "workspace": {
+    "passed": 916,
+    "ignored": 31,
+    "failed": 0
+  },
+  "real_provider_targets": 10,
+  "real_provider_scenarios_passed": 16,
+  "kotlin_scenarios_passed": 6,
+  "real_gradle_contracts_passed": 5,
+  "execution": "linux/amd64 Docker on macOS ARM64",
+  "image_id": "sha256:055aac4fb26a886bc2c8cf854b771d63691f09dcf7bfbcdc7ca386e250637463",
+  "log_sha256": "a007eeda0b499ed0554083713a2c37e1c9afa371e564ddd2bdcf7fd9650fba8e",
+  "evidence_directory": "target/kmp-fix/final-candidate-matrix",
+  "limitations": [
+    "Not native Windows or Intel macOS validation",
+    "Not public release provenance"
+  ],
+  "passed_real_tests": [
+    "current_rust_analyzer_returns_precise_incoming_call",
+    "current_clangd_returns_precise_incoming_calls_across_revisions",
+    "csharp_ls_026_resolves_a_signature_named_method",
+    "current_gopls_returns_precise_incoming_calls_across_revisions",
+    "current_terraform_ls_returns_precise_references_across_revisions",
+    "current_pyright_returns_precise_incoming_calls_across_revisions",
+    "current_vtsls_returns_precise_incoming_calls_across_revisions",
+    "current_vtsls_returns_precise_javascript_calls_across_revisions",
+    "current_jdtls_returns_precise_incoming_calls_across_revisions",
+    "current_bash_language_server_returns_precise_incoming_calls_across_revisions",
+    "current_kotlin_lsp_rejects_unimported_standalone_scripts",
+    "current_kotlin_lsp_returns_precise_incoming_calls_across_revisions",
+    "current_kotlin_lsp_supports_android",
+    "current_kotlin_lsp_supports_gradle_jvm",
+    "current_kotlin_lsp_supports_java_boundaries_and_java_only_edits",
+    "current_kotlin_lsp_supports_multiplatform",
+    "import::tests::real_gradle_mixed_project_reports_incomplete_model_coverage",
+    "import::tests::real_gradle_model_preserves_compiler_plugins",
+    "import::tests::real_gradle_model_preserves_effective_compiler_options",
+    "import::tests::real_gradle_model_rejects_invalid_and_conflicting_free_arguments",
+    "import::tests::real_gradle_model_resolves_multimodule_project_artifacts"
+  ]
+}

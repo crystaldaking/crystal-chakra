@@ -1174,6 +1174,8 @@ fn file_language(path: &RepoRelativePath) -> Option<Language> {
         Some(Language::Shell)
     } else if value.ends_with(".go") {
         Some(Language::Go)
+    } else if value.ends_with(".kt") || value.ends_with(".kts") {
+        Some(Language::Kotlin)
     } else if value.ends_with(".c")
         || value.ends_with(".h")
         || value.ends_with(".cc")
