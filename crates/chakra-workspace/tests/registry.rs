@@ -544,34 +544,63 @@ fn head_transitions_reuse_commit_state_without_sharing_worktree_overlay()
     let registry = WorkspaceRegistry::new(WorkspaceRegistryConfig { max_workspaces: 2 })?;
     let primary = registry.register(&fixture.primary, WorkspaceStartOptions::default())?;
     let linked = registry.register(&fixture.linked, WorkspaceStartOptions::default())?;
+    let committed_source =
+        "pub fn target() {}\npub fn provider_caller() {}\npub fn committed_next() {}\n";
+    let path = chakra_domain::location::RepoRelativePath::new("src/lib.rs")?;
 
-    fs::write(
-        fixture.primary.join("src/lib.rs"),
-        "pub fn target() {}\npub fn provider_caller() {}\npub fn committed_next() {}\n",
-    )?;
+    fs::write(fixture.primary.join(path.as_str()), committed_source)?;
     git(&fixture.primary, &["add", "src/lib.rs"])?;
     git(&fixture.primary, &["commit", "-m", "next commit"])?;
     let next = git_stdout(&fixture.primary, &["rev-parse", "HEAD"])?;
     assert_eq!(search_count(&primary.engine(), "committed_next")?, 1);
+    let primary_snapshot = primary.engine().snapshot();
     assert_eq!(
-        primary
-            .engine()
-            .snapshot()
-            .layers()
-            .commit_snapshot
-            .reuse
-            .origin,
-        CommitSnapshotOrigin::ColdBuild
+        primary_snapshot.layers().commit_snapshot.commit.as_deref(),
+        Some(next.as_str())
     );
+    // A watcher event can invalidate publication after the new commit has
+    // entered the cache. The retry then legitimately reports MemoryReuse.
+    // Exact cold-build/coalescing counts are tested directly against the cache.
+    assert!(matches!(
+        primary_snapshot.layers().commit_snapshot.reuse.origin,
+        CommitSnapshotOrigin::ColdBuild | CommitSnapshotOrigin::MemoryReuse
+    ));
+    assert_eq!(
+        primary_snapshot.commit_graph().file_source(&path),
+        Some(committed_source)
+    );
+
+    fs::write(
+        fixture.primary.join(path.as_str()),
+        format!("{committed_source}pub fn primary_overlay_only() {{}}\n"),
+    )?;
+    assert_eq!(search_count(&primary.engine(), "primary_overlay_only")?, 1);
+    let dirty_primary = primary.engine().snapshot();
+    assert_eq!(
+        dirty_primary.commit_graph().file_source(&path),
+        Some(committed_source)
+    );
+    assert!(!dirty_primary.layers().worktree_overlay.files.is_empty());
 
     git(&fixture.linked, &["checkout", "--detach", &next])?;
     assert_eq!(search_count(&linked.engine(), "committed_next")?, 1);
+    assert_eq!(search_count(&linked.engine(), "primary_overlay_only")?, 0);
     let snapshot = linked.engine().snapshot();
+    assert_eq!(
+        snapshot.layers().commit_snapshot.commit.as_deref(),
+        Some(next.as_str())
+    );
     assert_eq!(
         snapshot.layers().commit_snapshot.reuse.origin,
         CommitSnapshotOrigin::MemoryReuse
     );
+    assert!(snapshot.layers().commit_snapshot.reuse.reused_files > 0);
+    assert_eq!(
+        snapshot.commit_graph().file_source(&path),
+        Some(committed_source)
+    );
     assert!(snapshot.layers().worktree_overlay.files.is_empty());
+    assert_eq!(search_count(&primary.engine(), "primary_overlay_only")?, 1);
     registry.shutdown()?;
     Ok(())
 }
