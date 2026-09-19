@@ -1582,12 +1582,15 @@
           ]
         },
         "PRECISE-02": {
-          "status": "missing",
-          "mechanism": "Maven, Gradle JVM, Android, KMP and mixed Kotlin/Java real-provider fixtures pass individually, including Java-only edits and overload/method-value exclusions. KMP and mixed JVM calls use semantic references/definitions. Mixed/composite graph coverage and final candidate review remain open.",
+          "status": "pass",
+          "mechanism": "Current-candidate real-provider tests pass for Maven, Gradle JVM, Android, mixed Kotlin/Java and Multiplatform. They verify KotlinLsp provenance, revision-bound incoming/outgoing calls, overload exclusions, Java-only synchronization and KMP source-root reimport. Semantic definitions/references bind KMP and mixed-language calls; incomplete models truncate explicitly and composite imports fail honestly.",
           "evidence": [
             "docs/evaluation/v0.4.0-kotlin-acceptance.md",
             "crates/chakra-provider-kotlin-lsp/tests/real_provider.rs",
-            "crates/chakra-provider-kotlin-lsp/tests/lifecycle.rs"
+            "crates/chakra-provider-kotlin-lsp/tests/lifecycle.rs",
+            "docs/evaluation/v0.4.0-current-docker.json",
+            "crates/chakra-provider-kotlin-lsp/src/semantic.rs",
+            "crates/chakra-provider-kotlin-lsp/src/import.rs"
           ]
         },
         "PRECISE-03": {
