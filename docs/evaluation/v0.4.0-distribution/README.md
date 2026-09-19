@@ -84,3 +84,32 @@ cases. `cargo clippy --locked -p chakra-cli --all-targets -- -D warnings`,
 `target/kmp-fix/update-contract/`. Production update code is unchanged; all
 61 added lines are inside the existing `#[cfg(test)]` module. No new network
 override, dependency, public API or publication was introduced.
+
+## Committed candidate: native macOS ARM64, 2026-09-19
+
+`cargo build --locked --release -p chakra-cli --bin chakra` succeeded at
+`c2b843b2a2eb1cc1402af786e42cc27a6c2a5f52`. The recorded Rust source hashes
+were unchanged throughout the build. The resulting `chakra 0.4.0` binary has
+SHA256 `a7d673bc5069b3a7b68b976cf0eee68d2bbd62bff438ee7df785dcbac7b6586f`.
+
+The actual archive passed clean installation into a temporary HOME, discovery
+in a fresh interactive zsh, repeat installation with one managed PATH block,
+and checksum/download failure preservation. Existing `.zshrc` content and a
+shell canary survived; the installed binary remained byte-identical and no
+temporary replacement binary remained. The test removed its temporary HOME.
+
+Evidence is in `target/kmp-fix/final-candidate-macos/`: `identity.json`,
+`result.json`, `build.log`, `package-smoke.py`, and `package/{result,steps}.json`.
+This is a local native ARM64 package check using the repository installer;
+it does not test Intel macOS, Windows, update discovery, a remotely assembled
+release bundle, GitHub attestations or public release downloads.
+
+The same binary passed the integrated four-client configuration sequence:
+dry-run, idempotent setup, JSON diagnostics, sanitized report, overwrite
+protection, conflicting-registration redaction, and removal preserving user
+instructions. Logs are in `target/kmp-fix/final-candidate-macos/setup-report/`.
+An initial harness assertion incorrectly required removal to restore the
+pre-setup newline count; the existing contract preserves all bytes outside
+markers, including setup separators. That assertion was corrected to match
+the documented lifecycle test, and the complete sequence then passed.
+Production code was unchanged. No agent-client sessions ran in this check.

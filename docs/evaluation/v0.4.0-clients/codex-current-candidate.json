@@ -1,0 +1,55 @@
+{
+  "date": "2026-09-19",
+  "binary_sha256": "a7d673bc5069b3a7b68b976cf0eee68d2bbd62bff438ee7df785dcbac7b6586f",
+  "head": "c2b843b2a2eb1cc1402af786e42cc27a6c2a5f52",
+  "client": "codex-cli 0.154.0",
+  "model": "gpt-6-astra",
+  "reasoning": "medium",
+  "prompt": "Explain how invoice_total is calculated, identify its direct callers and the tests relevant to changing shipping charges. Cite files and function names. Do not modify files.",
+  "conditions": {
+    "available": {
+      "exit_code": 0,
+      "timed_out": false,
+      "elapsed_seconds": 44.495957459002966,
+      "files_unchanged": true,
+      "mcp_tools": [
+        "status",
+        "search",
+        "context",
+        "callers"
+      ],
+      "transcript_sha256": "4dd276b7b84acf36d45480904e849bc5202bed83d0189e5494f71bcd5dbe9207",
+      "final_answer": "`invoice_total(items, shipping)` returns **the sum of all item values plus shipping**, using `u32` inputs and output. It calls `subtotal(items)`, which uses `items.iter().sum()`. Shipping is added even when the item list is empty. See `subtotal` and `invoice_total` in [src/lib.rs:1](<fixture>/src/lib.rs:1).\n\nIts direct callers are:\n\n- **`checkout_total`** \u2014 calls `invoice_total(items, 5)`, fixing checkout shipping at **5**. Change this argument to change the checkout shipping charge. [src/lib.rs:3](<fixture>/src/lib.rs:3)\n- **`empty_invoice_pays_shipping`** \u2014 directly tests `invoice_total(&[], 5) == 5`. [tests/invoice.rs:2](<fixture>/tests/invoice.rs:2)\n\nThe relevant shipping tests are:\n\n- **`empty_invoice_pays_shipping`** verifies that an empty invoice still pays the supplied shipping charge. Changing only checkout\u2019s fixed charge would not require changing this test.\n- **`checkout_includes_items`** verifies `checkout_total(&[2, 3]) == 10`: item subtotal **5**, plus shipping **5**. Its expected total must change if checkout shipping changes. [tests/invoice.rs:3](<fixture>/tests/invoice.rs:3)\n\nChakra\u2019s index was fresh, but its precise provider degraded; I verified the findings against the source, including the test call omitted from its caller results. No files were modified."
+    },
+    "unavailable": {
+      "exit_code": 0,
+      "timed_out": false,
+      "elapsed_seconds": 40.49670366701321,
+      "files_unchanged": true,
+      "mcp_tools": [],
+      "transcript_sha256": "2e8a1b2f047cb5db41c64f48bba4086eb61ae7a3bbdda6c0dbef240497097e15",
+      "final_answer": "`invoice_total(items, shipping)` returns **the sum of all item amounts plus shipping**, using `u32` values. It calls `subtotal(items)`, which uses `items.iter().sum()`. Empty items therefore still incur the supplied shipping charge. See `subtotal` and `invoice_total` in [src/lib.rs:1](<fixture>/src/lib.rs:1).\n\nIts direct callers are:\n\n- `checkout_total` \u2014 passes a fixed shipping charge of `5`. Change this value to change checkout\u2019s shipping charge. [src/lib.rs:3](<fixture>/src/lib.rs:3)\n- `empty_invoice_pays_shipping` \u2014 directly tests `invoice_total(&[], 5) == 5`. [tests/invoice.rs:2](<fixture>/tests/invoice.rs:2)\n\nThe tests relevant to shipping changes are:\n\n- `empty_invoice_pays_shipping` verifies that shipping applies even with no items. Changing only checkout\u2019s fixed charge would not affect this test.\n- `checkout_includes_items` indirectly exercises `invoice_total` through `checkout_total(&[2, 3])`, expecting `10` (`2 + 3 + 5`). Its expectation must change if checkout shipping changes. [tests/invoice.rs:3](<fixture>/tests/invoice.rs:3)\n\nChakra was unavailable; I verified these references through local source searches. No files were modified, and tests were not run."
+    }
+  },
+  "review": {
+    "calculation_correct": true,
+    "direct_callers_correct": [
+      "checkout_total",
+      "empty_invoice_pays_shipping"
+    ],
+    "relevant_tests_correct": [
+      "empty_invoice_pays_shipping",
+      "checkout_includes_items"
+    ],
+    "unavailable_disclosed": true,
+    "precise_degradation_disclosed": true,
+    "source_verification_of_omitted_test_caller": true
+  },
+  "limitations": [
+    "Small uncommitted Rust fixture, not paired effectiveness evaluation",
+    "Other global plugins remained available",
+    "Rust provider degraded; imported test caller was found by source inspection",
+    "Does not cover Claude Code, Cursor or OpenCode sessions"
+  ],
+  "raw_evidence": "target/kmp-fix/final-candidate-macos/clients/"
+}

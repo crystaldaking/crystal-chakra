@@ -77,3 +77,20 @@ environment; neither failed setup attempt counts as successful adoption.
 Trust is a separate client step, consistent with the
 [official project-configuration documentation](https://learn.chatgpt.com/docs/config-file/config-advanced).
 The temporary profile was removed after each run.
+
+### Current candidate recheck (2026-09-19)
+
+Both Codex scenarios passed again on the optimized macOS ARM64 binary built
+from `c2b843b2a2eb1cc1402af786e42cc27a6c2a5f52`. The [candidate record](../evaluation/v0.4.0-clients/codex-current-candidate.json)
+contains the binary hash, explicit model/reasoning selection, sanitized final
+answers, and raw-transcript hashes. The available session independently used
+`status`, `search`, `context`, and `callers`; the unavailable session disclosed
+the missing tools and inspected source. Both completed without timeout and
+left the fixture files unchanged. Temporary profiles and fixture directories
+were removed after the runs.
+
+The precise Rust provider degraded in the available scenario. The caller
+result omitted the imported test call, which the agent found by inspecting
+source and explicitly disclosed in its answer. These runs verify adoption
+and fallback behavior; they do not establish complete caller coverage or
+verify the other three clients.
