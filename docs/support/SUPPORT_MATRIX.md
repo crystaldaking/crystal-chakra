@@ -247,8 +247,8 @@ Target list reviewed: 2026-09 (GitHub Octoverse 2025 top languages plus pre-exis
 | PRECISE-01 | pass | recorded JetBrains kotlin-lsp selection with Alpha status notes (ADR-0056) |
 | PRECISE-02 | missing | Maven, Gradle JVM, Android, KMP and mixed Kotlin/Java real-provider fixtures pass individually, including Java-only edits and overload/method-value exclusions. KMP and mixed JVM calls use semantic references/definitions. Mixed/composite graph coverage and final candidate review remain open. |
 | PRECISE-03 | missing | Owned startup/readiness, cancellation, restart and shutdown have hermetic and real Gradle cancellation evidence; native Windows and final candidate lifecycle verification remain pending. |
-| PRECISE-04 | missing | All routes require definition/reference capabilities; ordinary projects additionally require call hierarchy. KMP and Java-containing workspaces use the bounded semantic route; partial model coverage is explicitly truncated. Missing-capability and Java query-isolation tests pass; final candidate review remains pending. |
-| PRECISE-05 | missing | Hermetic crash, timeout, missing-capability and failed-import tests preserve syntax fallback; final candidate isolation verification remains pending. |
+| PRECISE-04 | pass | Current-candidate review and Linux/macOS workspace tests verify capability negotiation: missing definitions/references or required hierarchy degrades explicitly, Gradle DSL and Java queries never enter the Kotlin session, and incomplete imported models report truncation. See the 2026-09-19 Docker evidence. |
+| PRECISE-05 | pass | Current-candidate Kotlin lifecycle tests verify crash/retry degradation, bounded timeout, missing executable and failed-import isolation. Shared engine tests retain syntax callers with explicit precision/provenance and fallback causes; the complete Linux/macOS workspace suites passed. |
 | PROV-01 | pass | domain provenance model including TreeSitter and Git |
 | QUERY-01 | pass | chakra-engine QueryService over Kotlin syntax relations |
 | QUERY-02 | pass | chakra-mcp structured tools |

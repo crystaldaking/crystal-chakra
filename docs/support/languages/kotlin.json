@@ -128,21 +128,25 @@
       ]
     },
     "PRECISE-04": {
-      "status": "missing",
-      "mechanism": "All routes require definition/reference capabilities; ordinary projects additionally require call hierarchy. KMP and Java-containing workspaces use the bounded semantic route; partial model coverage is explicitly truncated. Missing-capability and Java query-isolation tests pass; final candidate review remains pending.",
+      "status": "pass",
+      "mechanism": "Current-candidate review and Linux/macOS workspace tests verify capability negotiation: missing definitions/references or required hierarchy degrades explicitly, Gradle DSL and Java queries never enter the Kotlin session, and incomplete imported models report truncation. See the 2026-09-19 Docker evidence.",
       "evidence": [
         "docs/evaluation/v0.4.0-kotlin-acceptance.md",
         "crates/chakra-provider-kotlin-lsp/tests/real_provider.rs",
-        "crates/chakra-provider-kotlin-lsp/tests/lifecycle.rs"
+        "crates/chakra-provider-kotlin-lsp/tests/lifecycle.rs",
+        "docs/evaluation/v0.4.0-current-docker.json",
+        "crates/chakra-engine/tests/scenario.rs"
       ]
     },
     "PRECISE-05": {
-      "status": "missing",
-      "mechanism": "Hermetic crash, timeout, missing-capability and failed-import tests preserve syntax fallback; final candidate isolation verification remains pending.",
+      "status": "pass",
+      "mechanism": "Current-candidate Kotlin lifecycle tests verify crash/retry degradation, bounded timeout, missing executable and failed-import isolation. Shared engine tests retain syntax callers with explicit precision/provenance and fallback causes; the complete Linux/macOS workspace suites passed.",
       "evidence": [
         "docs/evaluation/v0.4.0-kotlin-acceptance.md",
         "crates/chakra-provider-kotlin-lsp/tests/real_provider.rs",
-        "crates/chakra-provider-kotlin-lsp/tests/lifecycle.rs"
+        "crates/chakra-provider-kotlin-lsp/tests/lifecycle.rs",
+        "docs/evaluation/v0.4.0-current-docker.json",
+        "crates/chakra-engine/tests/scenario.rs"
       ]
     },
     "QUERY-01": {
